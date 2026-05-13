@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+from types import SimpleNamespace
 import habana_frameworks.torch  # noqa: F401
 from habana_frameworks.torch.utils.internal import is_lazy
 from vllm.model_executor.model_loader import get_model
@@ -645,3 +646,58 @@ def test_model_torch_regional_compilation(default_vllm_config: None, dist_init, 
     assert_compilation(model, "lm_head", VocabParallelEmbedding)
     assert_compilation(model, "model.decoder.final_layer_norm", LayerNorm)
     assert_compilation(model, "model.decoder.embed_tokens", VocabParallelEmbedding)
+
+
+def test_max_cudagraph_capture_size_defaults_to_max_num_batched_tokens(model_runner):
+    """max_cudagraph_capture_size defaults to max_num_batched_tokens when not configured."""
+    assert model_runner.max_cudagraph_capture_size == model_runner.max_num_batched_tokens
+
+
+def test_max_cudagraph_capture_size_uses_explicit_value():
+    """max_cudagraph_capture_size uses the configured value when explicitly set."""
+    vllm_config = get_vllm_config()
+    vllm_config.compilation_config.max_cudagraph_capture_size = 256
+    with set_current_vllm_config(vllm_config):
+        environment.set_vllm_config(vllm_config)
+        num_heads = vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = vllm_config.model_config.get_head_size()
+        vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(num_heads, head_size, 0.1)
+        runner = HPUModelRunner(vllm_config, DEVICE)
+        assert runner.max_cudagraph_capture_size == 256
+
+
+@pytest.mark.parametrize(
+    "is_prompt,batch_size,seq_len,num_blocks,block_size,max_capture,expected",
+    [
+        # Prefill within limits → use graphs
+        (True, 1, 128, 0, 128, 512, True),
+        # Prefill exceeding limits → skip graphs
+        (True, 1, 256, 4, 128, 512, False),
+        # Prefill at exact boundary → use graphs
+        (True, 1, 256, 2, 128, 512, True),
+        # Prefill just over boundary → skip graphs
+        (True, 1, 256, 2, 128, 511, False),
+        # Decode never skips graphs even with many tokens
+        (False, 256, 1, 100, 128, 512, True),
+        # Decode with many blocks → still use graphs
+        (False, 64, 1, 1000, 128, 512, True),
+    ])
+def test_use_graphs(model_runner, is_prompt, batch_size, seq_len, num_blocks, block_size, max_capture, expected):
+    model_runner.max_cudagraph_capture_size = max_capture
+    attn_metadata = SimpleNamespace(is_prompt=is_prompt,
+                                    block_size=block_size,
+                                    seq_len=lambda: seq_len,
+                                    num_blocks=lambda: num_blocks)
+    result = model_runner._use_graphs(attn_metadata, batch_size)
+    assert result == expected
+
+
+def test_use_graphs_enforce_eager(model_runner):
+    """When enforce_eager is set, never use graphs."""
+    orig = model_runner.model_config.enforce_eager
+    try:
+        model_runner.model_config.enforce_eager = True
+        attn_metadata = SimpleNamespace(is_prompt=False, block_size=128, seq_len=lambda: 1, num_blocks=lambda: 0)
+        assert model_runner._use_graphs(attn_metadata, 1) is False
+    finally:
+        model_runner.model_config.enforce_eager = orig
