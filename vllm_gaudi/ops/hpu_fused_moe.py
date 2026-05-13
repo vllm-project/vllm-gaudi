@@ -308,8 +308,9 @@ def patched_fused_moe_forward(
         layer = self._hpu_layer_ref
         layer.ensure_moe_quant_config_init()
         self._maybe_sync_shared_experts_stream(shared_experts_input)
-        if self.gate is not None:
-            router_logits, _ = self.gate(hidden_states)
+        gate = self.gate or getattr(self, "_hpu_gate_ref", None)
+        if gate is not None:
+            router_logits, _ = gate(hidden_states)
         shared_output, fused_hidden = self._apply_quant_method(
             layer=layer,
             hidden_states=hidden_states,
@@ -558,6 +559,8 @@ def _hpu_fused_moe_init(self, *args, **kwargs):
     _orig_fused_moe_init(self, *args, **kwargs)
     if hasattr(self, "runner"):
         object.__setattr__(self.runner, "_hpu_layer_ref", self)
+        if self.runner.gate is not None:
+            object.__setattr__(self.runner, "_hpu_gate_ref", self.runner.gate)
 
 
 FusedMoE.__init__ = _hpu_fused_moe_init
