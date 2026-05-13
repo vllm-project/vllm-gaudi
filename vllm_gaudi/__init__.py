@@ -64,6 +64,7 @@ def register():
     # Apply HPU runtime monkey-patches (e.g. cleanup_dist_env_and_memory).
     # See vllm_gaudi/patches.py for details (GAUDISW-247825).
     from vllm_gaudi import patches as _hpu_patches
+
     _hpu_patches.apply()
 
     return "vllm_gaudi.platform.HpuPlatform"
@@ -82,6 +83,11 @@ def register_utils():
         from vllm_gaudi.v1.engine.core_patch import install_engine_core_patch
 
         install_engine_core_patch()
+
+    # Guard CUDA sync in upstream HF3FS mock client for non-CUDA platforms.
+    from vllm_gaudi import patches as _hpu_patches
+
+    _hpu_patches.patch_hf3fs_mock_client()
 
 
 def register_ops():
