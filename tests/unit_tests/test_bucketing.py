@@ -727,3 +727,39 @@ def test_decode_buckets_satisfy_ctx_filter(monkeypatch, use_contiguous_pa, max_m
                             f"ctx <= ceil(max_model_len/block_size) * bs "
                             f"(max_blocks_per_seq={max_blocks_per_seq}):\n" +
                             "\n".join(f"  bs={bs}, query={query}, ctx={ctx}" for bs, query, ctx in violations[:20]))
+
+
+def test_file_buckets_with_empty_ctx_range_no_crash(monkeypatch):
+    """When VLLM_BUCKETING_FROM_FILE is used, ctx_range is empty.
+
+    The ctx filter must not crash with IndexError on ctx_range[0].
+    Reproduces server.log issue: GraniteMoeHybrid model with file-based
+    bucketing caused IndexError in num_ctx_tokens_less_or_equal_batched_max_model_len.
+    """
+    monkeypatch.setenv("VLLM_CONTIGUOUS_PA", "false")
+    clear_config()
+    get_config()
+
+    max_model_len = 131072
+    block_size = 528
+    max_num_seqs = 32
+    max_blocks = 2424
+
+    file_buckets = [(1, 1, 256), (1, 1, 512), (2, 1, 256), (2, 1, 512), (32, 1, 2424)]
+
+    # ctx_range is empty when using file-based bucketing
+    buckets = generate_buckets(
+        bs_range=[],
+        query_range=[],
+        ctx_range=[],
+        is_prompt=False,
+        max_model_len=max_model_len,
+        max_num_seqs=max_num_seqs,
+        max_num_prefill_seqs=1,
+        max_num_batched_tokens=8192,
+        block_size=block_size,
+        max_blocks=max_blocks,
+        file_buckets=file_buckets,
+    )
+
+    assert len(buckets) > 0, "Should produce buckets from file_buckets"

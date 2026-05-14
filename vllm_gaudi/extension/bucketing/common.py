@@ -448,10 +448,11 @@ def generate_buckets(bs_range,
         return bs <= ctx
 
     def num_ctx_tokens_less_or_equal_batched_max_model_len(bs, query, ctx):
-        is_valid = ctx <= math.ceil(max_model_len / block_size) * bs if ctx > ctx_range[0] else True
+        ctx_min = ctx_range[0] if ctx_range else 0
+        is_valid = ctx <= math.ceil(max_model_len / block_size) * bs if ctx > ctx_min else True
         if not is_valid:
             omitted_buckets.add(
-                ("condition: ctx <= math.ceil(max_model_len / block_size) * bs if ctx > ctx_range[0] else True",
+                ("condition: ctx <= math.ceil(max_model_len / block_size) * bs if ctx > ctx_min else True",
                  "-> bs, query, ctx: ", bs, query, ctx))
         return is_valid
 
