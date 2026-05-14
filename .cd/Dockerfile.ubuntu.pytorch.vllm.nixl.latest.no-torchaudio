@@ -1,0 +1,89 @@
+# Copyright (C) 2025 Habana Labs, Ltd. an Intel Company
+# SPDX-License-Identifier: Apache-2.0
+#
+# NOTE: This is a copy of Dockerfile.ubuntu.pytorch.vllm.nixl.latest with
+# torchaudio removed. Used to validate that vllm + vllm-gaudi can be built and
+# run on Gaudi without pulling the CPU torchaudio wheel.
+
+# Parameterize base image components
+ARG DOCKER_URL=vault.habana.ai/gaudi-docker
+ARG VERSION=1.24.0
+ARG BASE_NAME=ubuntu24.04
+ARG PT_VERSION=2.10.0
+ARG REVISION=latest
+ARG REPO_TYPE=habanalabs
+ARG TORCH_TYPE_SUFFIX
+
+FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-${TORCH_TYPE_SUFFIX}installer-${PT_VERSION}:${REVISION}
+
+# Parameterize commit/branch for vllm-project & vllm-gaudi checkout
+# leave empty to use last-good-commit-for-vllm-gaudi
+ARG PT_VERSION
+ARG VLLM_PROJECT_COMMIT=
+ARG VLLM_GAUDI_COMMIT=main
+
+ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
+
+RUN apt update && \
+    apt install -y gettext moreutils jq && \
+    ln -sf /usr/bin/python3 /usr/bin/python
+WORKDIR /root
+
+ENV VLLM_PATH=/workspace/vllm-project
+ENV VLLM_PATH2=/workspace/vllm-gaudi
+ENV HABANA_VISIBLE_DEVICES=all
+
+RUN echo "dash dash/sh boolean false" | debconf-set-selections && \
+    DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
+ENV ENV=~/.profile
+
+# Clone the vllm-project repository and install inside the container
+# --- START: COMBINED RUN COMMAND ---
+RUN \
+    # Clone vllm-gaudi and get the commit hash for the vllm-project/vllm
+    set -e && \
+    mkdir -p $VLLM_PATH2 && \
+    git clone https://github.com/vllm-project/vllm-gaudi.git $VLLM_PATH2 && \
+    cd $VLLM_PATH2 && \
+    if [ -z "${VLLM_PROJECT_COMMIT}" ]; then \
+       VLLM_PROJECT_COMMIT=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" 2>/dev/null) && \
+       echo "Found vLLM commit hash: ${VLLM_PROJECT_COMMIT}"; \
+    else \
+       echo "Using vLLM commit : ${VLLM_PROJECT_COMMIT}"; \
+    fi && \
+    mkdir -p $VLLM_PATH && \
+    # Clone vllm-project/vllm and use configured or last good commit hash    
+    git clone https://github.com/vllm-project/vllm.git $VLLM_PATH && \
+    cd $VLLM_PATH && \
+    git remote add upstream https://github.com/vllm-project/vllm.git && \
+    git fetch upstream --tags || true && \
+    git checkout ${VLLM_PROJECT_COMMIT} && \
+    # Install vllm-project/vllm
+    bash -c 'pip install -r <(sed "/^torch/d" requirements/build/cuda.txt)' && \
+    VLLM_TARGET_DEVICE=empty pip install --no-build-isolation . && \
+    # Install vllm-gaudi plugin
+    cd $VLLM_PATH2 && \
+    git checkout ${VLLM_GAUDI_COMMIT} && \
+    VLLM_TARGET_DEVICE=hpu pip install -v . --no-build-isolation && \
+    python install_nixl.py
+# --- END: COMBINED RUN COMMAND ---
+
+# torchaudio install removed.
+
+# Workaround: Gaudi base image bundles HPU-patched PyTorch (e.g. 2.10.0a0+git...)
+# which doesn't satisfy torchvision's strict torch==X.Y.Z pin.
+# Relax the requirement in installed package metadata so pip check passes.
+# (torchaudio metadata patch removed together with torchaudio install.)
+RUN SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
+    TORCH_VER=$(python3 -c "import torch; v=torch.__version__.split('+')[0].split('a')[0]; print(v)") && \
+    find "$SITE" -path "*/torchvision*.dist-info/METADATA" \
+      -exec sed -i "s/Requires-Dist: torch (==${TORCH_VER})/Requires-Dist: torch (>=${TORCH_VER}a0,<${TORCH_VER%.*}.$((${TORCH_VER##*.}+1)))/" {} +
+RUN pip install datasets && \
+    pip install pandas && pip install lm-eval lm-eval[api] && \
+    pip install pytest pytest_asyncio pytest-timeout
+
+# Copy utility scripts and configuration
+WORKDIR /workspace
+RUN ln -s /workspace/vllm/tests /workspace/tests \
+    && ln -s /workspace/vllm/examples /workspace/examples \
+    && ln -s /workspace/vllm/benchmarks /workspace/benchmarks
