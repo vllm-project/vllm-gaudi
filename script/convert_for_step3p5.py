@@ -44,21 +44,17 @@ def copy_other_files(input_path, output_path):
             )
 
 
-
-def convert_files(input_path, output_path, input_scale_path, num_experts,
-                  use_unit_quant):
+def convert_files(input_path, output_path, input_scale_path, num_experts, use_unit_quant):
     all_safetensors = glob(f"{input_path}/*.safetensors")
     # sort by file name
     all_safetensors.sort()
     model_list = {}
 
-    with safe_open(input_scale_path, framework="pt",
-                   device="cpu") as input_scale:
+    with safe_open(input_scale_path, framework="pt", device="cpu") as input_scale:
         for safetensors_path in all_safetensors:
             print(f"processing {safetensors_path}")
             tensors = {}
-            with safe_open(safetensors_path, framework="pt",
-                           device="cpu") as tensor_file:
+            with safe_open(safetensors_path, framework="pt", device="cpu") as tensor_file:
                 for k in tensor_file.keys():  # noqa: SIM118
                     tensor = tensor_file.get_tensor(k)
                     if len(tensor.shape) == 3 and tensor.size(0) == num_experts:
@@ -71,32 +67,14 @@ def convert_files(input_path, output_path, input_scale_path, num_experts,
                                 use_unit_quant=use_unit_quant,
                             )
                             weight_scale_name = weight_name + "_scale"
-                            input_scale_name = weight_name.rstrip(
-                                "weight") + "input_scale"
-                            input_scale_tensor = input_scale.get_tensor(
-                                input_scale_name).float() * 448.0 / 240.0
-                            tensors.update({
-                                input_scale_name:
-                                input_scale_tensor
-                            })
-                            tensors.update(
-                               {weight_name: weight_fp8})
-                            tensors.update({
-                                weight_scale_name:
-                                weight_scale
-                            })
-                            model_list.update({
-                                input_scale_name:
-                                safetensors_path.split("/")[-1]
-                            })
-                            model_list.update({
-                                weight_name:
-                                safetensors_path.split("/")[-1]
-                            })
-                            model_list.update({
-                                weight_scale_name:
-                                safetensors_path.split("/")[-1]
-                            })
+                            input_scale_name = weight_name.rstrip("weight") + "input_scale"
+                            input_scale_tensor = input_scale.get_tensor(input_scale_name).float() * 448.0 / 240.0
+                            tensors.update({input_scale_name: input_scale_tensor})
+                            tensors.update({weight_name: weight_fp8})
+                            tensors.update({weight_scale_name: weight_scale})
+                            model_list.update({input_scale_name: safetensors_path.split("/")[-1]})
+                            model_list.update({weight_name: safetensors_path.split("/")[-1]})
+                            model_list.update({weight_scale_name: safetensors_path.split("/")[-1]})
                     else:
                         print(f"skip {k}.")
                         tensors.update({k: tensor})
@@ -112,8 +90,7 @@ def convert_files(input_path, output_path, input_scale_path, num_experts,
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Convert tensors to float8 format.")
+    parser = argparse.ArgumentParser(description="Convert tensors to float8 format.")
     parser.add_argument(
         "-i",
         "--input_path",
@@ -132,10 +109,7 @@ if __name__ == "__main__":
         default="/mnt/disk6/HF_models/step3p5-input-scale.safetensors",
         help="Path to the output directory.",
     )
-    parser.add_argument("-u",
-                        "--unit_quant",
-                        action="store_true",
-                        help="Enable Unit FP8 Quant for the entire model")
+    parser.add_argument("-u", "--unit_quant", action="store_true", help="Enable Unit FP8 Quant for the entire model")
     args = parser.parse_args()
     input_path = args.input_path
     output_path = args.output_path
@@ -146,5 +120,4 @@ if __name__ == "__main__":
     if not os.path.exists(output_path):
         os.makedirs(output_path)
     copy_other_files(input_path, output_path)
-    convert_files(input_path, output_path, input_scale_path, 288,
-                  use_unit_quant)
+    convert_files(input_path, output_path, input_scale_path, 288, use_unit_quant)

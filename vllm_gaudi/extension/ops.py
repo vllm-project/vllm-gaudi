@@ -670,7 +670,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         gate_up: [N, 2*D] (last dim is the concated gate and up )
         return:  [N, D]
         """
-        gate, up = gate_up.chunk(2, dim=-1)     # chunk last dim
+        gate, up = gate_up.chunk(2, dim=-1)  # chunk last dim
         gate = F.silu(gate)
         gate = gate.clamp(max=limit)
         up = up.clamp(min=-limit, max=limit)
@@ -687,15 +687,15 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
 
         w13_list = self._cached_w13_views
         w2_list = self._cached_w2_views
-        
+
         # swiglustep not support on torch.ops.hpu.mixture_of_experts
-        if(activation == "swiglustep"):
+        if (activation == "swiglustep"):
             T, H = hidden_states.shape
             device = hidden_states.device
             dtype = hidden_states.dtype  # expected bf16
 
-            E_local = len(self.w13_list) # the number of local experts
-            
+            E_local = len(self.w13_list)  # the number of local experts
+
             # ------------------------------------------------------------
             # 1) get the full raw moe bf16 weight and shape
             # ------------------------------------------------------------
@@ -731,9 +731,9 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
             #    torch.mm： x to [1,T,H]，W13^T to [E,H,2D], broadcast matmul
             # ------------------------------------------------------------
             xE = hidden_states.unsqueeze(0)  # [1,T,H]
-            W13_T = W13.transpose(1, 2)                              # [E,H,2D]
+            W13_T = W13.transpose(1, 2)  # [E,H,2D]
 
-            gate_up = (xE @ W13_T).contiguous()                      # [E,T,2D]
+            gate_up = (xE @ W13_T).contiguous()  # [E,T,2D]
 
             # ------------------------------------------------------------
             # 4) activation：shape is [E,T,D]
@@ -745,7 +745,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
             #    W2: [E,H,D] => W2^T: [E,D,H]
             # ------------------------------------------------------------
             W2_T = W2.transpose(1, 2)  # [E,D,H]
-            y = torch.bmm(ff, W2_T).contiguous()                  # [E,T,H]
+            y = torch.bmm(ff, W2_T).contiguous()  # [E,T,H]
 
             # ------------------------------------------------------------
             # 6) sum experts：out = sum_e (y_e * mask_e)
@@ -778,7 +778,7 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         if self.bias is not None:
             w13_bias_list = self._cached_w13_bias_views
             w2_bias_list = self._cached_w2_bias_views
-        if(activation != "swiglustep"):
+        if (activation != "swiglustep"):
             for i in range(self.moe_n_slice):
                 if self.bias is not None:
                     start = i * self.num_expert_per_group
@@ -805,22 +805,23 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
                     min_expert = self.experts_min + start
                     max_expert = min_expert + self.num_expert_per_group - 1
 
-                    slice_final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=hidden_states,
-                                                                                expert_routing_table=expert_routing_table,
-                                                                                router_weights=router_weights,
-                                                                                w12=w13_list_slice,
-                                                                                w3=w2_list_slice,
-                                                                                permuted_weights=permuted_weights,
-                                                                                activation=activation,
-                                                                                experts_min=min_expert,
-                                                                                experts_max=max_expert,
-                                                                                **kwargs)
+                    slice_final_hidden_states = torch.ops.hpu.mixture_of_experts(
+                        hidden_states=hidden_states,
+                        expert_routing_table=expert_routing_table,
+                        router_weights=router_weights,
+                        w12=w13_list_slice,
+                        w3=w2_list_slice,
+                        permuted_weights=permuted_weights,
+                        activation=activation,
+                        experts_min=min_expert,
+                        experts_max=max_expert,
+                        **kwargs)
                 if i == 0:
                     final_hidden_states = slice_final_hidden_states
                 else:
                     final_hidden_states += slice_final_hidden_states
                 htorch.core.mark_step()
-        else: # activation == "swiglustep"
+        else:  # activation == "swiglustep"
             final_hidden_states = out
         return final_hidden_states
 
@@ -1168,7 +1169,6 @@ def fp8_channel_moe_prepare_weights(layer):
     layer.moe_op.w13_raw_fp8 = layer.w13_weight.reshape(-1, hidden_size).contiguous()
     layer.moe_op.w2_raw_fp8 = layer.w2_weight
 
-
     twoD = layer.w13_weight.shape[1]  # weight shape that contain gatr and up
     D = twoD // 2
 
@@ -1177,10 +1177,11 @@ def fp8_channel_moe_prepare_weights(layer):
 
     # -> [E, 2D] by repeating each half
     s_per_channel = torch.cat(
-        [s2[:, 0:1].repeat(1, D),  # gate half
-        s2[:, 1:2].repeat(1, D)], # up half
-        dim=1
-    )  # [E,2D]
+        [
+            s2[:, 0:1].repeat(1, D),  # gate half
+            s2[:, 1:2].repeat(1, D)
+        ],  # up half
+        dim=1)  # [E,2D]
     layer.moe_op.w13_raw_fp8_scale = s_per_channel.reshape(-1).contiguous()
 
     #
@@ -1389,7 +1390,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         gate_up: [N, 2*D] (last dim is the concated gate and up )
         return:  [N, D]
         """
-        gate, up = gate_up.chunk(2, dim=-1)     # chunk last dim
+        gate, up = gate_up.chunk(2, dim=-1)  # chunk last dim
         gate = F.silu(gate)
         gate = gate.clamp(max=limit)
         up = up.clamp(min=-limit, max=limit)
@@ -1431,9 +1432,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
 
             # x -> fp8 (once)
             x_scale = self.w13_input_scale.data
-            x_fp8 = torch.ops.hpu.cast_to_fp8_v2(
-                x, 1.0 / x_scale, False, False, torch.float8_e4m3fn
-            )[0]
+            x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
 
             # experts_mask: [E_global, T, 1]
             experts_mask = torch.zeros((T, self.global_num_experts), dtype=dtype, device=device)
@@ -1461,9 +1460,9 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
             D = twoD // 2
 
             gate_up_full = torch.ops.hpu.fp8_gemm_v2(
-                A=x_fp8,            # [T,H]
+                A=x_fp8,  # [T,H]
                 trans_A=False,
-                B=W13_flat,         # [E*2D,H]
+                B=W13_flat,  # [E*2D,H]
                 trans_B=True,
                 D=None,
                 out_dtype=torch.bfloat16,
@@ -1487,9 +1486,8 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
             # -------------------------
             w2_scale = self.w2_input_scale
             w2_scale_b = w2_scale.view(E_local, 1, 1)  # broadcast to [E,T,D]
-            ff_fp8 = torch.ops.hpu.cast_to_fp8_v2(
-                ff, 1.0 / w2_scale_b, False, False, torch.float8_e4m3fn
-            )[0]  # [E,T,D] fp8
+            ff_fp8 = torch.ops.hpu.cast_to_fp8_v2(ff, 1.0 / w2_scale_b, False, False,
+                                                  torch.float8_e4m3fn)[0]  # [E,T,D] fp8
 
             # -------------------------
             # W2 batch GEMM: y = ff @ W2^T -> [E,T,H]
@@ -1498,9 +1496,9 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
             W2s = self.w2_raw_fp8_scale
 
             y = torch.ops.hpu.fp8_gemm_v2(
-                A=ff_fp8,            # [E,T,D]
+                A=ff_fp8,  # [E,T,D]
                 trans_A=False,
-                B=W2,                # [E,H,D]
+                B=W2,  # [E,H,D]
                 trans_B=True,
                 D=None,
                 out_dtype=torch.bfloat16,
@@ -1530,7 +1528,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
                                                                    experts_min=self.experts_min,
                                                                    experts_max=self.experts_max,
                                                                    **kwargs)
-        elif(activation != "swiglustep"):
+        elif (activation != "swiglustep"):
             x_scale = self.w13_input_scale.data
             # w2_input_scale should be List[Tensor] when static and fused
             w2_input_scale = [self.w2_input_scale[i] for i in range(self.num_experts)]
@@ -1549,7 +1547,7 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
                                                                    experts_min=self.experts_min,
                                                                    experts_max=self.experts_max,
                                                                    **kwargs)
-        if(activation == "swiglustep"):
+        if (activation == "swiglustep"):
             final_hidden_states = out
         return final_hidden_states
 
