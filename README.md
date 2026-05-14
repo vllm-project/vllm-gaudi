@@ -52,8 +52,7 @@ The vLLM Hardware Plugin for Intel® Gaudi® integrates [Intel® Gaudi® AI acce
     git clone https://github.com/vllm-project/vllm
     cd vllm
     git checkout $VLLM_COMMIT_HASH
-    python3 use_existing_torch.py --prefix
-    pip install -r requirements/build/cuda.txt
+    pip install -r <(sed '/^torch/d' requirements/build/cuda.txt)
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
     cd ..
     ```
