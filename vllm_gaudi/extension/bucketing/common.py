@@ -464,7 +464,7 @@ def generate_buckets(bs_range,
         },
         "decode": {
             # depends only on contiguous PA
-            True: [num_ctx_tokens_less_or_equal_batched_max_model_len],
+            True: [],
             False: [batch_size_smaller_than_blocks, num_ctx_tokens_less_or_equal_batched_max_model_len],
         }
     }
