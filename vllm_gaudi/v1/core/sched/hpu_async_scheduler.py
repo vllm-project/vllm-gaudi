@@ -8,7 +8,7 @@ from vllm.v1.request import Request, RequestStatus
 class HPUAsyncScheduler(AsyncScheduler):
 
     def schedule(self):
-        """HPU override: fix stale num_cached_tokens after OOM preemption.
+        """HPU override: fix stale cached-token accounting after preemption.
 
         After preemption a request is requeued with num_computed_tokens reset.
         On the next schedule() the OffloadingConnector may assign new external
@@ -27,7 +27,10 @@ class HPUAsyncScheduler(AsyncScheduler):
         """
         output = super().schedule()
         for request in self.running:
-            if (request.num_cached_tokens < request.num_external_computed_tokens):
+            # vLLM Request no longer exposes num_cached_tokens on newer
+            # branches. Keep the old fix only when the field exists.
+            if (hasattr(request, "num_cached_tokens")
+                    and request.num_cached_tokens < request.num_external_computed_tokens):
                 request.num_cached_tokens = request.num_computed_tokens
         return output
 
@@ -35,6 +38,7 @@ class HPUAsyncScheduler(AsyncScheduler):
         self,
         requests: Iterable[Request],
         invalid_block_ids: set[int],
+        num_scheduled_tokens: dict[str, int],
         evict_blocks: bool = True,
     ) -> tuple[set[str], int, set[int]]:
         """HPU override: clamp num_external_computed_tokens to 0 instead of
@@ -61,10 +65,13 @@ class HPUAsyncScheduler(AsyncScheduler):
             # TODO (davidb): add support for hybrid memory allocator
             (req_block_ids, ) = self.kv_cache_manager.get_block_ids(req_id)
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                req_num_computed_tokens = (request.num_computed_tokens if req_id in self.failed_recving_kv_req_ids else
-                                           len(req_block_ids) * self.block_size)
+                req_num_computed_tokens = (request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0) if req_id
+                                           in self.failed_recving_kv_req_ids else len(req_block_ids) * self.block_size)
             else:
-                req_num_computed_tokens = request.num_cached_tokens
+                # vLLM removed Request.num_cached_tokens in newer branches.
+                # Fall back to upstream-equivalent computed-token accounting.
+                req_num_computed_tokens = (request.num_cached_tokens if hasattr(request, "num_cached_tokens") else
+                                           request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0))
 
             req_num_computed_blocks = (req_num_computed_tokens + self.block_size - 1) // self.block_size
             for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
@@ -89,17 +96,18 @@ class HPUAsyncScheduler(AsyncScheduler):
                 # exceed the number of externally-computed tokens when
                 # OOM-invalidation spans locally-computed blocks too, which
                 # would otherwise drive num_external_computed_tokens negative.
-                request.num_external_computed_tokens = max(
-                    0,
-                    request.num_external_computed_tokens - num_affected_tokens,
-                )
+                if hasattr(request, "num_external_computed_tokens"):
+                    request.num_external_computed_tokens = max(
+                        0,
+                        request.num_external_computed_tokens - num_affected_tokens,
+                    )
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])
 
             if is_affected:
                 if not marked_invalid_block:
-                    total_affected_tokens += (request.num_computed_tokens - request.num_cached_tokens)
-                    request.num_computed_tokens = request.num_cached_tokens
+                    total_affected_tokens += (request.num_computed_tokens - req_num_computed_tokens)
+                    request.num_computed_tokens = req_num_computed_tokens
 
                 affected_req_ids.add(request.request_id)
 
