@@ -4667,10 +4667,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if mlp is not None:
                     block_gate = getattr(mlp, 'gate', None) or getattr(mlp, 'router', None)
                     experts = getattr(mlp, 'experts', None)
-                    if (block_gate is not None and experts is not None
-                            and getattr(experts, '_gate', None) is block_gate):
-                        experts._gate = None
-                        self._detached_moe_gates.add(id(experts))
+                    if block_gate is not None and experts is not None:
+                        if getattr(experts, '_gate', None) is block_gate:
+                            experts._gate = None
+                            self._detached_moe_gates.add(id(experts))
+                        # With upstream vLLM PR #35178 MoERunner is an
+                        # nn.Module, so `self.runner.gate = gate` in
+                        # FusedMoE.__init__ registers the shared gate
+                        # as a child of runner. INC's
+                        # generate_model_info() walks named_children()
+                        # and the last-seen parent wins, so INC patches
+                        # runner._modules['gate'] and leaves
+                        # mlp._modules['gate'] pointing at a stale
+                        # module whose weight Parameter has been
+                        # mutated in-place to fp8. Unregister the gate
+                        # from runner._modules (but keep runner.gate
+                        # as a plain attribute so is_internal_router()
+                        # and the runner's internal forward path keep
+                        # working) so INC sees mlp as the sole parent.
+                        runner = getattr(experts, 'runner', None)
+                        if (runner is not None and isinstance(runner, torch.nn.Module)
+                                and runner._modules.get('gate', None) is block_gate):
+                            del runner._modules['gate']
+                            object.__setattr__(runner, 'gate', block_gate)
 
     def _sync_shared_moe_gates(self):
         """Apply SharedFusedMoE post-INC synchronization and compatibility.
