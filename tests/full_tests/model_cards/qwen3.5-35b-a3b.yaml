@@ -12,7 +12,6 @@ model_card:
   reasoning_parser: qwen3
   max_num_batched_tokens: 16384
   max_gen_toks: 2048
-  enforce_eager: true
 
 metrics:
   name: exact_match,strict-match
