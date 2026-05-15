@@ -1207,14 +1207,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.use_hpu_graph = not self.model_config.enforce_eager
         self.max_batch_size = self.scheduler_config.max_num_seqs
         self.max_num_seqs = self.scheduler_config.max_num_seqs
-        self.max_cudagraph_capture_size = self.vllm_config.compilation_config.max_cudagraph_capture_size
         if prompt_profile_cfg:
             self.max_prefill_batch_size = prompt_profile_cfg[0]
         else:
             self.max_prefill_batch_size = with_default(get_config().VLLM_PROMPT_BS_BUCKET_MAX, 1)
         self.seen_configs: set = set()
-        self.max_num_batched_tokens = \
-            self.scheduler_config.max_num_batched_tokens
+        self.max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        self.max_cudagraph_capture_size = self.vllm_config.compilation_config.max_cudagraph_capture_size
+        if self.max_cudagraph_capture_size is None:
+            self.max_cudagraph_capture_size = self.max_num_batched_tokens
         self.use_prefix_caching = (self.vllm_config.cache_config.enable_prefix_caching)
         self.bucketing_manager = HPUBucketingManager()
         max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill \
@@ -3264,9 +3265,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._check_config(batch_size, seq_len, num_blocks, attn_metadata, warmup_mode)
         additional_kwargs = {}
         if htorch.utils.internal.is_lazy():
-            use_graphs = self._use_graphs()
-            if self.max_cudagraph_capture_size is not None and batch_size * seq_len > self.max_cudagraph_capture_size:
-                use_graphs = False
+            use_graphs = self._use_graphs(attn_metadata, batch_size)
             additional_kwargs.update({"bypass_hpu_graphs": not use_graphs})
         else:
             # no hpu graphs for t.compile?
@@ -3830,20 +3829,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return None
 
     def set_attn_bias(self, attn_metadata, batch_size, seq_len, device, dtype):
-        if attn_metadata is None or not attn_metadata.is_prompt:
+        if (attn_metadata is None
+                or (self.prefill_use_fusedsdpa and self.is_causal and attn_metadata.block_list is None)
+                or not attn_metadata.is_prompt):
             return attn_metadata
 
-        # FusedSDPA can handle a purely causal mask natively via
-        # is_causal=True + valid_seq_lengths, including chunked prefill where
-        # block_list is non-None. Skipping the materialised
-        # [bs, 1, q_len, total_kv_len] attn_bias avoids a large add_bf16 on the
-        # attention critical path (significant at long context). The original
-        # short-circuit only covered block_list is None; extend it to all
-        # plain-causal cases (no sliding-window / no chunked-attention / no
-        # alibi / not pooling).
-        # Conservative scope: only non-GDN hybrid models (e.g. Granite-4
-        # Mamba2+Transformer). GDN / pure-transformer / other topologies keep
-        # the materialised bias path until validated.
+        # Extended FSDPA-native causal short-circuit for non-GDN hybrid models
+        # (e.g. Granite-4 Mamba2+Transformer). FusedSDPA can encode a purely
+        # causal mask natively via is_causal=True + valid_seq_lengths, including
+        # chunked prefill where block_list is non-None. Skipping the
+        # materialised [bs, 1, q_len, total_kv_len] attn_bias avoids a large
+        # add_bf16 on the attention critical path (significant at long
+        # context). Conservative scope: only non-GDN hybrid models; GDN /
+        # pure-transformer / other topologies keep the materialised bias path
+        # until validated.
         if (self.prefill_use_fusedsdpa and self.is_causal and not self.is_pooling_model
                 and not getattr(self, 'sliding_window', None)
                 and not getattr(self, 'model_has_chunked_attention', False)
@@ -4583,8 +4582,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _compile(self, module):
         return torch.compile(module, **self.compile_config.get_compile_args())
 
-    def _use_graphs(self):
-        return not self.model_config.enforce_eager
+    def _use_graphs(self, attn_metadata, batch_size):
+        if self.model_config.enforce_eager:
+            return False
+        # skip HPU graphs for long (query + context) prefills
+        if attn_metadata is not None and attn_metadata.is_prompt:
+            seq_len = attn_metadata.seq_len()
+            num_blocks = attn_metadata.num_blocks()
+            total_tokens = (batch_size * seq_len + num_blocks * attn_metadata.block_size)
+            if total_tokens > self.max_cudagraph_capture_size:
+                logger.debug_once(f"Skipping HPU graph capture for prompt with [bs, query, num_blocks] = "
+                                  f"[{batch_size}, {seq_len}, {num_blocks}] due to total token count "
+                                  f"{total_tokens} exceeding the threshold of {self.max_cudagraph_capture_size}.")
+                return False
+        return True
 
     def _get_model_layers(self):
         """Return the decoder layers from the model, handling both
@@ -5096,6 +5107,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             num_scheduled_tokens[req_id] = scheduled_tokens
 
     def _generate_seq_lengths(self, num_samples, num_blocks, block_size):
+        # ensure the actual number of blocks is less than the KV cache blocks
+        num_blocks = min(self.kv_cache_config.num_blocks, num_blocks)
+
         assert num_samples <= num_blocks
         blocks = [num_blocks // num_samples] * num_samples
         missing_blocks = num_blocks - sum(blocks)
@@ -6704,18 +6718,21 @@ class HPUAttentionMetadataProcessor:
         Returns:
             Updated attention metadata with attn_bias set
         """
-        if attn_metadata is None or not attn_metadata.is_prompt:
+        if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
+                or not attn_metadata.is_prompt):
             return attn_metadata
 
-        # FusedSDPA handles a purely causal mask natively (is_causal=True +
-        # valid_seq_lengths). Skip materialising a [bs, 1, q_len,
-        # total_kv_len] attn_bias when the model is plain-causal (no
-        # sliding-window / chunked-attention). This removes a sizable
-        # add_bf16 from the attention critical path during long-context
-        # chunked prefill. interleaved_sliding_window and chunked-attention
-        # bias paths (window_attn_bias / chunked_attn_bias) are populated
-        # later in process_metadata and used by hpu_attn instead.
-        # Conservative scope: only non-GDN hybrid models (e.g. Granite-4).
+        # Extended FSDPA-native causal short-circuit for non-GDN hybrid models
+        # (e.g. Granite-4 Mamba2+Transformer). FusedSDPA handles a purely
+        # causal mask natively (is_causal=True + valid_seq_lengths). Skip
+        # materialising a [bs, 1, q_len, total_kv_len] attn_bias even during
+        # chunked prefill (block_list is non-None) for these topologies; this
+        # removes a sizable add_bf16 from the attention critical path during
+        # long-context chunked prefill. interleaved_sliding_window and
+        # chunked-attention bias paths (window_attn_bias / chunked_attn_bias)
+        # are populated later in process_metadata and used by hpu_attn
+        # instead. Conservative scope: only non-GDN hybrid models; all other
+        # topologies retain the original behaviour.
         if (self.prefill_use_fusedsdpa and not self.interleaved_sliding_window and self.is_non_gdn_hybrid):
             return attn_metadata
 
