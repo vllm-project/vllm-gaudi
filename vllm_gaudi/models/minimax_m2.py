@@ -107,9 +107,6 @@ class HpuMiniMaxM2MoE(nn.Module):
         # router_logits: (bs * seq_len, n_experts)
         router_logits, _ = self.gate(hidden_states.to(torch.float32))
         final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
-        final_hidden_states = final_hidden_states
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(bs, seq_len, hidden_dim)
 
