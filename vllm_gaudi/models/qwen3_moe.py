@@ -2,7 +2,8 @@ import torch
 from torch import nn
 
 from vllm.model_executor.models.qwen3_moe import (
-    Qwen3MoeSparseMoeBlock as UpstreamQwen3MoeSparseMoeBlock, )
+    Qwen3MoeSparseMoeBlock as UpstreamQwen3MoeSparseMoeBlock,
+)
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.distributed import tensor_model_parallel_all_gather
 
