@@ -771,25 +771,27 @@ def test_contiguous_pa_decode_buckets_not_filtered_by_ctx(monkeypatch):
     assert max_blocks in bucket_ctxs, (f"Bucket ctx={max_blocks} (num_hpu_blocks) was incorrectly filtered out.")
 
 
-def test_file_buckets_with_empty_ctx_range_no_crash(monkeypatch):
-    """When VLLM_BUCKETING_FROM_FILE is used, ctx_range is empty.
+def test_file_buckets_bypass_filters(monkeypatch):
+    """File-based bucketing (VLLM_BUCKETING_FROM_FILE) skips all filters.
 
-    The ctx filter must not crash with IndexError on ctx_range[0].
-    Reproduces server.log issue: GraniteMoeHybrid model with file-based
-    bucketing caused IndexError in num_ctx_tokens_less_or_equal_batched_max_model_len.
+    Buckets (1,1,256) and (2,1,512) would normally be rejected by the
+    batch_size_smaller_than_blocks or ctx filters in non-file mode.
+    Since file buckets bypass filters entirely, all provided buckets
+    must appear in the output unchanged.
     """
-    monkeypatch.setenv("VLLM_CONTIGUOUS_PA", "false")
+    monkeypatch.setenv("VLLM_CONTIGUOUS_PA", "true")
     clear_config()
     get_config()
 
-    max_model_len = 131072
-    block_size = 528
+    max_model_len = 2048
+    block_size = 256
     max_num_seqs = 32
     max_blocks = 2424
 
-    file_buckets = [(1, 1, 256), (1, 1, 512), (2, 1, 256), (2, 1, 512), (32, 1, 2424)]
+    # (512,1,256) would be rejected by batch_size_smaller_than_blocks (bs > ctx)
+    # All buckets pass through because file_buckets bypass filters entirely
+    file_buckets = [(1, 1, 256), (1, 1, 512), (2, 1, 256), (512, 1, 256), (32, 1, 2424)]
 
-    # ctx_range is empty when using file-based bucketing
     buckets = generate_buckets(
         bs_range=[],
         query_range=[],
@@ -804,4 +806,5 @@ def test_file_buckets_with_empty_ctx_range_no_crash(monkeypatch):
         file_buckets=file_buckets,
     )
 
-    assert len(buckets) > 0, "Should produce buckets from file_buckets"
+    assert set(buckets) == set(file_buckets), (f"All file buckets should pass through unfiltered.\n"
+                                               f"Expected: {sorted(file_buckets)}\nGot: {sorted(buckets)}")

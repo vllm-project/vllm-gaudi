@@ -491,7 +491,7 @@ def generate_buckets(bs_range,
     buckets = set()
     buckets_2d = set()
     omitted_buckets = set()
-    filters = get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
+    filters = [] if file_buckets else get_filters(is_prompt, use_merged_prefill, use_contiguous_pa)
     corrector = get_corrector(is_prompt, use_contiguous_pa)
 
     if file_buckets:
