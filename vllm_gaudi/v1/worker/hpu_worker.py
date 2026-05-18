@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCach
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.utils import is_fake_hpu
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
+from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, _GDN_MAMBA_TYPES
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -441,12 +441,9 @@ class HPUWorker(WorkerBase):
         # Reduce reported memory so the scheduler computes fewer
         # num_blocks that fit the HPU separate-allocation model.
         has_attn = any(isinstance(s, FullAttentionSpec) for s in kv_cache_spec.values())
-        has_gdn = any(
-            isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention")
-            for s in kv_cache_spec.values())
+        has_gdn = any(isinstance(s, MambaSpec) and s.mamba_type in _GDN_MAMBA_TYPES for s in kv_cache_spec.values())
         has_standard_mamba = any(
-            isinstance(s, MambaSpec) and s.mamba_type not in ("gdn_attention", "linear_attention")
-            for s in kv_cache_spec.values())
+            isinstance(s, MambaSpec) and s.mamba_type not in _GDN_MAMBA_TYPES for s in kv_cache_spec.values())
         compact_gdn = os.environ.get("VLLM_COMPACT_GDN", "0").strip().lower() in ("1", "true")
         if has_attn and has_gdn and not compact_gdn:
             # When compact GDN is OFF, GDN state scales with num_blocks
@@ -462,8 +459,7 @@ class HPUWorker(WorkerBase):
             real_attn = next(s.real_page_size_bytes for s in kv_cache_spec.values() if isinstance(s, FullAttentionSpec))
             real_mamba = next(
                 sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
-                for s in kv_cache_spec.values()
-                if isinstance(s, MambaSpec) and s.mamba_type in ("gdn_attention", "linear_attention"))
+                for s in kv_cache_spec.values() if isinstance(s, MambaSpec) and s.mamba_type in _GDN_MAMBA_TYPES)
             total_real = real_attn + real_mamba
             if total_real > padded_page:
                 factor = padded_page / total_real
@@ -484,8 +480,7 @@ class HPUWorker(WorkerBase):
             attn_page_size = next(s.page_size_bytes for s in kv_cache_spec.values() if isinstance(s, FullAttentionSpec))
             mamba_state_per_block = next(
                 sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
-                for s in kv_cache_spec.values()
-                if isinstance(s, MambaSpec) and s.mamba_type not in ("gdn_attention", "linear_attention"))
+                for s in kv_cache_spec.values() if isinstance(s, MambaSpec) and s.mamba_type not in _GDN_MAMBA_TYPES)
             if attn_page_size > 0:
                 ratio = attn_page_size / (attn_page_size + mamba_state_per_block)
                 adjusted = int(available * ratio)
