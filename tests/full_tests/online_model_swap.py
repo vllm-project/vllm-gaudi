@@ -233,17 +233,34 @@ class ServerLogCapture:
 
 
 def _stop_server_process_tree(proc: subprocess.Popen[str], timeout: float = 10.0) -> None:
-    """Stop the server process and its descendants (EngineCore workers) via process group."""
+    """Stop the server process and its descendants via process group."""
     if proc.poll() is not None:
+        # Already exited
         proc.wait(timeout=0)
         return
 
-    pgid = os.getpgid(proc.pid)
-    os.killpg(pgid, signal.SIGTERM)
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        # Process exited after poll check; wait for parent
+        proc.wait(timeout=0)
+        return
+
+    # Try SIGTERM on the group
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        # Group already gone; just wait on parent
+        pass
+    except PermissionError:
+        proc.terminate()
+
+    # Wait or escalate to SIGKILL
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(pgid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGKILL)
         proc.wait(timeout=timeout)
 
 
@@ -613,7 +630,7 @@ def print_metrics_table(all_metrics):
         if isinstance(value, int):
             return f"{value:>{width}d}"
         if isinstance(value, float):
-            return f"{int(value):>{width}d}"
+            return f"{value:>{width}.0f}"
         return f"{'N/A':>{width}}"
 
     hdr = (f"{'Phase':>5}  {'Model':<38}  "
@@ -630,7 +647,7 @@ def print_metrics_table(all_metrics):
 
     for m in all_metrics:
         warmup_str = fmt_num(m.get('warmup_s'), 9, 1)
-        reconfigure_str = fmt_num(m.get('reconfigure_s'), 13, 1)
+        reconfigure_str = fmt_num(m.get('reconfigure_s'), 14, 1)
         gen_str = fmt_num(m.get('gen_s'), 7, 2)
         tokens_str = fmt_int(m.get('tokens'), 7)
         status_str = str(m.get('status', 'ok'))
