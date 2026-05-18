@@ -110,7 +110,7 @@ def _patch_hf3fs_mock_client_for_cpu_only() -> None:
 
         return results
 
-    _batch_write_cpu_safe._vllm_gaudi_cpu_safe_patch = True
+    _batch_write_cpu_safe._vllm_gaudi_cpu_safe_patch = True  # type: ignore[attr-defined]
     client_cls.batch_write = _batch_write_cpu_safe
 
 
@@ -220,4 +220,3 @@ def patch_hf3fs_mock_client():
     initialized during platform registration.
     """
     _patch_hf3fs_mock_client_for_cpu_only()
-
