@@ -253,6 +253,9 @@ class ModuleFusedSDPA(ModuleFusedSDPABase):
                 and bs == 1  # bs should be 1 for chunked prefill
                 and q_len != kv_len  # normal causal prefill route to the default dispatch for better performance
                 and is_causal and attn_mask is not None  # only supports causal attention with mask
+                and padding_side == 'right'  # supports right padding only for the chunks that may have padding
+                and window_size is None  # slicing is not compatible with sliding window attention
+                and sinks is None  # slicing is not compatible with kernel fusion with sinks
             ):
             return self._sliced_fsdpa_fwd(query, key, value, attn_mask, dropout_p, is_causal, scale, softmax_mode,
                                           padding_side)
@@ -307,12 +310,13 @@ class ModuleFusedSDPA(ModuleFusedSDPABase):
                 k_chunk = k[..., kv_start:kv_end, :]
                 v_chunk = v[..., kv_start:kv_end, :]
 
-                is_causal_chunk = kv_chunk_idx == 0 and q_chunk_idx >= self.num_padded_query_chunks
-                # chunk sizes must be multiples of 1024 to get valid m and linv
-                is_causal_chunk = is_causal_chunk and q_chunk_size % 1024 == 0 and kv_chunk_size % 1024 == 0
-                # use mask only for the causal chunks that may have padding
+                # Always pass explicit mask for the diagonal chunk (kv_chunk_idx==0)
+                # to ensure numerical consistency. The kernel's is_causal=True path
+                # uses a different internal algorithm that can diverge from the
+                # explicit mask path even when both encode the same triangular pattern.
+                # For non-diagonal chunks within the padded region, also pass mask.
                 mask_chunk = (attn_mask[..., q_start:q_end, kv_start:kv_end]
-                              if kv_chunk_idx < self.num_padded_query_chunks and not is_causal_chunk else None)
+                              if kv_chunk_idx == 0 or kv_chunk_idx < self.num_padded_query_chunks else None)
 
                 if self.with_graph_breaks:
                     # break_graph() cannot break the tensor slicing, use clone to isolate the graph
@@ -328,7 +332,7 @@ class ModuleFusedSDPA(ModuleFusedSDPABase):
                     mask_chunk,
                     dropout_p,
                     scale,
-                    is_causal_chunk,
+                    False,
                     True,  # requires_backward
                     softmax_mode,
                     None,  # valid_seq_len
@@ -454,6 +458,8 @@ class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
                 and bs == 1  # bs should be 1 for chunked prefill
                 and q_len != kv_len  # normal causal prefill route to the default dispatch for better performance
                 and is_causal and attn_mask is not None  # only supports causal attention with mask
+                and padding_side == 'right'  # supports right padding only for the chunks that may have padding
+                and window_size is None  # slicing is not compatible with sliding window attention
             ):
             return self._sliced_fsdpa_fwd(qinput, kinput, vinput, attn_mask, dropout_p, is_causal, scale, softmax_mode,
                                           padding_side).to(query.dtype)
@@ -524,17 +530,18 @@ class ModuleFP8FusedSDPA(ModuleFusedSDPABase):
                 k_chunk = k[..., kv_start:kv_end, :].detach()
                 v_chunk = v[..., kv_start:kv_end, :].detach()
 
-                is_causal_chunk = kv_chunk_idx == 0 and q_chunk_idx >= self.num_padded_query_chunks
-                # chunk sizes must be multiples of 1024 to get valid m and linv
-                is_causal_chunk = is_causal_chunk and q_chunk_size % 1024 == 0 and kv_chunk_size % 1024 == 0
-                # use mask only for the causal chunks that may have padding
+                # Always pass explicit mask for the diagonal chunk (kv_chunk_idx==0)
+                # to ensure numerical consistency. The kernel's is_causal=True path
+                # uses a different internal algorithm that can diverge from the
+                # explicit mask path even when both encode the same triangular pattern.
+                # For non-diagonal chunks within the padded region, also pass mask.
                 mask_chunk = (attn_mask[..., q_start:q_end, kv_start:kv_end].detach() \
-                              if kv_chunk_idx < self.num_padded_query_chunks and not is_causal_chunk else None)
+                              if kv_chunk_idx == 0 or kv_chunk_idx < self.num_padded_query_chunks else None)
 
                 if self.with_graph_breaks:
                     self.break_graph()
 
-                chunk_res = self.fp8_fsdpa_fwd(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p, scale, is_causal_chunk,
+                chunk_res = self.fp8_fsdpa_fwd(q_chunk, k_chunk, v_chunk, mask_chunk, dropout_p, scale, False,
                                                softmax_mode)
 
                 chunk_out, chunk_m, chunk_linv = (gqa_output_reshape(x) if gqa else x for x in chunk_res[:3])
