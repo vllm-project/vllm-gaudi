@@ -447,14 +447,6 @@ def generate_buckets(bs_range,
             omitted_buckets.add(("condition: bs <= ctx, ", "-> bs, query, ctx: ", bs, query, ctx))
         return bs <= ctx
 
-    def num_ctx_tokens_less_or_equal_batched_max_model_len(bs, query, ctx):
-        is_valid = ctx <= math.ceil(max_model_len / block_size) * bs if ctx > ctx_range[0] else True
-        if not is_valid:
-            omitted_buckets.add(
-                ("condition: ctx <= math.ceil(max_model_len / block_size) * bs if ctx > ctx_range[0] else True",
-                 "-> bs, query, ctx: ", bs, query, ctx))
-        return is_valid
-
     filters_map = {
         "prompt": {
             # depends only on merged_prefill
@@ -463,8 +455,8 @@ def generate_buckets(bs_range,
         },
         "decode": {
             # depends only on contiguous PA
-            True: [num_ctx_tokens_less_or_equal_batched_max_model_len],
-            False: [batch_size_smaller_than_blocks, num_ctx_tokens_less_or_equal_batched_max_model_len],
+            True: [],
+            False: [batch_size_smaller_than_blocks],
         }
     }
 
