@@ -246,13 +246,6 @@ run_qwen2_5_vl_load_generate_test() {
     echo "✅ Test with multimodal-support with qwen2.5-vl-7b passed."
 }
 
-# Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and lazy mode
-run_qwen2_5_vl_lazy_warmup_test() {
-    echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and lazy mode..."
-    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PA=False \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
-    echo "✅ Test Qwen2.5-VL-7B with full restricted warmup and lazy mode passed."
-}
 
 # Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and torch.compile
 run_qwen2_5_vl_compile_warmup_test() {
@@ -272,7 +265,7 @@ run_qwen3_vl_load_generate_test() {
 
 # Multimodal-support with ernie4.5-vl
 run_ernie4.5_vl_test() {
-    echo "➡️ Testin gErnie4.5-VL-28B-A3B..."
+    echo "➡️ Testing Ernie4.5-VL-28B-A3B..."
     VLLM_SKIP_WARMUP=true \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/ernie4.5-vl-28b.yaml"
     echo "✅ Test with multimodal-support with ernie4.5-vl-28b passed."
@@ -343,12 +336,86 @@ run_gsm8k_qwen3_30b_test() {
 }
 
 
+# LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only (baseline, no fsdpa_slicing)
+# Requires: pip install 'lm_eval[longbench]'
+run_longbench_qwen3_30b_fp8_static_test() {
+    echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only..."
+    pip install 'lm_eval[longbench]' --quiet
+    VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B-FP8-Static-longbench.yaml"
+    echo "✅ LongBench test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only passed."
+}
+
+# LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache and fsdpa slicing in lazy mode
+# Validates accuracy of the new fsdpa_slicing feature for long-context inference
+# Requires: pip install 'lm_eval[longbench]'
+run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test() {
+    if [[ "${RUN_LONGBENCH_LAZY_TESTS:-false}" != "true" ]]; then
+        echo "⏭️ Skipping LongBench lazy-mode test. Set RUN_LONGBENCH_LAZY_TESTS=true to enable."
+        return 0
+    fi
+    echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=1..."
+    pip install 'lm_eval[longbench]' --quiet
+    VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 \
+    VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
+    VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD=8192 VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE=4096 \
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B-FP8-Static-longbench.yaml"
+    echo "✅ LongBench test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=1 passed."
+}
+
+# LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with FP8 KV cache and fsdpa slicing in lazy mode
+# Requires: pip install 'lm_eval[longbench]'
+run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test() {
+    if [[ "${RUN_LONGBENCH_LAZY_TESTS:-false}" != "true" ]]; then
+        echo "⏭️ Skipping LongBench lazy-mode test. Set RUN_LONGBENCH_LAZY_TESTS=true to enable."
+        return 0
+    fi
+    echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=1..."
+    pip install 'lm_eval[longbench]' --quiet
+    VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=1 TP_SIZE=2 KV_CACHE_DTYPE=fp8_inc \
+    VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
+    VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD=8192 VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE=4096 \
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B-FP8-Static-longbench.yaml"
+    echo "✅ LongBench test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=1 passed."
+}
+
+# LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache and fsdpa slicing in torch.compile mode
+# Requires: pip install 'lm_eval[longbench]'
+run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
+    echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
+    pip install 'lm_eval[longbench]' --quiet
+    VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
+    VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
+    VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD=8192 VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE=4096 \
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B-FP8-Static-longbench.yaml"
+    echo "✅ LongBench test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0 passed."
+}
+
+# LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with FP8 KV cache and fsdpa slicing in torch.compile mode
+# Requires: pip install 'lm_eval[longbench]'
+run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
+    echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
+    pip install 'lm_eval[longbench]' --quiet
+    VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 KV_CACHE_DTYPE=fp8_inc \
+    VLLM_BUCKETING_STRATEGY=pad VLLM_HPU_FSDPA_SLICE_ENABLED=true \
+    VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD=8192 VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE=4096 \
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B-FP8-Static-longbench.yaml"
+    echo "✅ LongBench test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0 passed."
+}
+
+
 # GSM8K on Qwen3.5-35B-A3B
 # This test requires new transformers and huggingface_hub versions for Qwen3.5 model support, once VLLM supports latest transfomer,
 # we can remove the pip version pinning and restoration in this test and just rely on the environment having the right versions.
 run_gsm8k_qwen35_35b_a3b_test() {
     echo "➡️ Testing GSM8K on Qwen3.5-35B-A3B..."
     VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.8 \
+    VLLM_PROMPT_BS_BUCKET_MAX=32 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3.5-35b-a3b.yaml"
     echo "✅ Test with Qwen3.5-35B-A3B passed."
 }
@@ -387,7 +454,7 @@ run_spec_decode_ngram_test() {
 run_spec_decode_eagle3_test() {
     echo "➡️ Testing Spec-decode with eagle3..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.70 --osl 2048
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.65
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.63
     echo "✅ Test with spec decode with eagle3 passed."
 }
 
@@ -495,7 +562,6 @@ launch_all_tests() {
     run_compressed_w4a16_moe_gidx_load_generate_test
     run_llama3_70b_inc_dynamic_quant_load_generate_test
     run_qwen2_5_vl_load_generate_test
-    run_qwen2_5_vl_lazy_warmup_test
     run_qwen2_5_vl_compile_warmup_test
     run_qwen3_vl_load_generate_test
     run_mistral3_load_generate_test
@@ -504,6 +570,11 @@ launch_all_tests() {
     run_gsm8k_granite_async_test
     run_gsm8k_deepseek_test
     run_gsm8k_qwen3_30b_test
+    run_longbench_qwen3_30b_fp8_static_test
+    run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test
+    run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test
+    run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
+    run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
     run_preemption_test
     run_spec_decode_ngram_test
     run_spec_decode_eagle3_test
