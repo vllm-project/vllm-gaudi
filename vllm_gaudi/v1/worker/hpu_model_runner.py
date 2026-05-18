@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
+from collections.abc import Mapping
 import copy
 import contextlib
 from copy import deepcopy
@@ -135,6 +136,14 @@ try:
     from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 except ImportError:
     LMCacheConnectorMetadata = None
+
+_GDN_MAMBA_TYPES: tuple[object, ...] = ("gdn_attention", "linear_attention")
+try:
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    _GDN_MAMBA_TYPES = (MambaAttentionBackendEnum.GDN_ATTN, MambaAttentionBackendEnum.LINEAR, "gdn_attention",
+                        "linear_attention")
+except (ImportError, AttributeError):
+    pass
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -425,6 +434,34 @@ def flatten(in_list):
 def gather_list(input, indices, v):
     """Gather values from input using indices"""
     return [input[i] if i is not None else v for i in indices]
+
+
+def ensure_multi_token_decodes_last(b: InputBatch, scheduled_tokens: Mapping[str, int]) -> None:
+    """Within the decode region, sort single-token decodes before multi-token ones.
+
+    When spec-decode is not configured, resumed/catch-up decode requests with
+    many scheduled tokens (e.g. from KV offloading requeue) must be processed
+    via the prefill path to avoid bucket overflow in get_habana_paged_attn_buffers.
+    Moving them to the end of the decode region lets _get_prompts_and_decodes
+    route them to the prefill batch where the large scheduled-token count is
+    handled correctly.
+
+    After _ensure_decodes_first the layout is: [decodes ... | prompts ...]
+    This function produces:                    [1-tok decodes | multi-tok decodes | prompts]
+    """
+    num_reqs = b.num_reqs
+    decode_end = num_reqs
+    for i in range(num_reqs):
+        if b.num_computed_tokens_cpu[i] < b.num_prompt_tokens[i]:
+            decode_end = i
+            break
+    write_pos = 0
+    for read_pos in range(decode_end):
+        req_id = b.req_ids[read_pos]
+        if scheduled_tokens.get(req_id, 1) == 1:
+            if read_pos != write_pos:
+                b.swap_states(write_pos, read_pos)
+            write_pos += 1
 
 
 def get_target_layer_suffix_list(model_type) -> list[str]:
@@ -2037,6 +2074,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self._is_prompt(i, scheduler_output):
                 break
 
+            # When spec-decode is not configured, a decode request with more
+            # than 1 scheduled token is a resumed/catch-up request that must
+            # be processed via the prefill (prompt) path instead. After
+            # ensure_multi_token_decodes_last these requests are sorted to the
+            # end of the decode region so the break here is correct.
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            if num_scheduled_tokens > 1 and \
+                    not self.vllm_config.speculative_config:
+                break
+
+            # This is decode
             # NOTE(chendi): To support spec decode,
             # we don't assume num_scheduled_tokens == 1.
             decode_req_ids.append(req_id)
@@ -2053,11 +2101,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
 
-            # Must be prompt
-            assert self._is_prompt(i, scheduler_output)
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+
+            # Prompt traversal must follow the exact same predicate used above
+            # to partition decode vs prompt requests, including preempted
+            # prompt / catch-up cases handled by `_is_prompt()`.
+            assert self._is_prompt(i, scheduler_output), (f"Unexpected at prompt-traversal req_id={req_id} idx={i}: "
+                                                          f"computed={num_computed_tokens}, "
+                                                          f"prompt={num_prompt_tokens}, "
+                                                          f"scheduled={num_scheduled_tokens}")
+            # NOTE(kzawora): In preempted sequences, num_output_tokens can be > 0, and still be a valid prefill
 
             prompt_req_ids.append(req_id)
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             prompt_scheduled_tokens.append(int(num_scheduled_tokens))
 
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids, prompt_scheduled_tokens)
@@ -2956,11 +3013,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 token_ids_device[:num_decodes] = self.input_ids_hpu[:num_decodes].view(-1, 1)
             else:
                 token_ids_split_tensors = torch.split(self.input_ids_hpu[:total_num_scheduled_tokens],
-                                                      num_tokens_per_req)
-                token_ids_device[:num_decodes] = \
+                                                      num_tokens_per_req[:num_decodes])
+                # token_ids was already reshaped to [padded_batch*num_tokens, 1]
+                # (via view(-1,1) in the CPU prepare path above) before the
+                # async_h2d_copy, so token_ids_device has the same flat shape.
+                # Index [:num_decodes*num_tokens] to write all rows for the
+                # decode region (not just the first num_decodes rows).
+                token_ids_device[:num_decodes * num_tokens] = \
                     pad_sequence(list(token_ids_split_tensors),
                                     batch_first=True,
-                                    padding_value=0)[:num_decodes]
+                                    padding_value=0)[:num_decodes].view(-1, 1)
 
             #####################################
             # NOTE(Chendi): Since we can't actually do num_tokens = 2,
@@ -3985,8 +4047,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
 
         batch_changed = self.batch_changed
-        # If necessary, swap decodes/prompts to have all decodes on the start
+        # If necessary, swap decodes/prompts to have all decodes on the start.
+        # Use the method form (not a module-level helper) so that the
+        # partitioning predicate matches `_is_prompt()` exactly, including
+        # preempted-prompt, decoder-only, and spec-decode cases.
         self._ensure_decodes_first(scheduler_output)
+        # When spec-decode is not configured, sort multi-token catch-up
+        # decode requests to the end of the decode region so that
+        # _get_prompts_and_decodes routes them through the prefill path,
+        # preventing bucket overflow and Habana workspace OOM.
+        if not self.vllm_config.speculative_config:
+            ensure_multi_token_decodes_last(self.input_batch, scheduler_output.num_scheduled_tokens)
         # Prepare prompts/decodes info
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
@@ -4667,10 +4738,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if mlp is not None:
                     block_gate = getattr(mlp, 'gate', None) or getattr(mlp, 'router', None)
                     experts = getattr(mlp, 'experts', None)
-                    if (block_gate is not None and experts is not None
-                            and getattr(experts, '_gate', None) is block_gate):
-                        experts._gate = None
-                        self._detached_moe_gates.add(id(experts))
+                    if block_gate is not None and experts is not None:
+                        if getattr(experts, '_gate', None) is block_gate:
+                            experts._gate = None
+                            self._detached_moe_gates.add(id(experts))
+                        # With upstream vLLM PR #35178 MoERunner is an
+                        # nn.Module, so `self.runner.gate = gate` in
+                        # FusedMoE.__init__ registers the shared gate
+                        # as a child of runner. INC's
+                        # generate_model_info() walks named_children()
+                        # and the last-seen parent wins, so INC patches
+                        # runner._modules['gate'] and leaves
+                        # mlp._modules['gate'] pointing at a stale
+                        # module whose weight Parameter has been
+                        # mutated in-place to fp8. Unregister the gate
+                        # from runner._modules (but keep runner.gate
+                        # as a plain attribute so is_internal_router()
+                        # and the runner's internal forward path keep
+                        # working) so INC sees mlp as the sole parent.
+                        runner = getattr(experts, 'runner', None)
+                        if (runner is not None and isinstance(runner, torch.nn.Module)
+                                and runner._modules.get('gate', None) is block_gate):
+                            del runner._modules['gate']
+                            object.__setattr__(runner, 'gate', block_gate)
 
     def _sync_shared_moe_gates(self):
         """Apply SharedFusedMoE post-INC synchronization and compatibility.
@@ -5861,8 +5951,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.num_mamba_like_layers > 0 and self._compact_gdn_enabled:
             self._num_gdn_groups = sum(
                 1 for g in kv_cache_config.kv_cache_groups
-                if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in ("gdn_attention",
-                                                                                             "linear_attention"))
+                if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES)
         # Profiling may request more sequences than max_num_seqs
         # (e.g. VLLM_PROFILE_DECODE=16,64 with max_num_seqs=1).
         # Ensure GDN compact tensors and free-list are large enough.
@@ -5897,7 +5986,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if isinstance(spec, FullAttentionSpec):
                         continue
                     if isinstance(spec, MambaSpec) and \
-                            spec.mamba_type in ("gdn_attention", "linear_attention"):
+                            spec.mamba_type in _GDN_MAMBA_TYPES:
                         continue
                     # Standard Mamba2 or unknown spec — needs raw buffer
                     return True
@@ -5945,7 +6034,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
-                            kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention") and \
+                            kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES and \
                             self._compact_gdn_enabled:
                         # GDN/linear_attention: compact allocation.
                         # All GDN groups share the same state tensor, so each
@@ -5972,7 +6061,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     elif isinstance(kv_cache_spec, MambaSpec) and \
-                            kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention"):
+                            kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
                         # GDN/linear_attention: non-compact (baseline) allocation
                         # using contiguous tensors with num_blocks+1 slots.
                         if isinstance(kv_caches.get(layer_name), tuple):
@@ -6037,7 +6126,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
-                            kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention") and \
+                            kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES and \
                             self._compact_gdn_enabled:
                         # GDN/linear_attention: compact allocation.
                         self._compact_gdn_group_ids.add(group_idx)
@@ -6057,7 +6146,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     elif isinstance(kv_cache_spec, MambaSpec) and \
-                            kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention"):
+                            kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
                         # GDN/linear_attention: non-compact (baseline) allocation.
                         if isinstance(kv_caches.get(layer_name), tuple):
                             continue

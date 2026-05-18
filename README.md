@@ -68,7 +68,8 @@ The vLLM Hardware Plugin for Intel® Gaudi® integrates [Intel® Gaudi® AI acce
 5. Install torchaudio (required by some upstream vLLM models such as QWEN3_5). Use the CPU wheel with `--no-deps` to avoid pulling a conflicting CUDA torch:
 
     ```bash
-    pip install --no-deps torchaudio --extra-index-url https://download.pytorch.org/whl/cpu
+    TORCH_VERSION=$(python3 -c "import re, torch; print(re.match(r'(\d+\.\d+\.\d+)', torch.__version__).group(1))")
+    pip install --no-deps torchaudio==$TORCH_VERSION --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 
     To see all the available installation methods, such as NIXL, see the [Installation](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html) guide.
