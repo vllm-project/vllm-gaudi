@@ -370,6 +370,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                      trust_remote_code=True),
     "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b",  # noqa: E501
                                                         hf_overrides={"architectures": ["TarsierForConditionalGeneration"]}),  # noqa: E501
+    "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo("baidu/ERNIE-4.5-VL-28B-A3B-PT",
+                                                              trust_remote_code=True),  # noqa: E501
     # [Encoder-decoder]
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
     # Therefore, we borrow the BartTokenizer from the original Bart model
