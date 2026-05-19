@@ -187,7 +187,7 @@ def run_benchmark(
         print(f"Warmup iterations: {NUM_WARMUP}, Benchmark iterations: {NUM_ITERATIONS}")
         print(f"{'='*80}\n")
 
-    results = {}
+    results: dict[int, dict[int, dict[str, float]]] = {}
     input_size_per_partition = intermediate_size // tp_size
 
     for num_chunks in num_chunks_list:
