@@ -8,13 +8,17 @@
 stages:
   - name: first_stage
     steps:
-      # --- g2.l: cpu_offloading + spec_decode_ngram (~12min, 8 cards) ---
+      # --- g2.l: cpu_offloading + spec_decode_ngram + fsdpa_slicing accuracy (~15min, 8 cards) ---
       #   Uses g2 due to accuracy issue on g3
       - name: e2e_g2_offloading_specdec_bundle
         flavor: g2.l
         command: >-
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_cpu_offloading_test &&
-          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test
+          HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_ngram_test &&
+          pip install pytest-timeout &&
+          HABANA_VISIBLE_DEVICES=0 pytest -vvv --timeout=300
+          -o junit_family=xunit1 --junitxml=\${TEST_RESULTS_DIR}/test_fsdpa_slicing_accuracy.xml
+          tests/unit_tests/test_fsdpa_slicing.py -k "TestFsdpaSlicingAccuracyBF16 or TestFsdpaSlicingAccuracyFP8"
       # --- g3.l: unit_tests + eagle3 + w4a16 + calibration + accuracy + TP=2 tests (~50min, 8 cards) ---
       #   Uses g3.l because unit_tests needs 8 cards for offloading test
       #   run_accuracy_test (NIXL PD) needs 3+ cards for prefill + decode TP=2
@@ -25,7 +29,9 @@ stages:
           pip install pytest-timeout &&
           HABANA_VISIBLE_DEVICES=all pytest -vvv --timeout=300 --durations=10 --durations-min=1.0
           -o junit_family=xunit1 --junitxml=\${TEST_RESULTS_DIR}/test_unit_tests.xml
-          tests/unit_tests &&
+          tests/unit_tests
+          --deselect=tests/unit_tests/test_fsdpa_slicing.py::TestFsdpaSlicingAccuracyBF16
+          --deselect=tests/unit_tests/test_fsdpa_slicing.py::TestFsdpaSlicingAccuracyFP8 &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_eagle3_test &&
           HF_HOME=/tmp HF_HUB_OFFLINE=0 VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_spec_decode_eagle3_num_spec_2_test &&
           VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_compressed_w4a16_moe_gidx_load_generate_test &&
