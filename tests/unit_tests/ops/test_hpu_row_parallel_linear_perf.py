@@ -173,16 +173,13 @@ def run_benchmark(
 
     # Auto-detect TP size from distributed environment
     if tp_size is None:
-        if torch.distributed.is_initialized():
-            tp_size = torch.distributed.get_world_size()
-        else:
-            tp_size = 1
+        tp_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
 
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
     if rank == 0:
         print(f"\n{'='*80}")
-        print(f"HPURowParallelLinear Chunked All-Reduce Performance Benchmark")
+        print("HPURowParallelLinear Chunked All-Reduce Performance Benchmark")
         print(f"{'='*80}")
         print(f"Model config: {model_config}")
         print(f"Hidden size: {hidden_size}, Intermediate size: {intermediate_size}")
@@ -207,7 +204,7 @@ def run_benchmark(
         # Skip chunked tests if TP=1 (no all-reduce needed)
         if num_chunks > 1 and tp_size == 1:
             if rank == 0:
-                print(f"Skipping chunked test with TP=1 (no all-reduce needed)")
+                print("Skipping chunked test with TP=1 (no all-reduce needed)")
             continue
 
         for num_tokens in token_counts:
@@ -277,15 +274,14 @@ def run_benchmark(
                     crossover_found = True
                     crossover_token_count = num_tokens
 
-                print(
-                    f"{num_tokens:<10} {baseline_time:<15.4f} {chunked_time:<15.4f} {speedup:<10.3f} {recommendation:<20}"
-                )
+                print(f"{num_tokens:<10} {baseline_time:<15.4f} {chunked_time:<15.4f}"
+                      f" {speedup:<10.3f} {recommendation:<20}")
 
             if crossover_token_count:
                 print(f"\n>>> Recommended cutoff for num_chunks={num_chunks}: {crossover_token_count} tokens")
                 print(f">>> (Enable chunking when total_tokens >= {crossover_token_count})")
             else:
-                print(f"\n>>> No crossover found - chunked mode not beneficial for tested token counts")
+                print("\n>>> No crossover found - chunked mode not beneficial for tested token counts")
 
         print(f"\n{'='*80}")
 

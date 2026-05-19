@@ -5,7 +5,7 @@ from pathlib import Path
 
 def parse_log_file(filepath):
     """Parse a single log file and extract benchmark results."""
-    with open(filepath, 'r') as f:
+    with open(filepath) as f:
         content = f.read()
 
     # Extract TP size from filename
@@ -43,7 +43,7 @@ def parse_log_file(filepath):
 
 def parse_summary_section(filepath):
     """Parse the summary/speedup section from log file."""
-    with open(filepath, 'r') as f:
+    with open(filepath) as f:
         content = f.read()
 
     # Extract TP size

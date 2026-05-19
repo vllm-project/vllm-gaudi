@@ -9,7 +9,7 @@ from vllm import LLM, SamplingParams
 
 # Import habana_frameworks to ensure HPU is available
 try:
-    import habana_frameworks.torch as htorch
+    import habana_frameworks.torch as htorch  # noqa: F401
     HPU_AVAILABLE = True
 except ImportError:
     HPU_AVAILABLE = False
@@ -83,9 +83,9 @@ def test_llama_70b_2layer_tp4_bf16(max_tokens: int = 16,
             enforce_eager=True,
             load_format="dummy",  # Initialize with random weights, no checkpoint needed
             max_num_batched_tokens=num_decodes * max_tokens_per_seq,  # Enough for full batch
-            num_gpu_blocks_override=(
-                (num_decodes * max_tokens_per_seq) // 128 + 10
-            ),  # Slightly larger than max decode to avoid recompilations. This is used because defrag=True fails so we avoid defragmentation limiting kv cache
+            num_gpu_blocks_override=((num_decodes * max_tokens_per_seq) // 128 +
+                                     10),  # Slightly larger than max decode to avoid recompilations.
+            # defrag=True fails so we avoid defragmentation limiting kv cache
         )
 
         # Create prompt with approximately prompt_len tokens
