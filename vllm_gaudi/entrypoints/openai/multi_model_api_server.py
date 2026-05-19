@@ -10,7 +10,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import uvloop
 import yaml
@@ -148,6 +148,19 @@ class MultiModelEngineClient(EngineClient):
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
         await self._engine.wake_up(tags=tags)
+
+    async def notify_kv_transfer_request_rejected(
+        self,
+        request_id: str,
+        kv_transfer_params: dict[str, Any],
+        *,
+        data_parallel_rank: int | None = None,
+    ) -> None:
+        await self._engine.notify_kv_transfer_request_rejected(
+            request_id=request_id,
+            kv_transfer_params=kv_transfer_params,
+            data_parallel_rank=data_parallel_rank,
+        )
 
     async def is_sleeping(self) -> bool:
         return await self._engine.is_sleeping()
@@ -299,7 +312,7 @@ def _resolve_frontend_settings(
                                if model_overrides.enable_auto_tool_choice is not None else args.enable_auto_tool_choice)
     tool_call_parser = (model_overrides.tool_call_parser
                         if model_overrides.tool_call_parser is not None else args.tool_call_parser)
-    chat_template = (model_overrides.chat_template if model_overrides.chat_template is not None else args.chat_template)
+    chat_template = model_overrides.chat_template if model_overrides.chat_template is not None else args.chat_template
     return FrontendSettings(
         enable_auto_tool_choice=enable_auto_tool_choice,
         tool_call_parser=tool_call_parser,
@@ -321,7 +334,7 @@ def _validate_model_frontend_overrides(
         if effective_enable_auto and not effective_tool_parser:
             raise ValueError(f"Model '{model_name}' enables auto tool choice but no tool_call_parser is set.")
 
-        if (effective_enable_auto and effective_tool_parser and effective_tool_parser not in valid_tool_parsers):
+        if effective_enable_auto and effective_tool_parser and effective_tool_parser not in valid_tool_parsers:
             raise ValueError(f"Model '{model_name}' has invalid tool_call_parser='{effective_tool_parser}'. "
                              f"Valid options: {valid_tool_parsers}")
 
@@ -392,8 +405,7 @@ def _load_multi_model_config(path: str, ) -> MultiModelConfigLoadResult:
     if default_model is None:
         default_model = next(iter(model_configs.keys()))
     if default_model not in model_configs:
-        raise ValueError(f"Default model '{default_model}' not found in config models: "
-                         f"{list(model_configs.keys())}")
+        raise ValueError(f"Default model '{default_model}' not found in config models: {list(model_configs.keys())}")
 
     return MultiModelConfigLoadResult(
         model_configs=model_configs,
@@ -418,8 +430,13 @@ async def build_multi_model_engine_client(
     args: Namespace,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-) -> AsyncIterator[tuple[MultiModelEngineClient, MultiModelAsyncLLM, dict[str, BaseModelPath], dict[str, int], dict[
-        str, ModelFrontendOverrides]]]:
+) -> AsyncIterator[tuple[
+        MultiModelEngineClient,
+        MultiModelAsyncLLM,
+        dict[str, BaseModelPath],
+        dict[str, int],
+        dict[str, ModelFrontendOverrides],
+]]:
     config_path = _resolve_multi_model_config_path()
     if not config_path:
         raise ValueError("A multi-model config path must be set when multi-model mode is enabled. "
@@ -504,7 +521,8 @@ async def _init_multi_model_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
-        trust_request_chat_template=args.trust_request_chat_template)
+        trust_request_chat_template=args.trust_request_chat_template,
+    )
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import init_generate_state
@@ -537,8 +555,7 @@ async def _init_multi_model_state(
 
 def _attach_multi_model_router(app: FastAPI) -> None:
     if not envs.VLLM_SERVER_DEV_MODE:
-        logger.warning("The /v1/models/switch endpoint is disabled. "
-                       "Set VLLM_SERVER_DEV_MODE=1 to enable it.")
+        logger.warning("The /v1/models/switch endpoint is disabled. Set VLLM_SERVER_DEV_MODE=1 to enable it.")
         return
 
     router = APIRouter()
