@@ -18,7 +18,8 @@ stages:
           pip install pytest-timeout &&
           HABANA_VISIBLE_DEVICES=0 pytest -vvv --timeout=300
           -o junit_family=xunit1 --junitxml=\${TEST_RESULTS_DIR}/test_fsdpa_slicing_accuracy.xml
-          tests/unit_tests/test_fsdpa_slicing.py -k "TestFsdpaSlicingAccuracyBF16 or TestFsdpaSlicingAccuracyFP8"
+          tests/unit_tests/test_fsdpa_slicing.py::TestFsdpaSlicingAccuracyBF16
+          tests/unit_tests/test_fsdpa_slicing.py::TestFsdpaSlicingAccuracyFP8
       # --- g3.l: unit_tests + eagle3 + w4a16 + calibration + accuracy + TP=2 tests (~50min, 8 cards) ---
       #   Uses g3.l because unit_tests needs 8 cards for offloading test
       #   run_accuracy_test (NIXL PD) needs 3+ cards for prefill + decode TP=2
