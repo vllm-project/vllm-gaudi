@@ -27,7 +27,7 @@ class CacheSwapUtils(torch.nn.Module):
         self.enable_prefix_caching = get_config().prefix_caching
         self.block_slots = torch.arange(0, block_size, dtype=torch.long, device=device)
 
-    def forward(self, srcs: torch.tensor, dsts: torch.tensor, caches: list[torch.tensor], block_size: int):
+    def forward(self, srcs: torch.Tensor, dsts: torch.Tensor, caches: list[torch.Tensor], block_size: int):
         """ Internal method wrapped in HPU/t.compile graphs"""
         htorch.core.mark_step()
         srcs = ((srcs * block_size).unsqueeze(-1) + self.block_slots).flatten()  # used
@@ -49,7 +49,7 @@ class CacheSwapUtils(torch.nn.Module):
 class OnlineDefragmenter:
     """ Keeps track of assigned block_ids and remaps them if necessary """
 
-    def __init__(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int):
+    def __init__(self, kv_caches: tuple[tuple[torch.Tensor, torch.Tensor]], block_size: int):
         config = get_config()
         self.threshold = with_default(config.VLLM_DEFRAG_THRESHOLD, 32)
         self.to_swap_pad_thresholds = [8, 16, 32, 64, 128, 256, 512]
