@@ -34,13 +34,24 @@ from vllm.distributed import (
 )
 from vllm.config import VllmConfig, set_current_vllm_config
 
-
 # Model dimensions from common LLMs
 MODEL_CONFIGS = {
-    "llama-7b": {"hidden_size": 4096, "intermediate_size": 11008},
-    "llama-13b": {"hidden_size": 5120, "intermediate_size": 13824},
-    "llama-70b": {"hidden_size": 8192, "intermediate_size": 28672},
-    "mixtral-8x7b": {"hidden_size": 4096, "intermediate_size": 14336},
+    "llama-7b": {
+        "hidden_size": 4096,
+        "intermediate_size": 11008
+    },
+    "llama-13b": {
+        "hidden_size": 5120,
+        "intermediate_size": 13824
+    },
+    "llama-70b": {
+        "hidden_size": 8192,
+        "intermediate_size": 28672
+    },
+    "mixtral-8x7b": {
+        "hidden_size": 4096,
+        "intermediate_size": 14336
+    },
 }
 
 # Token counts to benchmark
@@ -63,10 +74,10 @@ def create_row_parallel_linear(input_size: int, output_size: int):
     from vllm.model_executor.layers.linear import RowParallelLinear
     from vllm_gaudi.ops.hpu_row_parallel_linear import HPURowParallelLinear
     from vllm.model_executor.custom_op import CustomOp
-    
+
     # Manually register the HPU implementation
     CustomOp.op_registry_oot[RowParallelLinear.__name__] = HPURowParallelLinear
-    
+
     # RowParallelLinear internally partitions input_size by tp_size
     # when input_is_parallel=True
     layer = RowParallelLinear(
@@ -106,26 +117,26 @@ def benchmark_single_config(
     # Initial warmup run to trigger graph compilation
     _ = layer(input_tensor)
     torch.hpu.synchronize()
-    
+
     # Additional warmup iterations
     for _ in range(num_warmup):
         _ = layer(input_tensor)
         torch.hpu.synchronize()
-    
+
     # Run multiple benchmark runs and average
     run_times = []
     for _ in range(num_runs):
         torch.hpu.synchronize()
         start_time = time.perf_counter()
-        
+
         for _ in range(num_iterations):
             _ = layer(input_tensor)
             torch.hpu.synchronize()
-        
+
         end_time = time.perf_counter()
         run_time_ms = (end_time - start_time) / num_iterations * 1000
         run_times.append(run_time_ms)
-    
+
     # Return average of all runs
     avg_time_ms = sum(run_times) / len(run_times)
     return avg_time_ms
@@ -150,25 +161,25 @@ def run_benchmark(
         num_chunks_list = [1, 2, 4, 8]
     if token_counts is None:
         token_counts = TOKEN_COUNTS
-    
+
     # Get model dimensions
     config = MODEL_CONFIGS.get(model_config)
     if config is None:
         raise ValueError(f"Unknown model config: {model_config}. "
-                        f"Available: {list(MODEL_CONFIGS.keys())}")
-    
+                         f"Available: {list(MODEL_CONFIGS.keys())}")
+
     hidden_size = config["hidden_size"]
     intermediate_size = config["intermediate_size"]
-    
+
     # Auto-detect TP size from distributed environment
     if tp_size is None:
         if torch.distributed.is_initialized():
             tp_size = torch.distributed.get_world_size()
         else:
             tp_size = 1
-    
+
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-    
+
     if rank == 0:
         print(f"\n{'='*80}")
         print(f"HPURowParallelLinear Chunked All-Reduce Performance Benchmark")
@@ -178,27 +189,27 @@ def run_benchmark(
         print(f"Tensor Parallel size: {tp_size}")
         print(f"Warmup iterations: {NUM_WARMUP}, Benchmark iterations: {NUM_ITERATIONS}")
         print(f"{'='*80}\n")
-    
+
     results = {}
     input_size_per_partition = intermediate_size // tp_size
-    
+
     for num_chunks in num_chunks_list:
         # Set environment variable for chunk count BEFORE creating the layer
         os.environ["VLLM_ROW_PARALLEL_CHUNKS"] = str(num_chunks)
-        
+
         if rank == 0:
             print(f"\n--- Testing num_chunks={num_chunks} ---")
             print(f"{'Tokens':<10} {'Time (ms)':<15} {'Throughput (tokens/ms)':<25}")
             print("-" * 50)
-        
+
         results[num_chunks] = {}
-        
+
         # Skip chunked tests if TP=1 (no all-reduce needed)
         if num_chunks > 1 and tp_size == 1:
             if rank == 0:
                 print(f"Skipping chunked test with TP=1 (no all-reduce needed)")
             continue
-        
+
         for num_tokens in token_counts:
             # Create a fresh layer for each (num_chunks, num_tokens) combination
             # This ensures the layer picks up the correct num_chunks setting
@@ -208,112 +219,95 @@ def run_benchmark(
                     input_size=intermediate_size,  # Full size
                     output_size=hidden_size,
                 ).to("hpu").to(torch.bfloat16)
-                
+
                 # Compile if using eager mode
                 # Note: We create a new compiled layer for each input shape
                 if not htorch.utils.internal.is_lazy():
                     from vllm_gaudi.utils import HPUCompileConfig
                     compile_config = HPUCompileConfig()
                     layer = torch.compile(layer, **compile_config.get_compile_args())
-                
+
                 # Create input tensor [num_tokens, input_size_per_partition]
-                input_tensor = torch.randn(
-                    num_tokens, input_size_per_partition,
-                    dtype=torch.bfloat16, device="hpu"
-                )
-                
+                input_tensor = torch.randn(num_tokens, input_size_per_partition, dtype=torch.bfloat16, device="hpu")
+
                 # Run benchmark
                 avg_time_ms = benchmark_single_config(layer, input_tensor)
                 throughput = num_tokens / avg_time_ms
-                
+
                 results[num_chunks][num_tokens] = {
                     "time_ms": avg_time_ms,
                     "throughput": throughput,
                 }
-                
+
                 if rank == 0:
                     print(f"{num_tokens:<10} {avg_time_ms:<15.4f} {throughput:<25.2f}")
-    
+
     # Summary: Find crossover points
     if rank == 0 and len(num_chunks_list) > 1 and 1 in num_chunks_list:
         print(f"\n{'='*80}")
         print("Summary: Speedup of chunked vs non-chunked (num_chunks=1)")
         print(f"{'='*80}")
-        
+
         baseline = results.get(1, {})
-        
+
         for num_chunks in num_chunks_list:
             if num_chunks == 1:
                 continue
-            
+
             if num_chunks not in results or not results[num_chunks]:
                 continue
-            
+
             print(f"\n--- num_chunks={num_chunks} ---")
             print(f"{'Tokens':<10} {'Baseline (ms)':<15} {'Chunked (ms)':<15} {'Speedup':<10} {'Recommendation':<20}")
             print("-" * 70)
-            
+
             crossover_found = False
             crossover_token_count = None
-            
+
             for num_tokens in token_counts:
                 if num_tokens not in baseline or num_tokens not in results[num_chunks]:
                     continue
-                
+
                 baseline_time = baseline[num_tokens]["time_ms"]
                 chunked_time = results[num_chunks][num_tokens]["time_ms"]
                 speedup = baseline_time / chunked_time if chunked_time > 0 else 0
-                
+
                 recommendation = "Use chunked" if speedup > 1.05 else "Use baseline"
                 if speedup > 1.05 and not crossover_found:
                     crossover_found = True
                     crossover_token_count = num_tokens
-                
-                print(f"{num_tokens:<10} {baseline_time:<15.4f} {chunked_time:<15.4f} {speedup:<10.3f} {recommendation:<20}")
-            
+
+                print(
+                    f"{num_tokens:<10} {baseline_time:<15.4f} {chunked_time:<15.4f} {speedup:<10.3f} {recommendation:<20}"
+                )
+
             if crossover_token_count:
                 print(f"\n>>> Recommended cutoff for num_chunks={num_chunks}: {crossover_token_count} tokens")
                 print(f">>> (Enable chunking when total_tokens >= {crossover_token_count})")
             else:
                 print(f"\n>>> No crossover found - chunked mode not beneficial for tested token counts")
-        
+
         print(f"\n{'='*80}")
-    
+
     return results
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Benchmark HPURowParallelLinear chunked all-reduce performance"
-    )
-    parser.add_argument(
-        "--model-config",
-        type=str,
-        default="llama-7b",
-        choices=list(MODEL_CONFIGS.keys()),
-        help="Model configuration to use for dimensions"
-    )
-    parser.add_argument(
-        "--num-chunks",
-        type=int,
-        nargs="+",
-        default=[1, 2, 4, 8],
-        help="Number of chunks to test"
-    )
-    parser.add_argument(
-        "--token-counts",
-        type=int,
-        nargs="+",
-        default=TOKEN_COUNTS,
-        help="Token counts to test"
-    )
+    parser = argparse.ArgumentParser(description="Benchmark HPURowParallelLinear chunked all-reduce performance")
+    parser.add_argument("--model-config",
+                        type=str,
+                        default="llama-7b",
+                        choices=list(MODEL_CONFIGS.keys()),
+                        help="Model configuration to use for dimensions")
+    parser.add_argument("--num-chunks", type=int, nargs="+", default=[1, 2, 4, 8], help="Number of chunks to test")
+    parser.add_argument("--token-counts", type=int, nargs="+", default=TOKEN_COUNTS, help="Token counts to test")
     args = parser.parse_args()
-    
+
     # Initialize distributed environment
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     rank = int(os.environ.get("RANK", 0))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    
+
     if world_size > 1:
         init_distributed_environment(
             world_size=world_size,
@@ -323,7 +317,7 @@ def main():
             backend="hccl",
         )
         initialize_model_parallel(tensor_model_parallel_size=world_size)
-    
+
     try:
         run_benchmark(
             model_config=args.model_config,
