@@ -1075,22 +1075,43 @@ class TestFsdpaSlicingAccuracyBF16:
 
     @staticmethod
     def _run_reference(q, k, v, attn_mask):
-        """Non-sliced reference: single FusedSDPA call with full mask."""
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
+        """Non-sliced reference: single FusedSDPA call with full mask.
+
+        Uses per-KV-group processing to work around a Gaudi3 kernel bug
+        where sdpa_recomp_fwd corrupts output for KV head group 1+ when
+        multiple GQA groups are processed together with certain mask/shape
+        combinations.
+        """
+        from habana_frameworks.torch.hpex.kernels.FusedSDPA import is_gqa, gqa_input_reshape_fwd, gqa_output_reshape
+        scale = 1.0 / (q.shape[-1]**0.5)
+        gqa = is_gqa(q, k)
         with torch.inference_mode():
-            output = FusedSDPA.apply(
-                q,
-                k,
-                v,
-                attn_mask,
-                0.0,  # dropout_p
-                False,  # is_causal (mask encodes causality)
-                None,  # scale
-                'fast',  # softmax_mode
-                True,  # recompute_mode
-                None,  # valid_sequence_lengths
-                'right',  # padding_side
-            )
+            if gqa:
+                q_r, k_r, v_r, mask_r = gqa_input_reshape_fwd(q, k, v, attn_mask)
+                outputs = []
+                for g in range(q_r.shape[1]):
+                    q_g = q_r[:, g:g + 1].contiguous()
+                    k_g = k_r[:, g:g + 1].contiguous()
+                    v_g = v_r[:, g:g + 1].contiguous()
+                    res = torch.ops.hpu.sdpa_recomp_fwd(q_g, k_g, v_g, mask_r, 0.0, scale, False, True, 'fast', None,
+                                                        'right')
+                    outputs.append(res[0])
+                output = gqa_output_reshape(torch.cat(outputs, dim=1))
+            else:
+                from habana_frameworks.torch.hpex.kernels import FusedSDPA
+                output = FusedSDPA.apply(
+                    q,
+                    k,
+                    v,
+                    attn_mask,
+                    0.0,  # dropout_p
+                    False,  # is_causal (mask encodes causality)
+                    None,  # scale
+                    'fast',  # softmax_mode
+                    True,  # recompute_mode
+                    None,  # valid_sequence_lengths
+                    'right',  # padding_side
+                )
         torch.hpu.synchronize()
         return output
 
@@ -1173,22 +1194,41 @@ class TestFsdpaSlicingAccuracyFP8:
 
     @staticmethod
     def _run_reference(q, k, v, attn_mask):
-        """BF16 ground-truth reference: single FusedSDPA call with full mask."""
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
+        """BF16 ground-truth reference: single FusedSDPA call with full mask.
+
+        Uses per-KV-group processing to work around a Gaudi3 kernel bug
+        (same as TestFsdpaSlicingAccuracyBF16._run_reference).
+        """
+        from habana_frameworks.torch.hpex.kernels.FusedSDPA import is_gqa, gqa_input_reshape_fwd, gqa_output_reshape
+        scale = 1.0 / (q.shape[-1]**0.5)
+        gqa = is_gqa(q, k)
         with torch.inference_mode():
-            output = FusedSDPA.apply(
-                q,
-                k,
-                v,
-                attn_mask,
-                0.0,  # dropout_p
-                False,  # is_causal (mask encodes causality)
-                None,  # scale
-                'fast',  # softmax_mode
-                True,  # recompute_mode
-                None,  # valid_sequence_lengths
-                'right',  # padding_side
-            )
+            if gqa:
+                q_r, k_r, v_r, mask_r = gqa_input_reshape_fwd(q, k, v, attn_mask)
+                outputs = []
+                for g in range(q_r.shape[1]):
+                    q_g = q_r[:, g:g + 1].contiguous()
+                    k_g = k_r[:, g:g + 1].contiguous()
+                    v_g = v_r[:, g:g + 1].contiguous()
+                    res = torch.ops.hpu.sdpa_recomp_fwd(q_g, k_g, v_g, mask_r, 0.0, scale, False, True, 'fast', None,
+                                                        'right')
+                    outputs.append(res[0])
+                output = gqa_output_reshape(torch.cat(outputs, dim=1))
+            else:
+                from habana_frameworks.torch.hpex.kernels import FusedSDPA
+                output = FusedSDPA.apply(
+                    q,
+                    k,
+                    v,
+                    attn_mask,
+                    0.0,  # dropout_p
+                    False,  # is_causal (mask encodes causality)
+                    None,  # scale
+                    'fast',  # softmax_mode
+                    True,  # recompute_mode
+                    None,  # valid_sequence_lengths
+                    'right',  # padding_side
+                )
         torch.hpu.synchronize()
         return output
 
