@@ -1,30 +1,25 @@
 #!/bin/bash
 # run_with_junit.sh — Wraps any command with JUnit XML reporting.
 #
-# Usage: bash run_with_junit.sh [--continue] <test_name> <command> [args...]
+# Usage: bash run_with_junit.sh <test_name> <command> [args...]
+#        bash run_with_junit.sh --check
 #
 # When TEST_RESULTS_DIR is set (e.g. by Jenkins), writes a JUnit XML file
 # with pass/fail status and elapsed time. When unset, just runs the command.
 #
-# Flags:
-#   --continue  Always exit 0 (record failure in JUnit XML but don't stop the chain).
-#               A final "bash run_with_junit.sh --check" at the end exits non-zero
-#               if any --continue test failed during this session.
-#   --check     Exit non-zero if any --continue test failed (reads marker file).
+# Behavior:
+#   - Always exits 0 after running a test (records failure in JUnit XML and
+#     a marker file, but does not break the && chain).
+#   - A final "bash run_with_junit.sh --check" exits non-zero if any test
+#     failed during this session.
 #
 # Examples:
-#   bash run_with_junit.sh --continue perf_tests bash tests/full_tests/ci_perf_tests.sh
+#   bash run_with_junit.sh perf_tests bash tests/full_tests/ci_perf_tests.sh
 #   bash run_with_junit.sh --check
 
 set -uo pipefail
 
-CONTINUE_ON_FAIL=0
 FAIL_MARKER="${TEST_RESULTS_DIR:-.}/.junit_failures"
-
-if [[ "${1:-}" == "--continue" ]]; then
-    CONTINUE_ON_FAIL=1
-    shift
-fi
 
 if [[ "${1:-}" == "--check" ]]; then
     if [[ -f "$FAIL_MARKER" ]]; then
@@ -79,9 +74,8 @@ EOF
     fi
 fi
 
-if [[ "$CONTINUE_ON_FAIL" -eq 1 && "$EXIT_CODE" -ne 0 ]]; then
+if [[ "$EXIT_CODE" -ne 0 ]]; then
     echo "$TEST_NAME" >> "$FAIL_MARKER"
-    exit 0
 fi
 
-exit $EXIT_CODE
+exit 0
