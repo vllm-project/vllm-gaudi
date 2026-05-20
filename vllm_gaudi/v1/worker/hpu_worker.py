@@ -286,6 +286,10 @@ class HPUWorker(WorkerBase):
         self.model_runner = self._model_runner_stash.pop(stash_key)
         stashed_state = self._model_runner_state_stash.pop(stash_key, {})
 
+        bucketing_manager = getattr(self.model_runner, "bucketing_manager", None)
+        if bucketing_manager is not None:
+            bucketing_manager.activate()
+
         restored_config = stashed_state.get("vllm_config", getattr(self.model_runner, "vllm_config", target_config))
         self._apply_vllm_config(restored_config)
 
