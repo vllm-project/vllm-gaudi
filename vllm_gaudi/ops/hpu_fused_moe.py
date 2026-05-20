@@ -22,8 +22,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     FusedTopKRouter, )
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopKRouter, )
-from vllm.model_executor.layers.fused_moe.router.router_factory import (
-    EMPTY_EPLB_STATE, )
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     RoutingSimulatorRouter, )
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
@@ -388,8 +386,7 @@ def create_fused_moe_router(
     # custom routing parameters
     custom_routing_function: Callable | None = None,
     # eplb parameters
-    enable_eplb: bool = False,
-    eplb_state: EplbLayerState = EMPTY_EPLB_STATE,
+    eplb_state: EplbLayerState | None = None,
     # zero expert parameters
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
@@ -428,7 +425,6 @@ def create_fused_moe_router(
         custom_routing_function: Optional custom routing function
 
     EPLB arguments:
-        enable_eplb: Whether EPLB is enabled
         eplb_state: EPLB (Expert Parallelism Load Balancing) state
 
     Zero expert arguments:
@@ -451,7 +447,6 @@ def create_fused_moe_router(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
 
@@ -468,7 +463,6 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
 
@@ -487,7 +481,6 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
         return grouped_topk_router
@@ -499,7 +492,6 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             custom_routing_function=custom_routing_function,
             renormalize=renormalize,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
 
@@ -514,7 +506,6 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
             hash_indices_table=hash_indices_table,
         )
@@ -525,7 +516,6 @@ def create_fused_moe_router(
         eplb_state=eplb_state,
         renormalize=renormalize,
         scoring_func=scoring_func,
-        enable_eplb=enable_eplb,
         indices_type_getter=indices_type_getter,
     )
 
