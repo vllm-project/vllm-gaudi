@@ -1,7 +1,7 @@
 # test_config.yaml
 #
 # Bundle optimization (based on build #482 actual timings):
-#   - Original 23 pods consolidated to 5 pods (19 cards total)
+#   - Original 23 pods consolidated to 4 pods (18 cards total)
 #   - Card sizes: g3=1, g3.l=8, g2.l=8
 #   - Tests grouped by flavor compatibility
 #   - Each e2e test wrapped via run_e2e.sh (JUnit + continue-on-fail)
@@ -50,8 +50,8 @@ stages:
           bash tests/full_tests/run_with_junit.sh nixl_pd_accuracy
           bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh' &&
           bash tests/full_tests/run_with_junit.sh --check
-      # --- g3 Bin A: qwen3_moe + qwen3_quant + deepseek_v2 + qwen3.5 + gsm8k (~36min, 1 card) ---
-      - name: e2e_qwen3moe_deepseek_bundle
+      # --- g3 Bin A: quant + moe + deepseek + granite + gsm8k (~46min, 1 card) ---
+      - name: e2e_quant_moe_granite_bundle
         flavor: g3
         command: >-
           bash tests/full_tests/run_e2e.sh qwen3_moe_dynamic_scaling run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test &&
@@ -61,11 +61,16 @@ stages:
           bash tests/full_tests/run_e2e.sh --hf-online mla_moe run_mla_moe_load_generate_test &&
           bash tests/full_tests/run_e2e.sh --hf-online deepseek_v2_inc run_deepseek_v2_inc_load_generate_test &&
           bash tests/full_tests/run_e2e.sh --hf-online gsm8k_deepseek run_gsm8k_deepseek_test &&
+          bash tests/full_tests/run_e2e.sh granite_inc run_granite_inc_load_generate_test &&
+          bash tests/full_tests/run_e2e.sh granite_inc_calibration_quant run_granite_inc_calibration_and_quantization_load_generate_test &&
+          bash tests/full_tests/run_e2e.sh granite_4_h run_granite_4_h_load_generate_test &&
           pip install lm-eval[api] &&
           bash tests/full_tests/run_e2e.sh gsm8k_qwen35_35b_a3b run_gsm8k_qwen35_35b_a3b_test &&
+          bash tests/full_tests/run_e2e.sh gsm8k_granite run_gsm8k_granite_test &&
+          bash tests/full_tests/run_e2e.sh gsm8k_granite_async run_gsm8k_granite_async_test &&
           bash tests/full_tests/run_with_junit.sh --check
-      # --- g3 Bin B: multimodal + embedding + quant + perf + fp8 (~32min, 1 card) ---
-      - name: e2e_multimodal_quant_perf_fp8_bundle
+      # --- g3 Bin B: multimodal + embedding + perf + fp8 + scaling + sleep (~41min, 1 card) ---
+      - name: e2e_multimodal_perf_scaling_bundle
         flavor: g3
         command: >-
           bash tests/full_tests/run_e2e.sh qwen2_5_vl_load_generate run_qwen2_5_vl_load_generate_test &&
@@ -87,19 +92,9 @@ stages:
           bash tests/full_tests/run_e2e.sh qwen3_8b_fp8_attn_static_fp8kv run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test &&
           bash tests/full_tests/run_e2e.sh dsv2_blockfp8_static_fp8kv run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test &&
           bash tests/full_tests/run_e2e.sh dsv2_blockfp8_static_fp8qkv run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test &&
-          bash tests/full_tests/run_with_junit.sh --check
-      # --- g3 Bin C: granite + scaling + sleep + structured_output + preemption (~19min, 1 card) ---
-      - name: e2e_granite_scaling_sleep_preemption_bundle
-        flavor: g3
-        command: >-
           bash tests/full_tests/run_e2e.sh sleep_mode run_sleep_mode_test &&
           bash tests/full_tests/run_e2e.sh online_model_swap run_online_model_swap_test &&
           bash tests/full_tests/run_e2e.sh structured_output run_structured_output_test &&
-          bash tests/full_tests/run_e2e.sh granite_inc run_granite_inc_load_generate_test &&
-          bash tests/full_tests/run_e2e.sh granite_inc_calibration_quant run_granite_inc_calibration_and_quantization_load_generate_test &&
-          bash tests/full_tests/run_e2e.sh granite_4_h run_granite_4_h_load_generate_test &&
-          bash tests/full_tests/run_e2e.sh gsm8k_granite run_gsm8k_granite_test &&
-          bash tests/full_tests/run_e2e.sh gsm8k_granite_async run_gsm8k_granite_async_test &&
           bash tests/full_tests/run_e2e.sh llama3_per_tensor_scaling run_llama3_per_tensor_scaling_load_generate_test &&
           bash tests/full_tests/run_e2e.sh llama3_modelopt_per_tensor_scaling run_llama3_modelopt_per_tensor_scaling_load_generate_test &&
           bash tests/full_tests/run_e2e.sh preemption run_preemption_test &&
