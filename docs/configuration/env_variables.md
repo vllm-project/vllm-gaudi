@@ -45,6 +45,18 @@ To enter developer mode use `VLLM_DEVELOPER_MODE`:
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | `VLLM_HANDLE_TOPK_DUPLICATES` | Handles duplicates outside top-k.                                                                                                                                                             | `false`       |
 | `VLLM_CONFIG_HIDDEN_LAYERS`   | Sets the number of hidden layers to run per HPUGraph for model splitting among hidden layers when TP is 1. It improves throughput by reducing inter-token latency limitations in some models. | `1`           |
+| `VLLM_WORKER_MULTIPROC_METHOD` | Python `multiprocessing` start method (`fork` or `spawn`) used by the `mp` distributed executor backend when launching worker processes. Upstream default is `fork`; on HPU this is automatically overridden to `spawn` (a warning is printed) because forked children inherit HPU driver state and can hang on exit. The override is applied when `--distributed-executor-backend` is `mp` or `uni`. With `uni` no subprocess is created and the value has no practical effect; with `external_launcher` and `ray` workers are not started via Python `multiprocessing` and the value is irrelevant for them. Set `VLLM_WORKER_MULTIPROC_METHOD=spawn` explicitly to suppress the auto-override warning, or `=fork` to opt out of the override (not recommended). | `spawn` on HPU (auto-overridden from upstream `fork`) |
+
+## Distributed Executor Backend on HPU
+
+vLLM exposes the `--distributed-executor-backend` CLI flag (also as `distributed_executor_backend` in the Python API). The relevant choices on HPU are:
+
+- **`mp`** — Python multiprocessing-based executor. Used when `world_size > 1` (i.e., `TP * PP * DP > 1`). Each worker runs in its own subprocess. This backend honors `VLLM_WORKER_MULTIPROC_METHOD`; on HPU the start method is forced to `spawn` to avoid teardown hangs caused by forking after HPU driver initialization. `mp` is the recommended backend for single-node multi-card serving on Gaudi.
+- **`uni`** — In-process (uni-process) executor. Selected automatically when `world_size == 1` (typically `TP=1`, `PP=1`, `DP=1`). No subprocess is started; the worker runs inside the engine process. `VLLM_WORKER_MULTIPROC_METHOD` has no effect for `uni` worker creation, but the HPU platform still sets the env var so any engine-adjacent multiprocessing (e.g., LMCache helpers, plugins) also runs under `spawn`.
+- **`external_launcher`** — vLLM does not start any workers; the user is expected to launch all processes via an external tool (torchrun, MPI, SLURM). Available on HPU but not commonly used.
+- **`ray`** — Ray-based executor. Workers run as Ray actors, not via Python `multiprocessing`. Multi-node serving with Ray on Gaudi has not yet been validated by the Gaudi software product engineering team; use `mp` for production deployments.
+
+If the flag is not provided, vLLM picks the backend automatically: `uni` when `world_size == 1`, and `mp` otherwise on HPU.
 
 HPU PyTorch bridge environment variables impacting vLLM execution:
 

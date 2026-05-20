@@ -8,7 +8,7 @@ Pipeline parallelism is a distributed model parallelization technique that split
 The following example shows how to use the pipeline parallelism with vLLM on HPU:
 
 ```bash
-vllm serve <model_path> --device hpu --tensor-parallel-size 8 --pipeline_parallel_size 2 --distributed-executor-backend ray
+vllm serve <model_path> --device hpu --tensor-parallel-size 8 --pipeline_parallel_size 2
 ```
 
 Since pipeline parallelism runs a `pp_size` number of virtual engines on each device, you have to lower `max_num_seqs` accordingly, as it acts as a micro batch for each virtual engine.

@@ -74,6 +74,14 @@ The vLLM Hardware Plugin for Intel® Gaudi® integrates [Intel® Gaudi® AI acce
 
     To see all the available installation methods, such as NIXL, see the [Installation](https://vllm-gaudi.readthedocs.io/en/latest/getting_started/installation.html) guide.
 
+## Distributed Executor Backend and Worker Start Method
+
+On HPU, multi-card serving uses vLLM's `mp` (Python multiprocessing) distributed executor backend by default whenever `world_size > 1` (`TP * PP * DP > 1`). When `world_size == 1`, vLLM uses the in-process `uni` backend.
+
+The worker start method is controlled by `VLLM_WORKER_MULTIPROC_METHOD` (`fork` or `spawn`). Upstream vLLM defaults to `fork`, but on HPU the platform layer **auto-overrides this to `spawn`** because forking after the HPU driver is initialized leaves driver state in child processes and can cause hangs on exit. A warning is logged when the override is applied. To opt out, set `VLLM_WORKER_MULTIPROC_METHOD=fork` explicitly (not recommended). The `uni`, `external_launcher`, and `ray` backends do not start workers via Python `multiprocessing`, so the value has no practical effect for them.
+
+See [docs/configuration/env_variables.md](docs/configuration/env_variables.md#distributed-executor-backend-on-hpu) for details.
+
 ## Contributing
 
 We welcome and value any contributions and collaborations.
