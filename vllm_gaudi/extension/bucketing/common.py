@@ -55,7 +55,10 @@ class HPUBucketingManager():
         # Spec decode may automatically add new buckets based on the seed buckets
         self.seed_decode_buckets: List[Tuple[int, int, int]] | None = None
         self.initialized = False
+
+    def activate(self):
         HPUBucketingManager._active_instance = self
+        return self
 
     def initialize(self,
                    max_num_seqs,
@@ -66,7 +69,7 @@ class HPUBucketingManager():
                    num_speculative_tokens=0,
                    mamba_chunk_size=0,
                    mamba_chunk_size_is_explicit=False):
-        HPUBucketingManager._active_instance = self
+        self.activate()
         self.max_num_seqs = max_num_seqs
         self.max_num_prefill_seqs = max_num_prefill_seqs
         self.block_size = block_size

@@ -55,6 +55,40 @@ def test_get_bucketing_strategy_default_when_env_not_set(monkeypatch):
     assert isinstance(strategy, ExponentialBucketingStrategy)
 
 
+def test_constructing_standby_manager_does_not_replace_active_instance():
+    HPUBucketingManager._active_instance = None
+
+    active_manager = HPUBucketingManager()
+    active_manager.initialize(max_num_seqs=8,
+                              max_num_prefill_seqs=4,
+                              block_size=128,
+                              max_num_batched_tokens=1024,
+                              max_model_len=1024)
+
+    standby_manager = HPUBucketingManager()
+
+    assert standby_manager.initialized is False
+    assert HPUBucketingManager.get_instance() is active_manager
+
+
+def test_activate_switches_active_manager_without_reinitializing():
+    HPUBucketingManager._active_instance = None
+
+    first_manager = HPUBucketingManager()
+    first_manager.initialize(max_num_seqs=8,
+                             max_num_prefill_seqs=4,
+                             block_size=128,
+                             max_num_batched_tokens=1024,
+                             max_model_len=1024)
+
+    restored_manager = HPUBucketingManager()
+    restored_manager.initialized = True
+
+    restored_manager.activate()
+
+    assert HPUBucketingManager.get_instance() is restored_manager
+
+
 @patch('vllm_gaudi.extension.bucketing.common.logger')
 def test_get_bucketing_strategy_deprecated_env_overrides_to_exponential(mock_logger, monkeypatch):
     monkeypatch.setenv("VLLM_BUCKETING_STRATEGY", "lin")
