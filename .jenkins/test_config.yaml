@@ -1,11 +1,9 @@
 # test_config.yaml
 #
-# Bundle optimization (based on build #482 actual timings):
-#   - Original 23 pods consolidated to 4 pods (18 cards total)
-#   - Card sizes: g3=1, g3.l=8, g2.l=8
-#   - Tests grouped by flavor compatibility
-#   - Each e2e test wrapped via run_e2e.sh (JUnit + continue-on-fail)
-#   - Final --check exits non-zero if any test in the bundle failed
+# 4 pods, 18 cards total (g2.l=8, g3.l=8, 2×g3=1 each)
+# Tests grouped by flavor compatibility and thematic affinity.
+# Each e2e test wrapped via run_e2e.sh (JUnit XML + continue-on-fail).
+# Final --check per bundle exits non-zero if any test failed.
 #
 stages:
   - name: first_stage
