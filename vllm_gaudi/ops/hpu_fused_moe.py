@@ -306,9 +306,16 @@ def patched_fused_moe_forward(
         layer = self._hpu_layer_ref
         layer.ensure_moe_quant_config_init()
         self._maybe_sync_shared_experts_stream(shared_experts_input)
-        gate = self.gate or getattr(self, "_hpu_gate_ref", None)
-        if gate is not None:
-            router_logits, _ = gate(hidden_states)
+        # Only invoke a runner-owned gate when the caller did not provide
+        # router_logits (internal-router mode, e.g. DeepSeek R1). For
+        # SharedFusedMoE models (Qwen3 MoE, ernie45, ...) the block's
+        # mlp.gate(...) has already produced router_logits and runner.gate
+        # is explicitly set to None by _sync_shared_moe_gates post-INC;
+        # re-invoking _hpu_gate_ref here would call a stale pre-INC module.
+        if router_logits is None:
+            gate = self.gate or getattr(self, "_hpu_gate_ref", None)
+            if gate is not None:
+                router_logits, _ = gate(hidden_states)
         shared_output, fused_hidden = self._apply_quant_method(
             layer=layer,
             hidden_states=hidden_states,
