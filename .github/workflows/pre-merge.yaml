@@ -29,6 +29,7 @@ concurrency:
 jobs:
   retrieve_head_sha:
     runs-on: ubuntu-latest
+    timeout-minutes: 720
     outputs:
       head_sha: ${{ steps.set_sha.outputs.head_sha }}
     steps:
@@ -40,6 +41,7 @@ jobs:
   gatekeeper:
     needs: retrieve_head_sha
     runs-on: ubuntu-latest
+    timeout-minutes: 720
     permissions:
       # Required to read the status of checks and PR details
       checks: read
@@ -136,6 +138,7 @@ jobs:
   discover_runner:
     needs: gatekeeper
     runs-on: ${{ inputs.use_hourly_runner == 'true' && 'hourly-ci' || 'pr-ci' }}
+    timeout-minutes: 720
     outputs:
       runner_name: ${{ steps.get_name.outputs.name }}
     steps:
@@ -148,6 +151,7 @@ jobs:
   discover_calibration_tests:
     needs: [discover_runner, retrieve_head_sha]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 720
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -175,6 +179,7 @@ jobs:
     # This job runs in parallel with the build job
     needs: [gatekeeper, retrieve_head_sha]
     runs-on: ubuntu-latest
+    timeout-minutes: 720
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -203,6 +208,7 @@ jobs:
     if: inputs.skip_tests != 'true'
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 720
     permissions:
       contents: read # Required to checkout code and read history
     outputs:
@@ -322,6 +328,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 720
     steps:
       - name: Run test scripts
         run: |
@@ -352,6 +359,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 720
     steps:
       - name: Run test scripts
         run: |
@@ -377,6 +385,7 @@ jobs:
     # Nixl e2e tests remain in GitHub CI as they require RDMA/privileged access not yet available in Jenkins.
     needs: [pre_merge_hpu_test_build, discover_runner, retrieve_head_sha]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 720
     strategy:
       fail-fast: false
       matrix:
@@ -408,6 +417,7 @@ jobs:
   calibration_tests:
     needs: [pre_merge_hpu_test_build, discover_calibration_tests, discover_runner, retrieve_head_sha]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 720
     strategy:
       fail-fast: false
       matrix:
@@ -441,6 +451,7 @@ jobs:
     needs: [retrieve_head_sha]
     if: inputs.is_merge_group != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 720
     outputs:
       nixl_changed: ${{ steps.check.outputs.nixl_changed }}
     steps:
@@ -468,6 +479,7 @@ jobs:
     needs: [check_dockerfile_changes, discover_runner, retrieve_head_sha]
     if: needs.check_dockerfile_changes.outputs.nixl_changed == 'true'
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 720
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -492,6 +504,7 @@ jobs:
     needs: [hpu_pd_tests, hpu_dp_tests, hpu_nixl_e2e_tests, calibration_tests, discover_runner]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 720
     # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
     steps:
       - name: Succeeded if all previous jobs passed
@@ -502,6 +515,7 @@ jobs:
     # This job runs after hpu-test-suite completes
     needs: [pre_merge_hpu_test, pre_merge_hpu_test_build]
     runs-on: ubuntu-latest
+    timeout-minutes: 720
     permissions:
       # Permissions are required on a per-job basis
       pull-requests: write
@@ -521,6 +535,7 @@ jobs:
     if: always()
     needs: [discover_runner, hpu_pd_tests, hpu_dp_tests, hpu_nixl_e2e_tests, calibration_tests, build_nixl_dockerfile]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 720
     steps:
       - name: Remove Docker image to free up space
         env:
