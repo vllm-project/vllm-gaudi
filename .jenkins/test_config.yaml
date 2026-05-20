@@ -10,7 +10,7 @@
 stages:
   - name: first_stage
     steps:
-      # --- g2.l: cpu_offloading + spec_decode_ngram + fsdpa_slicing accuracy (~15min, 8 cards) ---
+      # --- g2.l: cpu_offloading + spec_decode_ngram + fsdpa_slicing accuracy (~13min, 8 cards) ---
       #   Uses g2 due to accuracy issue on g3
       - name: e2e_g2_offloading_specdec_bundle
         flavor: g2.l
@@ -26,7 +26,7 @@ stages:
           tests/unit_tests/test_fsdpa_slicing.py::TestFsdpaSlicingAccuracyBF16
           tests/unit_tests/test_fsdpa_slicing.py::TestFsdpaSlicingAccuracyFP8 || FAIL=1;
           exit $FAIL
-      # --- g3.l: unit_tests + eagle3 + w4a16 + calibration + accuracy + TP=2 tests (~50min, 8 cards) ---
+      # --- g3.l: unit_tests + eagle3 + w4a16 + calibration + accuracy + TP=2 tests (~52min, 8 cards) ---
       #   Uses g3.l because unit_tests needs 8 cards for offloading test
       #   run_accuracy_test (NIXL PD) needs 3+ cards for prefill + decode TP=2
       #   TP=2 tests from accuracy bundle also run here
@@ -62,7 +62,7 @@ stages:
           bash tests/full_tests/run_with_junit.sh nixl_pd_accuracy
           bash -c 'cd tests/unit_tests && ./run_accuracy_test.sh' || FAIL=1;
           exit $FAIL
-      # --- g3 Bin A: qwen3_moe + qwen3_quant + deepseek_v2 + qwen3.5 + gsm8k (~35min, 1 card) ---
+      # --- g3 Bin A: qwen3_moe + qwen3_quant + deepseek_v2 + qwen3.5 + gsm8k (~36min, 1 card) ---
       - name: e2e_qwen3moe_deepseek_bundle
         flavor: g3
         command: >-
@@ -85,7 +85,7 @@ stages:
           bash tests/full_tests/run_with_junit.sh gsm8k_qwen35_35b_a3b
           env VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_gsm8k_qwen35_35b_a3b_test || FAIL=1;
           exit $FAIL
-      # --- g3 Bin B: multimodal + embedding + quant + perf + fp8 (~65min, 1 card) ---
+      # --- g3 Bin B: multimodal + embedding + quant + perf + fp8 (~32min, 1 card) ---
       - name: e2e_multimodal_quant_perf_fp8_bundle
         flavor: g3
         command: >-
@@ -127,7 +127,7 @@ stages:
           bash tests/full_tests/run_with_junit.sh dsv2_blockfp8_static_fp8qkv
           env VLLM_GAUDI_PREFIX=. bash tests/full_tests/ci_e2e_discoverable_tests.sh run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test || FAIL=1;
           exit $FAIL
-      # --- g3 Bin C: granite + scaling + sleep + structured_output + preemption (~33min, 1 card) ---
+      # --- g3 Bin C: granite + scaling + sleep + structured_output + preemption (~19min, 1 card) ---
       - name: e2e_granite_scaling_sleep_preemption_bundle
         flavor: g3
         command: >-
