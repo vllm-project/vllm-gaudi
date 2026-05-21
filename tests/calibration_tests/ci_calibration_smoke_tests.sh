@@ -4,6 +4,17 @@
 # This ensures that if any test fails, the script will stop.
 set -e
 
+# Resolve model path: use weka if available, otherwise fall back to HF model ID.
+resolve_model_path() {
+    local weka_path="$1"
+    local hf_id="$2"
+    if [ -d "$weka_path" ]; then
+        echo "$weka_path"
+    else
+        echo "$hf_id"
+    fi
+}
+
 # --- Configuration ---
 # Defines the path to the vllm-gaudi directory.
 VLLM_GAUDI_PREFIX=${VLLM_GAUDI_PREFIX:-"vllm-gaudi"}
@@ -31,8 +42,9 @@ run_granite_calibration_test() {
     echo "➡️ Testing calibration procedure on ibm-granite/granite-3.3-2b-instruct..."
     cleanup_calibration_output
 
+    GRANITE_MODEL=$(resolve_model_path /mnt/weka/data/huggingface-models/ibm-granite/granite-3.3-2b-instruct ibm-granite/granite-3.3-2b-instruct)
     "${VLLM_GAUDI_PREFIX}/calibration/calibrate_model.sh" \
-        -m ibm-granite/granite-3.3-2b-instruct \
+        -m "$GRANITE_MODEL" \
         -d "${CALIBRATION_DATASET}" \
         -o "${CALIBRATION_OUTPUT_DIR}" \
         -b ${BATCH_SIZE} \

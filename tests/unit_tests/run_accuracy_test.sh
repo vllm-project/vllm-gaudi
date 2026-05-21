@@ -2,6 +2,17 @@
 
 set -e
 
+# Resolve model path: use weka if available, otherwise fall back to HF model ID.
+resolve_model_path() {
+    local weka_path="$1"
+    local hf_id="$2"
+    if [ -d "$weka_path" ]; then
+        echo "$weka_path"
+    else
+        echo "$hf_id"
+    fi
+}
+
 # --- Install Nixl ---
 echo "Installing lm-eval dependency..."
 python ../../install_nixl.py
@@ -16,8 +27,8 @@ echo "Dependency installation complete."
 
 # Models to run
 MODELS=(
-    "Qwen/Qwen3-0.6B"
-    "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    "$(resolve_model_path /mnt/weka/data/huggingface-models/qwen/Qwen3-0.6B Qwen/Qwen3-0.6B)"
+    "$(resolve_model_path /mnt/weka/data/pytorch/DeepSeek-V2-Lite-Chat deepseek-ai/DeepSeek-V2-Lite-Chat)"
 )
 #MODELS=(
 #	"meta-llama/Llama-3.1-8B"

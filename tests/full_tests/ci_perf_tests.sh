@@ -1,5 +1,5 @@
 #!/bin/bash
-model=ibm-granite/granite-3.3-2b-instruct
+model=/mnt/weka/data/huggingface-models/ibm-granite/granite-3.3-2b-instruct
 
 FILE_PATH="ShareGPT_V3_unfiltered_cleaned_split.json"
 
