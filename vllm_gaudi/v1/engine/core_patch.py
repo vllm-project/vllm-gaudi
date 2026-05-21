@@ -8,6 +8,7 @@ from collections import deque
 import queue
 import time
 from typing import Any
+from math import ceil
 
 import cloudpickle
 
@@ -15,8 +16,10 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
@@ -132,6 +135,84 @@ def _deserialize_reconfigure_config(vllm_config_bytes: bytes | bytearray) -> Vll
     return _validate_reconfigure_config(cloudpickle.loads(bytes(vllm_config_bytes)))
 
 
+def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
+    """Best-effort platform normalization for switch-time configs.
+
+    The model-swap path receives a serialized config that might have been
+    created before final platform adjustments (for example hybrid KV page-size
+    alignment on HPU). Re-apply platform hooks here to keep switch behavior
+    consistent with cold initialization.
+    """
+    try:
+        # Keep the same order as startup normalization phases.
+        current_platform.check_and_update_config(config)
+        current_platform.update_block_size_for_backend(config)
+    except Exception as exc:
+        logger.warning(
+            "[gaudi_reconfigure] platform config normalization failed for model %s: %s",
+            getattr(getattr(config, "model_config", None), "model", "<unknown>"),
+            exc,
+        )
+
+    # Granite hybrid switch path can arrive with mamba_cache_mode=none and
+    # no padded Mamba page size, which later makes KV page-size unification
+    # fail in vLLM core. Force align-mode metadata in that case.
+    try:
+        model_config = getattr(config, "model_config", None)
+        cache_config = getattr(config, "cache_config", None)
+        parallel_config = getattr(config, "parallel_config", None)
+        if model_config is None or cache_config is None or parallel_config is None:
+            return
+
+        is_granite_hybrid = (bool(getattr(model_config, "is_hybrid", False)) and getattr(
+            getattr(model_config, "hf_config", None), "model_type", None) == "granitemoehybrid")
+        if not is_granite_hybrid:
+            return
+
+        mamba_mode = getattr(cache_config, "mamba_cache_mode", None)
+        if isinstance(mamba_mode, str) and mamba_mode.lower() == "none":
+            cache_config.mamba_cache_mode = "align"
+
+        if getattr(cache_config, "mamba_block_size", None) in (None, 0):
+            cache_config.mamba_block_size = cache_config.block_size
+
+        # Ensure mamba_page_size_padded exists and is divisible by the
+        # attention page size for this block size.
+        from vllm.model_executor.models import ModelRegistry
+        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+
+        if cache_config.cache_dtype == "auto":
+            kv_dtype = model_config.dtype
+        else:
+            kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        head_size = model_config.get_head_size()
+        attn_page = 2 * cache_config.block_size * num_kv_heads * head_size * get_dtype_size(kv_dtype)
+
+        if getattr(cache_config, "mamba_page_size_padded", None) is None:
+            model_cls, _ = ModelRegistry.resolve_model_cls(
+                model_config.architecture,
+                model_config=model_config,
+            )
+            raw_mamba_page = MambaSpec(
+                shapes=model_cls.get_mamba_state_shape_from_config(config),
+                dtypes=model_cls.get_mamba_state_dtype_from_config(config),
+                block_size=-1,
+            ).page_size_bytes
+            cache_config.mamba_page_size_padded = raw_mamba_page
+
+        if attn_page > 0 and cache_config.mamba_page_size_padded % attn_page != 0:
+            old_padded = cache_config.mamba_page_size_padded
+            cache_config.mamba_page_size_padded = ceil(old_padded / attn_page) * attn_page
+    except Exception as exc:
+        logger.warning(
+            "[gaudi_reconfigure] Granite hybrid mamba alignment fallback failed for model %s: %s",
+            getattr(getattr(config, "model_config", None), "model", "<unknown>"),
+            exc,
+        )
+
+
 def install_engine_core_patch() -> None:
     """Install a Gaudi-only EngineCore reconfigure hook."""
     from vllm.v1.engine.core import EngineCore
@@ -157,6 +238,7 @@ def install_engine_core_patch() -> None:
         start = time.perf_counter()
         previous_config = self.vllm_config
         new_config = _deserialize_reconfigure_config(vllm_config_bytes)
+        _normalize_reconfigure_config_for_platform(new_config)
         logger.info("[gaudi_reconfigure] start: target_model=%s", new_config.model_config.model)
         memory_before_mb = _collect_total_hpu_used_memory_mb(self)
         unload_result = None
@@ -207,6 +289,7 @@ def install_engine_core_patch() -> None:
             # Update config and reinitialize KV caches.
             self.vllm_config = new_config
             self.available_gpu_memory_for_kv_cache = -1
+
             kv_cache_config = self._initialize_kv_caches(new_config)
             num_gpu_blocks = new_config.cache_config.num_gpu_blocks
             logger.info(
