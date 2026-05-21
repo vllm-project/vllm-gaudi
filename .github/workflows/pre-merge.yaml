@@ -361,6 +361,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     timeout-minutes: 720
     steps:
       - name: Run pytest in tests/unit_tests
@@ -386,6 +387,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     timeout-minutes: 720
     steps:
       - name: Run test scripts
@@ -417,6 +419,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     timeout-minutes: 720
     steps:
       - name: Run test scripts
@@ -443,6 +446,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     timeout-minutes: 720
     steps:
       - name: Run test scripts
@@ -470,6 +474,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     timeout-minutes: 720
     strategy:
       fail-fast: false
@@ -503,6 +508,7 @@ jobs:
   calibration_tests:
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_calibration_tests, discover_runner, retrieve_head_sha]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     timeout-minutes: 720
     strategy:
       fail-fast: false
