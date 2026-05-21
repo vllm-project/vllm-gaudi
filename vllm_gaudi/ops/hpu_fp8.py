@@ -223,10 +223,26 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
         else:
             import torch.nn.functional as F
-            topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
-            topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
-            topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
-            topk_weights = topk_weights.to(x.dtype)
+            scoring_func = getattr(layer, "scoring_func", "softmax")
+            if scoring_func == "sigmoid":
+                scores = torch.sigmoid(router_logits.float())
+                e_score_correction_bias = getattr(layer, "e_score_correction_bias", None)
+                if e_score_correction_bias is not None:
+                    scores_for_selection = scores + e_score_correction_bias.unsqueeze(0)
+                else:
+                    scores_for_selection = scores
+                _, topk_ids = torch.topk(scores_for_selection, layer.top_k, dim=-1)
+                topk_weights = scores.gather(1, topk_ids)
+                if getattr(layer, "renormalize", False):
+                    topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+                routed_scaling_factor = getattr(layer, "routed_scaling_factor", 1.0)
+                if routed_scaling_factor != 1.0:
+                    topk_weights = topk_weights * routed_scaling_factor
+            else:
+                topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
+                topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
+                topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+                topk_weights = topk_weights.to(x.dtype)
 
         if not layer.use_grouped_topk:
             topk_ids = topk_ids.to(torch.int64)
