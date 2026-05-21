@@ -165,6 +165,33 @@ jobs:
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
+      - name: Harden runner (egress block)
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: block
+          disable-sudo: false
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            results-receiver.actions.githubusercontent.com:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            vault.habana.ai:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            download.pytorch.org:443
+            huggingface.co:443
+            cdn-lfs.huggingface.co:443
+            cdn-lfs.hf.co:443
+            cdn-lfs-us-1.hf.co:443
+            cas-bridge.xethub.hf.co:443
+            xet-lfs-us-1.hf.co:443
       - name: Run pytest in tests/unit_tests
         run: |
           EXITCODE=1
@@ -222,6 +249,33 @@ jobs:
         test_function: ${{ fromJson(needs.discover_tests.outputs.matrix) }}
 
     steps:
+      - name: Harden runner (egress block)
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: block
+          disable-sudo: false
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            results-receiver.actions.githubusercontent.com:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            vault.habana.ai:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            download.pytorch.org:443
+            huggingface.co:443
+            cdn-lfs.huggingface.co:443
+            cdn-lfs.hf.co:443
+            cdn-lfs-us-1.hf.co:443
+            cas-bridge.xethub.hf.co:443
+            xet-lfs-us-1.hf.co:443
       - name: Run test suite - ${{ matrix.test_function }}
         run: |
           EXITCODE=1
@@ -249,6 +303,33 @@ jobs:
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
+      - name: Harden runner (egress block)
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: block
+          disable-sudo: false
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            results-receiver.actions.githubusercontent.com:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            vault.habana.ai:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            download.pytorch.org:443
+            huggingface.co:443
+            cdn-lfs.huggingface.co:443
+            cdn-lfs.hf.co:443
+            cdn-lfs-us-1.hf.co:443
+            cas-bridge.xethub.hf.co:443
+            xet-lfs-us-1.hf.co:443
       - name: Run Data Parallel test
         run: |
           EXITCODE=1
@@ -276,6 +357,33 @@ jobs:
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
+      - name: Harden runner (egress block)
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: block
+          disable-sudo: false
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            results-receiver.actions.githubusercontent.com:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            vault.habana.ai:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            download.pytorch.org:443
+            huggingface.co:443
+            cdn-lfs.huggingface.co:443
+            cdn-lfs.hf.co:443
+            cdn-lfs-us-1.hf.co:443
+            cas-bridge.xethub.hf.co:443
+            xet-lfs-us-1.hf.co:443
       - name: Run PD disaggregate test
         run: |
           EXITCODE=1
@@ -306,6 +414,33 @@ jobs:
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
+      - name: Harden runner (egress block)
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: block
+          disable-sudo: false
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            results-receiver.actions.githubusercontent.com:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            vault.habana.ai:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            download.pytorch.org:443
+            huggingface.co:443
+            cdn-lfs.huggingface.co:443
+            cdn-lfs.hf.co:443
+            cdn-lfs-us-1.hf.co:443
+            cas-bridge.xethub.hf.co:443
+            xet-lfs-us-1.hf.co:443
       - name: Run Sharegpt performance tests with warmup
         run: |
           EXITCODE=1
