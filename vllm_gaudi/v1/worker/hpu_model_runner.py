@@ -6,6 +6,7 @@ import contextlib
 from copy import deepcopy
 import functools
 from functools import partial, wraps
+import inspect
 import itertools
 import math
 import os
@@ -688,6 +689,7 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
     def __init__(self, model, vllm_config):
         super().__init__()
         self.model = model
+        _maybe_install_global_moe_warmup_patch(self.model)
         self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE', 'false').lower() in ['1', 'true']
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -831,6 +833,153 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
 @torch.compiler.disable
 def _mark_unbacked_dim0(tensor: torch.Tensor):
     torch._dynamo.decorators.mark_unbacked(tensor, 0)
+
+
+def _get_language_model_for_moe_patch(model: torch.nn.Module) -> torch.nn.Module:
+    language_model = model
+
+    if supports_multimodal(language_model) and hasattr(language_model, 'get_language_model'):
+        try:
+            multimodal_language_model = language_model.get_language_model()
+            if isinstance(multimodal_language_model, torch.nn.Module):
+                language_model = multimodal_language_model
+        except Exception:
+            pass
+
+    # Most text-generation wrappers keep the decoder stack on `.model`.
+    # Walk through those wrappers until we reach the layer-owning module.
+    while True:
+        inner_model = getattr(language_model, 'model', None)
+        if not isinstance(inner_model, torch.nn.Module):
+            return language_model
+
+        if hasattr(language_model, 'embed_input_ids') and hasattr(language_model, 'norm') and hasattr(language_model, 'layers'):
+            return language_model
+
+        language_model = inner_model
+
+
+def _has_moe_layers(model: torch.nn.Module) -> bool:
+    return any(isinstance(module, FusedMoE) for module in model.modules())
+
+
+def _get_first_decoder_layer(language_model: torch.nn.Module) -> torch.nn.Module | None:
+    layers = getattr(language_model, 'layers', None)
+    start_layer = getattr(language_model, 'start_layer', 0)
+    end_layer = getattr(language_model, 'end_layer', None)
+    if layers is None or end_layer is None:
+        return None
+
+    for layer in itertools.islice(layers, start_layer, end_layer):
+        return layer
+    return None
+
+
+def _decoder_layer_uses_none_residual_sentinel(layer: torch.nn.Module) -> bool:
+    try:
+        source = inspect.getsource(layer.forward)
+    except (OSError, TypeError):
+        return False
+    return 'residual is None' in source
+
+
+def _get_moe_warmup_patch_skip_reason(language_model: torch.nn.Module) -> str | None:
+    if not _has_moe_layers(language_model):
+        return 'no FusedMoE layers found'
+    if not hasattr(language_model, 'embed_input_ids') or not hasattr(language_model, 'norm'):
+        return 'missing embed_input_ids or norm'
+    if not hasattr(language_model, 'layers') or not hasattr(language_model, 'start_layer') or not hasattr(language_model, 'end_layer'):
+        return 'missing layers/start_layer/end_layer decoder attributes'
+
+    first_layer = _get_first_decoder_layer(language_model)
+    if first_layer is None:
+        return 'decoder layer list is empty for this pipeline rank'
+
+    try:
+        signature = inspect.signature(first_layer.forward)
+    except (TypeError, ValueError):
+        return 'unable to inspect first decoder layer forward signature'
+
+    required_positional = [
+        parameter for parameter in signature.parameters.values()
+        if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        and parameter.default is inspect._empty
+    ]
+    if len(required_positional) > 3:
+        return f'first decoder layer forward requires {len(required_positional)} positional args'
+    if _decoder_layer_uses_none_residual_sentinel(first_layer):
+        return 'first decoder layer branches on residual is None'
+
+    return None
+
+
+def _build_zero_residual_forward(language_model: torch.nn.Module):
+    original_forward = language_model.forward
+
+    @wraps(original_forward)
+    def _patched_forward(
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors=None,
+        inputs_embeds: torch.Tensor | None = None,
+        *args,
+        **kwargs,
+    ):
+        if args:
+            return original_forward(
+                input_ids,
+                positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                *args,
+                **kwargs,
+            )
+
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = language_model.embed_input_ids(input_ids)
+            residual = torch.zeros_like(hidden_states)
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors['hidden_states']
+            residual = intermediate_tensors['residual']
+
+        aux_hidden_state_layers = tuple(getattr(language_model, 'aux_hidden_state_layers', ()))
+        aux_hidden_states = []
+        for layer_idx, layer in enumerate(
+            itertools.islice(language_model.layers, language_model.start_layer, language_model.end_layer),
+            start=language_model.start_layer,
+        ):
+            if layer_idx in aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
+            hidden_states, residual = layer(positions, hidden_states, residual, **kwargs)
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+
+        norm_output = language_model.norm(hidden_states, residual)
+        hidden_states = norm_output[0] if isinstance(norm_output, tuple) else norm_output
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
+    return _patched_forward
+
+
+def _maybe_install_global_moe_warmup_patch(model: torch.nn.Module) -> None:
+    language_model = _get_language_model_for_moe_patch(model)
+    if getattr(language_model, '_hpu_global_moe_warmup_patch_installed', False):
+        return
+    skip_reason = _get_moe_warmup_patch_skip_reason(language_model)
+    if skip_reason is not None:
+        logger.info('Global MoE warmup patch not applied to %s: %s', type(language_model).__name__, skip_reason)
+        return
+
+    language_model.forward = _build_zero_residual_forward(language_model)
+    language_model._hpu_global_moe_warmup_patch_installed = True
+    logger.info('Installed global MoE warmup patch for %s', type(language_model).__name__)
 
 
 def _maybe_wrap_in_hpu_graph(*args, **kwargs):
