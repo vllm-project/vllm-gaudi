@@ -422,7 +422,8 @@ def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypa
         scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
     )
 
-    monkeypatch.setattr(core_patch.current_platform, "check_and_update_config", lambda _config: None)
+    check_and_update_config = Mock()
+    monkeypatch.setattr(core_patch.current_platform, "check_and_update_config", check_and_update_config)
     monkeypatch.setattr(core_patch.current_platform, "update_block_size_for_backend", lambda _config: None)
     monkeypatch.setattr(core_patch, "MambaSpec", _FakeMambaSpec)
     monkeypatch.setattr(
@@ -432,7 +433,7 @@ def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypa
 
     core_patch._normalize_reconfigure_config_for_platform(config)
 
+    assert check_and_update_config.call_count == 2
     assert cache_config.mamba_cache_mode == "align"
     assert cache_config.mamba_block_size == 528
-    assert cache_config.mamba_page_size_padded == 2112
-    assert cache_config.mamba_page_size_padded % 2112 == 0
+    assert cache_config.mamba_page_size_padded == 2111

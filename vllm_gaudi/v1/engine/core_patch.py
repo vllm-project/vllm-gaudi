@@ -8,7 +8,6 @@ from collections import deque
 import queue
 import time
 from typing import Any
-from math import ceil
 
 import cloudpickle
 
@@ -160,8 +159,7 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
     try:
         model_config = getattr(config, "model_config", None)
         cache_config = getattr(config, "cache_config", None)
-        parallel_config = getattr(config, "parallel_config", None)
-        if model_config is None or cache_config is None or parallel_config is None:
+        if model_config is None or cache_config is None:
             return
 
         is_granite_hybrid = (bool(getattr(model_config, "is_hybrid", False)) and getattr(
@@ -176,19 +174,9 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
         if getattr(cache_config, "mamba_block_size", None) in (None, 0):
             cache_config.mamba_block_size = cache_config.block_size
 
-        # Ensure mamba_page_size_padded exists and is divisible by the
-        # attention page size for this block size.
+        # Ensure mamba_page_size_padded exists. Final divisibility and other
+        # backend-specific alignment should be handled by platform hooks.
         from vllm.model_executor.models import ModelRegistry
-        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
-
-        if cache_config.cache_dtype == "auto":
-            kv_dtype = model_config.dtype
-        else:
-            kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-
-        num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        head_size = model_config.get_head_size()
-        attn_page = 2 * cache_config.block_size * num_kv_heads * head_size * get_dtype_size(kv_dtype)
 
         if getattr(cache_config, "mamba_page_size_padded", None) is None:
             model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -202,9 +190,9 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
             ).page_size_bytes
             cache_config.mamba_page_size_padded = raw_mamba_page
 
-        if attn_page > 0 and cache_config.mamba_page_size_padded % attn_page != 0:
-            old_padded = cache_config.mamba_page_size_padded
-            cache_config.mamba_page_size_padded = ceil(old_padded / attn_page) * attn_page
+        # Re-run platform normalization after applying Granite-specific
+        # fallback fields so alignment math stays centralized.
+        current_platform.check_and_update_config(config)
     except Exception as exc:
         logger.warning(
             "[gaudi_reconfigure] Granite hybrid mamba alignment fallback failed for model %s: %s",
