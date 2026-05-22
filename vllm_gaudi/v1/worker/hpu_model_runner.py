@@ -1137,12 +1137,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                              and (getattr(hf_text_config, "mamba_chunk_size", None) is not None
                                                   or getattr(hf_text_config, "chunk_size", None) is not None))
 
-        # Non-GDN hybrid: at least one mamba/linear-style layer and zero GDN
-        # (gdn_attention / linear_attention) layers. Used to gate optimizations
-        # that have only been validated on non-GDN hybrid topologies
-        # (e.g. Granite-4 Mamba2+Transformer).
-        self.is_non_gdn_hybrid = (self.num_mamba_like_layers > 0 and self.num_gdn == 0)
-
         # For HPU GDN, use configured chunk size when explicitly provided;
         # otherwise default to 128 to match bucket alignment.
         if self.num_mamba_like_layers > 0:
@@ -3895,21 +3889,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if (attn_metadata is None
                 or (self.prefill_use_fusedsdpa and self.is_causal and attn_metadata.block_list is None)
                 or not attn_metadata.is_prompt):
-            return attn_metadata
-
-        # Extended FSDPA-native causal short-circuit for non-GDN hybrid models
-        # (e.g. Granite-4 Mamba2+Transformer). FusedSDPA can encode a purely
-        # causal mask natively via is_causal=True + valid_seq_lengths, including
-        # chunked prefill where block_list is non-None. Skipping the
-        # materialised [bs, 1, q_len, total_kv_len] attn_bias avoids a large
-        # add_bf16 on the attention critical path (significant at long
-        # context). Conservative scope: only non-GDN hybrid models; GDN /
-        # pure-transformer / other topologies keep the materialised bias path
-        # until validated.
-        if (self.prefill_use_fusedsdpa and self.is_causal and not self.is_pooling_model
-                and not getattr(self, 'sliding_window', None)
-                and not getattr(self, 'model_has_chunked_attention', False)
-                and getattr(self, 'alibi_slopes', None) is None and self.is_non_gdn_hybrid):
             return attn_metadata
 
         if attn_metadata.attn_bias is not None:
@@ -6769,17 +6748,6 @@ class HPUAttentionMetadataProcessor:
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
 
-        # Detect non-GDN hybrid topologies (e.g. Granite-4 Mamba2+Transformer).
-        # Used to gate the FSDPA-native causal short-circuit in _set_attn_bias.
-        # Mirrors the runner's num_mamba_like_layers / num_gdn computation
-        # (HPUModelRunner.__init__) so the same set of models is targeted.
-        get_num_layers = vllm_config.model_config.get_num_layers_by_block_type
-        parallel_config = vllm_config.parallel_config
-        num_mamba_like = sum(
-            get_num_layers(parallel_config, bt) for bt in ("mamba", "gdn_attention", "linear_attention"))
-        num_gdn = sum(get_num_layers(parallel_config, bt) for bt in ("gdn_attention", "linear_attention"))
-        self.is_non_gdn_hybrid = (num_mamba_like > 0 and num_gdn == 0)
-
         if self.interleaved_sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
@@ -6810,20 +6778,6 @@ class HPUAttentionMetadataProcessor:
         """
         if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
                 or not attn_metadata.is_prompt):
-            return attn_metadata
-
-        # Extended FSDPA-native causal short-circuit for non-GDN hybrid models
-        # (e.g. Granite-4 Mamba2+Transformer). FusedSDPA handles a purely
-        # causal mask natively (is_causal=True + valid_seq_lengths). Skip
-        # materialising a [bs, 1, q_len, total_kv_len] attn_bias even during
-        # chunked prefill (block_list is non-None) for these topologies; this
-        # removes a sizable add_bf16 from the attention critical path during
-        # long-context chunked prefill. interleaved_sliding_window and
-        # chunked-attention bias paths (window_attn_bias / chunked_attn_bias)
-        # are populated later in process_metadata and used by hpu_attn
-        # instead. Conservative scope: only non-GDN hybrid models; all other
-        # topologies retain the original behaviour.
-        if (self.prefill_use_fusedsdpa and not self.interleaved_sliding_window and self.is_non_gdn_hybrid):
             return attn_metadata
 
         if attn_metadata.attn_bias is not None:
