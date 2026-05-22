@@ -55,6 +55,13 @@ def test_get_bucketing_strategy_default_when_env_not_set(monkeypatch):
     assert isinstance(strategy, ExponentialBucketingStrategy)
 
 
+def test_get_instance_raises_when_no_active_manager(monkeypatch):
+    monkeypatch.setattr(HPUBucketingManager, "_active_instance", None)
+
+    with pytest.raises(RuntimeError, match="No active HPUBucketingManager instance"):
+        HPUBucketingManager.get_instance()
+
+
 def test_constructing_standby_manager_does_not_replace_active_instance():
     HPUBucketingManager._active_instance = None
 
