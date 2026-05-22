@@ -361,6 +361,8 @@ class HPUBucketingManager():
     @classmethod
     def get_instance(cls):
         """Retrieve the currently active bucketing manager instance."""
+        if cls._active_instance is None:
+            raise RuntimeError("No active HPUBucketingManager instance. Call initialize() or activate() first.")
         return cls._active_instance
 
 
