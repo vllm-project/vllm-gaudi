@@ -1045,6 +1045,14 @@ def fp8_channel_moe_prepare_weights(layer):
             layer.moe_op.w13_list[index].set_scale_inv_fp8(layer.moe_op.w13_list[index].scale_inv_fp8.reshape(
                 2, 1).repeat(1, layer.w13_weight.shape[1] // 2).flatten().clone())
 
+    if get_config().enable_unit_moe:
+        layer.moe_op.w13_weight_scale = [
+            layer.moe_op.w13_list[i].scale_inv_fp8.item() for i in range(layer.moe_op.num_experts)
+        ]
+        layer.moe_op.w2_weight_scale = [
+            layer.moe_op.w2_list[i].scale_inv_fp8.item() for i in range(layer.moe_op.num_experts)
+        ]
+
     del layer.w13_weight
     del layer.w2_weight
     setattr(layer, "w13_weight", None)
@@ -1220,8 +1228,12 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         w13_list = [self.w13_list[i].weight for i in experts_range]
         w2_list = [self.w2_list[i].weight for i in experts_range]
 
-        w13_weight_scale = [self.w13_list[i].scale_inv_fp8 for i in experts_range]
-        w2_weight_scale = [self.w2_list[i].scale_inv_fp8 for i in experts_range]
+        if self.enable_unit_moe:
+            w13_weight_scale = self.w13_weight_scale
+            w2_weight_scale = self.w2_weight_scale
+        else:
+            w13_weight_scale = [self.w13_list[i].scale_inv_fp8 for i in experts_range]
+            w2_weight_scale = [self.w2_list[i].scale_inv_fp8 for i in experts_range]
 
         if self.w13_input_scale is None:
             if self.enable_unit_moe:
