@@ -381,6 +381,56 @@ def test_gaudi_reconfigure_engine_rolls_back_on_load_failure(monkeypatch):
     assert fake_core.vllm_config.model_config.model == "old-model"
 
 
+def test_gaudi_reconfigure_engine_rolls_back_on_normalize_failure(monkeypatch):
+
+    class _FakeNewConfig:
+
+        def __init__(self):
+            self.model_config = SimpleNamespace(model="new-model")
+
+    class _FakeEngineCore:
+
+        def __init__(self):
+            self.vllm_config = SimpleNamespace(model_config=SimpleNamespace(model="old-model"))
+            self.resume_scheduler_calls = 0
+            self.restore_called = False
+            self.unload_called = False
+
+        def collective_rpc(self, method: str, kwargs=None):
+            if method == "unload_model":
+                self.unload_called = True
+                return [{"stash_memory_after_mb": 7.0}]
+            if method == "restore_stashed_model":
+                assert kwargs is not None
+                assert kwargs["vllm_config"] is self.vllm_config
+                self.restore_called = True
+                return [{"restored": True}]
+            raise AssertionError(f"Unexpected RPC method: {method}")
+
+        def resume_scheduler(self):
+            self.resume_scheduler_calls += 1
+
+    def _raise_normalize_failure(_config):
+        raise RuntimeError("normalize failed")
+
+    monkeypatch.setattr(core_patch, "_deserialize_reconfigure_config", lambda _: _FakeNewConfig())
+    monkeypatch.setattr(core_patch, "_normalize_reconfigure_config_for_platform", _raise_normalize_failure)
+
+    core_patch.install_engine_core_patch()
+
+    from vllm.v1.engine.core import EngineCore
+
+    fake_core = _FakeEngineCore()
+
+    with pytest.raises(RuntimeError, match="normalize failed"):
+        EngineCore.gaudi_reconfigure_engine(fake_core, b"payload")
+
+    assert fake_core.unload_called is False
+    assert fake_core.restore_called is True
+    assert fake_core.resume_scheduler_calls >= 1
+    assert fake_core.vllm_config.model_config.model == "old-model"
+
+
 def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypatch):
 
     class _FakeModelClass:

@@ -135,7 +135,7 @@ def _deserialize_reconfigure_config(vllm_config_bytes: bytes | bytearray) -> Vll
 
 
 def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
-    """Best-effort platform normalization for switch-time configs.
+    """Platform normalization for switch-time configs.
 
     The model-swap path receives a serialized config that might have been
     created before final platform adjustments (for example hybrid KV page-size
@@ -147,11 +147,12 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
         current_platform.check_and_update_config(config)
         current_platform.update_block_size_for_backend(config)
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "[gaudi_reconfigure] platform config normalization failed for model %s: %s",
             getattr(getattr(config, "model_config", None), "model", "<unknown>"),
             exc,
         )
+        raise
 
     # Granite hybrid switch path can arrive with mamba_cache_mode=none and
     # no padded Mamba page size, which later makes KV page-size unification
@@ -194,11 +195,12 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
         # fallback fields so alignment math stays centralized.
         current_platform.check_and_update_config(config)
     except Exception as exc:
-        logger.warning(
+        logger.error(
             "[gaudi_reconfigure] Granite hybrid mamba alignment fallback failed for model %s: %s",
             getattr(getattr(config, "model_config", None), "model", "<unknown>"),
             exc,
         )
+        raise
 
 
 def install_engine_core_patch() -> None:
@@ -226,30 +228,32 @@ def install_engine_core_patch() -> None:
         start = time.perf_counter()
         previous_config = self.vllm_config
         new_config = _deserialize_reconfigure_config(vllm_config_bytes)
-        _normalize_reconfigure_config_for_platform(new_config)
-        logger.info("[gaudi_reconfigure] start: target_model=%s", new_config.model_config.model)
-        memory_before_mb = _collect_total_hpu_used_memory_mb(self)
+        memory_before_mb = None
         unload_result = None
         memory_after_unload_mb = None
 
-        # Pause scheduling and clear caches to avoid mixed state.
         try:
-            self.pause_scheduler(mode="abort", clear_cache=True)
-            logger.info("[gaudi_reconfigure] scheduler paused and caches reset")
-        except Exception as exc:  # pragma: no cover - best effort
-            logger.warning("Failed to pause scheduler before reconfigure: %s", exc)
+            _normalize_reconfigure_config_for_platform(new_config)
+            logger.info("[gaudi_reconfigure] start: target_model=%s", new_config.model_config.model)
+            memory_before_mb = _collect_total_hpu_used_memory_mb(self)
 
-        # Sleep to release device memory before reloading weights.
-        try:
-            if getattr(self.model_executor, "is_sleeping", False):
-                logger.warning("[gaudi_reconfigure] executor already marked sleeping before reconfigure")
-            else:
-                self.model_executor.sleep(level=1)
-                logger.info("[gaudi_reconfigure] executor slept (level=1)")
-        except Exception as exc:  # pragma: no cover - best effort
-            logger.warning("Failed to sleep executor before reconfigure: %s", exc)
+            # Pause scheduling and clear caches to avoid mixed state.
+            try:
+                self.pause_scheduler(mode="abort", clear_cache=True)
+                logger.info("[gaudi_reconfigure] scheduler paused and caches reset")
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.warning("Failed to pause scheduler before reconfigure: %s", exc)
 
-        try:
+            # Sleep to release device memory before reloading weights.
+            try:
+                if getattr(self.model_executor, "is_sleeping", False):
+                    logger.warning("[gaudi_reconfigure] executor already marked sleeping before reconfigure")
+                else:
+                    self.model_executor.sleep(level=1)
+                    logger.info("[gaudi_reconfigure] executor slept (level=1)")
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.warning("Failed to sleep executor before reconfigure: %s", exc)
+
             # Unload model put to sleep, reload new model on worker
             unload_result = self.collective_rpc("unload_model")
             # Validate unload_result: collective_rpc returns a list of per-worker results.
