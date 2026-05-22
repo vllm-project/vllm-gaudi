@@ -3981,6 +3981,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Swap
             self.input_batch.swap_states(first_prompt_index, last_decode_index)
 
+    def _get_structured_output_request_order(self, pd_info) -> list[str]:
+        return list(pd_info.decode_req_ids) + list(pd_info.prompt_req_ids)
+
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         if self.scheduler_output is None:
@@ -4068,6 +4071,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes,
                                                                          warmup_mode)
+
+        structured_output_req_ids = self._get_structured_output_request_order(pd_info)
         prefill_data, \
             dummy_prefill_input_data_batches_across_dp = prefill_input_data
         num_pad_prefill_batch_across_dp = \
@@ -4302,7 +4307,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if grammar_output:
                 self.apply_grammar_bitmask(scheduler_output, grammar_output, logits)
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
-                                                                    pd_info.prompt_req_ids + pd_info.decode_req_ids,
+                                                                    structured_output_req_ids,
                                                                     logits.shape[0])
             # Deal with the case of incomplete prompt
             for i in range(logits.shape[0] - num_decodes):
@@ -4310,8 +4315,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
             # Logprobs: rows match logits order (decodes first, then
             # prefills), so build req_ids in same order.
-            struct_logprobs_req_ids = (list(pd_info.decode_req_ids) + list(pd_info.prompt_req_ids))
-            logprobs_segments.append((struct_logprobs_req_ids, sampler_output.logprobs_tensors))
+            logprobs_segments.append((structured_output_req_ids, sampler_output.logprobs_tensors))
 
         if self.use_async_scheduling or self.use_structured_output:
             # For async scheduling: keep tokens on HPU and avoid CPU sync
