@@ -201,6 +201,7 @@ def test_dynamic_ntk_scaling_rotary_embedding(
         "head_size": head_size,
         "rotary_dim": rotary_dim,
         "max_position_embeddings": max_position_embeddings,
+        "max_trained_positions": max_position_embeddings,
         "base": base,
         "is_neox_style": is_neox_style,
         "scaling_factor": scaling_factor,

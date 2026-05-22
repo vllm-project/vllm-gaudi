@@ -20,7 +20,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig,
     CompressedTensorsMoEMethod,
     CompressedTensorsKVCacheMethod,
-    SparsityCompressionConfig,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
@@ -1056,8 +1055,6 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
         target_scheme_map: dict[str, Any],
         ignore: list[str],
         quant_format: str,
-        sparsity_scheme_map: dict[str, SparsityCompressionConfig],
-        sparsity_ignore_list: list[str],
         kv_cache_scheme: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
         transform_config: dict[str, Any] | None = None,
@@ -1068,8 +1065,6 @@ class HPUCompressedTensorsConfig(CompressedTensorsConfig):
             target_scheme_map,
             ignore,
             quant_format,
-            sparsity_scheme_map,
-            sparsity_ignore_list,
             kv_cache_scheme,
             config,
             transform_config,
