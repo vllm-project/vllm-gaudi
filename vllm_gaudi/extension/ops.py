@@ -1008,16 +1008,6 @@ def fp8_block_moe_prepare_weights(layer, force_channel_fp8=False):
 
 
 def fp8_channel_moe_prepare_weights(layer):
-    if get_config().enable_unit_moe:
-        w13_weight = layer.w13_weight.to(torch.float)
-        w13_scale = layer.w13_weight_scale_inv if hasattr(layer, "w13_weight_scale_inv") else layer.w13_weight_scale
-        w13_weight = (w13_weight * w13_scale).to(torch.float8_e4m3fn)
-        layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
-        w2_weight = layer.w2_weight.to(torch.float)
-        w2_scale = layer.w2_weight_scale_inv if hasattr(layer, "w2_weight_scale_inv") else layer.w2_weight_scale
-        w2_weight = (w2_weight * w2_scale).to(torch.float8_e4m3fn)
-        layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
-
     for index in range(layer.moe_op.num_experts):
         layer.moe_op.w13_list[index].set_weight(layer.w13_weight[index])
         if hasattr(layer, "w13_weight_scale_inv"):
@@ -1054,6 +1044,14 @@ def fp8_channel_moe_prepare_weights(layer):
                 '''
             layer.moe_op.w13_list[index].set_scale_inv_fp8(layer.moe_op.w13_list[index].scale_inv_fp8.reshape(
                 2, 1).repeat(1, layer.w13_weight.shape[1] // 2).flatten().clone())
+
+    if get_config().enable_unit_moe:
+        layer.moe_op.w13_weight_scale = [
+            layer.moe_op.w13_list[i].scale_inv_fp8.item() for i in range(layer.moe_op.num_experts)
+        ]
+        layer.moe_op.w2_weight_scale = [
+            layer.moe_op.w2_list[i].scale_inv_fp8.item() for i in range(layer.moe_op.num_experts)
+        ]
 
     del layer.w13_weight
     del layer.w2_weight
@@ -1231,14 +1229,18 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         w2_list = [self.w2_list[i].weight for i in experts_range]
 
         if self.enable_unit_moe:
-            w13_weight_scale = [1.0 for i in experts_range]
-            w2_weight_scale = [1.0 for i in experts_range]
+            w13_weight_scale = self.w13_weight_scale
+            w2_weight_scale = self.w2_weight_scale
         else:
             w13_weight_scale = [self.w13_list[i].scale_inv_fp8 for i in experts_range]
             w2_weight_scale = [self.w2_list[i].scale_inv_fp8 for i in experts_range]
 
         if self.w13_input_scale is None:
-            x_fp8, x_scale = dynamic_quant(x)
+            if self.enable_unit_moe:
+                x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0, False, False, torch.float8_e4m3fn)[0]
+                x_scale = 1.0
+            else:
+                x_fp8, x_scale = dynamic_quant(x)
             final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
                                                                    expert_routing_table=topk_ids.to(torch.int64),
                                                                    router_weights=topk_weights.to(x.dtype),
