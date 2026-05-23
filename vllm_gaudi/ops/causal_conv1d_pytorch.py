@@ -373,25 +373,79 @@ def hpu_causal_conv1d_update(
         raise NotImplementedError("'max_query_len' is not used in the reference implementation.")
 
     activation = _normalize_activation(activation)
-    dim = weight.size(0)
 
-    flat_x, qsl, reshape_spec = _flatten_inputs_for_update(x, query_start_loc, dim)
+    # Native HPU TPC kernel for conv1d decode update.
+    # torch.ops.hpu.causal_conv1d_update signature:
+    #   x:          [batch, seqlen, dim]
+    #   conv_state: [batch, state_len, dim]  (state_len = width - 1)
+    #   weight:     [width, dim]
+    #   bias:       [dim] or None
+    #   activation: bool (True = silu)
+    #   pad_slot_id: int
+    # Returns: (output [batch, seqlen, dim], updated_state [batch, state_len, dim])
+    #
+    # Our layout:
+    #   x:          [batch, dim]  (1 token per seq in decode)
+    #   conv_state: [num_blocks, conv_kernel_size, dim]  (conv_kernel_size = width = 4)
+    #   weight:     [dim, width]
 
-    result = hpu_causal_conv1d_fn_update(
-        flat_x,
-        weight,
+    # Adapt layouts for native kernel
+    batch = x.size(0)
+    width = weight.size(1)
+    state_len = width - 1
+
+    # x [batch, dim] → [batch, 1, dim]
+    x_3d = x.unsqueeze(1)
+
+    # weight [dim, width] → [width, dim]
+    weight_t = weight.t().contiguous()
+
+    # Select state slots and take last state_len entries
+    # conv_state [num_blocks, width, dim] → [batch, state_len, dim]
+    if conv_state_indices is not None:
+        batch_state = conv_state[conv_state_indices, -state_len:, :]
+    else:
+        batch_state = conv_state[:batch, -state_len:, :]
+
+    # Call native HPU kernel
+    act_bool = (activation == "silu")
+    out, state_out = torch.ops.hpu.causal_conv1d_update(
+        x_3d,
+        batch_state,
+        weight_t,
         bias,
-        conv_state,
-        qsl,
-        cache_indices=conv_state_indices,
-        has_initial_state=None,
-        activation=activation,
-        metadata=None,
-        validate_data=validate_data,
-        is_prompt=False,
+        activation=act_bool,
+        pad_slot_id=pad_slot_id,
     )
 
-    return reshape_spec.reshape_fn(result)
+    # Write updated state back
+    # state_out [batch, state_len, dim] → conv_state[indices, -state_len:, dim]
+    if conv_state_indices is not None:
+        conv_state[conv_state_indices, -state_len:, :] = state_out
+    else:
+        conv_state[:batch, -state_len:, :] = state_out
+
+    # Output: [batch, 1, dim] → [batch, dim]
+    return out.squeeze(1)
+
+    # --- Original PyTorch reference implementation (commented out) ---
+    # flat_x, qsl, reshape_spec = _flatten_inputs_for_update(x, query_start_loc, dim)
+    #
+    # result = hpu_causal_conv1d_fn_update(
+    #     flat_x,
+    #     weight,
+    #     bias,
+    #     conv_state,
+    #     qsl,
+    #     cache_indices=conv_state_indices,
+    #     has_initial_state=None,
+    #     activation=activation,
+    #     metadata=None,
+    #     validate_data=validate_data,
+    #     is_prompt=False,
+    # )
+    #
+    # return reshape_spec.reshape_fn(result)
 
 
 def hpu_causal_conv1d_fn_update(
