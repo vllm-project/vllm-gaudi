@@ -4304,8 +4304,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Apply structured output bitmasks if present
             if grammar_output:
                 self.apply_grammar_bitmask(scheduler_output, grammar_output, logits)
-            sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
-                                                                    structured_output_req_ids,
+            sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits, structured_output_req_ids,
                                                                     logits.shape[0])
             # Deal with the case of incomplete prompt
             for i in range(logits.shape[0] - num_decodes):
