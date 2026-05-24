@@ -7,7 +7,6 @@ This script contains:
 """
 
 import pytest
-import os
 
 from vllm import LLM
 from vllm.lora.request import LoRARequest
@@ -66,7 +65,6 @@ def test_multiple_lora_requests():
         gpu_memory_utilization=0.5,
         enforce_eager=True,
         dtype='bfloat16',
-        hf_token=os.environ.get("HF_TOKEN"),
     )
     PROMPTS = ["Hello, my name is"] * 2
     LORA_NAME = "Alice"
