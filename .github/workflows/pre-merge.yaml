@@ -354,6 +354,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     steps:
       - name: Run pytest in tests/unit_tests
         run: |
@@ -378,6 +379,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     steps:
       - name: Run test scripts
         run: |
@@ -408,6 +410,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     steps:
       - name: Run test scripts
         run: |
@@ -433,6 +436,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     steps:
       - name: Run test scripts
         run: |
@@ -459,6 +463,7 @@ jobs:
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_tests, discover_runner, retrieve_head_sha]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     strategy:
       fail-fast: false
       matrix:
@@ -491,6 +496,7 @@ jobs:
   calibration_tests:
     needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_calibration_tests, discover_runner, retrieve_head_sha]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     strategy:
       fail-fast: false
       matrix:

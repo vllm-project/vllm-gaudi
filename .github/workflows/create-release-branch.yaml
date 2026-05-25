@@ -164,6 +164,7 @@ jobs:
     needs: [prepare-release-branch, setup_and_build, discover_runner]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     steps:
       - name: Run pytest in tests/unit_tests
         run: |
@@ -216,6 +217,7 @@ jobs:
     needs: [prepare-release-branch, setup_and_build, discover_tests, discover_runner]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     strategy:
       fail-fast: false
       matrix:
@@ -248,6 +250,7 @@ jobs:
     needs: [prepare-release-branch, setup_and_build, discover_runner]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     steps:
       - name: Run Data Parallel test
         run: |
@@ -275,6 +278,7 @@ jobs:
     needs: [prepare-release-branch, setup_and_build, discover_runner]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     steps:
       - name: Run PD disaggregate test
         run: |
@@ -305,6 +309,7 @@ jobs:
     needs: [prepare-release-branch, setup_and_build, discover_runner]
     # --- UPDATED: Run on the specific node ---
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    environment: approved-workflow
     steps:
       - name: Run Sharegpt performance tests with warmup
         run: |
