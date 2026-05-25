@@ -4814,6 +4814,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 runner = getattr(experts, "runner", None)
                 if runner is not None and hasattr(runner, "gate"):
                     runner.gate = None
+                    # Refresh the cached gate ref captured at
+                    # FusedMoE.__init__ to the post-INC block-level gate.
+                    # The dp_size==1 fast path (patched_fused_moe_forward)
+                    # falls back to runner._hpu_gate_ref when runner.gate
+                    # is None; the pre-INC reference points at the now-
+                    # replaced module and produced shape/dtype mismatches
+                    # under fp8.
+                    if block_gate is not None:
+                        object.__setattr__(runner, "_hpu_gate_ref", block_gate)
 
                 if id(experts) in self._detached_moe_gates:
                     self._detached_moe_gates.remove(id(experts))
