@@ -62,8 +62,8 @@ def test_get_instance_raises_when_no_active_manager(monkeypatch):
         HPUBucketingManager.get_instance()
 
 
-def test_constructing_standby_manager_does_not_replace_active_instance():
-    HPUBucketingManager._active_instance = None
+def test_constructing_standby_manager_does_not_replace_active_instance(monkeypatch):
+    monkeypatch.setattr(HPUBucketingManager, "_active_instance", None)
 
     active_manager = HPUBucketingManager()
     active_manager.initialize(max_num_seqs=8,
@@ -78,8 +78,8 @@ def test_constructing_standby_manager_does_not_replace_active_instance():
     assert HPUBucketingManager.get_instance() is active_manager
 
 
-def test_activate_switches_active_manager_without_reinitializing():
-    HPUBucketingManager._active_instance = None
+def test_activate_switches_active_manager_without_reinitializing(monkeypatch):
+    monkeypatch.setattr(HPUBucketingManager, "_active_instance", None)
 
     first_manager = HPUBucketingManager()
     first_manager.initialize(max_num_seqs=8,
