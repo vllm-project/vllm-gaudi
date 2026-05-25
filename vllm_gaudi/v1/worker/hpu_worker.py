@@ -198,9 +198,6 @@ class HPUWorker(WorkerBase):
                     "kv_cache_sleeping": self.kv_cache_sleeping,
                     "kv_cache_config": self.kv_cache_config,
                 }
-                bucketing_manager = getattr(self.model_runner, "bucketing_manager", None)
-                if bucketing_manager is not None:
-                    bucketing_manager._active_instance = None
                 self.model_runner = None
             # Preserve previous KV cache metadata in stash for rollback.
             self.model_sleeping = False
