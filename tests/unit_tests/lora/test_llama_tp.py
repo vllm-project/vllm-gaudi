@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 import vllm
 import vllm.config
 from vllm.lora.request import LoRARequest
@@ -103,6 +101,5 @@ def test_llama_lora(llama32_lora_files):
         max_model_len=1024,
         max_loras=4,
         dtype='bfloat16',
-        hf_token=os.environ.get("HF_TOKEN"),
     )
     generate_and_test(llm, llama32_lora_files)
