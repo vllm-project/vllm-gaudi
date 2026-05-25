@@ -303,7 +303,8 @@ def _hpu_get_by_source(self, source: str) -> int:
     return max(0, _stats_get_by_source_orig(self, source))
 
 
-_stats_module.PromptTokenStats.get_by_source = _hpu_get_by_source
+_prompt_token_stats_cls: Any = _stats_module.PromptTokenStats
+_prompt_token_stats_cls.get_by_source = _hpu_get_by_source
 
 
 def patch_nixl_utils_for_hpu():
