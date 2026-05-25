@@ -428,24 +428,6 @@ def hpu_causal_conv1d_update(
     # Output: [batch, 1, dim] → [batch, dim]
     return out.squeeze(1)
 
-    # --- Original PyTorch reference implementation (commented out) ---
-    # flat_x, qsl, reshape_spec = _flatten_inputs_for_update(x, query_start_loc, dim)
-    #
-    # result = hpu_causal_conv1d_fn_update(
-    #     flat_x,
-    #     weight,
-    #     bias,
-    #     conv_state,
-    #     qsl,
-    #     cache_indices=conv_state_indices,
-    #     has_initial_state=None,
-    #     activation=activation,
-    #     metadata=None,
-    #     validate_data=validate_data,
-    #     is_prompt=False,
-    # )
-    #
-    # return reshape_spec.reshape_fn(result)
 
 
 def hpu_causal_conv1d_fn_update(
