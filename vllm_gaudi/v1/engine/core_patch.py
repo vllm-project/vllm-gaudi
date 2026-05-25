@@ -194,6 +194,7 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
         # Re-run platform normalization after applying Granite-specific
         # fallback fields so alignment math stays centralized.
         current_platform.check_and_update_config(config)
+        current_platform.update_block_size_for_backend(config)
     except Exception as exc:
         logger.error(
             "[gaudi_reconfigure] Granite hybrid mamba alignment fallback failed for model %s: %s",
@@ -231,6 +232,7 @@ def install_engine_core_patch() -> None:
         memory_before_mb = None
         unload_result = None
         memory_after_unload_mb = None
+        stash_created = False
 
         try:
             _normalize_reconfigure_config_for_platform(new_config)
@@ -256,6 +258,7 @@ def install_engine_core_patch() -> None:
 
             # Unload model put to sleep, reload new model on worker
             unload_result = self.collective_rpc("unload_model")
+            stash_created = True
             # Validate unload_result: collective_rpc returns a list of per-worker results.
             if not isinstance(unload_result, (list, tuple)) or len(unload_result) == 0:
                 logger.warning(
@@ -362,18 +365,21 @@ def install_engine_core_patch() -> None:
         except Exception as exc:
             logger.error("[gaudi_reconfigure] failed: %s: %s", exc.__class__.__name__, exc)
 
-            try:
-                restore_result = self.collective_rpc(
-                    "restore_stashed_model",
-                    kwargs={
-                        "vllm_config": previous_config,
-                        "restore_kv_cache": True,
-                    },
-                )
-                logger.warning("[gaudi_reconfigure] rollback restore_stashed_model result=%s", restore_result)
-            except Exception as restore_exc:
-                logger.error("[gaudi_reconfigure] rollback restore_stashed_model failed: %s: %s",
-                             restore_exc.__class__.__name__, restore_exc)
+            if stash_created:
+                try:
+                    restore_result = self.collective_rpc(
+                        "restore_stashed_model",
+                        kwargs={
+                            "vllm_config": previous_config,
+                            "restore_kv_cache": True,
+                        },
+                    )
+                    logger.warning("[gaudi_reconfigure] rollback restore_stashed_model result=%s", restore_result)
+                except Exception as restore_exc:
+                    logger.error("[gaudi_reconfigure] rollback restore_stashed_model failed: %s: %s",
+                                 restore_exc.__class__.__name__, restore_exc)
+            else:
+                logger.warning("[gaudi_reconfigure] rollback skipped restore_stashed_model (no stash created)")
 
             self.vllm_config = previous_config
             try:

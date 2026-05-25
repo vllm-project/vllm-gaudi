@@ -426,7 +426,7 @@ def test_gaudi_reconfigure_engine_rolls_back_on_normalize_failure(monkeypatch):
         EngineCore.gaudi_reconfigure_engine(fake_core, b"payload")
 
     assert fake_core.unload_called is False
-    assert fake_core.restore_called is True
+    assert fake_core.restore_called is False
     assert fake_core.resume_scheduler_calls >= 1
     assert fake_core.vllm_config.model_config.model == "old-model"
 
@@ -446,7 +446,7 @@ def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypa
     class _FakeMambaSpec:
 
         def __init__(self, **_kwargs):
-            # Deliberately non-divisible by attn_page (2112) to assert padding.
+            # Use a raw fallback value; platform hooks own any later padding/alignment.
             self.page_size_bytes = 2111
 
     model_config = SimpleNamespace(
@@ -473,8 +473,9 @@ def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypa
     )
 
     check_and_update_config = Mock()
+    update_block_size_for_backend = Mock()
     monkeypatch.setattr(core_patch.current_platform, "check_and_update_config", check_and_update_config)
-    monkeypatch.setattr(core_patch.current_platform, "update_block_size_for_backend", lambda _config: None)
+    monkeypatch.setattr(core_patch.current_platform, "update_block_size_for_backend", update_block_size_for_backend)
     monkeypatch.setattr(core_patch, "MambaSpec", _FakeMambaSpec)
     monkeypatch.setattr(
         "vllm.model_executor.models.ModelRegistry.resolve_model_cls",
@@ -484,6 +485,7 @@ def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypa
     core_patch._normalize_reconfigure_config_for_platform(config)
 
     assert check_and_update_config.call_count == 2
+    assert update_block_size_for_backend.call_count == 2
     assert cache_config.mamba_cache_mode == "align"
     assert cache_config.mamba_block_size == 528
     assert cache_config.mamba_page_size_padded == 2111
