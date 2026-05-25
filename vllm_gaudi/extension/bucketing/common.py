@@ -60,6 +60,10 @@ class HPUBucketingManager():
         HPUBucketingManager._active_instance = self
         return self
 
+    @classmethod
+    def deactivate(cls):
+        cls._active_instance = None
+
     def initialize(self,
                    max_num_seqs,
                    max_num_prefill_seqs,
