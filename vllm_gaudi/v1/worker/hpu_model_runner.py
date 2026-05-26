@@ -974,7 +974,7 @@ def _maybe_install_global_moe_warmup_patch(model: torch.nn.Module) -> None:
         return
     skip_reason = _get_moe_warmup_patch_skip_reason(language_model)
     if skip_reason is not None:
-        logger.info('Global MoE warmup patch not applied to %s: %s', type(language_model).__name__, skip_reason)
+        logger.debug('Global MoE warmup patch not applied to %s: %s', type(language_model).__name__, skip_reason)
         return
 
     language_model.forward = _build_zero_residual_forward(language_model)
