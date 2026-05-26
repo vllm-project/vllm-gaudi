@@ -431,6 +431,67 @@ def test_gaudi_reconfigure_engine_rolls_back_on_normalize_failure(monkeypatch):
     assert fake_core.vllm_config.model_config.model == "old-model"
 
 
+def test_gaudi_reconfigure_engine_skips_restore_without_stash_marker(monkeypatch):
+
+    class _FakeNewConfig:
+
+        def __init__(self):
+            self.model_config = SimpleNamespace(model="new-model")
+
+    class _FakeModelExecutor:
+
+        def __init__(self):
+            self.is_sleeping = False
+
+        def sleep(self, level: int = 1):
+            assert level == 1
+
+    class _FakeEngineCore:
+
+        def __init__(self):
+            self.vllm_config = SimpleNamespace(model_config=SimpleNamespace(model="old-model"))
+            self.model_executor = _FakeModelExecutor()
+            self.resume_scheduler_calls = 0
+            self.restore_called = False
+
+        def pause_scheduler(self, mode: str, clear_cache: bool):
+            assert mode == "abort"
+            assert clear_cache
+
+        def collective_rpc(self, method: str, kwargs=None):
+            if method == "get_hpu_used_memory_mb":
+                return [{"used": 10.0}]
+            if method == "unload_model":
+                return []
+            if method == "load_model":
+                raise RuntimeError("load failed")
+            if method == "restore_stashed_model":
+                self.restore_called = True
+                return [{"restored": True}]
+            raise AssertionError(f"Unexpected RPC method: {method}")
+
+        def resume_scheduler(self):
+            self.resume_scheduler_calls += 1
+
+    monkeypatch.setattr(core_patch, "_deserialize_reconfigure_config", lambda _: _FakeNewConfig())
+    normalize_config = Mock()
+    monkeypatch.setattr(core_patch, "_normalize_reconfigure_config_for_platform", normalize_config)
+
+    core_patch.install_engine_core_patch()
+
+    from vllm.v1.engine.core import EngineCore
+
+    fake_core = _FakeEngineCore()
+
+    with pytest.raises(RuntimeError, match="load failed"):
+        EngineCore.gaudi_reconfigure_engine(fake_core, b"payload")
+
+    normalize_config.assert_called_once()
+    assert fake_core.restore_called is False
+    assert fake_core.resume_scheduler_calls >= 1
+    assert fake_core.vllm_config.model_config.model == "old-model"
+
+
 def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypatch):
 
     class _FakeModelClass:
