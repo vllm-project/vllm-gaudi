@@ -640,12 +640,14 @@ class InputBatch:
                 # The prompt tokens are used only for applying penalties during
                 # the sampling process. Hence copy these tensors only when
                 # there are requests which need penalties to be applied.
-                prompt_token_ids = self._make_prompt_token_ids_cpu_tensor()[req_indices]
+                prompt_token_ids = self._make_prompt_token_ids_cpu_tensor()[req_indices].to(device=self.device,
+                                                                                            non_blocking=True)
         else:
             # Even with skip_copy=True, we need prompt_token_ids for penalties
             if not self.no_penalties:
                 cached_tensor = self._get_cached_prompt_token_ids()
-                prompt_token_ids = cached_tensor[req_indices] if cached_tensor is not None else None
+                prompt_token_ids = cached_tensor[req_indices].to(
+                    device=self.device, non_blocking=True) if cached_tensor is not None else None
             else:
                 prompt_token_ids = None
 

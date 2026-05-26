@@ -1337,10 +1337,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 state_indices_cpu = block_table_cpu_tensor[req_indices, block_table_offsets].clone()
 
             if num_indices < target_bs:
-                padding = torch.full((target_bs - num_indices, ),
-                                     self._MAMBA_PAD_BLOCK_ID,
-                                     dtype=torch.int32,
-                                     device='cpu')
+                pad_val = -1 if group_idx in self._compact_gdn_group_ids else self._MAMBA_PAD_BLOCK_ID
+                padding = torch.full((target_bs - num_indices, ), pad_val, dtype=torch.int32, device='cpu')
                 state_indices_cpu = torch.cat([state_indices_cpu, padding])
 
             all_state_indices_cpu.append(state_indices_cpu)
@@ -3960,6 +3958,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Swap
             self.input_batch.swap_states(first_prompt_index, last_decode_index)
 
+    def _get_structured_output_request_order(self, pd_info) -> list[str]:
+        return list(pd_info.decode_req_ids) + list(pd_info.prompt_req_ids)
+
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         if self.scheduler_output is None:
@@ -4047,6 +4048,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             prefill_input_data, decode_input_data = self._prepare_inputs(scheduler_output, num_prefills, num_decodes,
                                                                          warmup_mode)
+
+        structured_output_req_ids = self._get_structured_output_request_order(pd_info)
         prefill_data, \
             dummy_prefill_input_data_batches_across_dp = prefill_input_data
         num_pad_prefill_batch_across_dp = \
@@ -4280,8 +4283,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Apply structured output bitmasks if present
             if grammar_output:
                 self.apply_grammar_bitmask(scheduler_output, grammar_output, logits)
-            sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
-                                                                    pd_info.prompt_req_ids + pd_info.decode_req_ids,
+            sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits, structured_output_req_ids,
                                                                     logits.shape[0])
             # Deal with the case of incomplete prompt
             for i in range(logits.shape[0] - num_decodes):
@@ -4289,8 +4291,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
             # Logprobs: rows match logits order (decodes first, then
             # prefills), so build req_ids in same order.
-            struct_logprobs_req_ids = (list(pd_info.decode_req_ids) + list(pd_info.prompt_req_ids))
-            logprobs_segments.append((struct_logprobs_req_ids, sampler_output.logprobs_tensors))
+            logprobs_segments.append((structured_output_req_ids, sampler_output.logprobs_tensors))
 
         if self.use_async_scheduling or self.use_structured_output:
             # For async scheduling: keep tokens on HPU and avoid CPU sync
@@ -5185,8 +5186,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             num_scheduled_tokens[req_id] = scheduled_tokens
 
     def _generate_seq_lengths(self, num_samples, num_blocks, block_size):
-        # ensure the actual number of blocks is less than the KV cache blocks
-        num_blocks = min(self.kv_cache_config.num_blocks, num_blocks)
+        # For contiguous PA, cap num_blocks to physical KV cache size because
+        # block_id = num_blocks - 1 must be a valid physical block.
+        # For non-contiguous PA, block_id=0 is always valid and runtime can
+        # exceed physical blocks via prefix-sharing, so don't cap.
+        if self.use_contiguous_pa:
+            num_blocks = min(self.kv_cache_config.num_blocks, num_blocks)
 
         assert num_samples <= num_blocks
         blocks = [num_blocks // num_samples] * num_samples
@@ -5284,7 +5289,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             decode_block_size = self.attn_block_size
             if self.use_contiguous_pa:
                 decode_seq_lengths = [decode_block_size] * decode_bs
-                block_id = decode_num_blocks - 1
+                # Cap block_id at physical pool — contiguous PA uses
+                # block_id as the allocation base which must be valid.
+                block_id = min(decode_num_blocks - 1, self.kv_cache_config.num_blocks - 1)
             else:
                 decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
                 block_id = 0
@@ -5553,7 +5560,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self.bucketing_manager.generate_prompt_buckets()
         if not self.is_pooling_model:
-            self.bucketing_manager.generate_decode_buckets()
+            # For hybrid models where HPU kernel block size (attn_block_size)
+            # differs from KV-cache block_size, decode buckets must be
+            # generated in attn_block_size units because the runtime decode
+            # path (_create_decode_input_data) computes num_blocks using
+            # attn_block_size.  Scope the mutation to avoid affecting prompt
+            # fallback paths that still need the original block_size.
+            saved_block_size = self.bucketing_manager.block_size
+            if self.attn_block_size != self.block_size:
+                self.bucketing_manager.block_size = self.attn_block_size
+            try:
+                self.bucketing_manager.generate_decode_buckets()
+            finally:
+                self.bucketing_manager.block_size = saved_block_size
         else:
             self.bucketing_manager.decode_buckets = []
 
