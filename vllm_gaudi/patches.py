@@ -171,4 +171,4 @@ def patch_hf3fs_mock_client():
         with patch("torch.cuda.current_stream", return_value=MagicMock()):
             return _orig_batch_write(self, offsets, tensors, event)
 
-    hf3fs_mock_client.Hf3fsClient.batch_write = _safe_batch_write
+    hf3fs_mock_client.Hf3fsClient.batch_write = _safe_batch_write  # type: ignore[method-assign]
