@@ -1136,12 +1136,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                              and (getattr(hf_text_config, "mamba_chunk_size", None) is not None
                                                   or getattr(hf_text_config, "chunk_size", None) is not None))
 
-        # Non-GDN hybrid: at least one mamba/linear-style layer and zero GDN
-        # (gdn_attention / linear_attention) layers. Used to gate optimizations
-        # that have only been validated on non-GDN hybrid topologies
-        # (e.g. Granite-4 Mamba2+Transformer).
-        self.is_non_gdn_hybrid = (self.num_mamba_like_layers > 0 and self.num_gdn == 0)
-
         # For HPU GDN, use configured chunk size when explicitly provided;
         # otherwise default to 128 to match bucket alignment.
         if self.num_mamba_like_layers > 0:
@@ -3894,21 +3888,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 or not attn_metadata.is_prompt):
             return attn_metadata
 
-        # Extended FSDPA-native causal short-circuit for non-GDN hybrid models
-        # (e.g. Granite-4 Mamba2+Transformer). FusedSDPA can encode a purely
-        # causal mask natively via is_causal=True + valid_seq_lengths, including
-        # chunked prefill where block_list is non-None. Skipping the
-        # materialised [bs, 1, q_len, total_kv_len] attn_bias avoids a large
-        # add_bf16 on the attention critical path (significant at long
-        # context). Conservative scope: only non-GDN hybrid models; GDN /
-        # pure-transformer / other topologies keep the materialised bias path
-        # until validated.
-        if (self.prefill_use_fusedsdpa and self.is_causal and not self.is_pooling_model
-                and not getattr(self, 'sliding_window', None)
-                and not getattr(self, 'model_has_chunked_attention', False)
-                and getattr(self, 'alibi_slopes', None) is None and self.is_non_gdn_hybrid):
-            return attn_metadata
-
         if attn_metadata.attn_bias is not None:
             return attn_metadata
 
@@ -5289,11 +5268,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                             is_prompt=True)
         if decode_cfg:
             decode_bs, decode_query_len, decode_num_blocks = decode_cfg
+            # Use attn_block_size (the actual kernel block granularity used in
+            # _create_decode_input_data) rather than block_size (the KV-manager
+            # page size).  For hybrid models these differ after
+            # initialize_kv_cache aligns attn page size to mamba page size,
+            # causing warmup to record wrong num_blocks otherwise.
+            decode_block_size = self.attn_block_size
             if self.use_contiguous_pa:
-                decode_seq_lengths = [self.block_size] * decode_bs
+                decode_seq_lengths = [decode_block_size] * decode_bs
                 block_id = decode_num_blocks - 1
             else:
-                decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, self.block_size)
+                decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
                 block_id = 0
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
@@ -5902,10 +5887,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         if self.num_mamba_like_layers > 0:
-            # Reassign block size for hybrid models after platform.py alignments
-            self.block_size = self.vllm_config.cache_config.block_size
-            if self.enable_bucketing:
-                self.bucketing_manager.block_size = self.block_size
+            # NOTE: Do NOT reassign self.block_size or
+            # bucketing_manager.block_size from cache_config here.
+            # For hybrid models the upstream HybridAttentionMambaModelConfig
+            # inflates cache_config.block_size to align mamba pages (e.g.
+            # 1152 for Qwen3.5), but the HPU attention kernel operates at
+            # 128-token granularity.  _create_decode_input_data computes
+            # num_blocks using self.attn_block_size (set below from
+            # prepare_kernel_block_sizes), so the bucketing manager must
+            # also use that same granularity.  Overwriting block_size with
+            # the inflated KV-manager page size caused decode buckets to be
+            # generated at 1152-token granularity while runtime used
+            # 128-token granularity, leading to permanent "not warmed-up"
+            # warnings and recompilations.
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
 
@@ -6754,17 +6748,6 @@ class HPUAttentionMetadataProcessor:
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
 
-        # Detect non-GDN hybrid topologies (e.g. Granite-4 Mamba2+Transformer).
-        # Used to gate the FSDPA-native causal short-circuit in _set_attn_bias.
-        # Mirrors the runner's num_mamba_like_layers / num_gdn computation
-        # (HPUModelRunner.__init__) so the same set of models is targeted.
-        get_num_layers = vllm_config.model_config.get_num_layers_by_block_type
-        parallel_config = vllm_config.parallel_config
-        num_mamba_like = sum(
-            get_num_layers(parallel_config, bt) for bt in ("mamba", "gdn_attention", "linear_attention"))
-        num_gdn = sum(get_num_layers(parallel_config, bt) for bt in ("gdn_attention", "linear_attention"))
-        self.is_non_gdn_hybrid = (num_mamba_like > 0 and num_gdn == 0)
-
         if self.interleaved_sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
@@ -6795,20 +6778,6 @@ class HPUAttentionMetadataProcessor:
         """
         if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
                 or not attn_metadata.is_prompt):
-            return attn_metadata
-
-        # Extended FSDPA-native causal short-circuit for non-GDN hybrid models
-        # (e.g. Granite-4 Mamba2+Transformer). FusedSDPA handles a purely
-        # causal mask natively (is_causal=True + valid_seq_lengths). Skip
-        # materialising a [bs, 1, q_len, total_kv_len] attn_bias even during
-        # chunked prefill (block_list is non-None) for these topologies; this
-        # removes a sizable add_bf16 from the attention critical path during
-        # long-context chunked prefill. interleaved_sliding_window and
-        # chunked-attention bias paths (window_attn_bias / chunked_attn_bias)
-        # are populated later in process_metadata and used by hpu_attn
-        # instead. Conservative scope: only non-GDN hybrid models; all other
-        # topologies retain the original behaviour.
-        if (self.prefill_use_fusedsdpa and not self.interleaved_sliding_window and self.is_non_gdn_hybrid):
             return attn_metadata
 
         if attn_metadata.attn_bias is not None:
