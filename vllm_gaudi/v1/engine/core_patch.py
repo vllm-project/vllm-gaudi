@@ -134,6 +134,19 @@ def _deserialize_reconfigure_config(vllm_config_bytes: bytes | bytearray) -> Vll
     return _validate_reconfigure_config(cloudpickle.loads(bytes(vllm_config_bytes)))
 
 
+def _run_platform_normalization(config: VllmConfig, error_message: str) -> None:
+    try:
+        current_platform.check_and_update_config(config)
+        current_platform.update_block_size_for_backend(config)
+    except Exception as exc:
+        logger.error(
+            error_message,
+            getattr(getattr(config, "model_config", None), "model", "<unknown>"),
+            exc,
+        )
+        raise
+
+
 def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
     """Platform normalization for switch-time configs.
 
@@ -142,17 +155,11 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
     alignment on HPU). Re-apply platform hooks here to keep switch behavior
     consistent with cold initialization.
     """
-    try:
-        # Keep the same order as startup normalization phases.
-        current_platform.check_and_update_config(config)
-        current_platform.update_block_size_for_backend(config)
-    except Exception as exc:
-        logger.error(
-            "[gaudi_reconfigure] platform config normalization failed for model %s: %s",
-            getattr(getattr(config, "model_config", None), "model", "<unknown>"),
-            exc,
-        )
-        raise
+    # Keep the same order as startup normalization phases.
+    _run_platform_normalization(
+        config,
+        "[gaudi_reconfigure] platform config normalization failed for model %s: %s",
+    )
 
     # Granite hybrid switch path can arrive with mamba_cache_mode=none and
     # no padded Mamba page size, which later makes KV page-size unification
@@ -193,14 +200,11 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
 
         # Re-run platform normalization after applying Granite-specific
         # fallback fields so alignment math stays centralized.
-        current_platform.check_and_update_config(config)
-        current_platform.update_block_size_for_backend(config)
-    except Exception as exc:
-        logger.error(
+        _run_platform_normalization(
+            config,
             "[gaudi_reconfigure] Granite hybrid mamba alignment fallback failed for model %s: %s",
-            getattr(getattr(config, "model_config", None), "model", "<unknown>"),
-            exc,
         )
+    except Exception:
         raise
 
 
@@ -232,6 +236,7 @@ def install_engine_core_patch() -> None:
         memory_before_mb = None
         unload_result = None
         memory_after_unload_mb = None
+        stash_memory_after_mb = None
         stash_created = False
 
         try:
@@ -258,7 +263,6 @@ def install_engine_core_patch() -> None:
 
             # Unload model put to sleep, reload new model on worker
             unload_result = self.collective_rpc("unload_model")
-            stash_created = True
             # Validate unload_result: collective_rpc returns a list of per-worker results.
             if not isinstance(unload_result, (list, tuple)) or len(unload_result) == 0:
                 logger.warning(
@@ -273,6 +277,8 @@ def install_engine_core_patch() -> None:
                             i,
                             type(worker_result).__name__,
                         )
+            stash_memory_after_mb = _sum_named_numeric_values(unload_result, "stash_memory_after_mb")
+            stash_created = stash_memory_after_mb is not None
             memory_after_unload_mb = _collect_total_hpu_used_memory_mb(self)
             load_kwargs: dict[str, Any] = {"vllm_config": new_config}
             if quant_config_path is not _QUANT_CONFIG_UNCHANGED:
@@ -393,8 +399,6 @@ def install_engine_core_patch() -> None:
         freed_memory_mb = None
         if memory_before_mb is not None and memory_after_unload_mb is not None:
             freed_memory_mb = max(memory_before_mb - memory_after_unload_mb, 0.0)
-
-        stash_memory_after_mb = _sum_named_numeric_values(unload_result, "stash_memory_after_mb")
 
         return {
             "memory_before_mb": memory_before_mb,
