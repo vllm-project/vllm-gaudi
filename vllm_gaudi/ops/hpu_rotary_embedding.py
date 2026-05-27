@@ -10,6 +10,24 @@ from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding, Phi3Lo
 from vllm.model_executor.custom_op import CustomOp
 
 
+def _apply_interleaved_rope(x: torch.Tensor,
+                            mrope_section: list[int]) -> torch.Tensor:
+    """Apply interleaved MRoPE to 3D rotary embeddings.
+    Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
+    interleaved [THTHWHTHW...TT], preserving frequency continuity.
+    Uses index_put_ to avoid clone and arange.
+    """
+    x_t = torch.empty_like(x[0])
+    x_t.copy_(x[0])
+    idx_h = torch.tensor(range(1, mrope_section[1] * 3, 3),
+                         device=x.device)
+    idx_w = torch.tensor(range(2, mrope_section[2] * 3, 3),
+                         device=x.device)
+    x_t.index_put_((..., idx_h), x[1].index_select(-1, idx_h))
+    x_t.index_put_((..., idx_w), x[2].index_select(-1, idx_w))
+    return x_t
+
+
 @RotaryEmbedding.register_oot
 class HPURotaryEmbedding(RotaryEmbedding):
     """Original rotary positional embedding."""
@@ -669,10 +687,8 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
         if positions.ndim == 2:
             assert self.mrope_section
             if getattr(self, "mrope_interleaved", False):
-                from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
-
-                cos = apply_interleaved_rope(cos, self.mrope_section)
-                sin = apply_interleaved_rope(sin, self.mrope_section)
+                cos = _apply_interleaved_rope(cos, self.mrope_section)
+                sin = _apply_interleaved_rope(sin, self.mrope_section)
             else:
                 cos = torch.cat([m[i] for i, m in enumerate(cos.split(self.mrope_section, dim=-1))], dim=-1)
                 sin = torch.cat([m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))], dim=-1)
