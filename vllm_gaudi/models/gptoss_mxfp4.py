@@ -288,12 +288,9 @@ def patched_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> s
     quant_cfg = getattr(self.config, "quantization_config", None)
     quant_method = quant_cfg.get("quant_method") if quant_cfg else None
 
-    # Normalize the checkpoint's "mxfp4" to "gpt_oss_mxfp4" the same way
-    # upstream `GptOssForCausalLM.load_weights` does (see
-    # vllm/model_executor/models/gpt_oss.py): the raw HF config read here
-    # may still carry the original "mxfp4" string from the checkpoint even
-    # though `GptOssForCausalLMConfig.verify_and_update_model_config()`
-    # patches a separate copy used for other lookups.
+    # Normalize "mxfp4" -> "gpt_oss_mxfp4" like upstream
+    # GptOssForCausalLM.load_weights does; self.config here is the raw
+    # HF config and may still carry the checkpoint's original "mxfp4".
     if quant_method == "mxfp4":
         quant_method = "gpt_oss_mxfp4"
 
