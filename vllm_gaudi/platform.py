@@ -378,14 +378,19 @@ class HpuPlatform(Platform):
                 os.environ.pop('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS', None)
                 os.environ.pop(cls._TORCH_COMPILE_ENV_MARKER, None)
         else:
+            auto_set = False
             # If not set by user then for torch compile enable Runtime scale patching by default
             if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
                 os.environ['RUNTIME_SCALE_PATCHING'] = '1'
+                auto_set = True
             #This allows for utilization of Parallel Compilation feature
             if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
                 os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
-            # Mark that these flags were set by set_torch_compile(), not user.
-            os.environ[cls._TORCH_COMPILE_ENV_MARKER] = '1'
+                auto_set = True
+            # Mark only when this call actually set the flags, not when
+            # user-provided values were already present.
+            if auto_set:
+                os.environ[cls._TORCH_COMPILE_ENV_MARKER] = '1'
 
     @classmethod
     def adjust_cuda_hooks(cls) -> None:
