@@ -694,6 +694,7 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
         self._rotary_embed_module = self._get_rotary_embedding_module(self.model)
         self._rotary_prepare_cos_sin = self._get_prepare_cos_sin()
         self.flatten_input = get_config().flatten_input
+        self.skip_mark_unbacked = os.environ.get('VLLM_SKIP_MARK_UNBACKED', '0').lower() in ('1', 'true')
         self.is_mm_optimized = is_mm_optimized(self.model)
         self.sliding_window = vllm_config.model_config.get_sliding_window()
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
@@ -771,7 +772,7 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
                                                                                model_has_chunked_attention)
         # Avoid 0/1 size specialization on block_list dim 0 for MoE models.
         # Must be outside compiled regions — mark_unbacked is a forbidden callable.
-        if self.flatten_input:
+        if self.flatten_input and not self.skip_mark_unbacked:
             attn_md = kwargs.get('attn_metadata')
             if (attn_md is not None and getattr(attn_md, 'is_prompt', False)
                     and getattr(attn_md, 'block_list', None) is not None):
