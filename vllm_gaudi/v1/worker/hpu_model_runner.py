@@ -5186,8 +5186,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             num_scheduled_tokens[req_id] = scheduled_tokens
 
     def _generate_seq_lengths(self, num_samples, num_blocks, block_size):
-        # ensure the actual number of blocks is less than the KV cache blocks
-        num_blocks = min(self.kv_cache_config.num_blocks, num_blocks)
+        # For contiguous PA, cap num_blocks to physical KV cache size because
+        # block_id = num_blocks - 1 must be a valid physical block.
+        # For non-contiguous PA, block_id=0 is always valid and runtime can
+        # exceed physical blocks via prefix-sharing, so don't cap.
+        if self.use_contiguous_pa:
+            num_blocks = min(self.kv_cache_config.num_blocks, num_blocks)
 
         assert num_samples <= num_blocks
         blocks = [num_blocks // num_samples] * num_samples
@@ -5285,7 +5289,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             decode_block_size = self.attn_block_size
             if self.use_contiguous_pa:
                 decode_seq_lengths = [decode_block_size] * decode_bs
-                block_id = decode_num_blocks - 1
+                # Cap block_id at physical pool — contiguous PA uses
+                # block_id as the allocation base which must be valid.
+                block_id = min(decode_num_blocks - 1, self.kv_cache_config.num_blocks - 1)
             else:
                 decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
                 block_id = 0
@@ -5554,7 +5560,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self.bucketing_manager.generate_prompt_buckets()
         if not self.is_pooling_model:
-            self.bucketing_manager.generate_decode_buckets()
+            # For hybrid models where HPU kernel block size (attn_block_size)
+            # differs from KV-cache block_size, decode buckets must be
+            # generated in attn_block_size units because the runtime decode
+            # path (_create_decode_input_data) computes num_blocks using
+            # attn_block_size.  Scope the mutation to avoid affecting prompt
+            # fallback paths that still need the original block_size.
+            saved_block_size = self.bucketing_manager.block_size
+            if self.attn_block_size != self.block_size:
+                self.bucketing_manager.block_size = self.attn_block_size
+            try:
+                self.bucketing_manager.generate_decode_buckets()
+            finally:
+                self.bucketing_manager.block_size = saved_block_size
         else:
             self.bucketing_manager.decode_buckets = []
 
