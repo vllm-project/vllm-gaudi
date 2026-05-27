@@ -53,11 +53,14 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 def kv_postprocess_blksize_on_save(cache, indices, target_block_size):
@@ -178,10 +181,11 @@ def wait_for_save(self):
         self.connector_worker.kv_caches_postprocess(self._connector_metadata)
 
 
-def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str):
+def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig"):
     """Implementation of Scheduler side methods"""
 
     self.vllm_config = vllm_config
+    self.kv_cache_config = kv_cache_config
     self.block_size = vllm_config.cache_config.block_size
     self.kv_cache_layout = get_kv_cache_layout()
     self.engine_id: EngineId = engine_id  # type: ignore[misc]
@@ -417,7 +421,7 @@ def request_finished(
     )
 
 
-def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
+def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig"):
     """Implementation of Worker side methods"""
 
     if NixlWrapper is None:
@@ -428,6 +432,7 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
 
     # Config.
     self.vllm_config = vllm_config
+    self.kv_cache_config = kv_cache_config
     self.block_size = vllm_config.cache_config.block_size
 
     if vllm_config.kv_transfer_config is None:
@@ -597,6 +602,8 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str):
     self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
                                                        self.transfer_topo.cross_layers_blocks)
     self._physical_blocks_per_logical_kv_block = 1
+    # Initialize Mamba SSM size (currently not supported for hetero HPU, set to default)
+    self._mamba_ssm_size = (0, 0)
 
 
 def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -754,6 +761,9 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         block_lens=block_len_per_layer_on_save,
         kv_cache_layout=self.kv_cache_layout_on_save if not self.use_host_buffer else self.host_buffer_kv_cache_layout,
         block_size=self.block_size_on_save,
+        ssm_sizes=self._mamba_ssm_size,
+        attn_backend_name=self.backend_name,
+        physical_blocks_per_logical_kv_block=self._physical_blocks_per_logical_kv_block,
     )
     # Wrap metadata in payload with hash for defensive decoding
     encoder = msgspec.msgpack.Encoder()
