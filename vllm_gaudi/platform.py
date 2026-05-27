@@ -376,8 +376,10 @@ class HpuPlatform(Platform):
             # ran in eager mode). User-set values are left untouched.
             if os.environ.pop(cls._MARKER_RUNTIME_SCALE_PATCHING, None):
                 os.environ.pop('RUNTIME_SCALE_PATCHING', None)
+                logger.info("Removed inherited RUNTIME_SCALE_PATCHING (auto-set by parent process)")
             if os.environ.pop(cls._MARKER_FUSER_MULTI_THREADED, None):
                 os.environ.pop('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS', None)
+                logger.info("Removed inherited FUSER_ENABLE_MULTI_THREADED_INVOCATIONS (auto-set by parent process)")
         else:
             # If not set by user then for torch compile enable Runtime scale patching by default
             if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
