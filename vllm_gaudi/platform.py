@@ -354,7 +354,8 @@ class HpuPlatform(Platform):
     def is_sleep_mode_available(cls) -> bool:
         return True
 
-    _TORCH_COMPILE_ENV_MARKER = '_VLLM_SET_TORCH_COMPILE_FLAGS'
+    _MARKER_RUNTIME_SCALE_PATCHING = '_VLLM_AUTOSET_RUNTIME_SCALE_PATCHING'
+    _MARKER_FUSER_MULTI_THREADED = '_VLLM_AUTOSET_FUSER_MULTI_THREADED'
 
     @classmethod
     def set_torch_compile(cls) -> None:
@@ -373,24 +374,19 @@ class HpuPlatform(Platform):
             # Remove eager-mode flags ONLY if they were auto-set by a prior
             # set_torch_compile() call (e.g. in a parent pytest process that
             # ran in eager mode). User-set values are left untouched.
-            if os.environ.get(cls._TORCH_COMPILE_ENV_MARKER):
+            if os.environ.pop(cls._MARKER_RUNTIME_SCALE_PATCHING, None):
                 os.environ.pop('RUNTIME_SCALE_PATCHING', None)
+            if os.environ.pop(cls._MARKER_FUSER_MULTI_THREADED, None):
                 os.environ.pop('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS', None)
-                os.environ.pop(cls._TORCH_COMPILE_ENV_MARKER, None)
         else:
-            auto_set = False
             # If not set by user then for torch compile enable Runtime scale patching by default
             if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
                 os.environ['RUNTIME_SCALE_PATCHING'] = '1'
-                auto_set = True
+                os.environ[cls._MARKER_RUNTIME_SCALE_PATCHING] = '1'
             #This allows for utilization of Parallel Compilation feature
             if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
                 os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
-                auto_set = True
-            # Mark only when this call actually set the flags, not when
-            # user-provided values were already present.
-            if auto_set:
-                os.environ[cls._TORCH_COMPILE_ENV_MARKER] = '1'
+                os.environ[cls._MARKER_FUSER_MULTI_THREADED] = '1'
 
     @classmethod
     def adjust_cuda_hooks(cls) -> None:
