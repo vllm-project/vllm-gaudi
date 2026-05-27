@@ -671,6 +671,7 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
             assert self.mrope_section
             if getattr(self, "mrope_interleaved", False):
                 from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
+
                 cos = _apply_interleaved_rope(cos, self.mrope_section)
                 sin = _apply_interleaved_rope(sin, self.mrope_section)
             else:
