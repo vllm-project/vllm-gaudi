@@ -354,6 +354,8 @@ class HpuPlatform(Platform):
     def is_sleep_mode_available(cls) -> bool:
         return True
 
+    _TORCH_COMPILE_ENV_MARKER = '_VLLM_SET_TORCH_COMPILE_FLAGS'
+
     @classmethod
     def set_torch_compile(cls) -> None:
         # NOTE: PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
@@ -368,6 +370,13 @@ class HpuPlatform(Platform):
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
+            # Remove eager-mode flags ONLY if they were auto-set by a prior
+            # set_torch_compile() call (e.g. in a parent pytest process that
+            # ran in eager mode). User-set values are left untouched.
+            if os.environ.get(cls._TORCH_COMPILE_ENV_MARKER):
+                os.environ.pop('RUNTIME_SCALE_PATCHING', None)
+                os.environ.pop('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS', None)
+                os.environ.pop(cls._TORCH_COMPILE_ENV_MARKER, None)
         else:
             # If not set by user then for torch compile enable Runtime scale patching by default
             if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
@@ -375,6 +384,8 @@ class HpuPlatform(Platform):
             #This allows for utilization of Parallel Compilation feature
             if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
                 os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
+            # Mark that these flags were set by set_torch_compile(), not user.
+            os.environ[cls._TORCH_COMPILE_ENV_MARKER] = '1'
 
     @classmethod
     def adjust_cuda_hooks(cls) -> None:
