@@ -15,7 +15,7 @@ def _apply_interleaved_rope(x: torch.Tensor,
     """Apply interleaved MRoPE to 3D rotary embeddings.
     Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
     interleaved [THTHWHTHW...TT], preserving frequency continuity.
-    Uses index_put_ to avoid clone and arange.
+    Uses index_copy_ / index_select on last dim.
     """
     x_t = torch.empty_like(x[0])
     x_t.copy_(x[0])
@@ -23,8 +23,8 @@ def _apply_interleaved_rope(x: torch.Tensor,
                          device=x.device)
     idx_w = torch.tensor(range(2, mrope_section[2] * 3, 3),
                          device=x.device)
-    x_t.index_put_((..., idx_h), x[1].index_select(-1, idx_h))
-    x_t.index_put_((..., idx_w), x[2].index_select(-1, idx_w))
+    x_t.index_copy_(-1, idx_h, x[1].index_select(-1, idx_h))
+    x_t.index_copy_(-1, idx_w, x[2].index_select(-1, idx_w))
     return x_t
 
 
