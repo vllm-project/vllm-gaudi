@@ -672,8 +672,8 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
             if getattr(self, "mrope_interleaved", False):
                 from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
 
-                cos = _apply_interleaved_rope(cos, self.mrope_section)
-                sin = _apply_interleaved_rope(sin, self.mrope_section)
+                cos = apply_interleaved_rope(cos, self.mrope_section)
+                sin = apply_interleaved_rope(sin, self.mrope_section)
             else:
                 cos = torch.cat([m[i] for i, m in enumerate(cos.split(self.mrope_section, dim=-1))], dim=-1)
                 sin = torch.cat([m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))], dim=-1)
