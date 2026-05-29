@@ -50,8 +50,51 @@ def _uses_lmcache_connector() -> bool:
     return False
 
 
+def _normalize_nixl_kv_load_failure_policy() -> None:
+    """Set kv_load_failure_policy=recompute for NIXL when unspecified.
+
+    This keeps transient transport failures request-scoped instead of forcing
+    immediate request failure.
+    """
+
+    def _patch_config_json(config_json: str) -> str:
+        config = json.loads(config_json)
+        if not isinstance(config, dict):
+            return config_json
+
+        connector = config.get("kv_connector")
+        if connector != "NixlConnector":
+            return config_json
+
+        # Respect explicit user choice.
+        if "kv_load_failure_policy" in config:
+            return config_json
+
+        config["kv_load_failure_policy"] = "recompute"
+        return json.dumps(config)
+
+    env_kv_config = os.getenv("VLLM_KV_TRANSFER_CONFIG")
+    if env_kv_config:
+        try:
+            patched = _patch_config_json(env_kv_config)
+            if patched != env_kv_config:
+                os.environ["VLLM_KV_TRANSFER_CONFIG"] = patched
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    for i, arg in enumerate(sys.argv):
+        if arg == "--kv-transfer-config" and i + 1 < len(sys.argv):
+            try:
+                patched = _patch_config_json(sys.argv[i + 1])
+                if patched != sys.argv[i + 1]:
+                    sys.argv[i + 1] = patched
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+
 def register():
     """Register the HPU platform."""
+    _normalize_nixl_kv_load_failure_policy()
     HpuPlatform.set_torch_compile()
     # Monkey patch for LMCache
     # LMCache requires PT_HPU_GPU_MIGRATION=1

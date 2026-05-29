@@ -6,12 +6,19 @@ import queue
 import threading
 import time
 import uuid
+import os
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
 
 import msgspec
 import numpy as np
 
+# Apply NIXL metadata compatibility patch BEFORE importing from nixl
+# This allows HPU decode to work with older GPU prefill that doesn't send attn_backend_name
+import vllm_gaudi.distributed.kv_transfer.kv_connector.v1.nixl_metadata_compat  # noqa: F401
+
+# Now import from nixl - it will use our patched metadata class
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlAgentMetadata,
     NixlConnector,
@@ -52,6 +59,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     yield_req_data,
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.kv_cache_interface import MambaSpec
 
 from typing import Any, TYPE_CHECKING
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
@@ -196,6 +204,12 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, 
         self.use_host_buffer = False
     else:
         self.use_host_buffer = vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
+
+    # Initialize _has_mamba to check if the model uses Mamba attention
+    self._has_mamba = any(
+        isinstance(g.kv_cache_spec, MambaSpec)
+        for g in kv_cache_config.kv_cache_groups
+    )
 
     self.postprocess_kv_caches_on_save = False
     self.kv_cache_layout_on_save = self.kv_cache_layout
@@ -440,6 +454,29 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     self.kv_transfer_config = vllm_config.kv_transfer_config
     self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config("backends", ["UCX"])
 
+    def _maybe_set_ucx_env_from_config(env_name: str, config_key: str):
+        config_value = self.kv_transfer_config.get_from_extra_config(config_key, None)
+        if config_value is None:
+            return
+        value = str(config_value).strip()
+        if not value:
+            return
+        os.environ[env_name] = value
+        logger.info("Setting %s=%s from kv_connector_extra_config[%s]", env_name, value, config_key)
+
+    # Allow explicit per-connector UCX settings to keep both sides aligned.
+    _maybe_set_ucx_env_from_config("UCX_TLS", "ucx_tls")
+    _maybe_set_ucx_env_from_config("UCX_SOCKADDR_TLS_PRIORITY", "ucx_sockaddr_tls_priority")
+    _maybe_set_ucx_env_from_config("UCX_NET_DEVICES", "ucx_net_devices")
+
+    # Optional safety fallback for unstable RDMA wireup setups.
+    # Enable with VLLM_HPU_NIXL_FORCE_UCX_TCP=1 to force socket transport.
+    if os.getenv("VLLM_HPU_NIXL_FORCE_UCX_TCP", "0") == "1" and not os.getenv("UCX_TLS"):
+        os.environ["UCX_TLS"] = "tcp,self"
+        logger.warning(
+            "VLLM_HPU_NIXL_FORCE_UCX_TCP=1 set and UCX_TLS is unset; forcing UCX_TLS=tcp,self"
+        )
+
     # Agent.
     non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
     # Configure NIXL num_threads to avoid UAR exhaustion on Mellanox NICs.
@@ -602,8 +639,34 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
                                                        self.transfer_topo.cross_layers_blocks)
     self._physical_blocks_per_logical_kv_block = 1
+    self._logical_num_blocks = self.num_blocks
     # Initialize Mamba SSM size (currently not supported for hetero HPU, set to default)
+    self._has_mamba = False
+    self._conv_decomp = None
     self._mamba_ssm_size = (0, 0)
+    # Upstream worker request_ready() references this flag during handshake failures.
+    self._is_hma_required = False
+    # Upstream get_finished/add_remote_agent paths expect these attributes.
+    self.enable_heterogeneous_attn_post_process = False
+    self.tp_mappings = {}
+
+    if not hasattr(self, "_layer_specs"):
+        layer_specs: dict[str, Any] = {}
+        kv_groups = getattr(kv_cache_config, "kv_cache_groups", [])
+        for group in kv_groups:
+            spec = getattr(group, "kv_cache_spec", None)
+            for layer_name in getattr(group, "layer_names", []):
+                layer_specs[layer_name] = spec
+        self._layer_specs = layer_specs
+
+    if not hasattr(self, "hma_group_size"):
+        self.hma_group_size = len(getattr(kv_cache_config, "kv_cache_tensors", []))
+
+    if not hasattr(self, "_group_spec_types"):
+        kv_groups = getattr(kv_cache_config, "kv_cache_groups", [])
+        # Keep this as close as possible to upstream semantics: one representative
+        # spec type per group, with graceful fallback when symbols differ across versions.
+        self._group_spec_types = tuple(type(getattr(group, "kv_cache_spec", None)) for group in kv_groups)
 
 
 def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -863,7 +926,7 @@ def post_process_device_kv_on_save(self, block_ids: list[int]):
                 kv_postprocess_blksize_on_save(cache, indices, target_block_size)
 
 
-def _read_blocks(
+def _read_blocks_legacy(
     self,
     local_block_ids: list[int],
     remote_block_ids: list[int],
@@ -921,6 +984,7 @@ def _read_blocks(
                 remote_agent_name=agent_name,
             )
             self.xfer_stats.record_failed_notification()
+            self._failed_recv_reqs.add(request_id)
         return
     # Partial prefix cache hit: just read uncomputed blocks.
     num_remote_blocks = len(remote_block_ids)
@@ -1010,6 +1074,335 @@ def _read_blocks(
         self._failed_recv_reqs.add(request_id)
 
 
+def _read_blocks(self, *args, **kwargs):
+    """Compatibility shim for upstream _read_blocks signature changes."""
+    if "read_spec" in kwargs:
+        read_spec = kwargs["read_spec"]
+        local_block_ids = getattr(read_spec, "local_block_ids", None) or []
+        remote_block_ids = getattr(read_spec, "remote_block_ids", None) or []
+
+        # Older metadata pipelines can surface empty read specs. Handle full-prefix
+        # hit and malformed cases here to avoid upstream IndexError on [0] access.
+        if len(local_block_ids) == 0:
+            remote_request_id = kwargs["remote_request_id"]
+            dst_engine_id = kwargs["dst_engine_id"]
+            request_id = kwargs["request_id"]
+            remote_rank = getattr(read_spec, "remote_rank", 0)
+            notif_id = f"{remote_request_id}:{self.world_size}".encode()
+            agent_name = self._remote_agents[dst_engine_id][remote_rank]
+            try:
+                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+            except Exception as e:
+                self._log_failure(
+                    failure_type="notification_failed",
+                    msg="P worker blocks will be freed after timeout. This may indicate network issues.",
+                    req_id=request_id,
+                    error=e,
+                    dst_engine_id=dst_engine_id,
+                    remote_rank=remote_rank,
+                    remote_agent_name=agent_name,
+                )
+                self.xfer_stats.record_failed_notification()
+                self._failed_recv_reqs.add(request_id)
+            return
+
+        if len(remote_block_ids) == 0:
+            request_id = kwargs["request_id"]
+            self._log_failure(
+                failure_type="invalid_read_spec",
+                msg="Empty remote block ids in read_spec; marking request as failed",
+                req_id=request_id,
+                dst_engine_id=kwargs.get("dst_engine_id"),
+                remote_rank=getattr(read_spec, "remote_rank", None),
+            )
+            self._failed_recv_reqs.add(request_id)
+            return
+
+        return _original_read_blocks(self, *args, **kwargs)
+    return _read_blocks_legacy(self, *args, **kwargs)
+
+
+# Monkey-patch NixlConnectorWorker._nixl_handshake to use the compatible metadata decoder
+# This is necessary because msgspec captures the class definition at decoder creation time
+_original_nixl_handshake = NixlConnectorWorker._nixl_handshake
+_original_read_blocks = NixlConnectorWorker._read_blocks
+_original_read_blocks_for_req = NixlConnectorWorker._read_blocks_for_req
+
+
+def _nixl_handshake_compat(self, *args, **kwargs):
+    """
+    Patched version of _nixl_handshake that uses NixlAgentMetadataCompat decoder.
+    This allows decoding metadata from older GPU prefill that doesn't send attn_backend_name.
+
+    Keep the wrapper signature generic to remain compatible with multiple upstream
+    vLLM worker signatures.
+    """
+    # Import lazily to avoid NameError if module-level symbol import order changes.
+    from vllm_gaudi.distributed.kv_transfer.kv_connector.v1.nixl_metadata_compat import (
+        NixlAgentMetadataCompat,
+    )
+
+    # msgspec types are immutable on some builds, so avoid monkey-patching
+    # Decoder.__init__. Instead, temporarily swap the handshake function's
+    # NixlAgentMetadata global to the backward-compatible dataclass.
+    fn_globals = _original_nixl_handshake.__globals__
+    original_metadata_cls = fn_globals.get("NixlAgentMetadata")
+    fn_globals["NixlAgentMetadata"] = NixlAgentMetadataCompat
+    try:
+        return _original_nixl_handshake(self, *args, **kwargs)
+    finally:
+        if original_metadata_cls is None:
+            fn_globals.pop("NixlAgentMetadata", None)
+        else:
+            fn_globals["NixlAgentMetadata"] = original_metadata_cls
+
+
+def _normalize_grouped_block_ids(block_ids: Any):
+    if not block_ids:
+        return []
+
+    def _as_list(group_like: Any):
+        if isinstance(group_like, (list, tuple)):
+            return list(group_like)
+        try:
+            return list(group_like)
+        except TypeError:
+            return [group_like]
+
+    first = block_ids[0]
+    if isinstance(first, (list, tuple)):
+        return [list(group) for group in block_ids]
+    try:
+        iter(first)
+    except TypeError:
+        return [list(block_ids)]
+
+    return [_as_list(group) for group in block_ids]
+
+
+def _read_blocks_for_req_compat(self, req_id: str, meta: ReqMeta):
+    # Upstream v0.21 expects grouped block ids (list[list[int]]) here, while
+    # older metadata paths can still surface flat lists (list[int]).
+    # Normalize both local_block_ids and local_physical_block_ids so upstream
+    # failure handlers (which do meta.local_block_ids[0]) don't get a bare int.
+    meta.local_block_ids = _normalize_grouped_block_ids(
+        meta.local_block_ids
+    )
+    meta.local_physical_block_ids = _normalize_grouped_block_ids(
+        meta.local_physical_block_ids
+    )
+    if meta.remote is not None:
+        meta.remote.block_ids = _normalize_grouped_block_ids(meta.remote.block_ids)
+
+    return _original_read_blocks_for_req(self, req_id, meta)
+
+
+def _handle_failed_transfer_compat(self, req_id: str, handle: int):
+    """Handle failed transfer for both flat and grouped local block id layouts."""
+    if (meta := self._recving_metadata.get(req_id)) and not getattr(self, "_is_hma_required", False):
+        local_block_ids = getattr(meta, "local_block_ids", None) or []
+        if local_block_ids:
+            first = local_block_ids[0]
+            if isinstance(first, int):
+                self._invalid_block_ids.update(local_block_ids)
+            else:
+                for group in local_block_ids:
+                    if isinstance(group, int):
+                        self._invalid_block_ids.add(group)
+                    else:
+                        self._invalid_block_ids.update(group)
+    self.nixl_wrapper.release_xfer_handle(handle)
+    self.xfer_stats.record_failed_transfer()
+
+
+_original_get_finished = NixlConnectorWorker.get_finished
+
+
+def get_finished_compat(self):
+    """Drop stale failed-handshake recvs before upstream post-processing."""
+    transfer_topo = getattr(self, "transfer_topo", None)
+
+    if transfer_topo is not None and hasattr(transfer_topo, "_engines"):
+        known_engine_ids = set(getattr(transfer_topo, "_engines", {}).keys())
+        for req_id in list(self._failed_recv_reqs):
+            meta = self._recving_metadata.get(req_id)
+            remote = getattr(meta, "remote", None) if meta is not None else None
+            remote_engine_id = getattr(remote, "engine_id", None)
+            local_physical_block_ids = getattr(meta, "local_physical_block_ids", None) if meta is not None else None
+            local_block_ids = getattr(meta, "local_block_ids", None) if meta is not None else None
+
+            # Full-prefix-hit and some failure paths can surface empty local
+            # block metadata. Upstream get_finished assumes [0] exists.
+            has_no_local_blocks = not local_physical_block_ids and not local_block_ids
+
+            if has_no_local_blocks:
+                self._log_failure(
+                    failure_type="failed_recv_empty_local_blocks_cleanup",
+                    req_id=req_id,
+                    msg="Dropping failed recv with empty local block metadata",
+                    meta=meta,
+                    remote_engine_id=remote_engine_id,
+                )
+                self._recving_metadata.pop(req_id, None)
+                self._failed_recv_reqs.discard(req_id)
+                continue
+
+            if remote_engine_id is not None and remote_engine_id not in known_engine_ids:
+                self._log_failure(
+                    failure_type="handshake_failed_cleanup",
+                    req_id=req_id,
+                    msg="Dropping failed recv with missing transfer topology entry",
+                    meta=meta,
+                    remote_engine_id=remote_engine_id,
+                )
+                self._recving_metadata.pop(req_id, None)
+                self._failed_recv_reqs.discard(req_id)
+
+    done_sending, done_recving = _original_get_finished(self)
+    return done_sending, done_recving
+
+
+def _background_nixl_handshake_compat(self, req_id: str, remote_engine_id: EngineId, meta: ReqMeta):
+    # Do NIXL handshake in background and add to _ready_requests when done.
+    fut = self._handshake_futures.get(remote_engine_id)
+    if fut is None:
+        assert meta.remote is not None
+        fut = self._handshake_initiation_executor.submit(
+            self._nixl_handshake,
+            meta.remote.host,
+            meta.remote.port,
+            meta.tp_size,
+            remote_engine_id,
+        )
+        self._handshake_futures[remote_engine_id] = fut
+
+        def done_callback(f: Future[dict[int, str]], eid=remote_engine_id):
+            with self._handshake_lock:
+                del self._handshake_futures[eid]
+                try:
+                    self._remote_agents[eid] = f.result()
+                except Exception as e:
+                    self._log_failure(
+                        failure_type="handshake_setup_failed",
+                        req_id=None,
+                        error=e,
+                        remote_engine_id=eid,
+                    )
+
+        fut.add_done_callback(done_callback)
+
+    # check handshake success before proceeding with request
+    def request_ready(f: Future[Any], entry=(req_id, meta)):
+        try:
+            # check if handshake succeeded
+            f.result()
+            self._ready_requests.put(entry)
+        except Exception as e:
+            # handshake failed - mark blocks as invalid
+            self._log_failure(
+                failure_type="handshake_failed",
+                req_id=req_id,
+                error=e,
+                meta=meta,
+            )
+            req_meta = self._recving_metadata.get(req_id)
+            if req_meta and not getattr(self, "_is_hma_required", False):
+                local_block_ids = req_meta.local_block_ids or []
+                if local_block_ids:
+                    first = local_block_ids[0]
+                    if isinstance(first, int):
+                        self._invalid_block_ids.update(local_block_ids)
+                    else:
+                        for group in local_block_ids:
+                            if isinstance(group, int):
+                                self._invalid_block_ids.add(group)
+                            else:
+                                self._invalid_block_ids.update(group)
+            self._failed_recv_reqs.add(req_id)
+
+    fut.add_done_callback(request_ready)
+
+
+def _log_failure_compat(
+    self,
+    failure_type: str,
+    req_id: str | None,
+    msg: str = "",
+    error: Exception | None = None,
+    meta: ReqMeta | None = None,
+    **extra_context,
+):
+    """Log transfer failures robustly for both flat and nested block-id layouts."""
+
+    def _summarize_block_ids(block_ids: Any):
+        if not block_ids:
+            return 0, []
+
+        # Newer metadata may store a flat list[int], while heterogeneous TP paths
+        # can keep list[list[int]] grouped by TP rank.
+        first = block_ids[0]
+        if isinstance(first, int):
+            return len(block_ids), list(block_ids[:10])
+
+        num_blocks = 0
+        sample: list[int] = []
+        for group in block_ids:
+            if isinstance(group, int):
+                num_blocks += 1
+                if len(sample) < 10:
+                    sample.append(group)
+                continue
+
+            try:
+                group_len = len(group)
+            except TypeError:
+                num_blocks += 1
+                if len(sample) < 10:
+                    sample.append(group)
+                continue
+
+            num_blocks += group_len
+            if len(sample) < 10:
+                sample.extend(list(group[:10 - len(sample)]))
+
+        return num_blocks, sample
+
+    context: dict[str, Any] = {
+        "failure_type": failure_type,
+        "request_id": req_id,
+        "engine_id": self.engine_id,
+    }
+
+    if meta is None and req_id is not None:
+        meta = self._recving_metadata.get(req_id)
+
+    if meta and meta.remote:
+        num_local_blocks, local_sample = _summarize_block_ids(meta.local_block_ids)
+        num_remote_blocks, _ = _summarize_block_ids(meta.remote.block_ids)
+        context.update(
+            {
+                "remote_engine_id": meta.remote.engine_id,
+                "remote_request_id": meta.remote.request_id,
+                "remote_host": meta.remote.host,
+                "remote_port": meta.remote.port,
+                "num_local_blocks": num_local_blocks,
+                "num_remote_blocks": num_remote_blocks,
+                "local_block_ids_sample": local_sample,
+            }
+        )
+
+    context.update(extra_context)
+    if msg:
+        failure_type = f"{failure_type}. {msg}"
+
+    logger.error(
+        "NIXL transfer failure: %s | Context: %s",
+        failure_type,
+        context,
+        exc_info=error is not None,
+        stacklevel=2,
+    )
+
 NixlConnector.wait_for_save = wait_for_save
 NixlConnectorScheduler.__init__ = NixlConnectorScheduler_init_
 NixlConnectorScheduler.update_state_after_alloc = update_state_after_alloc
@@ -1021,3 +1414,9 @@ NixlConnectorWorker.register_local_xfer_handler = register_local_xfer_handler
 NixlConnectorWorker.kv_caches_postprocess = kv_caches_postprocess
 NixlConnectorWorker.post_process_device_kv_on_save = post_process_device_kv_on_save
 NixlConnectorWorker._read_blocks = _read_blocks
+NixlConnectorWorker._read_blocks_for_req = _read_blocks_for_req_compat
+NixlConnectorWorker._handle_failed_transfer = _handle_failed_transfer_compat
+NixlConnectorWorker._background_nixl_handshake = _background_nixl_handshake_compat
+NixlConnectorWorker._nixl_handshake = _nixl_handshake_compat
+NixlConnectorWorker.get_finished = get_finished_compat
+NixlConnectorWorker._log_failure = _log_failure_compat
