@@ -130,13 +130,27 @@ def _load_weights_mxfp4_dequantize_hpu(
         pcp_rank=get_pcp_group().rank_in_group,
     )
     intermediate_size = self.config.intermediate_size
-    intermediate_size_block = intermediate_size // OCP_MX_BLOCK_SIZE
-    per_rank_intermediate_size_block = cdiv(intermediate_size_block, tp_size)
-    per_rank_intermediate_size = per_rank_intermediate_size_block * OCP_MX_BLOCK_SIZE
+    # Use cdiv-based per-rank partitioning to match FusedMoE's bf16 param
+    # layout (which is what gets allocated here because the gpt_oss mxfp4
+    # quant config is bypassed in `_patched_normalize_quantization_config`).
+    # Block-aligned partitioning would over-/under-size the rank slice when
+    # `intermediate_size` is not divisible by `OCP_MX_BLOCK_SIZE * tp_size`
+    # (e.g. gpt-oss-120b: 2880 / (32*4) = 22.5).
+    per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
 
     # Calculate common slicing bounds for current rank
     tp_rank_start = tp_rank * per_rank_intermediate_size
     tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
+    local_intermediate_size = tp_rank_end - tp_rank_start
+
+    # For w2 the intermediate dim is the K (reduction) axis and mxfp4 scales
+    # are stored per `OCP_MX_BLOCK_SIZE` block along K. When the rank range
+    # is not block-aligned, expand outward to a block-aligned window for
+    # dequantization, then crop the dequantized result back to the rank's
+    # true range using `k_offset`.
+    k_block_start = tp_rank_start // OCP_MX_BLOCK_SIZE
+    k_block_end = cdiv(tp_rank_end, OCP_MX_BLOCK_SIZE)
+    k_offset = tp_rank_start - k_block_start * OCP_MX_BLOCK_SIZE
 
     block_weight_dict = {}
 
@@ -184,7 +198,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight_scale = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight_scale = weight[..., tp_rank_start // OCP_MX_BLOCK_SIZE:tp_rank_end // OCP_MX_BLOCK_SIZE]
+                narrow_weight_scale = weight[..., k_block_start:k_block_end]
             narrow_weight_scale = narrow_weight_scale.contiguous()
 
             # Read block weight
@@ -198,7 +212,8 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 param.copy_(weight)
             else:
-                param[:, :, :(tp_rank_end - tp_rank_start)] = weight
+                # Crop block-aligned dequant output to the rank's true range.
+                param[:, :, :local_intermediate_size] = weight[..., k_offset:k_offset + local_intermediate_size]
             del block_weight_dict[block_name]
             loaded_params.add(name)
             continue
@@ -206,7 +221,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             if use_ep:
                 narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
             else:
-                narrow_weight = weight[:, :, tp_rank_start // OCP_MX_BLOCK_SIZE:tp_rank_end // OCP_MX_BLOCK_SIZE, :]
+                narrow_weight = weight[:, :, k_block_start:k_block_end, :]
             narrow_weight = narrow_weight.contiguous()
             block_weight_dict[name] = narrow_weight
             loaded_params.add(name)
@@ -273,8 +288,14 @@ def patched_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> s
     quant_cfg = getattr(self.config, "quantization_config", None)
     quant_method = quant_cfg.get("quant_method") if quant_cfg else None
 
-    # Only use custom loading for gpt_oss + mxfp4
+    # Normalize "mxfp4" -> "gpt_oss_mxfp4" like upstream
+    # GptOssForCausalLM.load_weights does; self.config here is the raw
+    # HF config and may still carry the checkpoint's original "mxfp4".
     if quant_method == "mxfp4":
+        quant_method = "gpt_oss_mxfp4"
+
+    # Only use custom loading for gpt_oss + mxfp4.
+    if quant_method == "gpt_oss_mxfp4":
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
