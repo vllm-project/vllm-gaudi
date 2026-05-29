@@ -169,10 +169,24 @@ def get_mapped_blocks(block_ids, block_size_ratio, num_blocks):
             # local is  |h0-b0......||h1-b0......||h2-b0........
     local_block_ids         0           [1]           2
     """
-    if block_ids.size == 0:
+    # Upstream can pass flat [int] or grouped [[int]] block IDs depending on
+    # connector path/version. Normalize to 1D before vectorized math.
+    block_ids_arr = np.asarray(block_ids)
+    if block_ids_arr.size == 0:
         return []
 
-    start_ids = block_ids * block_size_ratio
+    if block_ids_arr.dtype == object:
+        flat_block_ids: list[int] = []
+        for block in block_ids:
+            if isinstance(block, (list, tuple, np.ndarray)):
+                flat_block_ids.extend(np.asarray(block).reshape(-1).tolist())
+            else:
+                flat_block_ids.append(block)
+        block_ids_arr = np.asarray(flat_block_ids, dtype=np.int64)
+    else:
+        block_ids_arr = block_ids_arr.reshape(-1)
+
+    start_ids = block_ids_arr * block_size_ratio
     offsets = np.arange(block_size_ratio)
     mapped_2d = start_ids[:, None] + offsets[None, :]
     ret = mapped_2d.flatten().tolist()[:num_blocks]
