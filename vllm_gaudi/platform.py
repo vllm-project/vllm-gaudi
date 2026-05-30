@@ -359,7 +359,6 @@ class HpuPlatform(Platform):
     # into a subprocess (e.g. via pytest plugin loading vllm_gaudi).
     _MARKER_RUNTIME_SCALE_PATCHING = '_VLLM_AUTOSET_RUNTIME_SCALE_PATCHING'
     _MARKER_FUSER_MULTI_THREADED = '_VLLM_AUTOSET_FUSER_MULTI_THREADED'
-    _MARKER_WEIGHT_SHARING = '_VLLM_AUTOSET_WEIGHT_SHARING'
 
     @classmethod
     def set_torch_compile(cls) -> None:
@@ -367,9 +366,11 @@ class HpuPlatform(Platform):
         # does not support torch.compile
         # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
         # torch.compile support
+
+        # PT_HPU_WEIGHT_SHARING=0 is needed in both lazy and eager modes.
+        # Only set if not already provided by the user.
         if os.environ.get('PT_HPU_WEIGHT_SHARING') is None:
             os.environ['PT_HPU_WEIGHT_SHARING'] = '0'
-            os.environ[cls._MARKER_WEIGHT_SHARING] = '1'
         is_lazy = htorch.utils.internal.is_lazy()
         if is_lazy:
             torch._dynamo.config.disable = True
@@ -377,7 +378,7 @@ class HpuPlatform(Platform):
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
-            # Remove eager-mode env vars that were auto-set by a prior
+            # Remove eager-mode-only env vars that were auto-set by a prior
             # set_torch_compile() call (e.g. in a parent pytest process
             # that loaded vllm_gaudi as a plugin in eager mode).
             # User-explicitly-set values are left untouched.
@@ -389,10 +390,6 @@ class HpuPlatform(Platform):
                 os.environ.pop('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS', None)
                 logger.info("Removed inherited "
                             "FUSER_ENABLE_MULTI_THREADED_INVOCATIONS "
-                            "(auto-set by parent process in eager mode)")
-            if os.environ.pop(cls._MARKER_WEIGHT_SHARING, None):
-                os.environ.pop('PT_HPU_WEIGHT_SHARING', None)
-                logger.info("Removed inherited PT_HPU_WEIGHT_SHARING "
                             "(auto-set by parent process in eager mode)")
         else:
             # If not set by user then for torch compile enable Runtime scale patching by default
