@@ -116,7 +116,7 @@ This release is based on [vLLM v0.21.0](https://github.com/vllm-project/vllm/rel
 
 | PR | Title | Author |
 | --- | --- | --- |
-| [#1511](https://github.com/vllm-project/vllm-gaudi/pull/1511) | Heterogenous and Homogenous fixes for v0.21.0 | @hsubramony |
+| [#1511](https://github.com/vllm-project/vllm-gaudi/pull/1511) | Heterogeneous and Homogeneous fixes for v0.21.0 | @hsubramony |
 | [#1510](https://github.com/vllm-project/vllm-gaudi/pull/1510) | fix: prevent eager-mode env vars leaking to lazy-mode subprocesses | @adobrzyn |
 | [#1507](https://github.com/vllm-project/vllm-gaudi/pull/1507) | fix: raise default max_cudagraph_capture_size floor to 16384 | @adobrzyn |
 | [#1503](https://github.com/vllm-project/vllm-gaudi/pull/1503) | Fix NIXL connector V1 API signature mismatches for hetero HPU | @hsubramony |
