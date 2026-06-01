@@ -17,11 +17,19 @@ Currently:
   requires the device's allocator to be a ``c10::DeviceAllocator``.  We
   replace it with an HPU-safe variant that uses
   ``current_platform.empty_cache()`` instead (see GAUDISW-247825).
+
+* ``vllm.v1.sample.ops.logprobs.batched_count_greater_than`` — upstream
+  decorates this function with ``@torch.compile(dynamic=True, ...)``.
+  Habana's ``recipe_compiler`` backend cannot handle the symbolic shapes
+  produced by ``dynamic=True`` (and by ``mark_unbacked`` in the caller),
+  raising ``TypeError: Cannot convert symbols to int``.  We replace it
+  with a plain (uncompiled) version of the same function.  The replacement
+  is deferred to ``load_general_plugins`` time to avoid importing
+  ``vllm.v1.sample.sampler`` during early plugin registration, which would
+  trigger a heavy import chain that interferes with platform initialisation.
 """
 
-import functools
 import gc
-from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -43,6 +51,69 @@ def _hpu_accelerator_empty_cache() -> None:
         empty_cache()
 
 
+def _patch_hf3fs_mock_client_for_cpu_only() -> None:
+    """Patch HF3FS mock client to avoid CUDA stream waits on CPU-only builds.
+
+    Upstream mock client unconditionally calls
+    ``torch.cuda.current_stream().wait_event(event)`` in ``batch_write``.
+    In environments where PyTorch is not compiled with CUDA, that path throws
+    and the method returns ``-1`` for writes, causing connector unit tests to
+    fail. This patch keeps the same behavior but skips CUDA synchronization when
+    CUDA is unavailable.
+    """
+    try:
+        from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils import hf3fs_mock_client as _mock_mod
+    except Exception:
+        # Keep plugin load resilient if the module path changes or is missing.
+        return
+
+    client_cls = getattr(_mock_mod, "Hf3fsClient", None)
+    if client_cls is None:
+        return
+
+    original_batch_write = getattr(client_cls, "batch_write", None)
+    if original_batch_write is None:
+        return
+
+    if getattr(original_batch_write, "_vllm_gaudi_cpu_safe_patch", False):
+        return
+
+    def _batch_write_cpu_safe(self, offsets, tensors, event):
+        if torch.cuda.is_available():
+            return original_batch_write(self, offsets, tensors, event)
+
+        results = []
+        try:
+            data_bytes_list = [self._tensor_to_bytes(tensor) for tensor in tensors]
+
+            with open(self._file_path, "r+b") as f:
+                for offset, data_bytes in zip(offsets, data_bytes_list):
+                    if offset < 0 or offset + len(data_bytes) > self._size:
+                        results.append(-1)
+                        continue
+
+                    f.seek(offset)
+                    bytes_written = f.write(data_bytes)
+
+                    if bytes_written == len(data_bytes) == self._bytes_per_page:
+                        results.append(self._bytes_per_page)
+                    else:
+                        _mock_mod.logger.error(
+                            "Write size mismatch: wrote %d, expected %d",
+                            bytes_written,
+                            self._bytes_per_page,
+                        )
+                        results.append(-1)
+        except Exception as e:
+            _mock_mod.logger.error("Batch write error: %s", e)
+            results.extend([-1] * (len(offsets) - len(results)))
+
+        return results
+
+    _batch_write_cpu_safe._vllm_gaudi_cpu_safe_patch = True  # type: ignore[attr-defined]
+    client_cls.batch_write = _batch_write_cpu_safe
+
+
 def _hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
     """HPU-safe replacement for ``cleanup_dist_env_and_memory``.
 
@@ -51,6 +122,9 @@ def _hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
     ``torch.accelerator.empty_cache()`` (which is incompatible with the
     HPU allocator).
     """
+    # Re-apply lazy runtime patches that may depend on import timing.
+    _patch_hf3fs_mock_client_for_cpu_only()
+
     # Reset environment variable cache
     envs.disable_envs_cache()
     # Ensure all objects are not frozen before cleanup
@@ -74,6 +148,31 @@ def _hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
         parallel_state.logger.warning("torch._C._host_emptyCache() only available in Pytorch >=2.5")
 
 
+def _hpu_batched_count_greater_than(x: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+    """HPU-safe replacement for ``batched_count_greater_than``.
+
+    Identical logic to the upstream implementation but *not* wrapped in
+    ``torch.compile``.  The upstream decorator uses ``dynamic=True`` whose
+    symbolic shapes are incompatible with Habana's ``recipe_compiler``
+    backend, and ``mark_unbacked`` in the caller prevents ``dynamic=False``
+    from helping.
+    """
+    return (x >= values).sum(-1)
+
+
+def _patch_batched_count_greater_than() -> None:
+    """Replace ``batched_count_greater_than`` in the sampler & logprobs modules.
+
+    Called from the ``load_general_plugins`` hook so that the heavy
+    ``vllm.v1.sample.*`` import chain runs *after* platform initialisation.
+    """
+    import vllm.v1.sample.ops.logprobs as _logprobs_mod
+    import vllm.v1.sample.sampler as _sampler_mod
+
+    _logprobs_mod.batched_count_greater_than = _hpu_batched_count_greater_than
+    _sampler_mod.batched_count_greater_than = _hpu_batched_count_greater_than
+
+
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
     # --- torch.accelerator.empty_cache ---
@@ -83,14 +182,28 @@ def apply() -> None:
     if not hasattr(torch._C, "_host_emptyCache"):
         torch._C._host_emptyCache = lambda: None
 
-    # Patch the canonical definition.
+    # --- cleanup_dist_env_and_memory ---
     parallel_state.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
-    # Patch the re-export from ``vllm.distributed`` so ``from vllm.distributed
-    # import cleanup_dist_env_and_memory`` (used by the upstream pytest
-    # conftest) also picks up the HPU-safe version.
     import vllm.distributed as _vllm_distributed
 
     _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
+    _patch_hf3fs_mock_client_for_cpu_only()
+
+    # --- batched_count_greater_than (deferred) ---
+    # We cannot import the sampler modules here because the import chain
+    # triggers platform re-initialisation ("Device string must not be
+    # empty").  Instead we hook into ``load_general_plugins`` which runs
+    # in every process (parent + EngineCore subprocess) after the platform
+    # is ready.
+    import vllm.plugins as _plugins_mod
+
+    _original_load_general = _plugins_mod.load_general_plugins
+
+    def _load_general_with_hpu_patches():
+        _original_load_general()
+        _patch_batched_count_greater_than()
+
+    _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
 
 def patch_hf3fs_mock_client():
@@ -98,29 +211,12 @@ def patch_hf3fs_mock_client():
 
     The upstream mock client's ``batch_write`` unconditionally calls
     ``torch.cuda.current_stream().wait_event(event)``, which raises
-    ``RuntimeError`` on platforms without CUDA (e.g. HPU).  We wrap
-    ``batch_write`` to stub ``torch.cuda.current_stream`` with a no-op
-    mock for the duration of the call.
+    ``RuntimeError`` on platforms without CUDA (e.g. HPU). This helper
+    installs the CPU-safe replacement for ``batch_write``.
 
     Called from ``register_utils()`` (general plugin) rather than
     ``apply()`` (platform plugin) to avoid circular imports — the mock
     client transitively imports ``vllm.config`` which is not yet fully
     initialized during platform registration.
     """
-    if torch.cuda.is_available():
-        return
-
-    try:
-        from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils import (
-            hf3fs_mock_client, )
-    except ImportError:
-        return
-
-    _orig_batch_write = hf3fs_mock_client.Hf3fsClient.batch_write
-
-    @functools.wraps(_orig_batch_write)
-    def _safe_batch_write(self, offsets, tensors, event):
-        with patch("torch.cuda.current_stream", return_value=MagicMock()):
-            return _orig_batch_write(self, offsets, tensors, event)
-
-    hf3fs_mock_client.Hf3fsClient.batch_write = _safe_batch_write
+    _patch_hf3fs_mock_client_for_cpu_only()

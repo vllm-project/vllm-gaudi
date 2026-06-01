@@ -22,15 +22,12 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     FusedTopKRouter, )
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopKRouter, )
-from vllm.model_executor.layers.fused_moe.router.router_factory import (
-    EMPTY_EPLB_STATE, )
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     RoutingSimulatorRouter, )
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter, )
 from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOp
 from vllm_gaudi.extension.runtime import get_config
-from vllm.model_executor.utils import set_weight_attrs
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
@@ -49,13 +46,9 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         torch.hpu.synchronize()
         vllm_config = get_current_vllm_config()
         self.model_type = None
-        self.is_mxfp4 = False
         if (vllm_config is not None and vllm_config.model_config is not None
                 and vllm_config.model_config.hf_config is not None):
             self.model_type = vllm_config.model_config.hf_config.model_type
-            if (hasattr(vllm_config.model_config.hf_config, "quantization_config")
-                    and vllm_config.model_config.hf_config.quantization_config is not None):
-                self.is_mxfp4 = vllm_config.model_config.hf_config.quantization_config.get("quant_method") == "mxfp4"
 
     def _select_monolithic(self) -> Callable:
         """Overriding base method"""
@@ -105,53 +98,6 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # Build cache once AFTER weights/bias are set (BF16 + unquantized only)
         if cache_weight_lists and hasattr(layer.moe_op, "_cache_weight_lists"):
             layer.moe_op._cache_weight_lists()
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size_per_partition: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-
-        if self.model_type in ["gpt_oss"] and self.is_mxfp4:
-            from vllm.utils.math_utils import round_up
-
-            # Fused gate_up_proj (column parallel)
-            w13_weight = torch.nn.Parameter(
-                torch.zeros(num_experts,
-                            2 * round_up(intermediate_size_per_partition, 32),
-                            hidden_size,
-                            dtype=params_dtype),
-                requires_grad=False,
-            )
-            layer.register_parameter("w13_weight", w13_weight)
-            set_weight_attrs(w13_weight, extra_weight_attrs)
-
-            w13_bias = torch.nn.Parameter(
-                torch.zeros(num_experts, 2 * round_up(intermediate_size_per_partition, 32), dtype=params_dtype),
-                requires_grad=False,
-            )
-            layer.register_parameter("w13_bias", w13_bias)
-            set_weight_attrs(w13_bias, extra_weight_attrs)
-
-            # down_proj (row parallel)
-            w2_weight = torch.nn.Parameter(
-                torch.zeros(num_experts, hidden_size, round_up(intermediate_size_per_partition, 32),
-                            dtype=params_dtype),
-                requires_grad=False,
-            )
-            layer.register_parameter("w2_weight", w2_weight)
-            set_weight_attrs(w2_weight, extra_weight_attrs)
-
-            w2_bias = torch.nn.Parameter(torch.zeros(num_experts, hidden_size, dtype=params_dtype), requires_grad=False)
-            layer.register_parameter("w2_bias", w2_bias)
-            set_weight_attrs(w2_bias, extra_weight_attrs)
-        else:
-            super().create_weights(layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype,
-                                   **extra_weight_attrs)
 
     def apply_monolithic(
         self,
@@ -284,7 +230,8 @@ def patched_fused_moe_forward(
     ensure_moe_quant_config_init, and _sequence_parallel_context — all of
     which access ForwardContext and cause torch.compile graph breaks), we
     use a layer reference stashed on the runner at FusedMoE.__init__ time
-    (self._hpu_layer_ref) and call _forward_impl directly. This also
+    (self._hpu_layer_ref) and bypass _forward_impl for dp_size==1,
+    calling _apply_quant_method + _maybe_combine directly. This also
     bypasses self.layer_name (a per-layer string) so dynamo no longer
     emits per-layer string guards that trigger recompilation.
 
@@ -297,17 +244,27 @@ def patched_fused_moe_forward(
     hidden_states, og_hidden_dims = self._maybe_pad_hidden_states(shared_experts_input, hidden_states)
 
     if self.moe_config.dp_size == 1:
-        # Use layer ref saved at FusedMoE.__init__ to avoid both the
-        # get_layer_from_name(self.layer_name) lookup (graph break) and
-        # the per-layer string guard from accessing self.layer_name.
-        # Replicate the remaining forward_dispatch logic that we bypass:
-        # 1. Sync shared experts stream for multi-stream overlap
+        # Bypass _forward_impl entirely for dp_size==1 to eliminate
+        # graph breaks from _sequence_parallel_context() (which calls
+        # get_forward_context()), skip the no-op _maybe_dispatch(), and
+        # avoid double gate / stream-sync calls that _forward_impl
+        # would redundantly repeat.
+        if self.moe_config.pcp_size > 1:
+            raise RuntimeError("dp_size==1 fast path does not support pcp_size > 1")
+        layer = self._hpu_layer_ref
+        layer.ensure_moe_quant_config_init()
         self._maybe_sync_shared_experts_stream(shared_experts_input)
-        # 2. Apply gate if the runner owns it (internal router mode)
-        if self.gate is not None:
-            router_logits, _ = self.gate(hidden_states)
-
-        result = self._forward_impl(self._hpu_layer_ref, hidden_states, router_logits, shared_experts_input, input_ids)
+        gate = self.gate or getattr(self, "_hpu_gate_ref", None)
+        if gate is not None:
+            router_logits, _ = gate(hidden_states)
+        shared_output, fused_hidden = self._apply_quant_method(
+            layer=layer,
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            shared_experts_input=shared_experts_input,
+            input_ids=input_ids,
+        )
+        result = self._maybe_combine(shared_output, fused_hidden)
     else:
         result = self._forward_entry(hidden_states, router_logits, shared_experts_input, input_ids,
                                      self._encode_layer_name(), self._trtllm_mxfp4_unpadded_dim())
@@ -377,8 +334,7 @@ def create_fused_moe_router(
     # custom routing parameters
     custom_routing_function: Callable | None = None,
     # eplb parameters
-    enable_eplb: bool = False,
-    eplb_state: EplbLayerState = EMPTY_EPLB_STATE,
+    eplb_state: EplbLayerState | None = None,
     # zero expert parameters
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
@@ -417,7 +373,6 @@ def create_fused_moe_router(
         custom_routing_function: Optional custom routing function
 
     EPLB arguments:
-        enable_eplb: Whether EPLB is enabled
         eplb_state: EPLB (Expert Parallelism Load Balancing) state
 
     Zero expert arguments:
@@ -440,7 +395,6 @@ def create_fused_moe_router(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
 
@@ -457,7 +411,6 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
 
@@ -476,7 +429,6 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
         return grouped_topk_router
@@ -488,7 +440,6 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             custom_routing_function=custom_routing_function,
             renormalize=renormalize,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
 
@@ -503,7 +454,6 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
             hash_indices_table=hash_indices_table,
         )
@@ -514,7 +464,6 @@ def create_fused_moe_router(
         eplb_state=eplb_state,
         renormalize=renormalize,
         scoring_func=scoring_func,
-        enable_eplb=enable_eplb,
         indices_type_getter=indices_type_getter,
     )
 
@@ -546,15 +495,14 @@ _orig_fused_moe_init = FusedMoE.__init__
 
 def _hpu_fused_moe_init(self, *args, **kwargs):
     _orig_fused_moe_init(self, *args, **kwargs)
-    if hasattr(self, 'runner'):
-        object.__setattr__(self.runner, '_hpu_layer_ref', self)
+    if hasattr(self, "runner"):
+        object.__setattr__(self.runner, "_hpu_layer_ref", self)
+        if self.runner.gate is not None:
+            object.__setattr__(self.runner, "_hpu_gate_ref", self.runner.gate)
 
 
 FusedMoE.__init__ = _hpu_fused_moe_init
 
-vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = \
-    get_compressed_expert_map
-vllm.model_executor.layers.fused_moe.router.router_factory.create_fused_moe_router = \
-    create_fused_moe_router
-vllm.model_executor.layers.fused_moe.layer.create_fused_moe_router = \
-    create_fused_moe_router
+vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = get_compressed_expert_map
+vllm.model_executor.layers.fused_moe.router.router_factory.create_fused_moe_router = create_fused_moe_router
+vllm.model_executor.layers.fused_moe.layer.create_fused_moe_router = create_fused_moe_router

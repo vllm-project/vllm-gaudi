@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
+from collections.abc import Mapping
 import copy
 import contextlib
 from copy import deepcopy
@@ -135,6 +136,14 @@ try:
     from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 except ImportError:
     LMCacheConnectorMetadata = None
+
+_GDN_MAMBA_TYPES: tuple[object, ...] = ("gdn_attention", "linear_attention")
+try:
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    _GDN_MAMBA_TYPES = (MambaAttentionBackendEnum.GDN_ATTN, MambaAttentionBackendEnum.LINEAR, "gdn_attention",
+                        "linear_attention")
+except (ImportError, AttributeError):
+    pass
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -427,6 +436,34 @@ def gather_list(input, indices, v):
     return [input[i] if i is not None else v for i in indices]
 
 
+def ensure_multi_token_decodes_last(b: InputBatch, scheduled_tokens: Mapping[str, int]) -> None:
+    """Within the decode region, sort single-token decodes before multi-token ones.
+
+    When spec-decode is not configured, resumed/catch-up decode requests with
+    many scheduled tokens (e.g. from KV offloading requeue) must be processed
+    via the prefill path to avoid bucket overflow in get_habana_paged_attn_buffers.
+    Moving them to the end of the decode region lets _get_prompts_and_decodes
+    route them to the prefill batch where the large scheduled-token count is
+    handled correctly.
+
+    After _ensure_decodes_first the layout is: [decodes ... | prompts ...]
+    This function produces:                    [1-tok decodes | multi-tok decodes | prompts]
+    """
+    num_reqs = b.num_reqs
+    decode_end = num_reqs
+    for i in range(num_reqs):
+        if b.num_computed_tokens_cpu[i] < b.num_prompt_tokens[i]:
+            decode_end = i
+            break
+    write_pos = 0
+    for read_pos in range(decode_end):
+        req_id = b.req_ids[read_pos]
+        if scheduled_tokens.get(req_id, 1) == 1:
+            if read_pos != write_pos:
+                b.swap_states(write_pos, read_pos)
+            write_pos += 1
+
+
 def get_target_layer_suffix_list(model_type) -> list[str]:
     # This sets the suffix for the hidden layer name, which is controlled by
     # VLLM_CONFIG_HIDDEN_LAYERS. The default suffix is "DecoderLayer," which is
@@ -506,7 +543,8 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
         model = model.model
 
     mamba_like_arch = [
-        "GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration"
+        "GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration",
+        "Qwen3NextForCausalLM"
     ]
     if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):
         return
@@ -1098,12 +1136,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.mamba_chunk_size_is_explicit = (self.num_mamba_like_layers > 0
                                              and (getattr(hf_text_config, "mamba_chunk_size", None) is not None
                                                   or getattr(hf_text_config, "chunk_size", None) is not None))
-
-        # Non-GDN hybrid: at least one mamba/linear-style layer and zero GDN
-        # (gdn_attention / linear_attention) layers. Used to gate optimizations
-        # that have only been validated on non-GDN hybrid topologies
-        # (e.g. Granite-4 Mamba2+Transformer).
-        self.is_non_gdn_hybrid = (self.num_mamba_like_layers > 0 and self.num_gdn == 0)
 
         # For HPU GDN, use configured chunk size when explicitly provided;
         # otherwise default to 128 to match bucket alignment.
@@ -2037,6 +2069,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self._is_prompt(i, scheduler_output):
                 break
 
+            # When spec-decode is not configured, a decode request with more
+            # than 1 scheduled token is a resumed/catch-up request that must
+            # be processed via the prefill (prompt) path instead. After
+            # ensure_multi_token_decodes_last these requests are sorted to the
+            # end of the decode region so the break here is correct.
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            if num_scheduled_tokens > 1 and \
+                    not self.vllm_config.speculative_config:
+                break
+
+            # This is decode
             # NOTE(chendi): To support spec decode,
             # we don't assume num_scheduled_tokens == 1.
             decode_req_ids.append(req_id)
@@ -2053,11 +2096,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
 
-            # Must be prompt
-            assert self._is_prompt(i, scheduler_output)
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+
+            # Prompt traversal must follow the exact same predicate used above
+            # to partition decode vs prompt requests, including preempted
+            # prompt / catch-up cases handled by `_is_prompt()`.
+            assert self._is_prompt(i, scheduler_output), (f"Unexpected at prompt-traversal req_id={req_id} idx={i}: "
+                                                          f"computed={num_computed_tokens}, "
+                                                          f"prompt={num_prompt_tokens}, "
+                                                          f"scheduled={num_scheduled_tokens}")
+            # NOTE(kzawora): In preempted sequences, num_output_tokens can be > 0, and still be a valid prefill
 
             prompt_req_ids.append(req_id)
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             prompt_scheduled_tokens.append(int(num_scheduled_tokens))
 
         return PromptDecodeInfo(prompt_req_ids, decode_req_ids, prompt_scheduled_tokens)
@@ -2956,11 +3008,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 token_ids_device[:num_decodes] = self.input_ids_hpu[:num_decodes].view(-1, 1)
             else:
                 token_ids_split_tensors = torch.split(self.input_ids_hpu[:total_num_scheduled_tokens],
-                                                      num_tokens_per_req)
-                token_ids_device[:num_decodes] = \
+                                                      num_tokens_per_req[:num_decodes])
+                # token_ids was already reshaped to [padded_batch*num_tokens, 1]
+                # (via view(-1,1) in the CPU prepare path above) before the
+                # async_h2d_copy, so token_ids_device has the same flat shape.
+                # Index [:num_decodes*num_tokens] to write all rows for the
+                # decode region (not just the first num_decodes rows).
+                token_ids_device[:num_decodes * num_tokens] = \
                     pad_sequence(list(token_ids_split_tensors),
                                     batch_first=True,
-                                    padding_value=0)[:num_decodes]
+                                    padding_value=0)[:num_decodes].view(-1, 1)
 
             #####################################
             # NOTE(Chendi): Since we can't actually do num_tokens = 2,
@@ -3834,21 +3891,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 or not attn_metadata.is_prompt):
             return attn_metadata
 
-        # Extended FSDPA-native causal short-circuit for non-GDN hybrid models
-        # (e.g. Granite-4 Mamba2+Transformer). FusedSDPA can encode a purely
-        # causal mask natively via is_causal=True + valid_seq_lengths, including
-        # chunked prefill where block_list is non-None. Skipping the
-        # materialised [bs, 1, q_len, total_kv_len] attn_bias avoids a large
-        # add_bf16 on the attention critical path (significant at long
-        # context). Conservative scope: only non-GDN hybrid models; GDN /
-        # pure-transformer / other topologies keep the materialised bias path
-        # until validated.
-        if (self.prefill_use_fusedsdpa and self.is_causal and not self.is_pooling_model
-                and not getattr(self, 'sliding_window', None)
-                and not getattr(self, 'model_has_chunked_attention', False)
-                and getattr(self, 'alibi_slopes', None) is None and self.is_non_gdn_hybrid):
-            return attn_metadata
-
         if attn_metadata.attn_bias is not None:
             return attn_metadata
 
@@ -3985,8 +4027,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
 
         batch_changed = self.batch_changed
-        # If necessary, swap decodes/prompts to have all decodes on the start
+        # If necessary, swap decodes/prompts to have all decodes on the start.
+        # Use the method form (not a module-level helper) so that the
+        # partitioning predicate matches `_is_prompt()` exactly, including
+        # preempted-prompt, decoder-only, and spec-decode cases.
         self._ensure_decodes_first(scheduler_output)
+        # When spec-decode is not configured, sort multi-token catch-up
+        # decode requests to the end of the decode region so that
+        # _get_prompts_and_decodes routes them through the prefill path,
+        # preventing bucket overflow and Habana workspace OOM.
+        if not self.vllm_config.speculative_config:
+            ensure_multi_token_decodes_last(self.input_batch, scheduler_output.num_scheduled_tokens)
         # Prepare prompts/decodes info
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
@@ -4667,10 +4718,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if mlp is not None:
                     block_gate = getattr(mlp, 'gate', None) or getattr(mlp, 'router', None)
                     experts = getattr(mlp, 'experts', None)
-                    if (block_gate is not None and experts is not None
-                            and getattr(experts, '_gate', None) is block_gate):
-                        experts._gate = None
-                        self._detached_moe_gates.add(id(experts))
+                    if block_gate is not None and experts is not None:
+                        if getattr(experts, '_gate', None) is block_gate:
+                            experts._gate = None
+                            self._detached_moe_gates.add(id(experts))
+                        # With upstream vLLM PR #35178 MoERunner is an
+                        # nn.Module, so `self.runner.gate = gate` in
+                        # FusedMoE.__init__ registers the shared gate
+                        # as a child of runner. INC's
+                        # generate_model_info() walks named_children()
+                        # and the last-seen parent wins, so INC patches
+                        # runner._modules['gate'] and leaves
+                        # mlp._modules['gate'] pointing at a stale
+                        # module whose weight Parameter has been
+                        # mutated in-place to fp8. Unregister the gate
+                        # from runner._modules (but keep runner.gate
+                        # as a plain attribute so is_internal_router()
+                        # and the runner's internal forward path keep
+                        # working) so INC sees mlp as the sole parent.
+                        runner = getattr(experts, 'runner', None)
+                        if (runner is not None and isinstance(runner, torch.nn.Module)
+                                and runner._modules.get('gate', None) is block_gate):
+                            del runner._modules['gate']
+                            object.__setattr__(runner, 'gate', block_gate)
 
     def _sync_shared_moe_gates(self):
         """Apply SharedFusedMoE post-INC synchronization and compatibility.
@@ -4724,6 +4794,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 runner = getattr(experts, "runner", None)
                 if runner is not None and hasattr(runner, "gate"):
                     runner.gate = None
+                    # Refresh the cached gate ref captured at
+                    # FusedMoE.__init__ to the post-INC block-level gate.
+                    # The dp_size==1 fast path (patched_fused_moe_forward)
+                    # falls back to runner._hpu_gate_ref when runner.gate
+                    # is None; the pre-INC reference points at the now-
+                    # replaced module and produced shape/dtype mismatches
+                    # under fp8.
+                    if block_gate is not None:
+                        object.__setattr__(runner, "_hpu_gate_ref", block_gate)
 
                 if id(experts) in self._detached_moe_gates:
                     self._detached_moe_gates.remove(id(experts))
@@ -5107,8 +5186,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             num_scheduled_tokens[req_id] = scheduled_tokens
 
     def _generate_seq_lengths(self, num_samples, num_blocks, block_size):
-        # ensure the actual number of blocks is less than the KV cache blocks
-        num_blocks = min(self.kv_cache_config.num_blocks, num_blocks)
+        # For contiguous PA, cap num_blocks to physical KV cache size because
+        # block_id = num_blocks - 1 must be a valid physical block.
+        # For non-contiguous PA, block_id=0 is always valid and runtime can
+        # exceed physical blocks via prefix-sharing, so don't cap.
+        if self.use_contiguous_pa:
+            num_blocks = min(self.kv_cache_config.num_blocks, num_blocks)
 
         assert num_samples <= num_blocks
         blocks = [num_blocks // num_samples] * num_samples
@@ -5198,11 +5281,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                             is_prompt=True)
         if decode_cfg:
             decode_bs, decode_query_len, decode_num_blocks = decode_cfg
+            # Use attn_block_size (the actual kernel block granularity used in
+            # _create_decode_input_data) rather than block_size (the KV-manager
+            # page size).  For hybrid models these differ after
+            # initialize_kv_cache aligns attn page size to mamba page size,
+            # causing warmup to record wrong num_blocks otherwise.
+            decode_block_size = self.attn_block_size
             if self.use_contiguous_pa:
-                decode_seq_lengths = [self.block_size] * decode_bs
-                block_id = decode_num_blocks - 1
+                decode_seq_lengths = [decode_block_size] * decode_bs
+                # Cap block_id at physical pool — contiguous PA uses
+                # block_id as the allocation base which must be valid.
+                block_id = min(decode_num_blocks - 1, self.kv_cache_config.num_blocks - 1)
             else:
-                decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, self.block_size)
+                decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
                 block_id = 0
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
@@ -5469,7 +5560,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self.bucketing_manager.generate_prompt_buckets()
         if not self.is_pooling_model:
-            self.bucketing_manager.generate_decode_buckets()
+            # For hybrid models where HPU kernel block size (attn_block_size)
+            # differs from KV-cache block_size, decode buckets must be
+            # generated in attn_block_size units because the runtime decode
+            # path (_create_decode_input_data) computes num_blocks using
+            # attn_block_size.  Scope the mutation to avoid affecting prompt
+            # fallback paths that still need the original block_size.
+            saved_block_size = self.bucketing_manager.block_size
+            if self.attn_block_size != self.block_size:
+                self.bucketing_manager.block_size = self.attn_block_size
+            try:
+                self.bucketing_manager.generate_decode_buckets()
+            finally:
+                self.bucketing_manager.block_size = saved_block_size
         else:
             self.bucketing_manager.decode_buckets = []
 
@@ -5811,10 +5914,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         if self.num_mamba_like_layers > 0:
-            # Reassign block size for hybrid models after platform.py alignments
-            self.block_size = self.vllm_config.cache_config.block_size
-            if self.enable_bucketing:
-                self.bucketing_manager.block_size = self.block_size
+            # NOTE: Do NOT reassign self.block_size or
+            # bucketing_manager.block_size from cache_config here.
+            # For hybrid models the upstream HybridAttentionMambaModelConfig
+            # inflates cache_config.block_size to align mamba pages (e.g.
+            # 1152 for Qwen3.5), but the HPU attention kernel operates at
+            # 128-token granularity.  _create_decode_input_data computes
+            # num_blocks using self.attn_block_size (set below from
+            # prepare_kernel_block_sizes), so the bucketing manager must
+            # also use that same granularity.  Overwriting block_size with
+            # the inflated KV-manager page size caused decode buckets to be
+            # generated at 1152-token granularity while runtime used
+            # 128-token granularity, leading to permanent "not warmed-up"
+            # warnings and recompilations.
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
 
@@ -5861,8 +5973,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.num_mamba_like_layers > 0 and self._compact_gdn_enabled:
             self._num_gdn_groups = sum(
                 1 for g in kv_cache_config.kv_cache_groups
-                if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in ("gdn_attention",
-                                                                                             "linear_attention"))
+                if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES)
         # Profiling may request more sequences than max_num_seqs
         # (e.g. VLLM_PROFILE_DECODE=16,64 with max_num_seqs=1).
         # Ensure GDN compact tensors and free-list are large enough.
@@ -5897,7 +6008,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if isinstance(spec, FullAttentionSpec):
                         continue
                     if isinstance(spec, MambaSpec) and \
-                            spec.mamba_type in ("gdn_attention", "linear_attention"):
+                            spec.mamba_type in _GDN_MAMBA_TYPES:
                         continue
                     # Standard Mamba2 or unknown spec — needs raw buffer
                     return True
@@ -5945,7 +6056,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
-                            kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention") and \
+                            kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES and \
                             self._compact_gdn_enabled:
                         # GDN/linear_attention: compact allocation.
                         # All GDN groups share the same state tensor, so each
@@ -5972,7 +6083,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     elif isinstance(kv_cache_spec, MambaSpec) and \
-                            kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention"):
+                            kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
                         # GDN/linear_attention: non-compact (baseline) allocation
                         # using contiguous tensors with num_blocks+1 slots.
                         if isinstance(kv_caches.get(layer_name), tuple):
@@ -6037,7 +6148,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
-                            kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention") and \
+                            kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES and \
                             self._compact_gdn_enabled:
                         # GDN/linear_attention: compact allocation.
                         self._compact_gdn_group_ids.add(group_idx)
@@ -6057,7 +6168,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     elif isinstance(kv_cache_spec, MambaSpec) and \
-                            kv_cache_spec.mamba_type in ("gdn_attention", "linear_attention"):
+                            kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
                         # GDN/linear_attention: non-compact (baseline) allocation.
                         if isinstance(kv_caches.get(layer_name), tuple):
                             continue
@@ -6664,17 +6775,6 @@ class HPUAttentionMetadataProcessor:
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
 
-        # Detect non-GDN hybrid topologies (e.g. Granite-4 Mamba2+Transformer).
-        # Used to gate the FSDPA-native causal short-circuit in _set_attn_bias.
-        # Mirrors the runner's num_mamba_like_layers / num_gdn computation
-        # (HPUModelRunner.__init__) so the same set of models is targeted.
-        get_num_layers = vllm_config.model_config.get_num_layers_by_block_type
-        parallel_config = vllm_config.parallel_config
-        num_mamba_like = sum(
-            get_num_layers(parallel_config, bt) for bt in ("mamba", "gdn_attention", "linear_attention"))
-        num_gdn = sum(get_num_layers(parallel_config, bt) for bt in ("gdn_attention", "linear_attention"))
-        self.is_non_gdn_hybrid = (num_mamba_like > 0 and num_gdn == 0)
-
         if self.interleaved_sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
@@ -6705,20 +6805,6 @@ class HPUAttentionMetadataProcessor:
         """
         if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
                 or not attn_metadata.is_prompt):
-            return attn_metadata
-
-        # Extended FSDPA-native causal short-circuit for non-GDN hybrid models
-        # (e.g. Granite-4 Mamba2+Transformer). FusedSDPA handles a purely
-        # causal mask natively (is_causal=True + valid_seq_lengths). Skip
-        # materialising a [bs, 1, q_len, total_kv_len] attn_bias even during
-        # chunked prefill (block_list is non-None) for these topologies; this
-        # removes a sizable add_bf16 from the attention critical path during
-        # long-context chunked prefill. interleaved_sliding_window and
-        # chunked-attention bias paths (window_attn_bias / chunked_attn_bias)
-        # are populated later in process_metadata and used by hpu_attn
-        # instead. Conservative scope: only non-GDN hybrid models; all other
-        # topologies retain the original behaviour.
-        if (self.prefill_use_fusedsdpa and not self.interleaved_sliding_window and self.is_non_gdn_hybrid):
             return attn_metadata
 
         if attn_metadata.attn_bias is not None:
