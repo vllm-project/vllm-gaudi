@@ -2,6 +2,22 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.21.0
+
+This version is based on [vLLM 0.21.0](https://github.com/vllm-project/vllm/releases/tag/v0.21.0) and supports [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
+
+This release removes lazy execution mode from CI — eager is now the default in CI pipelines while lazy mode remains supported at runtime. It introduces a new padding-aware bucketing strategy, W8A8 INT8 quantization with BF16 fallback, FusedSDPA slicing, prefix caching for HPUMambaMixer2, and OpenAI /v1/models/switch integration. Performance improvements include raised max cudagraph capture size, bucketing edge case tuning, and MoE compilation optimizations. Multiple stability fixes address NIXL heterogeneous deployments, hybrid model block sizes, Llama4 torch.compile recompilations, MRoPE accuracy, and FP8 quantization issues.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.21.0.md).
+
+## 0.19.1
+
+This is a minor patch release on top of 0.19.0 and continues to support [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
+
+The release lifts the `transformers < 5` upper-bound constraint, allowing Hugging Face Transformers v5 to be installed alongside the plugin.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.19.1.md).
+
 ## 0.19.0
 
 This version is based on [vLLM 0.19.0](https://github.com/vllm-project/vllm/releases/tag/v0.19.0) and supports the latest [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
