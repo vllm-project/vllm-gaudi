@@ -176,6 +176,7 @@ class RequestRunner:
                 "spec_name": "MockOffloadingSpec",
                 "spec_module_path": "tests.unit_tests.kv_offload.offloading_connector.utils",  # noqa: E501
                 "block_size": offloaded_block_size,
+                "offload_prompt_only": False,
             },
         )
 
