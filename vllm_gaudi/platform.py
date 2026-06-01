@@ -378,19 +378,14 @@ class HpuPlatform(Platform):
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
-            # Remove eager-mode-only env vars that were auto-set by a prior
-            # set_torch_compile() call (e.g. in a parent pytest process
-            # that loaded vllm_gaudi as a plugin in eager mode).
-            # User-explicitly-set values are left untouched.
-            if os.environ.pop(cls._MARKER_RUNTIME_SCALE_PATCHING, None):
-                os.environ.pop('RUNTIME_SCALE_PATCHING', None)
-                logger.info("Removed inherited RUNTIME_SCALE_PATCHING "
-                            "(auto-set by parent process in eager mode)")
-            if os.environ.pop(cls._MARKER_FUSER_MULTI_THREADED, None):
-                os.environ.pop('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS', None)
-                logger.info("Removed inherited "
-                            "FUSER_ENABLE_MULTI_THREADED_INVOCATIONS "
-                            "(auto-set by parent process in eager mode)")
+            # Clear auto-set markers from a parent eager-mode process (e.g.
+            # pytest plugin loading vllm_gaudi) but keep the env var values.
+            # Both vars are beneficial in lazy mode:
+            # - RUNTIME_SCALE_PATCHING: needed for fp8/INC scale handling
+            # - FUSER_ENABLE_MULTI_THREADED_INVOCATIONS: parallel compilation
+            # User-explicitly-set values (no marker) are never touched.
+            os.environ.pop(cls._MARKER_RUNTIME_SCALE_PATCHING, None)
+            os.environ.pop(cls._MARKER_FUSER_MULTI_THREADED, None)
         else:
             # If not set by user then for torch compile enable Runtime scale patching by default
             if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
