@@ -6,7 +6,22 @@ This document provides an overview of the features, changes, and fixes introduce
 
 This version is based on [vLLM 0.21.0](https://github.com/vllm-project/vllm/releases/tag/v0.21.0) and supports [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
 
-This release removes lazy execution mode from CI — eager is now the default in CI pipelines while lazy mode remains supported at runtime. It introduces a new padding-aware bucketing strategy, W8A8 INT8 quantization with BF16 fallback, FusedSDPA slicing, prefix caching for HPUMambaMixer2, and OpenAI /v1/models/switch integration. Performance improvements include raised max cudagraph capture size, bucketing edge case tuning, and MoE compilation optimizations. Multiple stability fixes address NIXL heterogeneous deployments, hybrid model block sizes, Llama4 torch.compile recompilations, MRoPE accuracy, and FP8 quantization issues.
+The release introduces the following key features and improvements:
+
+- Eager execution as the default mode in CI pipelines, while lazy mode remains available at runtime.
+- A new padding-aware bucketing strategy for improved memory utilization and reduced padding overhead.
+- W8A8 INT8 quantization with BF16 fallback.
+- FusedSDPA slicing for improved attention performance.
+- Prefix caching for `HPUMambaMixer2`.
+- OpenAI `/v1/models/switch` integration.
+- A higher maximum cudagraph capture size.
+- Refined bucketing behavior for edge cases.
+- Optimized MoE compilation.
+- Improved stability for NIXL heterogeneous deployments.
+- Improved block size handling for hybrid models.
+- Reduced unnecessary Llama4 `torch.compile` recompilations.
+- Improved MRoPE accuracy.
+- Improved FP8 quantization stability.
 
 For a full list of changes, see the [Detailed Release Notes](release_notes_v0.21.0.md).
 

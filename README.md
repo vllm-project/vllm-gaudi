@@ -16,7 +16,7 @@ vLLM Hardware Plugin for Intel® Gaudi®
 *Latest News* 🔥
 - [2026/06] Version 0.21.0 is now available, built on [vLLM 0.21.0](https://github.com/vllm-project/vllm/releases/tag/v0.21.0) and fully compatible with [Intel® Gaudi® v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
 
-  This release removes lazy execution mode from CI (eager-only in CI, lazy still supported at runtime), introduces a new padding-aware bucketing strategy, W8A8 INT8 quantization with BF16 fallback, FusedSDPA slicing, prefix caching for HPUMambaMixer2, OpenAI /v1/models/switch integration, and NIXL heterogeneous/homogeneous deployment fixes. See the [detailed release notes](docs/release_notes_v0.21.0.md) for the full list of changes.
+  This release makes eager execution the default mode in CI while keeping lazy mode available at runtime. It also introduces a padding-aware bucketing strategy, W8A8 INT8 quantization with BF16 fallback, FusedSDPA slicing, prefix caching for HPUMambaMixer2, OpenAI `/v1/models/switch` integration, and fixes for heterogeneous and homogeneous NIXL deployments. See the [detailed release notes](docs/release_notes_v0.21.0.md) for the full list of changes.
 
 - [2026/04] Version 0.19.0 is now available, built on [vLLM 0.19.0](https://github.com/vllm-project/vllm/releases/tag/v0.19.0) and fully compatible with [Intel® Gaudi® v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
 
@@ -25,10 +25,6 @@ vLLM Hardware Plugin for Intel® Gaudi®
 - [2026/04] Version 0.17.1 is now available, built on [vLLM 0.17.1](https://github.com/vllm-project/vllm/releases/tag/v0.17.1) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
 
   This patch release backports critical fixes and improvements including MxFP4 weight loading, Granite 4.0-h calibration, prefix caching for HPUMambaMixer2, OOM crash fixes, and SDL secure error handling improvements.
-
-- [2026/03] Version 0.16.0 is now available, built on [vLLM 0.16.0](https://github.com/vllm-project/vllm/releases/tag/v0.16.0) and fully compatible with [Intel® Gaudi® v1.23.0](https://docs.habana.ai/en/v1.23.0/Release_Notes/GAUDI_Release_Notes.html).
-
-  This release introduces validated support and critical stability fixes for Qwen3-VL models leveraging HPUMMEncoderAttention. Performance and stability were improved through backported Mamba architecture optimizations, Docker and UBI infrastructure enhancements, and a forced CPU loading mechanism for INC quantization to prevent OOM errors.
 
 ---
 
