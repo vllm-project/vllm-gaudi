@@ -748,11 +748,26 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         moe: FusedMoEConfig,
         layer_name: str | None = None,
     ):
-        super().__init__(weight_quant, input_quant, moe)
+        # NOTE: Intentionally bypass CompressedTensorsWNA16MarlinMoEMethod.__init__.
+        # Upstream made that constructor select a WNA16 MoE backend via an oracle
+        # (select_wna16_moe_backend), which raises
+        # NotImplementedError("No WNA16 MoE backend supports the deployment
+        # configuration") on Gaudi because no CUDA Marlin/Flashinfer backend is
+        # available. The HPU path supplies its own MoE op
+        # (VllmMixtureOfExpertsOpWNA16) and does not need a CUDA backend, so we
+        # initialize the grandparent (CompressedTensorsMoEMethod ->
+        # FusedMoEMethodBase) directly and replicate the weight-derived
+        # attributes that the HPU create_weights/process_weights path consumes.
+        CompressedTensorsMoEMethod.__init__(self, moe)
 
         self.weight_quant = weight_quant
         self.input_quant = input_quant
         assert weight_quant.symmetric, ("Only symmetric quantization is supported for MoE")
+        self.num_bits = weight_quant.num_bits
+        self.packed_factor = 32 // weight_quant.num_bits
+        self.strategy = weight_quant.strategy
+        self.group_size = weight_quant.group_size
+        self.actorder = weight_quant.actorder
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
         self.layer_name = layer_name
 
