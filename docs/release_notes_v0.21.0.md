@@ -8,13 +8,13 @@ This release is based on [vLLM v0.21.0](https://github.com/vllm-project/vllm/rel
 
 ## Highlights
 
-- **Removed lazy execution mode from CI** — eager mode is now the default in CI pipelines; lazy mode is still supported at runtime. ([#996](https://github.com/vllm-project/vllm-gaudi/pull/996))
-- Introduced **new padding-aware bucketing strategy** for improved memory utilization and reduced padding overhead. ([#762](https://github.com/vllm-project/vllm-gaudi/pull/762))
-- Added **W8A8 INT8 quantization with BF16 fallback** via `HPUCompressedTensorsW8A8Int8_BF16Fallback`. ([#1168](https://github.com/vllm-project/vllm-gaudi/pull/1168))
-- Enabled **FusedSDPA slicing** for better attention performance. ([#1155](https://github.com/vllm-project/vllm-gaudi/pull/1155))
-- Added **OpenAI-compatible `/v1/models/switch` entrypoint** and per-model tool-calling and FP8 configs for online model swap. ([#1258](https://github.com/vllm-project/vllm-gaudi/pull/1258))
-- Introduced **HPU-specific KV-offload and async speculative decoding** fixes. ([#1264](https://github.com/vllm-project/vllm-gaudi/pull/1264))
-- Fixed **NIXL connector heterogeneous and homogeneous** deployment scenarios. ([#1511](https://github.com/vllm-project/vllm-gaudi/pull/1511), [#1503](https://github.com/vllm-project/vllm-gaudi/pull/1503))
+- Removed lazy execution mode from CI, making eager execution the default for CI pipelines while retaining lazy mode support at runtime. ([#996](https://github.com/vllm-project/vllm-gaudi/pull/996))
+- Introduced a new padding-aware bucketing strategy to improve memory utilization and reduce padding overhead. ([#762](https://github.com/vllm-project/vllm-gaudi/pull/762))
+- Added W8A8 INT8 quantization with BF16 fallback via `HPUCompressedTensorsW8A8Int8_BF16Fallback`. ([#1168](https://github.com/vllm-project/vllm-gaudi/pull/1168))
+- Enabled FusedSDPA slicing to improve attention performance. ([#1155](https://github.com/vllm-project/vllm-gaudi/pull/1155))
+- Added an OpenAI-compatible `/v1/models/switch` entrypoint together with per-model tool-calling and FP8 configs for online model swapping. ([#1258](https://github.com/vllm-project/vllm-gaudi/pull/1258))
+- Added HPU-specific fixes for KV offload and asynchronous speculative decoding. ([#1264](https://github.com/vllm-project/vllm-gaudi/pull/1264))
+- Resolved NIXL connector issues in heterogeneous and homogeneous deployment scenarios. ([#1511](https://github.com/vllm-project/vllm-gaudi/pull/1511), [#1503](https://github.com/vllm-project/vllm-gaudi/pull/1503))
 
 ---
 
@@ -26,20 +26,20 @@ This release is based on [vLLM v0.21.0](https://github.com/vllm-project/vllm/rel
 - Fixed guard breaks and improved warmup time for Qwen3 MoE. ([#1329](https://github.com/vllm-project/vllm-gaudi/pull/1329))
 - Improved `selective_state_update` performance. ([#1291](https://github.com/vllm-project/vllm-gaudi/pull/1291))
 - Removed splitting MoE decode layer compilation function. ([#1313](https://github.com/vllm-project/vllm-gaudi/pull/1313))
-- Optimized visible block number for hybrid KV cache. ([#1317](https://github.com/vllm-project/vllm-gaudi/pull/1317))
+- Optimized the visible block number for hybrid KV cache. ([#1317](https://github.com/vllm-project/vllm-gaudi/pull/1317))
 - Fine-tuned bucketing edge cases for longer contexts. ([#1362](https://github.com/vllm-project/vllm-gaudi/pull/1362))
-- Raised the default `max_cudagraph_capture_size` floor to 16384. ([#1507](https://github.com/vllm-project/vllm-gaudi/pull/1507))
+- Raised the default `max_cudagraph_capture_size` floor to `16384`. ([#1507](https://github.com/vllm-project/vllm-gaudi/pull/1507))
 
 ---
 
 ## Attention & KV Cache
 
 - Added prefix caching support for HPUMambaMixer2. ([#1366](https://github.com/vllm-project/vllm-gaudi/pull/1366))
-- Fixed condition for materialised causal `attn_bias`. ([#1433](https://github.com/vllm-project/vllm-gaudi/pull/1433))
+- Fixed the condition for materialized causal `attn_bias`. ([#1433](https://github.com/vllm-project/vllm-gaudi/pull/1433))
 - Fixed proper KV cache slot addressing for hybrid models. ([#1327](https://github.com/vllm-project/vllm-gaudi/pull/1327))
 - Fixed `mamba_type` comparison for GDN hybrid cache allocation. ([#1449](https://github.com/vllm-project/vllm-gaudi/pull/1449))
 - Fixed extra masking for batched prefill in GDN layers. ([#1440](https://github.com/vllm-project/vllm-gaudi/pull/1440))
-- Fixed HPU-specific bugs for KV-offload and async speculative decoding. ([#1264](https://github.com/vllm-project/vllm-gaudi/pull/1264))
+- Fixed HPU-specific bugs affecting KV offload and asynchronous speculative decoding. ([#1264](https://github.com/vllm-project/vllm-gaudi/pull/1264))
 
 ---
 
@@ -47,7 +47,7 @@ This release is based on [vLLM v0.21.0](https://github.com/vllm-project/vllm/rel
 
 - Implemented `HPUCompressedTensorsW8A8Int8_BF16Fallback` for W8A8 INT8 quantization with BF16 fallback. ([#1168](https://github.com/vllm-project/vllm-gaudi/pull/1168))
 - Fixed Synapse GC compile failure for FP8-quantized models. ([#1324](https://github.com/vllm-project/vllm-gaudi/pull/1324))
-- Enabled Llama4 Maverick FP8 torch.compile without breaking DeepSeek. ([#1396](https://github.com/vllm-project/vllm-gaudi/pull/1396))
+- Enabled Llama4 Maverick FP8 `torch.compile` support without breaking DeepSeek. ([#1396](https://github.com/vllm-project/vllm-gaudi/pull/1396))
 - Fixed GPT-OSS MxFP4 TP partitioning and `quant_method` matching. ([#1498](https://github.com/vllm-project/vllm-gaudi/pull/1498))
 - Added Granite-4.0-h calibration config. ([#1270](https://github.com/vllm-project/vllm-gaudi/pull/1270))
 - Fixed load failure of MxFP4 GPT-OSS-120B with expert parallel. ([#1411](https://github.com/vllm-project/vllm-gaudi/pull/1411))
@@ -57,14 +57,14 @@ This release is based on [vLLM v0.21.0](https://github.com/vllm-project/vllm/rel
 
 ## Plugin Core
 
-- Removed lazy execution mode from CI — eager is now the default in CI pipelines. ([#996](https://github.com/vllm-project/vllm-gaudi/pull/996))
+- Removed lazy execution mode from CI, making eager execution the default in CI pipelines. ([#996](https://github.com/vllm-project/vllm-gaudi/pull/996))
 - Accepted PEP 440 versions in build detection. ([#1351](https://github.com/vllm-project/vllm-gaudi/pull/1351))
 - Patched `torch.accelerator.empty_cache` for HPU to fix import-order dependent cleanup failures. ([#1430](https://github.com/vllm-project/vllm-gaudi/pull/1430))
 - Removed `matmul_qk` output-tensor compatibility gate after 1.24.0. ([#1409](https://github.com/vllm-project/vllm-gaudi/pull/1409))
 - Removed `transformers` installation from vllm-gaudi. ([#1494](https://github.com/vllm-project/vllm-gaudi/pull/1494))
-- Prevented eager-mode env vars from leaking to lazy-mode subprocesses. ([#1510](https://github.com/vllm-project/vllm-gaudi/pull/1510))
+- Prevented eager-mode environment variables from leaking into lazy-mode subprocesses. ([#1510](https://github.com/vllm-project/vllm-gaudi/pull/1510))
 - Fixed multiple upstream regressions across MoE, MLA, NIXL, attention, FP8, offloading, and platform modules. ([#1279](https://github.com/vllm-project/vllm-gaudi/pull/1279), [#1311](https://github.com/vllm-project/vllm-gaudi/pull/1311), [#1338](https://github.com/vllm-project/vllm-gaudi/pull/1338), [#1342](https://github.com/vllm-project/vllm-gaudi/pull/1342), [#1354](https://github.com/vllm-project/vllm-gaudi/pull/1354), [#1375](https://github.com/vllm-project/vllm-gaudi/pull/1375), [#1377](https://github.com/vllm-project/vllm-gaudi/pull/1377), [#1403](https://github.com/vllm-project/vllm-gaudi/pull/1403), [#1421](https://github.com/vllm-project/vllm-gaudi/pull/1421), [#1428](https://github.com/vllm-project/vllm-gaudi/pull/1428), [#1442](https://github.com/vllm-project/vllm-gaudi/pull/1442))
-- Ported fixes for MoE fast path, dynamic shape, kernel block size, and batched count operations. ([#1453](https://github.com/vllm-project/vllm-gaudi/pull/1453), [#1458](https://github.com/vllm-project/vllm-gaudi/pull/1458), [#1459](https://github.com/vllm-project/vllm-gaudi/pull/1459), [#1460](https://github.com/vllm-project/vllm-gaudi/pull/1460), [#1469](https://github.com/vllm-project/vllm-gaudi/pull/1469))
+- Ported fixes for the MoE fast path, dynamic shapes, kernel block sizes, and batched count operations. ([#1453](https://github.com/vllm-project/vllm-gaudi/pull/1453), [#1458](https://github.com/vllm-project/vllm-gaudi/pull/1458), [#1459](https://github.com/vllm-project/vllm-gaudi/pull/1459), [#1460](https://github.com/vllm-project/vllm-gaudi/pull/1460), [#1469](https://github.com/vllm-project/vllm-gaudi/pull/1469))
 
 ---
 
@@ -74,41 +74,41 @@ This release is based on [vLLM v0.21.0](https://github.com/vllm-project/vllm/rel
 - Set Docker `PT_HPU_LAZY_MODE=0` as the default auto-calculated value. ([#1378](https://github.com/vllm-project/vllm-gaudi/pull/1378))
 - Added OpenAI-compatible `/v1/models/switch` entrypoint integration. ([#1258](https://github.com/vllm-project/vllm-gaudi/pull/1258))
 - Added per-model tool-calling and FP8 configs. ([#1258](https://github.com/vllm-project/vllm-gaudi/pull/1258))
-- Enhanced process management for online model swap example. ([#1414](https://github.com/vllm-project/vllm-gaudi/pull/1414))
-- Fixed NIXL connector V1 API signature mismatches for heterogeneous HPU. ([#1503](https://github.com/vllm-project/vllm-gaudi/pull/1503))
+- Enhanced process management for the online model swap example. ([#1414](https://github.com/vllm-project/vllm-gaudi/pull/1414))
+- Fixed NIXL connector v1 API signature mismatches for heterogeneous HPU. ([#1503](https://github.com/vllm-project/vllm-gaudi/pull/1503))
 - Fixed heterogeneous and homogeneous NIXL deployment issues for v0.21.0. ([#1511](https://github.com/vllm-project/vllm-gaudi/pull/1511))
-- Enabled defragmentation when contiguous PA is enabled. ([#1400](https://github.com/vllm-project/vllm-gaudi/pull/1400))
-- Clarified `VLLM_PROMPT_BS_BUCKET_MAX` runtime behavior in docs. ([#1410](https://github.com/vllm-project/vllm-gaudi/pull/1410))
+- Enabled defragmentation when contiguous PA was enabled. ([#1400](https://github.com/vllm-project/vllm-gaudi/pull/1400))
+- Clarified `VLLM_PROMPT_BS_BUCKET_MAX` runtime behavior in the documentation. ([#1410](https://github.com/vllm-project/vllm-gaudi/pull/1410))
 
 ---
 
 ## Fixes
 
-- Fixed occasional Qwen3.5 segfault. ([#1500](https://github.com/vllm-project/vllm-gaudi/pull/1500))
+- Fixed occasional Qwen3.5 segfaults. ([#1500](https://github.com/vllm-project/vllm-gaudi/pull/1500))
 - Fixed decode bucket generation for hybrid models with mismatched block sizes. ([#1486](https://github.com/vllm-project/vllm-gaudi/pull/1486))
 - Fixed HPU `prompt_token_ids` device placement for penalty sampling. ([#1466](https://github.com/vllm-project/vllm-gaudi/pull/1466))
 - Fixed decode bucket filter issues. ([#1447](https://github.com/vllm-project/vllm-gaudi/pull/1447))
-- Fixed decode bucketing in non-contiguous PA scenario. ([#1122](https://github.com/vllm-project/vllm-gaudi/pull/1122))
+- Fixed decode bucketing in non-contiguous PA scenarios. ([#1122](https://github.com/vllm-project/vllm-gaudi/pull/1122))
 - Fixed MRoPE accuracy for Qwen models. ([#1437](https://github.com/vllm-project/vllm-gaudi/pull/1437))
-- Fixed warmup failure and multimodal graph warmup in PT compile-only mode. ([#1392](https://github.com/vllm-project/vllm-gaudi/pull/1392))
+- Fixed warmup failures and multimodal graph warmup in PT compile-only mode. ([#1392](https://github.com/vllm-project/vllm-gaudi/pull/1392))
 - Flattened 3D `inputs_embeds` in `HpuModelAdapter.forward`. ([#1381](https://github.com/vllm-project/vllm-gaudi/pull/1381))
 - Fixed prompt logprobs gathering on Gaudi HPU. ([#1405](https://github.com/vllm-project/vllm-gaudi/pull/1405))
-- Fixed regression in Mistral-Large-3-675B. ([#1304](https://github.com/vllm-project/vllm-gaudi/pull/1304))
-- Fixed Granite 4h block size calculations. ([#1332](https://github.com/vllm-project/vllm-gaudi/pull/1332))
-- Separated conv1d for Granite 4.0. ([#1322](https://github.com/vllm-project/vllm-gaudi/pull/1322))
+- Fixed a regression in Mistral-Large-3-675B. ([#1304](https://github.com/vllm-project/vllm-gaudi/pull/1304))
+- Fixed Granite 4H block size calculations. ([#1332](https://github.com/vllm-project/vllm-gaudi/pull/1332))
+- Separated `conv1d` for Granite 4.0. ([#1322](https://github.com/vllm-project/vllm-gaudi/pull/1322))
 - Corrected `get_supported_kernel_block_sizes`. ([#1384](https://github.com/vllm-project/vllm-gaudi/pull/1384))
-- Fixed MoE graph breaks from ForwardContext lookups. ([#1357](https://github.com/vllm-project/vllm-gaudi/pull/1357))
-- Reset hybrid `block_size` to 128 for tool calling. ([#1303](https://github.com/vllm-project/vllm-gaudi/pull/1303))
-- Fixed hybrid model warmup `block_size` mismatch (Qwen3.5-35B-A3B). ([#1462](https://github.com/vllm-project/vllm-gaudi/pull/1462))
-- Fixed stale gate ref overriding caller `router_logits` in dp_size==1 MoE fast path. ([#1469](https://github.com/vllm-project/vllm-gaudi/pull/1469))
-- Fixed Ernie4.5-VL test. ([#1105](https://github.com/vllm-project/vllm-gaudi/pull/1105))
-- Eliminated Llama4 torch.compile recompilations on HPU. ([#1360](https://github.com/vllm-project/vllm-gaudi/pull/1360))
+- Fixed MoE graph breaks from `ForwardContext` lookups. ([#1357](https://github.com/vllm-project/vllm-gaudi/pull/1357))
+- Reset hybrid `block_size` to `128` for tool calling. ([#1303](https://github.com/vllm-project/vllm-gaudi/pull/1303))
+- Fixed hybrid model warmup `block_size` mismatch for Qwen3.5-35B-A3B. ([#1462](https://github.com/vllm-project/vllm-gaudi/pull/1462))
+- Fixed stale gate references overriding caller `router_logits` in the `dp_size==1` MoE fast path. ([#1469](https://github.com/vllm-project/vllm-gaudi/pull/1469))
+- Fixed the Ernie4.5-VL test. ([#1105](https://github.com/vllm-project/vllm-gaudi/pull/1105))
+- Eliminated Llama4 `torch.compile` recompilations on HPU. ([#1360](https://github.com/vllm-project/vllm-gaudi/pull/1360))
 
 ---
 
 ## Deprecation & Breaking Changes
 
-- Removed `transformers` installation from vllm-gaudi — it is now expected to be provided by the base environment. ([#1494](https://github.com/vllm-project/vllm-gaudi/pull/1494))
+Removed `transformers` installation from vllm-gaudi; it is now expected to be provided by the base environment. ([#1494](https://github.com/vllm-project/vllm-gaudi/pull/1494))
 
 ---
 
