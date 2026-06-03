@@ -5282,10 +5282,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if decode_cfg:
             decode_bs, decode_query_len, decode_num_blocks = decode_cfg
             # Use attn_block_size (the actual kernel block granularity used in
-            # _create_decode_input_data) rather than block_size (the KV-manager
-            # page size).  For hybrid models these differ after
-            # initialize_kv_cache aligns attn page size to mamba page size,
-            # causing warmup to record wrong num_blocks otherwise.
+            # _create_decode_input_data) for decode warmup shapes.  For GDN
+            # hybrids (Qwen3.5) these differ from self.block_size; for non-GDN
+            # hybrids (Granite 4.0-H) they are equal after reassignment.
             decode_block_size = self.attn_block_size
             if self.use_contiguous_pa:
                 decode_seq_lengths = [decode_block_size] * decode_bs
@@ -5914,19 +5913,28 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         if self.num_mamba_like_layers > 0:
-            # NOTE: Do NOT reassign self.block_size or
-            # bucketing_manager.block_size from cache_config here.
-            # For hybrid models the upstream HybridAttentionMambaModelConfig
-            # inflates cache_config.block_size to align mamba pages (e.g.
-            # 1152 for Qwen3.5), but the HPU attention kernel operates at
-            # 128-token granularity.  _create_decode_input_data computes
-            # num_blocks using self.attn_block_size (set below from
-            # prepare_kernel_block_sizes), so the bucketing manager must
-            # also use that same granularity.  Overwriting block_size with
-            # the inflated KV-manager page size caused decode buckets to be
-            # generated at 1152-token granularity while runtime used
-            # 128-token granularity, leading to permanent "not warmed-up"
-            # warnings and recompilations.
+            if self.num_gdn > 0:
+                # GDN hybrids (e.g. Qwen3.5): Do NOT reassign self.block_size
+                # from cache_config.  The upstream HybridAttentionMambaModelConfig
+                # inflates cache_config.block_size to align mamba pages (e.g.
+                # 1152 for Qwen3.5), but the HPU attention kernel operates at
+                # 128-token granularity.  _create_decode_input_data computes
+                # num_blocks using self.attn_block_size (set below from
+                # prepare_kernel_block_sizes), so the bucketing manager must
+                # also use that same granularity.  Overwriting block_size with
+                # the inflated KV-manager page size caused decode buckets to be
+                # generated at 1152-token granularity while runtime used
+                # 128-token granularity, leading to permanent "not warmed-up"
+                # warnings and recompilations.
+                pass
+            else:
+                # Non-GDN hybrids (e.g. Granite 4.0-H): block_size and
+                # attn_block_size are equal (both 528) after platform
+                # alignment, so reassignment keeps all runtime paths
+                # (warmup, prefill bucketing, decode) consistent.
+                self.block_size = self.vllm_config.cache_config.block_size
+                if self.enable_bucketing:
+                    self.bucketing_manager.block_size = self.block_size
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
 
