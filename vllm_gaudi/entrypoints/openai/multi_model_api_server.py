@@ -525,7 +525,7 @@ async def _init_multi_model_state(
     )
 
     if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generate.api_router import init_generate_state
+        from vllm.entrypoints.generate.api_router import init_generate_state
 
         state_args = Namespace(**vars(args))
         state_args.enable_auto_tool_choice = frontend_settings.enable_auto_tool_choice
