@@ -123,6 +123,11 @@ class HpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # Apply torch.compile/eager-only env defaults here (engine construction
+        # time) instead of at plugin registration time, so they cannot leak into
+        # a lazy-mode subprocess (GAUDISW-248809) and always respect values the
+        # user set explicitly (GAUDISW-249135).
+        cls.set_compile_env_defaults()
         parallel_config = vllm_config.parallel_config
 
         if parallel_config.worker_cls == "auto":
@@ -360,7 +365,19 @@ class HpuPlatform(Platform):
         # does not support torch.compile
         # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
         # torch.compile support
-        os.environ['PT_HPU_WEIGHT_SHARING'] = '0'
+        #
+        # This runs at plugin-registration / import time (e.g. when vllm_gaudi
+        # is loaded as a pytest plugin), which may be a different process and a
+        # different execution mode than the engine that ultimately runs. Only
+        # set env vars here that are safe to inherit in ANY mode, so they never
+        # leak harmful values into a child process running a different mode
+        # (see GAUDISW-248809). Compile/eager-only defaults are applied later in
+        # check_and_update_config(), which only runs when a real engine is built.
+        #
+        # Never overwrite a value the user set explicitly (respect user input,
+        # see GAUDISW-249135).
+        if os.environ.get('PT_HPU_WEIGHT_SHARING') is None:
+            os.environ['PT_HPU_WEIGHT_SHARING'] = '0'
         is_lazy = htorch.utils.internal.is_lazy()
         if is_lazy:
             torch._dynamo.config.disable = True
@@ -368,13 +385,26 @@ class HpuPlatform(Platform):
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
-        else:
-            # If not set by user then for torch compile enable Runtime scale patching by default
-            if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
-                os.environ['RUNTIME_SCALE_PATCHING'] = '1'
-            #This allows for utilization of Parallel Compilation feature
-            if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
-                os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
+
+    @classmethod
+    def set_compile_env_defaults(cls) -> None:
+        # Apply torch.compile / eager-only env defaults. Called from
+        # check_and_update_config() (engine construction time) rather than from
+        # set_torch_compile() (import/registration time) so these eager-only
+        # values can never leak into a lazy-mode subprocess spawned by a parent
+        # that merely imported vllm_gaudi (e.g. a pytest collection process).
+        # See GAUDISW-248809.
+        #
+        # No-op in lazy mode, and never overwrites a user-provided value
+        # (respect user input, see GAUDISW-249135).
+        if htorch.utils.internal.is_lazy():
+            return
+        # Enable Runtime Scale Patching by default for torch.compile/FP8.
+        if os.environ.get('RUNTIME_SCALE_PATCHING') is None:
+            os.environ['RUNTIME_SCALE_PATCHING'] = '1'
+        # Allow utilization of the Parallel Compilation feature.
+        if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
+            os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
 
     @classmethod
     def adjust_cuda_hooks(cls) -> None:
