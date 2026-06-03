@@ -384,7 +384,8 @@ class HpuPlatform(Platform):
             # NOTE multi-HPU inference with HPUGraphs (lazy-only)
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html  # noqa: E501
-            os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
+            if os.environ.get('PT_HPU_ENABLE_LAZY_COLLECTIVES') is None:
+                os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
 
     @classmethod
     def set_compile_env_defaults(cls) -> None:

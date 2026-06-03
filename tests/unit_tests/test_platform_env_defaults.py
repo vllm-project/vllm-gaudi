@@ -18,6 +18,7 @@ import os
 from unittest import mock
 
 import pytest
+import torch
 
 from vllm_gaudi.platform import HpuPlatform
 
@@ -29,16 +30,22 @@ _EAGER_ONLY_VARS = (
 
 @pytest.fixture(autouse=True)
 def _clean_env():
-    """Isolate the env vars this test touches."""
+    """Isolate the env vars and global torch state this test touches."""
     touched = (
         "PT_HPU_WEIGHT_SHARING",
         "PT_HPU_ENABLE_LAZY_COLLECTIVES",
         *_EAGER_ONLY_VARS,
     )
+    # set_torch_compile() flips torch._dynamo.config.disable in lazy mode;
+    # snapshot it so the change does not leak into other tests.
+    saved_dynamo_disable = torch._dynamo.config.disable
     with mock.patch.dict(os.environ, clear=False):
         for var in touched:
             os.environ.pop(var, None)
-        yield
+        try:
+            yield
+        finally:
+            torch._dynamo.config.disable = saved_dynamo_disable
 
 
 def _set_lazy(is_lazy: bool):
@@ -117,3 +124,16 @@ def test_pt_hpu_weight_sharing_default_and_respect():
     with _set_lazy(False):
         HpuPlatform.set_torch_compile()
     assert os.environ["PT_HPU_WEIGHT_SHARING"] == "1"
+
+
+def test_pt_hpu_enable_lazy_collectives_default_and_respect():
+    # Default-set in lazy mode when absent.
+    with _set_lazy(True):
+        HpuPlatform.set_torch_compile()
+    assert os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] == "true"
+
+    # User value respected in lazy mode (GAUDISW-249135).
+    os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] = "false"
+    with _set_lazy(True):
+        HpuPlatform.set_torch_compile()
+    assert os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] == "false"
