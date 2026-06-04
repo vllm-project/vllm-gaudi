@@ -27,7 +27,7 @@ import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 USE_TPC_CAUSAL_CONV1D_FWD = os.environ.get("VLLM_HPU_CAUSAL_CONV1D_FWD_TPC", "1") == "1"
-USE_TPC_CAUSAL_CONV1D_UPDATE = os.environ.get("VLLM_HPU_CAUSAL_CONV1D_UPDATE_TPC", "1") == "1"
+USE_TPC_CAUSAL_CONV1D_UPDATE = os.environ.get("VLLM_HPU_CAUSAL_CONV1D_UPDATE_TPC", "0") == "1"
 
 
 @dataclass(frozen=True)
