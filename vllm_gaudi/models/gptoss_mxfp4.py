@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+import os
 
 import torch
 from transformers import PretrainedConfig
@@ -17,19 +18,32 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+# HPU_MXFP4_NATIVE controls the MXFP4 execution strategy:
+#   True (HPU_MXFP4_NATIVE=1): If weights are packed, use native
+#     torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights kernel.
+#     Quant config flows through normally (GptOssMxfp4Config is active).
+#     Upstream _load_weights_mxfp4 is used for weight loading.
+#   False (default, HPU_MXFP4_NATIVE=0): Suppress quant config, dequantize
+#     weights to BF16 at load time (legacy behavior).
+HPU_MXFP4_NATIVE = os.environ.get("HPU_MXFP4_NATIVE", "0") == "1"
+
 # Store original implementations before patching
 _original_normalize_quantization_config = ModelArchConfigConvertorBase._normalize_quantization_config
 _original_load_weights = GptOssModel.load_weights
 
 
 def _patched_normalize_quantization_config(self, config: PretrainedConfig):
-    # Skip mxfp4 quantization to use custom loading logic for gpt_oss
-    if getattr(config, "model_type", None) == "gpt_oss":
-        quant_cfg = getattr(config, "quantization_config", None)
-        if quant_cfg is not None and quant_cfg.get("quant_method", "").lower() == "mxfp4":
-            return None
-
-    # For all other models, use the original vLLM implementation
+    # When HPU_MXFP4_NATIVE=False (legacy mode), suppress the mxfp4 quant
+    # config so that BF16 params are allocated and we dequantize at load time.
+    # When HPU_MXFP4_NATIVE=True, let the quant config flow through so
+    # GptOssMxfp4Config is used and uint8 params are properly allocated.
+    if not HPU_MXFP4_NATIVE:
+        if getattr(config, "model_type", None) == "gpt_oss":
+            quant_cfg = getattr(config, "quantization_config", None)
+            if quant_cfg is not None and quant_cfg.get("quant_method", "").lower() == "mxfp4":
+                return None
+    print(f"HPU_MXFP4_NATIVE={'enabled' if HPU_MXFP4_NATIVE else 'disabled'}: ")
+    # For all other models (or native mode), use the original implementation
     return _original_normalize_quantization_config(self, config)
 
 
@@ -296,35 +310,45 @@ def patched_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> s
 
     # Only use custom loading for gpt_oss + mxfp4.
     if quant_method == "gpt_oss_mxfp4":
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-        ]
+        if 1:
+            print("HPU_MXFP4_NATIVE enabled: using upstream MXFP4 weight loading logic for MoE layers")
+            # Native mode: quant config is active, uint8 params are allocated
+            # by GptOssMxfp4MoEMethod.create_weights(). Use upstream loader
+            # which handles TP-sliced loading into uint8 params directly.
+            return _original_load_weights(self, weights)
+        else:
+            print("HPU_MXFP4_NATIVE disabled: using HPU MXFP4 weight loading logic for MoE layers with dequantization to BF16")
+            # Legacy mode: quant config suppressed, BF16 params allocated.
+            # Dequantize packed MXFP4 weights at load time.
+            stacked_params_mapping = [
+                # (param_name, shard_name, shard_id)
+                (".qkv_proj", ".q_proj", "q"),
+                (".qkv_proj", ".k_proj", "k"),
+                (".qkv_proj", ".v_proj", "v"),
+            ]
 
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
 
-        # Attention heads per rank
-        heads_per_rank = self.config.num_attention_heads // tp_size
-        head_start = tp_rank * heads_per_rank
+            # Attention heads per rank
+            heads_per_rank = self.config.num_attention_heads // tp_size
+            head_start = tp_rank * heads_per_rank
 
-        ep_size = get_ep_group().world_size
-        ep_rank = get_ep_group().rank
-        num_experts = self.config.num_local_experts
-        experts_per_rank = num_experts // ep_size
-        ep_rank_start = ep_rank * experts_per_rank
-        ep_rank_end = (ep_rank + 1) * experts_per_rank
+            ep_size = get_ep_group().world_size
+            ep_rank = get_ep_group().rank
+            num_experts = self.config.num_local_experts
+            experts_per_rank = num_experts // ep_size
+            ep_rank_start = ep_rank * experts_per_rank
+            ep_rank_end = (ep_rank + 1) * experts_per_rank
 
-        return self._load_weights_mxfp4_dequantize_hpu(
-            ep_rank_end,
-            ep_rank_start,
-            heads_per_rank,
-            head_start,
-            weights,
-            stacked_params_mapping,
-        )
+            return self._load_weights_mxfp4_dequantize_hpu(
+                ep_rank_end,
+                ep_rank_start,
+                heads_per_rank,
+                head_start,
+                weights,
+                stacked_params_mapping,
+            )
 
     # For all other models, use the original vLLM implementation
     return _original_load_weights(self, weights)
