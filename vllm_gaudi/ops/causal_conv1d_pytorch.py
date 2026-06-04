@@ -17,6 +17,7 @@ explicitly.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Callable
 
@@ -24,6 +25,9 @@ import torch
 # import habana_frameworks.torch.hpu as ht
 
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+
+USE_TPC_CAUSAL_CONV1D_FWD = os.environ.get("VLLM_HPU_CAUSAL_CONV1D_FWD_TPC", "1") == "1"
+USE_TPC_CAUSAL_CONV1D_UPDATE = os.environ.get("VLLM_HPU_CAUSAL_CONV1D_UPDATE_TPC", "1") == "1"
 
 
 @dataclass(frozen=True)
@@ -195,6 +199,86 @@ def hpu_causal_conv1d_fn(
             num_computed_tokens,
     )):
         raise NotImplementedError("Prefix caching metadata is not supported in the PyTorch reference implementation.")
+
+    if USE_TPC_CAUSAL_CONV1D_FWD:
+        activation_bool = _normalize_activation(activation) in ("silu", "swish")
+        work_dtype = conv_states.dtype if conv_states is not None else x.dtype
+        # weight: (dim, width) -> (width, dim)
+        weight_for_tpc = weight.t().contiguous().clone().to(work_dtype)
+        bias_for_tpc = bias.to(work_dtype) if bias is not None else None
+
+        dim_x, cu_seqlen = x.shape
+        padded_batch = query_start_loc.numel() - 1
+        if has_initial_state is None:
+            has_initial_state = torch.zeros(padded_batch, dtype=torch.int32, device=x.device)
+        if cache_indices is None:
+            cache_indices = torch.arange(padded_batch, device=x.device, dtype=torch.int32)
+
+        # HPU bucketed prefill uses per-batch-padded layout: each sequence
+        # is individually padded to seq_len_each = cu_seqlen / batch.
+        # The query_start_loc gives cumulative VALID token counts, NOT buffer
+        # positions.  We must repack valid tokens into a contiguous buffer
+        # before calling the TPC kernel (which expects packed layout).
+        needs_repack = (padded_batch > 1 and cu_seqlen % padded_batch == 0)
+        if needs_repack:
+            seq_len_each = cu_seqlen // padded_batch
+            # Get actual sequence lengths as Python ints (avoid .item() on HPU)
+            qsl_cpu = query_start_loc.cpu().tolist()
+            actual_qlens_list = [qsl_cpu[b + 1] - qsl_cpu[b] for b in range(padded_batch)]
+            total_valid = sum(actual_qlens_list)
+            # Reshape to per-batch view: (dim, B, seq_len_each)
+            x_batched = x.to(work_dtype).reshape(dim_x, padded_batch, seq_len_each)
+            # Extract valid tokens from each batch and pack contiguously
+            packed_parts = []
+            for b in range(padded_batch):
+                packed_parts.append(x_batched[:, b, :actual_qlens_list[b]])
+            x_packed = torch.cat(packed_parts, dim=1)  # (dim, total_valid)
+            # x_packed is (dim, total_valid) -> transpose to (total_valid, dim) for TPC
+            x_for_tpc = x_packed.t().contiguous()
+            # packed_qsl matches the contiguous layout
+            packed_offsets = [0]
+            for ql in actual_qlens_list:
+                packed_offsets.append(packed_offsets[-1] + ql)
+            packed_qsl = torch.tensor(packed_offsets, dtype=torch.int32, device=x.device)
+        else:
+            # Single sequence or fallback: x is already usable as-is
+            x_for_tpc = x.t().contiguous().clone().to(work_dtype)
+            packed_qsl = query_start_loc.to(torch.int32)
+            total_valid = cu_seqlen
+
+        out, conv_states_out = torch.ops.hpu.causal_conv1d_fwd(
+            x_for_tpc,
+            conv_states,
+            weight_for_tpc,
+            bias_for_tpc,
+            has_initial_state.to(torch.int32),
+            packed_qsl,
+            cache_indices.to(torch.int32),
+            activation=activation_bool,
+            pad_slot_id=PAD_SLOT_ID,
+        )
+
+        with torch.no_grad():
+            # Only write back the slots that were actually processed —
+            # a blanket copy_ corrupts slots belonging to other in-flight
+            # requests that weren't part of this batch.
+            safe_idx = torch.remainder(cache_indices.long(), conv_states.shape[0])
+            conv_states[safe_idx] = conv_states_out[safe_idx]
+
+        # Scatter TPC output back to per-batch-padded layout
+        if needs_repack:
+            out_packed = out[:total_valid]  # (total_valid, dim)
+            out_padded = torch.zeros(cu_seqlen, dim_x, device=out.device, dtype=out.dtype)
+            packed_offset = 0
+            for b in range(padded_batch):
+                ql = actual_qlens_list[b]
+                batch_start = b * seq_len_each
+                out_padded[batch_start:batch_start + ql] = out_packed[packed_offset:packed_offset + ql]
+                packed_offset += ql
+            return out_padded.t().to(x.dtype)
+
+        # out: (cu_seqlen, dim) -> (dim, cu_seqlen)
+        return out.t().to(x.dtype)
 
     activation = _normalize_activation(activation)
     original_dtype = x.dtype
@@ -371,6 +455,62 @@ def hpu_causal_conv1d_update(
         raise NotImplementedError("Prefix caching metadata is not supported in the reference implementation.")
     if max_query_len not in (-1, None):  # Provided only for Triton helper parity
         raise NotImplementedError("'max_query_len' is not used in the reference implementation.")
+
+    if USE_TPC_CAUSAL_CONV1D_UPDATE:
+        activation_bool = _normalize_activation(activation) in ("silu", "swish")
+        dim = weight.size(0)
+        work_dtype = conv_state.dtype
+        # weight: (dim, width) -> (width, dim)
+        weight_for_tpc = weight.t().contiguous().to(work_dtype)
+        bias_for_tpc = bias.to(work_dtype) if bias is not None else None
+
+        # Gather per-batch conv_state using indices
+        if conv_state_indices is not None:
+            num_conv_slots = conv_state.shape[0]
+            safe_idx = torch.remainder(conv_state_indices.long(), num_conv_slots)
+            batch_conv_state = conv_state[safe_idx]
+            batch = safe_idx.numel()
+        else:
+            batch_conv_state = conv_state
+            batch = conv_state.shape[0]
+
+        # Reshape x to (batch, seqlen, dim) for TPC kernel
+        original_x = x
+        if x.dim() == 2:
+            if x.size(1) == dim:
+                x_3d = x.reshape(batch, -1, dim).to(work_dtype)
+            elif x.size(0) == dim:
+                x_3d = x.t().contiguous().reshape(batch, -1, dim).to(work_dtype)
+            else:
+                raise ValueError("Cannot reshape 2-D x for TPC causal_conv1d_update.")
+        elif x.dim() == 3:
+            x_3d = x.to(work_dtype)
+        else:
+            raise ValueError("Unsupported x dimensions for TPC causal_conv1d_update.")
+
+        out, conv_state_out = torch.ops.hpu.causal_conv1d_update(
+            x_3d,
+            batch_conv_state,
+            weight_for_tpc,
+            bias_for_tpc,
+            activation=activation_bool,
+            pad_slot_id=pad_slot_id,
+        )
+
+        # Write back updated conv_state
+        with torch.no_grad():
+            if conv_state_indices is not None:
+                conv_state[safe_idx] = conv_state_out
+            else:
+                conv_state.copy_(conv_state_out)
+
+        # Reshape output to match original x shape
+        if original_x.dim() == 2:
+            if original_x.size(1) == dim:
+                return out.reshape(original_x.shape).to(original_x.dtype)
+            elif original_x.size(0) == dim:
+                return out.reshape(-1, dim).t().contiguous().to(original_x.dtype)
+        return out.to(original_x.dtype)
 
     activation = _normalize_activation(activation)
     dim = weight.size(0)
