@@ -509,6 +509,17 @@ run_offloading_connector_test() {
     echo "✅ Test OffloadingConnector passed."
 }
 
+# HiKV Cache CPU offloading end-to-end test
+# Starts a vLLM server with the OffloadingConnector (CPU offload backend) and runs an
+# inference-perf workload that exercises the shared-prefix / LRU eviction path.
+# Requires: pip install inference-perf
+run_hi_cache_cpu_offload_test() {
+    echo "➡️ Testing HiKV Cache CPU offloading with OffloadingConnector (Qwen3-32B, TP=2)..."
+    pip install inference-perf --quiet
+    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/hi_cache_cpu_offload.py"
+    echo "✅ HiKV Cache CPU offloading test passed."
+}
+
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"
@@ -584,6 +595,7 @@ launch_all_tests() {
     run_pd_disaggregate_nixl_ucx_test
     run_cpu_offloading_test
     run_offloading_connector_test
+    run_hi_cache_cpu_offload_test
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test
