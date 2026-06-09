@@ -344,7 +344,7 @@ def install_engine_core_patch() -> None:
                     logger.info("[gaudi_reconfigure] kv connector handshake metadata refreshed")
 
             # Rebuild batch queue and scheduling helpers.
-            self.batch_queue_size = self.model_executor.max_concurrent_batches
+            self.batch_queue_size = new_config.max_concurrent_batches
             self.batch_queue = deque(maxlen=self.batch_queue_size) if self.batch_queue_size > 1 else None
 
             self.is_ec_consumer = (new_config.ec_transfer_config is None

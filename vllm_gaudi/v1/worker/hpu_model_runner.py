@@ -1338,10 +1338,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 state_indices_cpu = block_table_cpu_tensor[req_indices, block_table_offsets].clone()
 
             if num_indices < target_bs:
-                padding = torch.full((target_bs - num_indices, ),
-                                     self._MAMBA_PAD_BLOCK_ID,
-                                     dtype=torch.int32,
-                                     device='cpu')
+                pad_val = -1 if group_idx in self._compact_gdn_group_ids else self._MAMBA_PAD_BLOCK_ID
+                padding = torch.full((target_bs - num_indices, ), pad_val, dtype=torch.int32, device='cpu')
                 state_indices_cpu = torch.cat([state_indices_cpu, padding])
 
             all_state_indices_cpu.append(state_indices_cpu)
