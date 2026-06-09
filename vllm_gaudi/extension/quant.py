@@ -3,7 +3,8 @@ from typing import Any, Optional
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, UnquantizedFusedMoEMethod)
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase, UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (QuantizationConfig, QuantizeMethodBase)
