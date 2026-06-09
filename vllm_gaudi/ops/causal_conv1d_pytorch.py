@@ -34,6 +34,23 @@ class _ReshapeSpec:
     description: str
 
 
+# Cache transposed conv1d weights to avoid a per-token copy on the decode
+# update path. Keyed by (data_ptr, shape, dtype) so reloading the weight
+# in-place under the same shape/dtype invalidates the cache.
+_CONV1D_WEIGHT_T_CACHE: dict[tuple[int, torch.Size, torch.dtype], torch.Tensor] = {}
+
+
+def _get_conv1d_weight_t(weight: torch.Tensor) -> torch.Tensor:
+    """Return a cached contiguous [width, dim] view of weight ([dim, width])."""
+    key = (weight.data_ptr(), weight.shape, weight.dtype)
+    cached = _CONV1D_WEIGHT_T_CACHE.get(key)
+    if cached is not None:
+        return cached
+    weight_t = weight.t().contiguous()
+    _CONV1D_WEIGHT_T_CACHE[key] = weight_t
+    return weight_t
+
+
 def _normalize_activation(activation: bool | str | None) -> str | None:
     if isinstance(activation, bool):
         return "silu" if activation else None
@@ -374,31 +391,54 @@ def hpu_causal_conv1d_update(
 
     activation = _normalize_activation(activation)
 
+    # Fall back to the PyTorch reference path if the native TPC kernel is
+    # unavailable in the running stack (e.g. CPU-only debug builds).
+    if not hasattr(torch.ops.hpu, "causal_conv1d_update"):
+        dim = weight.size(0)
+        flat_x, qsl, reshape_spec = _flatten_inputs_for_update(x, query_start_loc, dim)
+        result = hpu_causal_conv1d_fn_update(
+            flat_x,
+            weight,
+            bias,
+            conv_state,
+            qsl,
+            cache_indices=conv_state_indices,
+            has_initial_state=None,
+            activation=activation,
+            metadata=None,
+            validate_data=validate_data,
+            is_prompt=False,
+        )
+        return reshape_spec.reshape_fn(result)
+
     # Native HPU TPC kernel for conv1d decode update.
     # torch.ops.hpu.causal_conv1d_update signature:
     #   x:          [batch, seqlen, dim]
     #   conv_state: [batch, state_len, dim]  (state_len = width - 1)
     #   weight:     [width, dim]
     #   bias:       [dim] or None
-    #   activation: bool (True = silu)
+    #   activation: bool (True applies SiLU/Swish, they are identical)
     #   pad_slot_id: int
     # Returns: (output [batch, seqlen, dim], updated_state [batch, state_len, dim])
     #
     # Our layout:
     #   x:          [batch, dim]  (1 token per seq in decode)
-    #   conv_state: [num_blocks, conv_kernel_size, dim]  (conv_kernel_size = width = 4)
+    #   conv_state: [num_blocks, conv_kernel_size, dim]  (conv_kernel_size = width)
     #   weight:     [dim, width]
 
-    # Adapt layouts for native kernel
     batch = x.size(0)
     width = weight.size(1)
+    # Native kernel requires a non-empty state window; width=1 would collapse
+    # `-state_len:` to the full state. GDN/Mamba2 models use width=4.
+    if width < 2:
+        raise NotImplementedError(f"hpu_causal_conv1d_update requires conv kernel width >= 2 (got {width}).")
     state_len = width - 1
 
     # x [batch, dim] → [batch, 1, dim]
     x_3d = x.unsqueeze(1)
 
-    # weight [dim, width] → [width, dim]
-    weight_t = weight.t().contiguous()
+    # weight [dim, width] → [width, dim] (cached across calls)
+    weight_t = _get_conv1d_weight_t(weight)
 
     # Select state slots and take last state_len entries
     # conv_state [num_blocks, width, dim] → [batch, state_len, dim]
@@ -407,8 +447,9 @@ def hpu_causal_conv1d_update(
     else:
         batch_state = conv_state[:batch, -state_len:, :]
 
-    # Call native HPU kernel
-    act_bool = (activation == "silu")
+    # SiLU and Swish are identical (x * sigmoid(x)); the native kernel takes
+    # a single bool flag, so map both to True.
+    act_bool = activation in ("silu", "swish")
     out, state_out = torch.ops.hpu.causal_conv1d_update(
         x_3d,
         batch_state,
@@ -427,7 +468,6 @@ def hpu_causal_conv1d_update(
 
     # Output: [batch, 1, dim] → [batch, dim]
     return out.squeeze(1)
-
 
 
 def hpu_causal_conv1d_fn_update(
