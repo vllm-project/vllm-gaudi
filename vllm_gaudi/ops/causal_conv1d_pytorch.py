@@ -350,74 +350,6 @@ def hpu_causal_conv1d_fn(
     return seq_out.squeeze(0).to(original_dtype)
 
 
-def hpu_causal_conv1d_fn_update(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    conv_states: torch.Tensor | None,
-    query_start_loc: torch.Tensor,
-    cache_indices: torch.Tensor | None = None,
-    has_initial_state: torch.Tensor | None = None,
-    activation: str | None = "silu",
-    block_idx_first_scheduled_token: torch.Tensor | None = None,
-    block_idx_last_scheduled_token: torch.Tensor | None = None,
-    initial_state_idx: torch.Tensor | None = None,
-    num_computed_tokens: torch.Tensor | None = None,
-    block_size_to_align: int = 0,
-    metadata=None,
-    validate_data: bool = False,
-    is_prompt: bool = True,
-):
-    """Pure PyTorch fallback for causal_conv1d_update (used when TPC op is unavailable)."""
-    if any(ptr is not None for ptr in (
-            block_idx_first_scheduled_token,
-            block_idx_last_scheduled_token,
-            initial_state_idx,
-            num_computed_tokens,
-    )):
-        raise NotImplementedError("Prefix caching metadata is not supported in the PyTorch reference implementation.")
-
-    activation = _normalize_activation(activation)
-    original_dtype = x.dtype
-    work_dtype = conv_states.dtype if conv_states is not None else x.dtype
-    x_work = x.to(work_dtype)
-    weight_work = weight.to(work_dtype)
-    bias_work = bias.to(work_dtype) if bias is not None else None
-
-    assert conv_states is not None
-    if conv_states.device != x_work.device:
-        raise ValueError("'conv_states' must reside on the same device as 'x'.")
-
-    qsl = _ensure_query_start_loc(query_start_loc)
-    assert qsl is not None
-
-    padded_batch = qsl.numel() - 1
-    _, dim, cu_seqlen = x_work.shape
-    _, width = weight_work.shape
-    state_len = max(width - 1, 0)
-
-    if cache_indices is None:
-        batch_cache_idx = torch.arange(padded_batch, device=x_work.device, dtype=torch.long)
-    else:
-        batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
-
-    num_conv_slots = conv_states.shape[0]
-    safe_cache_idx = torch.remainder(batch_cache_idx, num_conv_slots)
-
-    init_state = conv_states[safe_cache_idx, -state_len:, :]
-    init_state = init_state.transpose(-1, -2)
-
-    seq_input = torch.cat([init_state, x_work], dim=2)
-    new_state = seq_input[:, :, -state_len:]
-    seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
-    seq_out = _apply_activation(seq_out, activation)
-
-    with torch.no_grad():
-        conv_states[safe_cache_idx, -state_len:, :] = new_state.transpose(-1, -2)
-
-    return seq_out.to(original_dtype)
-
-
 def hpu_causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
@@ -499,8 +431,7 @@ def hpu_causal_conv1d_update(
         return out.to(original_x.dtype)
 
     else:
-        # Fallback: pure PyTorch implementation
-        activation_str = _normalize_activation(activation)
+        activation = _normalize_activation(activation)
         flat_x, qsl, reshape_spec = _flatten_inputs_for_update(x, query_start_loc, dim)
         result = hpu_causal_conv1d_fn_update(
             flat_x,
@@ -510,9 +441,106 @@ def hpu_causal_conv1d_update(
             qsl,
             cache_indices=conv_state_indices,
             has_initial_state=None,
-            activation=activation_str,
+            activation=activation,
             metadata=None,
             validate_data=validate_data,
             is_prompt=False,
         )
         return reshape_spec.reshape_fn(result)
+
+
+def hpu_causal_conv1d_fn_update(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_states: torch.Tensor | None,
+    query_start_loc: torch.Tensor,
+    cache_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    activation: str | None = "silu",
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    num_computed_tokens: torch.Tensor | None = None,
+    block_size_to_align: int = 0,
+    metadata=None,
+    validate_data: bool = False,
+    is_prompt: bool = True,
+):
+    if any(ptr is not None for ptr in (
+            block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token,
+            initial_state_idx,
+            num_computed_tokens,
+    )):
+        raise NotImplementedError("Prefix caching metadata is not supported in the PyTorch reference implementation.")
+
+    activation = _normalize_activation(activation)
+    original_dtype = x.dtype
+    work_dtype = conv_states.dtype if conv_states is not None else x.dtype
+    x_work = x.to(work_dtype)
+    weight_work = weight.to(work_dtype)
+    bias_work = bias.to(work_dtype) if bias is not None else None
+
+    assert conv_states is not None
+    if conv_states.device != x_work.device:
+        raise ValueError("'conv_states' must reside on the same device as 'x'.")
+
+    # GPU-optimized: Keep all tensors on GPU, no CPU transfers
+    # Don't use .to('cuda') during graph capture - use the device from x_work
+    qsl = _ensure_query_start_loc(query_start_loc)
+    assert qsl is not None
+
+    # Keep on GPU - compute sequence info using tensor operations
+    padded_batch = qsl.numel() - 1
+    _, dim, cu_seqlen = x_work.shape
+    _, width = weight_work.shape
+    state_len = max(width - 1, 0)
+
+    if validate_data:
+        if x_work.dim() != 2:
+            raise ValueError("'x' must be 2-D (dim, cu_seq_len).")
+        if weight_work.shape != (dim, width):
+            raise ValueError("'weight' must have shape (dim, width).")
+        if bias_work is not None and bias_work.shape != (dim, ):
+            raise ValueError("'bias' must match the feature dimension.")
+        if not ((x_work.stride(0) == 1) or (x_work.stride(1) == 1)):
+            raise ValueError("Input tensor must be in channel-last or channel-first memory layout.")
+        if cache_indices is not None and cache_indices.numel() != padded_batch:
+            raise ValueError("'cache_indices' must align with the batch dimension implied by 'query_start_loc'.")
+        if has_initial_state is not None and has_initial_state.numel() != padded_batch:
+            raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
+
+    out = torch.zeros_like(x_work)
+
+    # Get cache indices
+    if cache_indices is None:
+        batch_cache_idx = torch.arange(padded_batch, device=x_work.device, dtype=torch.long)
+    else:
+        # Ensure cache_indices is on the correct device
+        batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
+
+    # HPU bucketing pads the batch with state_indices == -1
+    # (PAD_SLOT_ID).  Route padding to a *garbage slot* (last entry
+    # in the conv_states tensor, unused by any real request).
+    # Use torch.remainder (not torch.where) — HPU torch.compile
+    # silently miscompiles torch.where on integer tensors.
+    # remainder(-1, N) == N-1, remainder(valid, N) == valid.
+    num_conv_slots = conv_states.shape[0]
+    safe_cache_idx = torch.remainder(batch_cache_idx, num_conv_slots)
+
+    init_state = conv_states[safe_cache_idx, -state_len:, :]
+    init_state = init_state.transpose(-1, -2)
+
+    seq_input = torch.cat([init_state, x_work], dim=2)
+    new_state = seq_input[:, :, -state_len:]
+    # Use element-wise TPC depthwise conv to avoid the MME
+    # spatial_convolution input1 weight-transpose stall.
+    seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
+    seq_out = _apply_activation(seq_out, activation)
+    out = seq_out
+
+    with torch.no_grad():
+        conv_states[safe_cache_idx, -state_len:, :] = new_state.transpose(-1, -2)
+
+    return out.to(original_dtype)
