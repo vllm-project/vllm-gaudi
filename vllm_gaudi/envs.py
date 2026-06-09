@@ -46,7 +46,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NIXL side channel host and port for KV transfer
     "VLLM_NIXL_SIDE_CHANNEL_HOST":
     lambda: os.environ.get("VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"),
-
     "VLLM_NIXL_SIDE_CHANNEL_PORT":
     lambda: int(os.environ.get("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")),
 }

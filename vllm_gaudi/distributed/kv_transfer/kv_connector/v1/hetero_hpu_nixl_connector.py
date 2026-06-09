@@ -61,8 +61,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     MambaSpec,
-    SlidingWindowSpec,
 )
 
 from typing import Any
@@ -215,10 +215,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, 
     self.block_size_on_save = self.block_size
 
     # Check if model has Mamba layers
-    self._has_mamba = any(
-        isinstance(g.kv_cache_spec, MambaSpec)
-        for g in kv_cache_config.kv_cache_groups
-    )
+    self._has_mamba = any(isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups)
 
     # list of chunked prefill partials
     self.partial_reqs: dict[ReqId, list] = {}  # type: ignore[misc]
@@ -253,7 +250,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, 
     self._heartbeat_by_engine: dict[EngineId, HeartbeatInfo] = {}  # type: ignore[misc]
     # Reverse lookup: local req_id -> (engine_id, remote_req_id) for O(1) removal
     self._heartbeat_req_engine: dict[ReqId, tuple[EngineId, ReqId]] = {}  # type: ignore[misc]
-    self._last_heartbeat_time: float = 0.0
+    self._last_heartbeat_time = 0.0
 
 
 def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
@@ -637,32 +634,21 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
 
     # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
     self._group_spec_types = tuple(
-        get_representative_spec_type(g.kv_cache_spec)
-        for g in kv_cache_config.kv_cache_groups
-    )
+        get_representative_spec_type(g.kv_cache_spec) for g in kv_cache_config.kv_cache_groups)
 
     # Per-engine TP mappings. Generated during handshake.
     self.tp_mappings: dict[EngineId, TPMapping] = {}  # type: ignore[misc]
 
     # Check if model has Mamba layers
-    self._has_mamba = any(
-        isinstance(g.kv_cache_spec, MambaSpec)
-        for g in kv_cache_config.kv_cache_groups
-    )
+    self._has_mamba = any(isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups)
 
     # Check if hybrid memory allocator is required
-    self._is_hma_required = (
-        not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-        and any(
-            not isinstance(g.kv_cache_spec, FullAttentionSpec)
-            for g in kv_cache_config.kv_cache_groups
-        )
-    )
+    self._is_hma_required = (not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+                             and any(not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                                     for g in kv_cache_config.kv_cache_groups))
 
     # Initialize lease extension for heartbeat handling
-    kv_lease_duration: int = vllm_config.kv_transfer_config.get_from_extra_config(
-        "kv_lease_duration", 30
-    )
+    kv_lease_duration: int = vllm_config.kv_transfer_config.get_from_extra_config("kv_lease_duration", 30)
     self._lease_extension = kv_lease_duration * 2 // 3
 
 
@@ -965,17 +951,17 @@ def _get_block_descs_ids(
     """
     # Convert flat list to BlockIds format (list of lists, one per group)
     block_ids_wrapped = [block_ids] if block_ids else [[]]
-    
+
     # Get number of blocks for the target engine
     dst_num_blocks = self.dst_num_blocks[engine_id]
-    
+
     # Get physical blocks per logical - use remote info if engine_id != self.engine_id
     if engine_id == self.engine_id:
         physical_blocks_per_logical = self._physical_blocks_per_logical_kv_block
     else:
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         physical_blocks_per_logical = remote_info.remote_physical_blocks_per_logical
-    
+
     # Call upstream _compute_desc_ids
     return self._compute_desc_ids(
         block_ids=block_ids_wrapped,
@@ -1003,7 +989,7 @@ def _read_blocks(
     # Hetero connector assumes single KV cache group (group 0)
     local_block_ids = read_spec.local_block_ids[0] if read_spec.local_block_ids else []
     remote_block_ids = read_spec.remote_block_ids[0] if read_spec.remote_block_ids else []
-    
+
     # Get remote engine info from transfer topology
     remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
     block_size_ratio = self.transfer_topo.block_size_ratio(remote_info.remote_block_size)
