@@ -38,7 +38,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm_gaudi.platform import logger
 
-from vllm import envs
+from vllm_gaudi import envs
 from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -125,11 +125,16 @@ def kv_postprocess_layout_and_blksize_on_save(cache, indices, target_block_size)
     )
     expanded_indices = (indices.unsqueeze(1) * ratio + torch.arange(ratio, device=indices.device)).flatten()
     cache_physical = cache
-    cache_resized_view = cache_physical.view(-1, target_block_size, n_kv_heads, head_size)
+    cache_resized_view = cache_physical.contiguous().view(-1, target_block_size, n_kv_heads, head_size)
     cache_resized_view.index_copy_(0, expanded_indices, blocks_processed)
 
 
 def kv_postprocess_layout_on_save(cache, indices):
+    """Transform KV cache layout from NHD to HND format.
+
+    Note: This is only called when block_size stays the same and only layout changes.
+    For hetero mode with both changing, use combined function instead.
+    """
     blocks_to_update = cache.index_select(0, indices)
     target_shape = blocks_to_update.shape
     # NHD => HND
@@ -437,7 +442,7 @@ def request_finished(
     return delay_free_blocks, dict(
         do_remote_prefill=True,
         do_remote_decode=False,
-        remote_block_ids=block_ids_on_save,
+        remote_block_ids=[block_ids_on_save],  # Wrap in list for GPU compatibility (list[list[int]])
         remote_engine_id=self.engine_id,
         remote_request_id=request.request_id,
         remote_host=self.side_channel_host,
@@ -654,6 +659,12 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
         )
     )
 
+    # Initialize lease extension for heartbeat handling
+    kv_lease_duration: int = vllm_config.kv_transfer_config.get_from_extra_config(
+        "kv_lease_duration", 30
+    )
+    self._lease_extension = kv_lease_duration * 2 // 3
+
 
 def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     """Register the KV Cache data in nixl."""
@@ -731,8 +742,24 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
 
             self.block_len_per_layer.append(curr_tensor_size_bytes // self.num_blocks)
             self.slot_size_per_layer.append(self.block_len_per_layer[-1] // self.block_size)
-            block_len_per_layer_on_save.append(curr_tensor_size_bytes // self.num_blocks // block_size_ratio_on_save)
-            num_blocks_on_save = curr_tensor_size_bytes // block_len_per_layer_on_save[-1]
+            # For GPU metadata: scale block_len DOWN by block_size_ratio so GPU validation passes
+            # GPU has 8x more blocks (16 vs 128), so block_len is 1/8
+            # Validation expects: remote_block_len == (local_block_len * tp_ratio) // block_size_ratio
+            # With tp_ratio=1, block_size_ratio=1: expects remote_block_len == local_block_len
+            block_len_per_layer_on_save.append(self.block_len_per_layer[-1] // block_size_ratio_on_save)
+            # Scale num_blocks UP by ratio to keep total cache size same
+            num_blocks_on_save = self.num_blocks * block_size_ratio_on_save
+
+            logger.info(
+                "Metadata for GPU: block_size_ratio_on_save=%d, "
+                "block_len_per_layer=%d, block_len_on_save=%d, "
+                "num_blocks=%d, num_blocks_on_save=%d",
+                block_size_ratio_on_save,
+                self.block_len_per_layer[-1],
+                block_len_per_layer_on_save[-1],
+                self.num_blocks,
+                num_blocks_on_save,
+            )
 
             if not self.use_mla:
                 # Different kv cache shape is not supported by HeteroTP
@@ -899,16 +926,27 @@ def post_process_device_kv_on_save(self, block_ids: list[int]):
     target_block_size = self.block_size_on_save
     split_k_and_v = self.transfer_topo.split_k_and_v
     sample_cache = list(self.device_kv_caches.values())[0][0]
-    indices = torch.tensor(block_ids, device=sample_cache.device)
+    # Flatten block_ids if it's a list of lists (one per request)
+    if isinstance(block_ids[0], list):
+        flat_block_ids = [bid for block_list in block_ids for bid in block_list]
+    else:
+        flat_block_ids = block_ids
+    indices = torch.tensor(flat_block_ids, device=sample_cache.device)
 
     for _, cache_or_caches in self.device_kv_caches.items():
         cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+    for _, cache_or_caches in self.device_kv_caches.items():
+        cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
         for cache in cache_list:
+            # Apply transformations based on what's changing
             if self.kv_cache_layout_on_save != self.kv_cache_layout and self.block_size_on_save != self.block_size:
+                # Both layout and block_size changing: use combined transformation
                 kv_postprocess_layout_and_blksize_on_save(cache, indices, target_block_size)
             elif self.kv_cache_layout_on_save != self.kv_cache_layout:
+                # Only layout changing
                 kv_postprocess_layout_on_save(cache, indices)
             elif self.block_size_on_save != self.block_size:
+                # Only block_size changing
                 kv_postprocess_blksize_on_save(cache, indices, target_block_size)
 
 
