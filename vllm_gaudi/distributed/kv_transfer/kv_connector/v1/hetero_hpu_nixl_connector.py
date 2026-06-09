@@ -9,7 +9,6 @@ import uuid
 import os
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
 
 import msgspec
 import numpy as np
@@ -220,10 +219,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, 
         self.use_host_buffer = vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
 
     # Initialize _has_mamba to check if the model uses Mamba attention
-    self._has_mamba = any(
-        isinstance(g.kv_cache_spec, MambaSpec)
-        for g in kv_cache_config.kv_cache_groups
-    )
+    self._has_mamba = any(isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups)
 
     self.postprocess_kv_caches_on_save = False
     self.kv_cache_layout_on_save = self.kv_cache_layout
@@ -487,9 +483,7 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     # Enable with VLLM_HPU_NIXL_FORCE_UCX_TCP=1 to force socket transport.
     if os.getenv("VLLM_HPU_NIXL_FORCE_UCX_TCP", "0") == "1" and not os.getenv("UCX_TLS"):
         os.environ["UCX_TLS"] = "tcp,self"
-        logger.warning(
-            "VLLM_HPU_NIXL_FORCE_UCX_TCP=1 set and UCX_TLS is unset; forcing UCX_TLS=tcp,self"
-        )
+        logger.warning("VLLM_HPU_NIXL_FORCE_UCX_TCP=1 set and UCX_TLS is unset; forcing UCX_TLS=tcp,self")
 
     # Agent.
     non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1153,8 +1147,7 @@ def _nixl_handshake_compat(self, *args, **kwargs):
     """
     # Import lazily to avoid NameError if module-level symbol import order changes.
     from vllm_gaudi.distributed.kv_transfer.kv_connector.v1.nixl_metadata_compat import (
-        NixlAgentMetadataCompat,
-    )
+        NixlAgentMetadataCompat, )
 
     # msgspec types are immutable on some builds, so avoid monkey-patching
     # Decoder.__init__. Instead, temporarily swap the handshake function's
@@ -1199,12 +1192,8 @@ def _read_blocks_for_req_compat(self, req_id: str, meta: ReqMeta):
     # older metadata paths can still surface flat lists (list[int]).
     # Normalize both local_block_ids and local_physical_block_ids so upstream
     # failure handlers (which do meta.local_block_ids[0]) don't get a bare int.
-    meta.local_block_ids = _normalize_grouped_block_ids(
-        meta.local_block_ids
-    )
-    meta.local_physical_block_ids = _normalize_grouped_block_ids(
-        meta.local_physical_block_ids
-    )
+    meta.local_block_ids = _normalize_grouped_block_ids(meta.local_block_ids)
+    meta.local_physical_block_ids = _normalize_grouped_block_ids(meta.local_physical_block_ids)
     if meta.remote is not None:
         meta.remote.block_ids = _normalize_grouped_block_ids(meta.remote.block_ids)
 
@@ -1393,17 +1382,15 @@ def _log_failure_compat(
     if meta and meta.remote:
         num_local_blocks, local_sample = _summarize_block_ids(meta.local_block_ids)
         num_remote_blocks, _ = _summarize_block_ids(meta.remote.block_ids)
-        context.update(
-            {
-                "remote_engine_id": meta.remote.engine_id,
-                "remote_request_id": meta.remote.request_id,
-                "remote_host": meta.remote.host,
-                "remote_port": meta.remote.port,
-                "num_local_blocks": num_local_blocks,
-                "num_remote_blocks": num_remote_blocks,
-                "local_block_ids_sample": local_sample,
-            }
-        )
+        context.update({
+            "remote_engine_id": meta.remote.engine_id,
+            "remote_request_id": meta.remote.request_id,
+            "remote_host": meta.remote.host,
+            "remote_port": meta.remote.port,
+            "num_local_blocks": num_local_blocks,
+            "num_remote_blocks": num_remote_blocks,
+            "local_block_ids_sample": local_sample,
+        })
 
     context.update(extra_context)
     if msg:
@@ -1416,6 +1403,7 @@ def _log_failure_compat(
         exc_info=error is not None,
         stacklevel=2,
     )
+
 
 NixlConnector.wait_for_save = wait_for_save
 NixlConnectorScheduler.__init__ = NixlConnectorScheduler_init_
