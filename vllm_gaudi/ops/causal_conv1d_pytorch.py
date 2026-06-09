@@ -350,6 +350,74 @@ def hpu_causal_conv1d_fn(
     return seq_out.squeeze(0).to(original_dtype)
 
 
+def hpu_causal_conv1d_fn_update(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_states: torch.Tensor | None,
+    query_start_loc: torch.Tensor,
+    cache_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    activation: str | None = "silu",
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    num_computed_tokens: torch.Tensor | None = None,
+    block_size_to_align: int = 0,
+    metadata=None,
+    validate_data: bool = False,
+    is_prompt: bool = True,
+):
+    """Pure PyTorch fallback for causal_conv1d_update (used when TPC op is unavailable)."""
+    if any(ptr is not None for ptr in (
+            block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token,
+            initial_state_idx,
+            num_computed_tokens,
+    )):
+        raise NotImplementedError("Prefix caching metadata is not supported in the PyTorch reference implementation.")
+
+    activation = _normalize_activation(activation)
+    original_dtype = x.dtype
+    work_dtype = conv_states.dtype if conv_states is not None else x.dtype
+    x_work = x.to(work_dtype)
+    weight_work = weight.to(work_dtype)
+    bias_work = bias.to(work_dtype) if bias is not None else None
+
+    assert conv_states is not None
+    if conv_states.device != x_work.device:
+        raise ValueError("'conv_states' must reside on the same device as 'x'.")
+
+    qsl = _ensure_query_start_loc(query_start_loc)
+    assert qsl is not None
+
+    padded_batch = qsl.numel() - 1
+    _, dim, cu_seqlen = x_work.shape
+    _, width = weight_work.shape
+    state_len = max(width - 1, 0)
+
+    if cache_indices is None:
+        batch_cache_idx = torch.arange(padded_batch, device=x_work.device, dtype=torch.long)
+    else:
+        batch_cache_idx = cache_indices.to(x_work.device) if cache_indices.device != x_work.device else cache_indices
+
+    num_conv_slots = conv_states.shape[0]
+    safe_cache_idx = torch.remainder(batch_cache_idx, num_conv_slots)
+
+    init_state = conv_states[safe_cache_idx, -state_len:, :]
+    init_state = init_state.transpose(-1, -2)
+
+    seq_input = torch.cat([init_state, x_work], dim=2)
+    new_state = seq_input[:, :, -state_len:]
+    seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
+    seq_out = _apply_activation(seq_out, activation)
+
+    with torch.no_grad():
+        conv_states[safe_cache_idx, -state_len:, :] = new_state.transpose(-1, -2)
+
+    return seq_out.to(original_dtype)
+
+
 def hpu_causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
@@ -372,57 +440,79 @@ def hpu_causal_conv1d_update(
     if max_query_len not in (-1, None):  # Provided only for Triton helper parity
         raise NotImplementedError("'max_query_len' is not used in the reference implementation.")
 
-    activation_bool = _normalize_activation(activation) in ("silu", "swish")
     dim = weight.size(0)
-    work_dtype = conv_state.dtype
-    # weight: (dim, width) -> (width, dim)
-    weight_for_tpc = weight.t().contiguous().to(work_dtype)
-    bias_for_tpc = bias.to(work_dtype) if bias is not None else None
 
-    # Gather per-batch conv_state using indices
-    if conv_state_indices is not None:
-        num_conv_slots = conv_state.shape[0]
-        safe_idx = torch.remainder(conv_state_indices.long(), num_conv_slots)
-        batch_conv_state = conv_state[safe_idx]
-        batch = safe_idx.numel()
-    else:
-        batch_conv_state = conv_state
-        batch = conv_state.shape[0]
+    # Use TPC kernel if available, otherwise fall back to PyTorch implementation
+    if hasattr(torch.ops.hpu, "causal_conv1d_update"):
+        activation_bool = _normalize_activation(activation) in ("silu", "swish")
+        work_dtype = conv_state.dtype
+        # weight: (dim, width) -> (width, dim)
+        weight_for_tpc = weight.t().contiguous().to(work_dtype)
+        bias_for_tpc = bias.to(work_dtype) if bias is not None else None
 
-    # Reshape x to (batch, seqlen, dim) for TPC kernel
-    original_x = x
-    if x.dim() == 2:
-        if x.size(1) == dim:
-            x_3d = x.reshape(batch, -1, dim).to(work_dtype)
-        elif x.size(0) == dim:
-            x_3d = x.t().contiguous().reshape(batch, -1, dim).to(work_dtype)
-        else:
-            raise ValueError("Cannot reshape 2-D x for TPC causal_conv1d_update.")
-    elif x.dim() == 3:
-        x_3d = x.to(work_dtype)
-    else:
-        raise ValueError("Unsupported x dimensions for TPC causal_conv1d_update.")
-
-    out, conv_state_out = torch.ops.hpu.causal_conv1d_update(
-        x_3d,
-        batch_conv_state,
-        weight_for_tpc,
-        bias_for_tpc,
-        activation=activation_bool,
-        pad_slot_id=pad_slot_id,
-    )
-
-    # Write back updated conv_state
-    with torch.no_grad():
+        # Gather per-batch conv_state using indices
         if conv_state_indices is not None:
-            conv_state[safe_idx] = conv_state_out
+            num_conv_slots = conv_state.shape[0]
+            safe_idx = torch.remainder(conv_state_indices.long(), num_conv_slots)
+            batch_conv_state = conv_state[safe_idx]
+            batch = safe_idx.numel()
         else:
-            conv_state.copy_(conv_state_out)
+            batch_conv_state = conv_state
+            batch = conv_state.shape[0]
 
-    # Reshape output to match original x shape
-    if original_x.dim() == 2:
-        if original_x.size(1) == dim:
-            return out.reshape(original_x.shape).to(original_x.dtype)
-        elif original_x.size(0) == dim:
-            return out.reshape(-1, dim).t().contiguous().to(original_x.dtype)
-    return out.to(original_x.dtype)
+        # Reshape x to (batch, seqlen, dim) for TPC kernel
+        original_x = x
+        if x.dim() == 2:
+            if x.size(1) == dim:
+                x_3d = x.reshape(batch, -1, dim).to(work_dtype)
+            elif x.size(0) == dim:
+                x_3d = x.t().contiguous().reshape(batch, -1, dim).to(work_dtype)
+            else:
+                raise ValueError("Cannot reshape 2-D x for TPC causal_conv1d_update.")
+        elif x.dim() == 3:
+            x_3d = x.to(work_dtype)
+        else:
+            raise ValueError("Unsupported x dimensions for TPC causal_conv1d_update.")
+
+        out, conv_state_out = torch.ops.hpu.causal_conv1d_update(
+            x_3d,
+            batch_conv_state,
+            weight_for_tpc,
+            bias_for_tpc,
+            activation=activation_bool,
+            pad_slot_id=pad_slot_id,
+        )
+
+        # Write back updated conv_state
+        with torch.no_grad():
+            if conv_state_indices is not None:
+                conv_state[safe_idx] = conv_state_out
+            else:
+                conv_state.copy_(conv_state_out)
+
+        # Reshape output to match original x shape
+        if original_x.dim() == 2:
+            if original_x.size(1) == dim:
+                return out.reshape(original_x.shape).to(original_x.dtype)
+            elif original_x.size(0) == dim:
+                return out.reshape(-1, dim).t().contiguous().to(original_x.dtype)
+        return out.to(original_x.dtype)
+
+    else:
+        # Fallback: pure PyTorch implementation
+        activation_str = _normalize_activation(activation)
+        flat_x, qsl, reshape_spec = _flatten_inputs_for_update(x, query_start_loc, dim)
+        result = hpu_causal_conv1d_fn_update(
+            flat_x,
+            weight,
+            bias,
+            conv_state,
+            qsl,
+            cache_indices=conv_state_indices,
+            has_initial_state=None,
+            activation=activation_str,
+            metadata=None,
+            validate_data=validate_data,
+            is_prompt=False,
+        )
+        return reshape_spec.reshape_fn(result)
