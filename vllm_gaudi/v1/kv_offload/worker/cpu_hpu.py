@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.cpu.gpu_worker import (
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
+    TransferResult,
     TransferSpec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import OffloadingConnectorWorker
@@ -223,6 +224,38 @@ def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
     return True
 
 
+def get_finished(self) -> list[TransferResult]:
+    results: list[TransferResult] = []
+    while self._transfers and self._transfers[0].end_event.query():
+        transfer: Transfer = self._transfers.popleft()
+        # elapsed_time is in milliseconds
+        transfer_time = transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
+        result = TransferResult(
+            job_id=transfer.job_id,
+            success=True,
+            transfer_size=transfer.num_bytes,
+            transfer_time=transfer_time,
+            transfer_type=self.transfer_type,
+        )
+        results.append(result)
+        self._stream_pool.append(transfer.stream)
+        self._event_pool.append(transfer.end_event)
+        self._event_pool.append(transfer.start_event)
+        del self._transfer_events[transfer.job_id]
+    return results
+
+
+def shutdown(self) -> None:
+    while self._transfers:
+        transfer: Transfer = self._transfers.popleft()
+        transfer.end_event.synchronize()
+    self._transfer_events.clear()
+    self._stream_pool.clear()
+    self._event_pool.clear()
+    self.src_tensors.clear()
+    self.dst_tensors.clear()
+
+
 def CpuGpuOffloadingHandlers_init_(
     self,
     kv_caches: CanonicalKVCaches,
@@ -283,6 +316,8 @@ def get_handlers(
 CPUOffloadingSpec.get_handlers = get_handlers
 SingleDirectionOffloadingHandler.__init__ = SingleDirectionOffloadingHandler_init_
 SingleDirectionOffloadingHandler.transfer_async = transfer_async
+SingleDirectionOffloadingHandler.get_finished = get_finished
+SingleDirectionOffloadingHandler.shutdown = shutdown
 CpuGpuOffloadingHandlers.__init__ = CpuGpuOffloadingHandlers_init_
 
 
