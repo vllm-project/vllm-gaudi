@@ -30,6 +30,7 @@ from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, se
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
+from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, _GDN_MAMBA_TYPES
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
@@ -199,6 +200,7 @@ class HPUWorker(WorkerBase):
                     "kv_cache_config": self.kv_cache_config,
                 }
                 self.model_runner = None
+                HPUBucketingManager.deactivate()
             # Preserve previous KV cache metadata in stash for rollback.
             self.model_sleeping = False
             self.kv_cache_sleeping = False
@@ -285,6 +287,10 @@ class HPUWorker(WorkerBase):
 
         self.model_runner = self._model_runner_stash.pop(stash_key)
         stashed_state = self._model_runner_state_stash.pop(stash_key, {})
+
+        bucketing_manager = getattr(self.model_runner, "bucketing_manager", None)
+        if bucketing_manager is not None:
+            bucketing_manager.activate()
 
         restored_config = stashed_state.get("vllm_config", getattr(self.model_runner, "vllm_config", target_config))
         self._apply_vllm_config(restored_config)
