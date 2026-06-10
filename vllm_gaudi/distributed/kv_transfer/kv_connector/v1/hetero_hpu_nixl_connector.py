@@ -429,7 +429,7 @@ def request_finished(
     block_ids_on_save = block_ids
     if block_size_ratio > 1:
         num_blocks = math.ceil((request.num_tokens - 1) / self.block_size_on_save)
-        block_ids_on_save = get_mapped_blocks(np.asarray(block_ids), block_size_ratio, num_blocks)
+        block_ids_on_save = get_mapped_blocks(np.asarray(block_ids).flatten(), block_size_ratio, num_blocks)
         logger.debug(
             "request.num_tokens is %s, block_ids is %s, block_ids_on_save is %s",
             request.num_tokens,
