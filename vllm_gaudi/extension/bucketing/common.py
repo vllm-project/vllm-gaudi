@@ -42,18 +42,27 @@ def calc_fallback_value(n: int, base_step: int):
 
 
 class HPUBucketingManager():
-    _instance = None
-    prompt_buckets: List[Tuple[int, int, int]] = []
-    decode_buckets: List[Tuple[int, int, int]] = []
-    # Seed buckets are the buckets originally generated from bucketing configuration
-    # Spec decode may automatically add new buckets based on the seed buckets
-    seed_decode_buckets: List[Tuple[int, int, int]] = None
-    initialized = False
+    # Keep an active-manager handle for code paths that cannot access
+    # the runner-local manager object directly (for example, fsdpa setup).
+    _active_instance = None
 
-    def __new__(cls, *args, **kwargs):
-        if not cls._instance:
-            cls._instance = super(HPUBucketingManager, cls).__new__(cls)
-        return cls._instance
+    def __init__(self):
+        # All mutable state must be instance-local to avoid cross-model
+        # contamination when multiple runners are stashed/restored.
+        self.prompt_buckets: List[Tuple[int, int, int]] = []
+        self.decode_buckets: List[Tuple[int, int, int]] = []
+        # Seed buckets are the buckets originally generated from bucketing configuration
+        # Spec decode may automatically add new buckets based on the seed buckets
+        self.seed_decode_buckets: List[Tuple[int, int, int]] | None = None
+        self.initialized = False
+
+    def activate(self):
+        HPUBucketingManager._active_instance = self
+        return self
+
+    @classmethod
+    def deactivate(cls):
+        cls._active_instance = None
 
     def initialize(self,
                    max_num_seqs,
@@ -64,6 +73,7 @@ class HPUBucketingManager():
                    num_speculative_tokens=0,
                    mamba_chunk_size=0,
                    mamba_chunk_size_is_explicit=False):
+        self.activate()
         self.max_num_seqs = max_num_seqs
         self.max_num_prefill_seqs = max_num_prefill_seqs
         self.block_size = block_size
@@ -354,10 +364,10 @@ class HPUBucketingManager():
 
     @classmethod
     def get_instance(cls):
-        """
-        Retrieve the singleton instance of the class.
-        """
-        return cls._instance
+        """Retrieve the currently active bucketing manager instance."""
+        if cls._active_instance is None:
+            raise RuntimeError("No active HPUBucketingManager instance. Call initialize() or activate() first.")
+        return cls._active_instance
 
 
 def get_bucketing_manager():
