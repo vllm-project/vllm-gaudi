@@ -242,7 +242,12 @@ def patched_fused_moe_forward(
     output combination logic introduced by upstream PR #35949.
     """
     hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
-    hidden_states, og_hidden_dims = self._maybe_pad_hidden_states(shared_experts_input, hidden_states)
+    # Upstream _maybe_pad_hidden_states now returns a 3-tuple: the (possibly
+    # padded) hidden_states plus two truncation sizes. og_hidden_dim_pre_xform
+    # trims fused_output before the routed-output transform (latent MoE);
+    # og_hidden_dim_post_xform strips kernel padding after the final all-reduce.
+    hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = self._maybe_pad_hidden_states(
+        shared_experts_input, hidden_states)
 
     if self.moe_config.dp_size == 1:
         # Bypass _forward_impl entirely for dp_size==1 to eliminate
@@ -276,13 +281,18 @@ def patched_fused_moe_forward(
     else:
         shared_output, fused_output = None, result
 
+    # Trim padding from fused_output before the routed-output transform, matching
+    # upstream MoERunner.forward (latent MoE with shared experts).
+    if og_hidden_dim_pre_xform is not None:
+        fused_output = fused_output[..., :og_hidden_dim_pre_xform]
+
     shared_output = self._maybe_reduce_shared_expert_output(shared_output)
     shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
     fused_output = self.apply_routed_output_transform(fused_output)
 
     combined = (shared_output + fused_output) if shared_output is not None else fused_output
 
-    combined = self._maybe_reduce_final_output(combined, og_hidden_dims)
+    combined = self._maybe_reduce_final_output(combined, og_hidden_dim_post_xform)
     return self._maybe_add_zero_expert_output(combined)
 
 
