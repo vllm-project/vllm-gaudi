@@ -175,7 +175,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.local_num_experts
-        ep_shift = layer.ep_rank * num_experts
+        ep_shift = layer.moe_config.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         if layer.moe_config.dp_size > 1 and self.use_dispatch_fn:

@@ -63,7 +63,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().process_weights_after_loading(layer)
         # custom handling for HPU
         num_experts = layer.local_num_experts
-        ep_shift = layer.ep_rank * num_experts
+        ep_shift = layer.moe_config.ep_rank * num_experts
         has_bias = hasattr(layer, "w13_bias") and hasattr(layer, "w2_bias")
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
