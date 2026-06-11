@@ -227,19 +227,20 @@ def patched_fused_moe_forward(
     """Patched forward that avoids graph breaks from ForwardContext lookups
     and dynamo per-layer string guards.
 
-    Instead of calling forward_dispatch (which uses get_layer_from_name,
-    ensure_moe_quant_config_init, and _sequence_parallel_context — all of
-    which access ForwardContext and cause torch.compile graph breaks), we
-    use a layer reference stashed on the runner at FusedMoE.__init__ time
-    (self._hpu_layer_ref) and bypass _forward_impl for dp_size==1,
-    calling _apply_quant_method + _maybe_combine directly. This also
-    bypasses self.layer_name (a per-layer string) so dynamo no longer
-    emits per-layer string guards that trigger recompilation.
+    Instead of calling _forward_impl (which uses _sequence_parallel_context
+    and _maybe_dispatch — both of which access ForwardContext and cause
+    torch.compile graph breaks), for dp_size==1 we inline the quant-config
+    init, gate application, _apply_quant_method and _maybe_combine directly.
+    This also bypasses self.layer_name (a per-layer string) so dynamo no
+    longer emits per-layer string guards that trigger recompilation.
 
-    The post-forward reduction sequence mirrors upstream
-    MoERunner.forward (vllm/model_executor/layers/fused_moe/runner/
-    moe_runner.py) so we stay in sync with the new shared/fused
-    output combination logic introduced by upstream PR #35949.
+    After upstream PR #41184 (FusedMoE/MoERunner inversion), `self` IS the
+    MoERunner: the expert weights and quant_method live on
+    self.routed_experts, quant init moved to
+    routed_experts._ensure_moe_quant_config_init(), and _apply_quant_method
+    no longer takes a `layer` argument. The post-forward reduction sequence
+    mirrors upstream MoERunner.forward so we stay in sync with the shared/
+    fused output combination logic.
     """
     hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
     # Upstream _maybe_pad_hidden_states now returns a 3-tuple: the (possibly
@@ -257,14 +258,18 @@ def patched_fused_moe_forward(
         # would redundantly repeat.
         if self.moe_config.pcp_size > 1:
             raise RuntimeError("dp_size==1 fast path does not support pcp_size > 1")
-        layer = self._hpu_layer_ref
-        layer.ensure_moe_quant_config_init()
+        # Mirrors upstream MoERunner._forward_impl; the quant config init can be
+        # dropped once upstream completes its Modular Kernel (MK) migration.
+        self.routed_experts._ensure_moe_quant_config_init()
         self._maybe_sync_shared_experts_stream(shared_experts_input)
-        gate = self.gate or getattr(self, "_hpu_gate_ref", None)
-        if gate is not None:
-            router_logits, _ = gate(hidden_states)
+        # Apply the gate if the runner holds it (mirrors _forward_impl).
+        if self.gate is not None:
+            if self._fse_fuse_gate:
+                self._maybe_fuse_gate_weights()
+                router_logits = torch.nn.functional.linear(hidden_states, self._combined_gate_weight)
+            else:
+                router_logits, _ = self.gate(hidden_states)
         shared_output, fused_hidden = self._apply_quant_method(
-            layer=layer,
             hidden_states=hidden_states,
             router_logits=router_logits,
             shared_experts_input=shared_experts_input,
@@ -489,22 +494,11 @@ def _patched_default_moe_runner_forward(self, *args, **kwargs):
 
 MoERunnerBase.forward = _patched_default_moe_runner_forward
 
-# Save FusedMoE layer reference on runner for direct _forward_impl calls.
-# This lets patched_fused_moe_forward bypass get_layer_from_name() and the
-# self.layer_name string access for dp_size==1, avoiding both ForwardContext
-# graph breaks and dynamo per-layer string guards.
-_orig_fused_moe_init = FusedMoE.__init__
-
-
-def _hpu_fused_moe_init(self, *args, **kwargs):
-    _orig_fused_moe_init(self, *args, **kwargs)
-    if hasattr(self, "runner"):
-        object.__setattr__(self.runner, "_hpu_layer_ref", self)
-        if self.runner.gate is not None:
-            object.__setattr__(self.runner, "_hpu_gate_ref", self.runner.gate)
-
-
-FusedMoE.__init__ = _hpu_fused_moe_init
+# Note: after upstream PR #41184, FusedMoE is a factory function (not an
+# nn.Module subclass), so there is no FusedMoE.__init__ to patch. The
+# dp_size==1 fast path in patched_fused_moe_forward operates directly on the
+# MoERunner (self.routed_experts / self.gate), so no stashed layer reference
+# is required.
 
 vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = get_compressed_expert_map
 vllm.model_executor.layers.fused_moe.router.router_factory.create_fused_moe_router = create_fused_moe_router
