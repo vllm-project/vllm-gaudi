@@ -773,7 +773,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
-        extra_weight_attrs["intermediate_size_full"] = intermediate_size_per_partition * layer.tp_size
+        extra_weight_attrs["intermediate_size_full"] = intermediate_size_per_partition * layer.moe_config.tp_size
 
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
