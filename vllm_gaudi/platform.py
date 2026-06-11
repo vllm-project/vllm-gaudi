@@ -406,6 +406,13 @@ class HpuPlatform(Platform):
         # Allow utilization of the Parallel Compilation feature.
         if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
             os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
+        # Use recursive dict-tag guards for torch.compile. A recent upstream
+        # torch release flipped this dynamo default off, which regresses
+        # throughput of the torch.compile serving path; force it back on so
+        # guard evaluation stays cheap. hasattr-guarded so torch builds without
+        # the knob are a no-op.
+        if hasattr(torch._dynamo.config, 'use_recursive_dict_tags_for_guards'):
+            torch._dynamo.config.use_recursive_dict_tags_for_guards = True
 
     @classmethod
     def adjust_cuda_hooks(cls) -> None:
