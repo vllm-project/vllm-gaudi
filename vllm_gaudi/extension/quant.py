@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase, UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -28,7 +28,10 @@ class _FakeINCConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
-        elif isinstance(layer, FusedMoE):
+        # After upstream PR #41184, FusedMoE is a factory function (not a class),
+        # so isinstance() against it raises TypeError. The object handed to
+        # get_quant_method is now the RoutedExperts expert container.
+        elif isinstance(layer, RoutedExperts):
             return UnquantizedFusedMoEMethod(layer.moe_config)
         return None
 
