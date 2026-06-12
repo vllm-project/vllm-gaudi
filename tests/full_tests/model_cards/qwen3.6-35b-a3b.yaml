@@ -11,7 +11,7 @@ model_card:
   gpu_memory_utilization: 0.7
   max_num_batched_tokens: 8192
   max_gen_toks: 2048
-  include_path: "${VLLM_GAUDI_PREFIX}/.jenkins/lm-eval-harness/tasks"
+  include_path: ".jenkins/lm-eval-harness/tasks"
 
 metrics:
   name: exact_match,strict-match
