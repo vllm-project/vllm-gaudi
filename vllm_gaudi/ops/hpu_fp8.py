@@ -161,6 +161,9 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         self.allow_deep_gemm = False
 
         self.use_dispatch_fn = get_config().use_dispatch_fn
+        # Snapshot the (static) quant-config flag while the vLLM config context
+        # is set; the forward hot path reads this cached value instead.
+        self.has_moe_quant_config = model_has_quant_config()
 
     @property
     def is_monolithic(self) -> bool:
@@ -233,7 +236,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
-            if not (model_has_quant_config() and self.use_dispatch_fn):
+            if not (self.has_moe_quant_config and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
                 x = dispatch_tensor(x, hidden_states_across_dp, is_sequence_parallel)
 

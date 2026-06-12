@@ -9,7 +9,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
 import torch
 import vllm
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
@@ -37,28 +37,25 @@ def _normalize_moe_activation(activation):
     return activation.value if isinstance(activation, Enum) else activation
 
 
-def current_model_config():
-    """Return the active ``ModelConfig`` via the current vLLM config, or None.
+def model_has_quant_config() -> bool:
+    """Whether the active model runs with a MoE quantization config.
 
     After upstream PR #41184 the ``layer`` reaching ``apply_monolithic`` is a
     ``RoutedExperts`` instance, which no longer carries ``vllm_config`` (that
     field belonged to the old top-level ``FusedMoE``). The model config must
     therefore be resolved from the global vLLM config instead of off ``layer``.
 
+    This MUST be called at build time (e.g. in ``__init__`` /
+    ``process_weights_after_loading``), where the vLLM config context is set:
+    the result is static per run, so callers cache it and read the cached flag
+    on the forward hot path. ``get_current_vllm_config_or_none`` is used so the
+    function degrades to ``False`` instead of raising if no context is active.
+
     Returns:
-        The active ``ModelConfig``, or ``None`` if no vLLM config is set.
+        ``True`` when the active model config declares a MoE quant config.
     """
-    vllm_config = get_current_vllm_config()
-    return vllm_config.model_config if vllm_config is not None else None
-
-
-def model_has_quant_config() -> bool:
-    """Whether the active model runs with a MoE quantization config.
-
-    Wraps :func:`has_quant_config` against the model config resolved from the
-    current vLLM config, returning ``False`` when no config is available.
-    """
-    model_config = current_model_config()
+    vllm_config = get_current_vllm_config_or_none()
+    model_config = vllm_config.model_config if vllm_config is not None else None
     return model_config is not None and has_quant_config(model_config)
 
 
@@ -105,6 +102,9 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.use_dispatch_fn = get_config().use_dispatch_fn
+        # Snapshot the (static) quant-config flag while the vLLM config context
+        # is set; the forward hot path reads this cached value instead.
+        self.has_moe_quant_config = model_has_quant_config()
         torch.hpu.synchronize()
         vllm_config = get_current_vllm_config()
         self.model_type = None
@@ -138,7 +138,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         is_bf16 = getattr(layer, "w13_weight", None) is not None and layer.w13_weight.dtype == torch.bfloat16
 
-        is_unquantized = not model_has_quant_config()
+        is_unquantized = not self.has_moe_quant_config
 
         cache_weight_lists = bool(is_bf16 and is_unquantized)
 
@@ -186,7 +186,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
-            if not (model_has_quant_config() and self.use_dispatch_fn):
+            if not (self.has_moe_quant_config and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
                 x = dispatch_tensor(x, hidden_states_across_dp, layer.moe_config.is_sequence_parallel)
 
@@ -240,7 +240,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
-            if not (model_has_quant_config() and self.use_dispatch_fn):
+            if not (self.has_moe_quant_config and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
                 x = dispatch_tensor(x, hidden_states_across_dp, layer.moe_config.is_sequence_parallel)
 
