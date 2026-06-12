@@ -37,6 +37,42 @@ def _normalize_moe_activation(activation):
     return activation.value if isinstance(activation, Enum) else activation
 
 
+def select_experts_from_routed(layer, hidden_states: torch.Tensor,
+                               router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Route tokens to experts for the grouped/custom-routing monolithic path.
+
+    After upstream PR #41184 the ``layer`` passed to ``apply_monolithic`` is a
+    ``RoutedExperts`` instance, which no longer owns a ``.router`` object (the
+    router moved onto ``MoERunner``). ``RoutedExperts`` does, however, carry all
+    the routing parameters, so we reproduce upstream's behaviour via the
+    standalone ``select_experts`` helper. It is imported lazily because
+    ``cpu_fused_moe`` registers a CPU custom op at module import time.
+
+    Args:
+        layer: The ``RoutedExperts`` instance holding the routing parameters.
+        hidden_states: Flattened input activations.
+        router_logits: Gate logits for the current tokens.
+
+    Returns:
+        A ``(topk_weights, topk_ids)`` tuple.
+    """
+    from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
+
+    return select_experts(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        top_k=layer.top_k,
+        use_grouped_topk=layer.use_grouped_topk,
+        renormalize=layer.renormalize,
+        topk_group=layer.topk_group,
+        num_expert_group=layer.num_expert_group,
+        custom_routing_function=layer.custom_routing_function,
+        scoring_func=layer.scoring_func,
+        routed_scaling_factor=layer.routed_scaling_factor,
+        e_score_correction_bias=layer.e_score_correction_bias,
+    )
+
+
 @UnquantizedFusedMoEMethod.register_oot
 class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """MoE method without quantization."""
@@ -110,7 +146,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
 
@@ -164,7 +200,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
 
@@ -277,8 +313,13 @@ def patched_fused_moe_forward(
         )
         result = self._maybe_combine(shared_output, fused_hidden)
     else:
+        # Upstream PR #41184 dropped MoERunner._trtllm_mxfp4_unpadded_dim(); the
+        # TRT-LLM MXFP4 unpadded hidden dim now comes from moe_config and is only
+        # non-zero when the quant method produces unpadded output. Mirror
+        # MoERunner.forward exactly so we stay in sync with the custom-op signature.
+        hidden_dim_unpadded = (self.moe_config.hidden_dim_unpadded if self._quant_method.has_unpadded_output else 0)
         result = self._forward_entry(hidden_states, router_logits, shared_experts_input, input_ids,
-                                     self._encode_layer_name(), self._trtllm_mxfp4_unpadded_dim())
+                                     self._encode_layer_name(), hidden_dim_unpadded)
 
     # Mirror upstream MoERunner.forward post-_forward_entry pipeline.
     if isinstance(result, tuple):

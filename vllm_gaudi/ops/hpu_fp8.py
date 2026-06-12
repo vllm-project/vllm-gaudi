@@ -13,7 +13,7 @@ import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpFP8)
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
-from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
+from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation, select_experts_from_routed
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
 from vllm.model_executor.kernels.linear import _POSSIBLE_FP8_BLOCK_KERNELS, _POSSIBLE_FP8_KERNELS
@@ -220,7 +220,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
