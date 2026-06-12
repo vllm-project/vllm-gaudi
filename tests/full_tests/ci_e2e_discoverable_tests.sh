@@ -421,6 +421,18 @@ run_gsm8k_qwen35_35b_a3b_test() {
 }
 
 
+# GSM8K on Qwen3.6-35B-A3B
+# This test requires new transformers and huggingface_hub versions for Qwen3.6 model support, once VLLM supports latest transfomer,
+# we can remove the pip version pinning and restoration in this test and just rely on the environment having the right versions.
+run_gsm8k_qwen36_35b_a3b_test() {
+    echo "➡️ Testing GSM8K on Qwen3.6-35B-A3B..."
+    VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.1 \
+    VLLM_PROMPT_BS_BUCKET_MAX=32 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3.6-35b-a3b.yaml"
+    echo "✅ Test with Qwen3.6-35B-A3B passed."
+}
+
+
 # --- Spec decode tests ---
 # Tests below check if speculative decoding is matching accept rate specified as an argument.
 # If the accept rate is below the threshold, the test will fail. The same applies for accuracy rate.
@@ -537,6 +549,7 @@ run_structured_output_test() {
 launch_all_tests() {
     echo "🚀 Starting all test suites..."
     # run_gemma3_load_generate_test
+    run_gsm8k_qwen36_35b_a3b_test
     run_basic_load_generate_test
     run_tp2_load_generate_test
     run_mla_moe_load_generate_test
