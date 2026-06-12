@@ -15,8 +15,10 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
@@ -132,6 +134,80 @@ def _deserialize_reconfigure_config(vllm_config_bytes: bytes | bytearray) -> Vll
     return _validate_reconfigure_config(cloudpickle.loads(bytes(vllm_config_bytes)))
 
 
+def _run_platform_normalization(config: VllmConfig, error_message: str) -> None:
+    try:
+        current_platform.check_and_update_config(config)
+        current_platform.update_block_size_for_backend(config)
+    except Exception as exc:
+        logger.error(
+            error_message,
+            getattr(getattr(config, "model_config", None), "model", "<unknown>"),
+            exc,
+        )
+        raise
+
+
+def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
+    """Platform normalization for switch-time configs.
+
+    The model-swap path receives a serialized config that might have been
+    created before final platform adjustments (for example hybrid KV page-size
+    alignment on HPU). Re-apply platform hooks here to keep switch behavior
+    consistent with cold initialization.
+    """
+    # Keep the same order as startup normalization phases.
+    _run_platform_normalization(
+        config,
+        "[gaudi_reconfigure] platform config normalization failed for model %s: %s",
+    )
+
+    # Granite hybrid switch path can arrive with mamba_cache_mode=none and
+    # no padded Mamba page size, which later makes KV page-size unification
+    # fail in vLLM core. Force align-mode metadata in that case.
+    try:
+        model_config = getattr(config, "model_config", None)
+        cache_config = getattr(config, "cache_config", None)
+        if model_config is None or cache_config is None:
+            return
+
+        is_granite_hybrid = (bool(getattr(model_config, "is_hybrid", False)) and getattr(
+            getattr(model_config, "hf_config", None), "model_type", None) == "granitemoehybrid")
+        if not is_granite_hybrid:
+            return
+
+        mamba_mode = getattr(cache_config, "mamba_cache_mode", None)
+        if isinstance(mamba_mode, str) and mamba_mode.lower() == "none":
+            cache_config.mamba_cache_mode = "align"
+
+        if getattr(cache_config, "mamba_block_size", None) in (None, 0):
+            cache_config.mamba_block_size = cache_config.block_size
+
+        # Ensure mamba_page_size_padded exists. Final divisibility and other
+        # backend-specific alignment should be handled by platform hooks.
+        from vllm.model_executor.models import ModelRegistry
+
+        if getattr(cache_config, "mamba_page_size_padded", None) is None:
+            model_cls, _ = ModelRegistry.resolve_model_cls(
+                model_config.architecture,
+                model_config=model_config,
+            )
+            raw_mamba_page = MambaSpec(
+                shapes=model_cls.get_mamba_state_shape_from_config(config),
+                dtypes=model_cls.get_mamba_state_dtype_from_config(config),
+                block_size=-1,
+            ).page_size_bytes
+            cache_config.mamba_page_size_padded = raw_mamba_page
+
+        # Re-run platform normalization after applying Granite-specific
+        # fallback fields so alignment math stays centralized.
+        _run_platform_normalization(
+            config,
+            "[gaudi_reconfigure] Granite hybrid mamba alignment fallback failed for model %s: %s",
+        )
+    except Exception:
+        raise
+
+
 def install_engine_core_patch() -> None:
     """Install a Gaudi-only EngineCore reconfigure hook."""
     from vllm.v1.engine.core import EngineCore
@@ -157,29 +233,34 @@ def install_engine_core_patch() -> None:
         start = time.perf_counter()
         previous_config = self.vllm_config
         new_config = _deserialize_reconfigure_config(vllm_config_bytes)
-        logger.info("[gaudi_reconfigure] start: target_model=%s", new_config.model_config.model)
-        memory_before_mb = _collect_total_hpu_used_memory_mb(self)
+        memory_before_mb = None
         unload_result = None
         memory_after_unload_mb = None
-
-        # Pause scheduling and clear caches to avoid mixed state.
-        try:
-            self.pause_scheduler(mode="abort", clear_cache=True)
-            logger.info("[gaudi_reconfigure] scheduler paused and caches reset")
-        except Exception as exc:  # pragma: no cover - best effort
-            logger.warning("Failed to pause scheduler before reconfigure: %s", exc)
-
-        # Sleep to release device memory before reloading weights.
-        try:
-            if getattr(self.model_executor, "is_sleeping", False):
-                logger.warning("[gaudi_reconfigure] executor already marked sleeping before reconfigure")
-            else:
-                self.model_executor.sleep(level=1)
-                logger.info("[gaudi_reconfigure] executor slept (level=1)")
-        except Exception as exc:  # pragma: no cover - best effort
-            logger.warning("Failed to sleep executor before reconfigure: %s", exc)
+        stash_memory_after_mb = None
+        stash_created = False
 
         try:
+            _normalize_reconfigure_config_for_platform(new_config)
+            logger.info("[gaudi_reconfigure] start: target_model=%s", new_config.model_config.model)
+            memory_before_mb = _collect_total_hpu_used_memory_mb(self)
+
+            # Pause scheduling and clear caches to avoid mixed state.
+            try:
+                self.pause_scheduler(mode="abort", clear_cache=True)
+                logger.info("[gaudi_reconfigure] scheduler paused and caches reset")
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.warning("Failed to pause scheduler before reconfigure: %s", exc)
+
+            # Sleep to release device memory before reloading weights.
+            try:
+                if getattr(self.model_executor, "is_sleeping", False):
+                    logger.warning("[gaudi_reconfigure] executor already marked sleeping before reconfigure")
+                else:
+                    self.model_executor.sleep(level=1)
+                    logger.info("[gaudi_reconfigure] executor slept (level=1)")
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.warning("Failed to sleep executor before reconfigure: %s", exc)
+
             # Unload model put to sleep, reload new model on worker
             unload_result = self.collective_rpc("unload_model")
             # Validate unload_result: collective_rpc returns a list of per-worker results.
@@ -196,6 +277,8 @@ def install_engine_core_patch() -> None:
                             i,
                             type(worker_result).__name__,
                         )
+            stash_memory_after_mb = _sum_named_numeric_values(unload_result, "stash_memory_after_mb")
+            stash_created = stash_memory_after_mb is not None
             memory_after_unload_mb = _collect_total_hpu_used_memory_mb(self)
             load_kwargs: dict[str, Any] = {"vllm_config": new_config}
             if quant_config_path is not _QUANT_CONFIG_UNCHANGED:
@@ -207,6 +290,7 @@ def install_engine_core_patch() -> None:
             # Update config and reinitialize KV caches.
             self.vllm_config = new_config
             self.available_gpu_memory_for_kv_cache = -1
+
             kv_cache_config = self._initialize_kv_caches(new_config)
             num_gpu_blocks = new_config.cache_config.num_gpu_blocks
             logger.info(
@@ -287,18 +371,21 @@ def install_engine_core_patch() -> None:
         except Exception as exc:
             logger.error("[gaudi_reconfigure] failed: %s: %s", exc.__class__.__name__, exc)
 
-            try:
-                restore_result = self.collective_rpc(
-                    "restore_stashed_model",
-                    kwargs={
-                        "vllm_config": previous_config,
-                        "restore_kv_cache": True,
-                    },
-                )
-                logger.warning("[gaudi_reconfigure] rollback restore_stashed_model result=%s", restore_result)
-            except Exception as restore_exc:
-                logger.error("[gaudi_reconfigure] rollback restore_stashed_model failed: %s: %s",
-                             restore_exc.__class__.__name__, restore_exc)
+            if stash_created:
+                try:
+                    restore_result = self.collective_rpc(
+                        "restore_stashed_model",
+                        kwargs={
+                            "vllm_config": previous_config,
+                            "restore_kv_cache": True,
+                        },
+                    )
+                    logger.warning("[gaudi_reconfigure] rollback restore_stashed_model result=%s", restore_result)
+                except Exception as restore_exc:
+                    logger.error("[gaudi_reconfigure] rollback restore_stashed_model failed: %s: %s",
+                                 restore_exc.__class__.__name__, restore_exc)
+            else:
+                logger.warning("[gaudi_reconfigure] rollback skipped restore_stashed_model (no stash created)")
 
             self.vllm_config = previous_config
             try:
@@ -312,8 +399,6 @@ def install_engine_core_patch() -> None:
         freed_memory_mb = None
         if memory_before_mb is not None and memory_after_unload_mb is not None:
             freed_memory_mb = max(memory_before_mb - memory_after_unload_mb, 0.0)
-
-        stash_memory_after_mb = _sum_named_numeric_values(unload_result, "stash_memory_after_mb")
 
         return {
             "memory_before_mb": memory_before_mb,
