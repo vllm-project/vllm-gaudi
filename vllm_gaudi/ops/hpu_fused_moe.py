@@ -37,6 +37,31 @@ def _normalize_moe_activation(activation):
     return activation.value if isinstance(activation, Enum) else activation
 
 
+def current_model_config():
+    """Return the active ``ModelConfig`` via the current vLLM config, or None.
+
+    After upstream PR #41184 the ``layer`` reaching ``apply_monolithic`` is a
+    ``RoutedExperts`` instance, which no longer carries ``vllm_config`` (that
+    field belonged to the old top-level ``FusedMoE``). The model config must
+    therefore be resolved from the global vLLM config instead of off ``layer``.
+
+    Returns:
+        The active ``ModelConfig``, or ``None`` if no vLLM config is set.
+    """
+    vllm_config = get_current_vllm_config()
+    return vllm_config.model_config if vllm_config is not None else None
+
+
+def model_has_quant_config() -> bool:
+    """Whether the active model runs with a MoE quantization config.
+
+    Wraps :func:`has_quant_config` against the model config resolved from the
+    current vLLM config, returning ``False`` when no config is available.
+    """
+    model_config = current_model_config()
+    return model_config is not None and has_quant_config(model_config)
+
+
 def select_experts_from_routed(layer, hidden_states: torch.Tensor,
                                router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Route tokens to experts for the grouped/custom-routing monolithic path.
@@ -113,11 +138,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         is_bf16 = getattr(layer, "w13_weight", None) is not None and layer.w13_weight.dtype == torch.bfloat16
 
-        model_config = None
-        if getattr(layer, "vllm_config", None) is not None:
-            model_config = getattr(layer.vllm_config, "model_config", None)
-
-        is_unquantized = (model_config is None) or (not has_quant_config(model_config))
+        is_unquantized = not model_has_quant_config()
 
         cache_weight_lists = bool(is_bf16 and is_unquantized)
 
@@ -165,7 +186,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
-            if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
+            if not (model_has_quant_config() and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
                 x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
 
@@ -219,7 +240,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
-            if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
+            if not (model_has_quant_config() and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
                 x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
 

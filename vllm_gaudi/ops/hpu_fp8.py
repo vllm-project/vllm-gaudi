@@ -12,8 +12,7 @@ from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as Orig
 import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpFP8)
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.utils import has_quant_config
-from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation, select_experts_from_routed
+from vllm_gaudi.ops.hpu_fused_moe import (_normalize_moe_activation, model_has_quant_config, select_experts_from_routed)
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
 from vllm.model_executor.kernels.linear import _POSSIBLE_FP8_BLOCK_KERNELS, _POSSIBLE_FP8_KERNELS
@@ -234,7 +233,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
-            if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
+            if not (model_has_quant_config() and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
                 x = dispatch_tensor(x, hidden_states_across_dp, is_sequence_parallel)
 
