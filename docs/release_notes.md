@@ -2,6 +2,14 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.19.1.post1
+
+This is a post-release patch on top of 0.19.1 and continues to support [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
+
+The release fixes a device mismatch error during repetition/presence/frequency penalty sampling on HPU.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.19.1.post1.md).
+
 ## 0.19.1
 
 This is a minor patch release on top of 0.19.0 and continues to support [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
