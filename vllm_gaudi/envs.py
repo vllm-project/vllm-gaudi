@@ -8,6 +8,9 @@ if TYPE_CHECKING:
     VLLM_HPU_FORCE_CHANNEL_FP8: bool = True
     VLLM_HPU_HETERO_KV_LAYOUT: bool = False
     VLLM_HPU_MULTI_MODEL_CONFIG: Optional[str] = None
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: float = 300.0
+    VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -35,6 +38,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # When unset, multi-model mode is disabled.
     "VLLM_HPU_MULTI_MODEL_CONFIG":
     lambda: os.environ.get("VLLM_HPU_MULTI_MODEL_CONFIG", None),
+
+    # Timeout in seconds for NIXL abort request handling
+    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
+    lambda: float(os.environ.get("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "300")),
+
+    # NIXL side channel host and port for KV transfer
+    "VLLM_NIXL_SIDE_CHANNEL_HOST":
+    lambda: os.environ.get("VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"),
+    "VLLM_NIXL_SIDE_CHANNEL_PORT":
+    lambda: int(os.environ.get("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")),
 }
 
 # end-env-vars-definition

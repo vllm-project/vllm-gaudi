@@ -372,26 +372,81 @@ def hpu_causal_conv1d_update(
     if max_query_len not in (-1, None):  # Provided only for Triton helper parity
         raise NotImplementedError("'max_query_len' is not used in the reference implementation.")
 
-    activation = _normalize_activation(activation)
     dim = weight.size(0)
 
-    flat_x, qsl, reshape_spec = _flatten_inputs_for_update(x, query_start_loc, dim)
+    # Use TPC kernel if available, otherwise fall back to PyTorch implementation
+    if hasattr(torch.ops.hpu, "causal_conv1d_update"):
+        activation_bool = _normalize_activation(activation) in ("silu", "swish")
+        work_dtype = conv_state.dtype
+        # weight: (dim, width) -> (width, dim)
+        weight_for_tpc = weight.t().contiguous().to(work_dtype)
+        bias_for_tpc = bias.to(work_dtype) if bias is not None else None
 
-    result = hpu_causal_conv1d_fn_update(
-        flat_x,
-        weight,
-        bias,
-        conv_state,
-        qsl,
-        cache_indices=conv_state_indices,
-        has_initial_state=None,
-        activation=activation,
-        metadata=None,
-        validate_data=validate_data,
-        is_prompt=False,
-    )
+        # Gather per-batch conv_state using indices
+        if conv_state_indices is not None:
+            num_conv_slots = conv_state.shape[0]
+            safe_idx = torch.remainder(conv_state_indices.long(), num_conv_slots)
+            batch_conv_state = conv_state[safe_idx]
+            batch = safe_idx.numel()
+        else:
+            batch_conv_state = conv_state
+            batch = conv_state.shape[0]
 
-    return reshape_spec.reshape_fn(result)
+        # Reshape x to (batch, seqlen, dim) for TPC kernel
+        original_x = x
+        if x.dim() == 2:
+            if x.size(1) == dim:
+                x_3d = x.reshape(batch, -1, dim).to(work_dtype)
+            elif x.size(0) == dim:
+                x_3d = x.t().contiguous().reshape(batch, -1, dim).to(work_dtype)
+            else:
+                raise ValueError("Cannot reshape 2-D x for TPC causal_conv1d_update.")
+        elif x.dim() == 3:
+            x_3d = x.to(work_dtype)
+        else:
+            raise ValueError("Unsupported x dimensions for TPC causal_conv1d_update.")
+
+        out, conv_state_out = torch.ops.hpu.causal_conv1d_update(
+            x_3d,
+            batch_conv_state,
+            weight_for_tpc,
+            bias_for_tpc,
+            activation=activation_bool,
+            pad_slot_id=pad_slot_id,
+        )
+
+        # Write back updated conv_state
+        with torch.no_grad():
+            if conv_state_indices is not None:
+                conv_state[safe_idx] = conv_state_out
+            else:
+                conv_state.copy_(conv_state_out)
+
+        # Reshape output to match original x shape
+        if original_x.dim() == 2:
+            if original_x.size(1) == dim:
+                return out.reshape(original_x.shape).to(original_x.dtype)
+            elif original_x.size(0) == dim:
+                return out.reshape(-1, dim).t().contiguous().to(original_x.dtype)
+        return out.to(original_x.dtype)
+
+    else:
+        activation = _normalize_activation(activation)
+        flat_x, qsl, reshape_spec = _flatten_inputs_for_update(x, query_start_loc, dim)
+        result = hpu_causal_conv1d_fn_update(
+            flat_x,
+            weight,
+            bias,
+            conv_state,
+            qsl,
+            cache_indices=conv_state_indices,
+            has_initial_state=None,
+            activation=activation,
+            metadata=None,
+            validate_data=validate_data,
+            is_prompt=False,
+        )
+        return reshape_spec.reshape_fn(result)
 
 
 def hpu_causal_conv1d_fn_update(
