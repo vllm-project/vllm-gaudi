@@ -26,6 +26,8 @@ vLLM Hardware Plugin for Intel® Gaudi®
 
   This release introduces validated support and critical stability fixes for Qwen3-VL models leveraging HPUMMEncoderAttention. Performance and stability were improved through backported Mamba architecture optimizations, Docker and UBI infrastructure enhancements, and a forced CPU loading mechanism for INC quantization to prevent OOM errors.
 
+- [2026/06/16] Some trash to check reason of OOM.
+
 ---
 
 ## About
