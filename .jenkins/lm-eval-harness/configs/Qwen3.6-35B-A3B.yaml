@@ -1,18 +1,18 @@
-model_name: "/mnt/weka/data/pytorch/Qwen/models--Qwen--Qwen3.6-35B-A3B"
-tasks:
-- name: "gsm8k_custom_stop"
-  metrics:
-  - name: "exact_match,strict-match"
-    value: 0.96
-  - name: "exact_match,flexible-extract"
-    value: 0.78
-limit: 256
-num_fewshot: 5
-max_num_seqs: 128
-max_model_len: 8192
-batch_size: 128
-dtype: "bfloat16"
-trust_remote_code: True
-model_args: "gpu_memory_utilization=0.7,enable_chunked_prefill=true,max_num_batched_tokens=8192"
-gen_kwargs: "max_gen_toks=2048"
-include_path: "tasks"
+model_card:
+  model_name: "Qwen/Qwen3.6-35B-A3B"
+  tasks: "gsm8k_custom_stop"
+  num_fewshot: 5
+  trust_remote_code: true
+  limit: 256
+  max_num_seqs: 128
+  max_model_len: 8192
+  batch_size: 128
+  dtype: bfloat16
+  gpu_memory_utilization: 0.7
+  max_num_batched_tokens: 8192
+  max_gen_toks: 2048
+  include_path: "full_tests/tasks"
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.96
