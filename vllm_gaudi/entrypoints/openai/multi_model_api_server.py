@@ -14,7 +14,7 @@ from typing import Any, NamedTuple
 
 import uvloop
 import yaml
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 import vllm.envs as envs
@@ -42,6 +42,51 @@ from vllm.utils.system_utils import decorate_logs
 from vllm_gaudi.v1.engine.multi_model_async_llm import MultiModelAsyncLLM
 
 logger = init_logger("vllm_gaudi.entrypoints.openai.multi_model_api_server")
+
+
+def _patch_instrumentator_route_walk() -> None:
+    """Make prometheus-fastapi-instrumentator tolerate path-less routes.
+
+    FastAPI >= 0.137 stores lazy ``_IncludedRouter`` objects (BaseRoute
+    subclasses with no ``.path``) in ``app.routes`` whenever
+    ``app.include_router()`` is called.  The instrumentator's
+    ``_get_route_name`` (up to v8.0.0) reads ``route.path`` unconditionally
+    on every request, so the metrics middleware raises ``AttributeError`` and
+    returns HTTP 500 for all non-excluded endpoints.
+
+    This is the same patch landed in upstream vllm via PR #45629.  Applying
+    it here is idempotent: once we rebase past that commit the upstream
+    ``metrics.py`` will apply the same fix at import time first.
+    """
+    try:
+        from prometheus_fastapi_instrumentator import routing as _pfi_routing
+        from starlette.routing import Match, Mount
+        from starlette.types import Scope
+
+        def _get_route_name(scope: Scope, routes, route_name=None):
+            for route in routes:
+                if getattr(route, "path", None) is None:
+                    continue
+                match, child_scope = route.matches(scope)
+                if match == Match.FULL:
+                    route_name = route.path
+                    child_scope = {**scope, **child_scope}
+                    if isinstance(route, Mount) and route.routes:
+                        child = _get_route_name(child_scope, route.routes, route_name)
+                        route_name = None if child is None else route_name + child
+                    return route_name
+                elif match == Match.PARTIAL and route_name is None:
+                    route_name = route.path
+            return None
+
+        _pfi_routing._get_route_name = _get_route_name
+    except Exception:
+        # prometheus_fastapi_instrumentator not installed or already patched;
+        # safe to ignore.
+        pass
+
+
+_patch_instrumentator_route_walk()
 
 
 @dataclass
@@ -558,9 +603,6 @@ def _attach_multi_model_router(app: FastAPI) -> None:
         logger.warning("The /v1/models/switch endpoint is disabled. Set VLLM_SERVER_DEV_MODE=1 to enable it.")
         return
 
-    router = APIRouter()
-
-    @router.post("/v1/models/switch", response_model=ModelSwitchResponse)
     async def switch_model(request: ModelSwitchRequest, raw_request: Request):
         manager: MultiModelAsyncLLM = raw_request.app.state.multi_model_manager
         engine_client: EngineClient = raw_request.app.state.multi_model_engine_client
@@ -625,7 +667,15 @@ def _attach_multi_model_router(app: FastAPI) -> None:
             stash_memory_after_mb=stash_memory_after_mb,
         )
 
-    app.include_router(router)
+    # Use add_api_route instead of include_router to avoid adding an
+    # _IncludedRouter object to app.routes, which lacks a .path attribute
+    # and breaks prometheus_fastapi_instrumentator route name resolution.
+    app.add_api_route(
+        "/v1/models/switch",
+        switch_model,
+        methods=["POST"],
+        response_model=ModelSwitchResponse,
+    )
 
 
 async def _run_multi_model_server_worker(
