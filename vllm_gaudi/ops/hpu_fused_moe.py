@@ -180,9 +180,15 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
 
-        if not layer.use_grouped_topk:
-            topk_ids = topk_ids.to(torch.int64)
-            topk_weights = topk_weights.to(x.dtype)
+        # The HPU mixture_of_experts kernel compiles for bf16 (x.dtype) router
+        # weights and int64 routing tables. The grouped-topk / custom-routing
+        # helper returns float32 weights and int32 ids; the regular-topk path
+        # above already normalized them, but the grouped path previously left
+        # them unconverted -> the bf16 MoE kernel graph received a float32
+        # router_weights tensor and failed to compile (synStatus 26). Normalize
+        # for every routing path so the kernel inputs are dtype-consistent.
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
@@ -234,9 +240,12 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
 
-        if not layer.use_grouped_topk:
-            topk_ids = topk_ids.to(torch.int64)
-            topk_weights = topk_weights.to(x.dtype)
+        # See apply_monolithic: the bf16 HPU MoE kernel needs int64 routing
+        # tables and x.dtype router weights. Normalize for every routing path
+        # (grouped-topk / custom routing returns int32 + float32) so the kernel
+        # graph receives dtype-consistent inputs and compiles.
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
