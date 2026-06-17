@@ -95,41 +95,6 @@ def select_experts_from_routed(layer, hidden_states: torch.Tensor,
     )
 
 
-def map_global_topk_ids_to_local(layer, topk_ids: torch.Tensor) -> torch.Tensor:
-    """Remap global expert ids to this rank's local weight-slot indices.
-
-    The HPU ``mixture_of_experts`` kernel indexes its (local) weight list by the
-    literal ``topk_id`` value and zeroes any id ``>= local_num_experts``; it does
-    not apply an ``experts_min`` offset. Under expert parallelism each rank holds
-    only ``local_num_experts`` of the ``global_num_experts`` experts, while the
-    router (upstream ``select_experts`` / ``torch.topk``) emits **global** ids.
-    The global ids must therefore be translated to local slots before the kernel.
-
-    Upstream GPU performs this translation inside ``moe_align_block_size`` via
-    ``expert_map``; the HPU kernel has no such parameter, so we apply the
-    translation here using ``layer.expert_map`` (global id -> local slot, or -1
-    when the expert is not owned by this rank). Non-owned ids are remapped to
-    ``local_num_experts`` so the kernel zeroes their contribution; the cross-rank
-    ``reduce_scatter`` combine then sums each token's full expert set.
-
-    No-op when ``expert_map`` is ``None`` (no EP sharding), so the single-card /
-    EP-disabled paths are unaffected.
-
-    Args:
-        layer: The ``RoutedExperts`` instance carrying ``expert_map`` and
-            ``local_num_experts``.
-        topk_ids: Selected expert ids in **global** index space.
-
-    Returns:
-        ``topk_ids`` translated to local slot indices (non-owned -> sentinel).
-    """
-    expert_map = layer.expert_map
-    if expert_map is None:
-        return topk_ids
-    local_ids = expert_map[topk_ids]
-    return torch.where(local_ids < 0, layer.local_num_experts, local_ids)
-
-
 @UnquantizedFusedMoEMethod.register_oot
 class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """MoE method without quantization."""
@@ -234,10 +199,6 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
-        # Translate global expert ids to local weight-slot indices for the HPU
-        # kernel (no-op without EP sharding). See map_global_topk_ids_to_local.
-        topk_ids = map_global_topk_ids_to_local(layer, topk_ids)
-
         output = layer.moe_op(
             x,
             topk_ids,
@@ -291,10 +252,6 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
-
-        # Translate global expert ids to local weight-slot indices for the HPU
-        # kernel (no-op without EP sharding). See map_global_topk_ids_to_local.
-        topk_ids = map_global_topk_ids_to_local(layer, topk_ids)
 
         if self.model_type in ["gpt_oss"]:
             return layer.moe_op(
