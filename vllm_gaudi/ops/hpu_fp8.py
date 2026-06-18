@@ -12,8 +12,7 @@ from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod as Orig
 import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8PerChannel, VllmMixtureOfExpertsOpFP8)
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.utils import has_quant_config
-from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
+from vllm_gaudi.ops.hpu_fused_moe import (_normalize_moe_activation, model_has_quant_config, select_experts_from_routed)
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
 from vllm.model_executor.kernels.linear import _POSSIBLE_FP8_BLOCK_KERNELS, _POSSIBLE_FP8_KERNELS
@@ -162,6 +161,9 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         self.allow_deep_gemm = False
 
         self.use_dispatch_fn = get_config().use_dispatch_fn
+        # Snapshot the (static) quant-config flag while the vLLM config context
+        # is set; the forward hot path reads this cached value instead.
+        self.has_moe_quant_config = model_has_quant_config()
 
     @property
     def is_monolithic(self) -> bool:
@@ -175,7 +177,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.local_num_experts
-        ep_shift = layer.ep_rank * num_experts
+        ep_shift = layer.moe_config.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         if layer.moe_config.dp_size > 1 and self.use_dispatch_fn:
@@ -220,7 +222,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -234,7 +236,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
-            if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
+            if not (self.has_moe_quant_config and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
                 x = dispatch_tensor(x, hidden_states_across_dp, is_sequence_parallel)
 
