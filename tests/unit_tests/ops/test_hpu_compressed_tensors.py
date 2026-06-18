@@ -345,34 +345,34 @@ def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_ini
 
     # Prepare FusedMoE layer with oot HPUCompressedTensorsWNA16MoEMethod
     oot_op = create_fused_moe(oot_quant_config).to("hpu")
-    assert isinstance(oot_op.quant_method, HPUCompressedTensorsWNA16MoEMethod)
+    assert isinstance(oot_op.routed_experts.quant_method, HPUCompressedTensorsWNA16MoEMethod)
 
     # Weights were extracted from first FusedMoE layer of RedHatAI/Qwen3-30B-A3B-quantized.w4a16
     # (with adjusted shapes, to make tensors smaller)
     with safe_open(get_data_path("data/compressed_tensors/moe_wna16.safetensors"), framework="pt", device="hpu") as f:
         w2_weight_packed = f.get_tensor("w2_weight_packed")
         w2_weight_packed = torch.swapaxes(w2_weight_packed, 0, 1).repeat(128, 1, 1)
-        oot_op.w2_weight_packed.copy_(w2_weight_packed)
+        oot_op.routed_experts.w2_weight_packed.copy_(w2_weight_packed)
 
         w13_weight_packed = f.get_tensor("w13_weight_packed")
         w13_weight_packed = torch.swapaxes(w13_weight_packed, 0, 1).repeat(128, 1, 1)
-        oot_op.w13_weight_packed.copy_(w13_weight_packed)
+        oot_op.routed_experts.w13_weight_packed.copy_(w13_weight_packed)
 
         w2_weight_scale = f.get_tensor("w2_weight_scale")
         w2_weight_scale = torch.swapaxes(w2_weight_scale, 0, 1).repeat(128, 1, 1)
-        oot_op.w2_weight_scale.copy_(w2_weight_scale)
+        oot_op.routed_experts.w2_weight_scale.copy_(w2_weight_scale)
 
         w13_weight_scale = f.get_tensor("w13_weight_scale")
         w13_weight_scale = torch.swapaxes(w13_weight_scale, 0, 1).repeat(128, 1, 1)
-        oot_op.w13_weight_scale.copy_(w13_weight_scale)
+        oot_op.routed_experts.w13_weight_scale.copy_(w13_weight_scale)
 
         w2_weight_shape = torch.tensor([512, 256], dtype=torch.bfloat16, device="hpu")
-        oot_op.w2_weight_shape.copy_(w2_weight_shape.repeat(128, 1))
+        oot_op.routed_experts.w2_weight_shape.copy_(w2_weight_shape.repeat(128, 1))
 
         w13_weight_shape = torch.tensor([256, 512], dtype=torch.bfloat16, device="hpu")
-        oot_op.w13_weight_shape.copy_(w13_weight_shape.repeat(128, 1))
+        oot_op.routed_experts.w13_weight_shape.copy_(w13_weight_shape.repeat(128, 1))
 
-    oot_op.quant_method.process_weights_after_loading(oot_op)
+    oot_op.routed_experts.quant_method.process_weights_after_loading(oot_op.routed_experts)
 
     if not htorch.utils.internal.is_lazy():
         compile_config = HPUCompileConfig()
@@ -388,12 +388,12 @@ def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_ini
 
     # Execute layer
     ctx = ForwardContext(
-        no_compile_layers={oot_op.runner.layer_name: oot_op},
+        no_compile_layers={oot_op.layer_name: oot_op},
         attn_metadata={},
         slot_mapping={},
     )
     with override_forward_context(ctx):
-        out = oot_op.runner.forward(hidden_states, router_logits)
+        out = oot_op.forward(hidden_states, router_logits)
 
     # Check correctness
     torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
@@ -589,7 +589,7 @@ def test_compressed_tensors_w8a8fp8_block_moe_method(default_vllm_config: None, 
     oot_quant_config = CompressedTensorsConfig.from_config(config)
 
     oot_op = create_fused_moe(oot_quant_config).to("hpu")
-    assert isinstance(oot_op.quant_method, HPUCompressedTensorsW8A8Fp8MoEMethod)
+    assert isinstance(oot_op.routed_experts.quant_method, HPUCompressedTensorsW8A8Fp8MoEMethod)
 
     num_experts = 128
     hidden_size = 512
@@ -610,18 +610,19 @@ def test_compressed_tensors_w8a8fp8_block_moe_method(default_vllm_config: None, 
     w13_weight_scale = torch.ones(num_experts, w13_scale_rows, w13_scale_cols, dtype=torch.float32, device="hpu")
     w2_weight_scale = torch.ones(num_experts, w2_scale_rows, w2_scale_cols, dtype=torch.float32, device="hpu")
 
-    oot_op.w13_weight.data.copy_(w13_weight)
-    oot_op.w2_weight.data.copy_(w2_weight)
-    oot_op.w13_weight_scale.data.copy_(w13_weight_scale)
-    oot_op.w2_weight_scale.data.copy_(w2_weight_scale)
+    oot_op.routed_experts.w13_weight.data.copy_(w13_weight)
+    oot_op.routed_experts.w2_weight.data.copy_(w2_weight)
+    oot_op.routed_experts.w13_weight_scale.data.copy_(w13_weight_scale)
+    oot_op.routed_experts.w2_weight_scale.data.copy_(w2_weight_scale)
 
-    oot_op.quant_method.process_weights_after_loading(oot_op)
+    oot_op.routed_experts.quant_method.process_weights_after_loading(oot_op.routed_experts)
 
     # Verify blockwise post-processing created the expected attributes
-    assert hasattr(oot_op, "w13_weight_scale_inv"), "w13_weight_scale_inv should be created for block MoE"
-    assert hasattr(oot_op, "w2_weight_scale_inv"), "w2_weight_scale_inv should be created for block MoE"
-    assert not hasattr(oot_op, "w13_weight_scale"), "w13_weight_scale should be removed after aliasing"
-    assert not hasattr(oot_op, "w2_weight_scale"), "w2_weight_scale should be removed after aliasing"
+    assert hasattr(oot_op.routed_experts,
+                   "w13_weight_scale_inv"), ("w13_weight_scale_inv should be created for block MoE")
+    assert hasattr(oot_op.routed_experts, "w2_weight_scale_inv"), "w2_weight_scale_inv should be created for block MoE"
+    assert not hasattr(oot_op.routed_experts, "w13_weight_scale"), "w13_weight_scale should be removed after aliasing"
+    assert not hasattr(oot_op.routed_experts, "w2_weight_scale"), "w2_weight_scale should be removed after aliasing"
 
     # Execute layer with synthetic input
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16, device="hpu")
@@ -630,7 +631,7 @@ def test_compressed_tensors_w8a8fp8_block_moe_method(default_vllm_config: None, 
     mock_ctx = MagicMock(spec=["dp_metadata"])
     mock_ctx.dp_metadata = None
     with override_forward_context(mock_ctx):
-        out = oot_op.runner._forward_impl(oot_op, hidden_states, router_logits, hidden_states)
+        out = oot_op._forward_impl(hidden_states, router_logits, hidden_states)
 
     assert out.shape == hidden_states.shape
     assert out.dtype == torch.bfloat16
