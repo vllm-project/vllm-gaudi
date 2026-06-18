@@ -27,6 +27,16 @@ Currently:
   is deferred to ``load_general_plugins`` time to avoid importing
   ``vllm.v1.sample.sampler`` during early plugin registration, which would
   trigger a heavy import chain that interferes with platform initialisation.
+
+* ``vllm.v1.sample.sampler.Sampler.gather_logprobs`` — upstream PR #38933
+  added two ``mark_unbacked()`` calls inside ``gather_logprobs`` to prevent
+  0->1 batch-size specialization recompiles for ``batched_count_greater_than``
+  on CUDA.  On HPU, ``torch._dynamo`` marks ``mark_unbacked`` as a forbidden
+  callable (``is_forbidden=True``), so tracing a compiled ``Sampler`` raises
+  ``AssertionError: Attempt to trace forbidden callable mark_unbacked`` for
+  any request with ``logprobs=true``.  We replace ``gather_logprobs`` with an
+  identical implementation that omits the two ``mark_unbacked`` calls.  HPU
+  handles dynamic batch shapes without this hint.
 """
 
 import gc
@@ -148,6 +158,58 @@ def _hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
         parallel_state.logger.warning("torch._C._host_emptyCache() only available in Pytorch >=2.5")
 
 
+def _hpu_gather_logprobs(
+    logprobs: torch.Tensor,
+    num_logprobs: int,
+    token_ids: torch.Tensor,
+):
+    """HPU-safe replacement for ``Sampler.gather_logprobs``.
+
+    Identical logic to the upstream implementation (vllm PR #38933) but with
+    the two ``mark_unbacked()`` calls removed.  On HPU, ``mark_unbacked`` is a
+    forbidden callable in ``torch._dynamo`` (``is_forbidden=True``).  When the
+    compiled ``Sampler`` traces ``gather_logprobs``, hitting ``mark_unbacked``
+    raises ``AssertionError: Attempt to trace forbidden callable``.  HPU does
+    not need this CUDA-specific recompile hint.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/38933
+    """
+    from vllm.v1.outputs import LogprobsTensors
+    import vllm.v1.sample.sampler as _sampler_mod
+
+    assert token_ids.dtype == torch.int64
+    topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
+    token_ids = token_ids.unsqueeze(-1)
+    token_logprobs = logprobs.gather(-1, token_ids)
+    # mark_unbacked calls intentionally omitted — forbidden on HPU dynamo.
+    token_ranks = _sampler_mod.batched_count_greater_than(logprobs, token_logprobs)
+    indices = torch.cat((token_ids, topk_indices), dim=1)
+    logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
+    indices = indices.to(torch.int32)
+    return LogprobsTensors(indices, logprobs, token_ranks)
+
+
+def _patch_gather_logprobs() -> None:
+    """Replace ``Sampler.gather_logprobs`` with the HPU-safe variant.
+
+    Called from the ``load_general_plugins`` hook (same as
+    ``_patch_batched_count_greater_than``) so that ``vllm.v1.sample.*``
+    imports run after platform initialisation.
+
+    Guarded by ``inspect.getsource`` so this is a no-op on vLLM versions
+    that predate PR #38933 (i.e. where ``gather_logprobs`` does not call
+    ``mark_unbacked``).
+    """
+    import inspect
+
+    import vllm.v1.sample.sampler as _sampler_mod
+
+    if 'mark_unbacked' not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
+        return  # Not affected — older vLLM without PR #38933.
+
+    _sampler_mod.Sampler.gather_logprobs = staticmethod(_hpu_gather_logprobs)
+
+
 def _hpu_batched_count_greater_than(x: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
     """HPU-safe replacement for ``batched_count_greater_than``.
 
@@ -202,6 +264,7 @@ def apply() -> None:
     def _load_general_with_hpu_patches():
         _original_load_general()
         _patch_batched_count_greater_than()
+        _patch_gather_logprobs()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
