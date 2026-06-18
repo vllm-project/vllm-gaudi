@@ -52,7 +52,7 @@ from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
                                       VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
+from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation, select_experts_from_routed
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase, )
 import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
@@ -433,7 +433,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         # super().process_weights_after_loading(layer)
         # custom handling for HPU
         num_experts = layer.local_num_experts
-        ep_shift = layer.ep_rank * num_experts
+        ep_shift = layer.moe_config.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
 
@@ -531,7 +531,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -773,7 +773,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
-        extra_weight_attrs["intermediate_size_full"] = intermediate_size_per_partition * layer.tp_size
+        extra_weight_attrs["intermediate_size_full"] = intermediate_size_per_partition * layer.moe_config.tp_size
 
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
@@ -925,7 +925,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
         # Initialize HPU MoE op
         num_experts = layer.local_num_experts
-        ep_shift = layer.ep_rank * num_experts
+        ep_shift = layer.moe_config.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         layer.moe_op = VllmMixtureOfExpertsOpWNA16(
@@ -958,7 +958,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         x = x.view(-1, x.shape[-1])
 
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
