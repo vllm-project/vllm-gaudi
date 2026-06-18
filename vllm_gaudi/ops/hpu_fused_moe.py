@@ -33,8 +33,24 @@ from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
 
+# Map model activation names to the activation strings the Gaudi fused-MoE op's
+# MoeActivationMode_t enum accepts. The synapse MoE kernel enumerates "gelu" (and
+# silu/selu) but NOT "gelu_tanh"; the Gaudi gelu TPC kernel is itself the tanh
+# approximation (tpc_kernels .../gelu_f16.c uses tanh_f16), so HF's
+# gelu_pytorch_tanh / gelu_tanh map to the op's "gelu" (the ~1e-3 exact-vs-tanh
+# difference does not affect inference). Without this, Gemma4's MoE aborts at
+# warmup_graphs with: Activation "gelu_tanh" not found among MoeActivationMode_t.
+_MOE_ACTIVATION_ALIASES = {
+    "gelu_tanh": "gelu",
+    "gelu_pytorch_tanh": "gelu",
+    "gelu_new": "gelu",
+    "quick_gelu": "gelu",
+}
+
+
 def _normalize_moe_activation(activation):
-    return activation.value if isinstance(activation, Enum) else activation
+    act = activation.value if isinstance(activation, Enum) else activation
+    return _MOE_ACTIVATION_ALIASES.get(act, act)
 
 
 def model_has_quant_config() -> bool:
