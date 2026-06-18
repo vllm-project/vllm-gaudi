@@ -25,7 +25,7 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, set_random_seed)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
@@ -610,8 +610,13 @@ class HPUWorker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
+        # Upstream now consumes handshake metadata via
+        # set_xfer_handshake_metadata_pp_aware(), which expects keys to be
+        # (pp_rank, tp_rank) tuples. Returning a flat {tp_rank: metadata} dict
+        # made it unpack an int and raise TypeError during EngineCore init.
+        pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        return {(pp_rank, tp_rank): metadata}
 
     def get_hpu_used_memory_mb(self) -> float | None:
         """Return currently used HPU memory in MB for this worker."""

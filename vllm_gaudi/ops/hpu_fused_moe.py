@@ -9,9 +9,10 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
 import torch
 import vllm
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter, )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
@@ -36,6 +37,64 @@ def _normalize_moe_activation(activation):
     return activation.value if isinstance(activation, Enum) else activation
 
 
+def model_has_quant_config() -> bool:
+    """Whether the active model runs with a MoE quantization config.
+
+    After upstream PR #41184 the ``layer`` reaching ``apply_monolithic`` is a
+    ``RoutedExperts`` instance, which no longer carries ``vllm_config`` (that
+    field belonged to the old top-level ``FusedMoE``). The model config must
+    therefore be resolved from the global vLLM config instead of off ``layer``.
+
+    This MUST be called at build time (e.g. in ``__init__`` /
+    ``process_weights_after_loading``), where the vLLM config context is set:
+    the result is static per run, so callers cache it and read the cached flag
+    on the forward hot path. ``get_current_vllm_config_or_none`` is used so the
+    function degrades to ``False`` instead of raising if no context is active.
+
+    Returns:
+        ``True`` when the active model config declares a MoE quant config.
+    """
+    vllm_config = get_current_vllm_config_or_none()
+    model_config = vllm_config.model_config if vllm_config is not None else None
+    return model_config is not None and has_quant_config(model_config)
+
+
+def select_experts_from_routed(layer, hidden_states: torch.Tensor,
+                               router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Route tokens to experts for the grouped/custom-routing monolithic path.
+
+    After upstream PR #41184 the ``layer`` passed to ``apply_monolithic`` is a
+    ``RoutedExperts`` instance, which no longer owns a ``.router`` object (the
+    router moved onto ``MoERunner``). ``RoutedExperts`` does, however, carry all
+    the routing parameters, so we reproduce upstream's behaviour via the
+    standalone ``select_experts`` helper. It is imported lazily because
+    ``cpu_fused_moe`` registers a CPU custom op at module import time.
+
+    Args:
+        layer: The ``RoutedExperts`` instance holding the routing parameters.
+        hidden_states: Flattened input activations.
+        router_logits: Gate logits for the current tokens.
+
+    Returns:
+        A ``(topk_weights, topk_ids)`` tuple.
+    """
+    from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
+
+    return select_experts(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        top_k=layer.top_k,
+        use_grouped_topk=layer.use_grouped_topk,
+        renormalize=layer.renormalize,
+        topk_group=layer.topk_group,
+        num_expert_group=layer.num_expert_group,
+        custom_routing_function=layer.custom_routing_function,
+        scoring_func=layer.scoring_func,
+        routed_scaling_factor=layer.routed_scaling_factor,
+        e_score_correction_bias=layer.e_score_correction_bias,
+    )
+
+
 @UnquantizedFusedMoEMethod.register_oot
 class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """MoE method without quantization."""
@@ -43,6 +102,9 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.use_dispatch_fn = get_config().use_dispatch_fn
+        # Snapshot the (static) quant-config flag while the vLLM config context
+        # is set; the forward hot path reads this cached value instead.
+        self.has_moe_quant_config = model_has_quant_config()
         torch.hpu.synchronize()
         vllm_config = get_current_vllm_config()
         self.model_type = None
@@ -62,7 +124,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().process_weights_after_loading(layer)
         # custom handling for HPU
         num_experts = layer.local_num_experts
-        ep_shift = layer.ep_rank * num_experts
+        ep_shift = layer.moe_config.ep_rank * num_experts
         has_bias = hasattr(layer, "w13_bias") and hasattr(layer, "w2_bias")
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
@@ -76,11 +138,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         is_bf16 = getattr(layer, "w13_weight", None) is not None and layer.w13_weight.dtype == torch.bfloat16
 
-        model_config = None
-        if getattr(layer, "vllm_config", None) is not None:
-            model_config = getattr(layer.vllm_config, "model_config", None)
-
-        is_unquantized = (model_config is None) or (not has_quant_config(model_config))
+        is_unquantized = not self.has_moe_quant_config
 
         cache_weight_lists = bool(is_bf16 and is_unquantized)
 
@@ -109,7 +167,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
 
@@ -122,21 +180,27 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
 
-        if not layer.use_grouped_topk:
-            topk_ids = topk_ids.to(torch.int64)
-            topk_weights = topk_weights.to(x.dtype)
+        # The HPU mixture_of_experts kernel compiles for bf16 (x.dtype) router
+        # weights and int64 routing tables. The grouped-topk / custom-routing
+        # helper returns float32 weights and int32 ids; the regular-topk path
+        # above already normalized them, but the grouped path previously left
+        # them unconverted -> the bf16 MoE kernel graph received a float32
+        # router_weights tensor and failed to compile (synStatus 26). Normalize
+        # for every routing path so the kernel inputs are dtype-consistent.
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
-            if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
+            if not (self.has_moe_quant_config and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
-                x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
+                x = dispatch_tensor(x, hidden_states_across_dp, layer.moe_config.is_sequence_parallel)
 
             topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
-            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
+            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.moe_config.is_sequence_parallel)
 
             topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
-            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
+            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.moe_config.is_sequence_parallel)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
@@ -163,7 +227,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
 
@@ -176,21 +240,24 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
 
-        if not layer.use_grouped_topk:
-            topk_ids = topk_ids.to(torch.int64)
-            topk_weights = topk_weights.to(x.dtype)
+        # See apply_monolithic: the bf16 HPU MoE kernel needs int64 routing
+        # tables and x.dtype router weights. Normalize for every routing path
+        # (grouped-topk / custom routing returns int32 + float32) so the kernel
+        # graph receives dtype-consistent inputs and compiles.
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
-            if not (has_quant_config(layer.vllm_config.model_config) and self.use_dispatch_fn):
+            if not (self.has_moe_quant_config and self.use_dispatch_fn):
                 hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
-                x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
+                x = dispatch_tensor(x, hidden_states_across_dp, layer.moe_config.is_sequence_parallel)
 
             topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
-            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
+            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.moe_config.is_sequence_parallel)
 
             topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
-            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
+            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.moe_config.is_sequence_parallel)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
@@ -226,22 +293,28 @@ def patched_fused_moe_forward(
     """Patched forward that avoids graph breaks from ForwardContext lookups
     and dynamo per-layer string guards.
 
-    Instead of calling forward_dispatch (which uses get_layer_from_name,
-    ensure_moe_quant_config_init, and _sequence_parallel_context — all of
-    which access ForwardContext and cause torch.compile graph breaks), we
-    use a layer reference stashed on the runner at FusedMoE.__init__ time
-    (self._hpu_layer_ref) and bypass _forward_impl for dp_size==1,
-    calling _apply_quant_method + _maybe_combine directly. This also
-    bypasses self.layer_name (a per-layer string) so dynamo no longer
-    emits per-layer string guards that trigger recompilation.
+    Instead of calling _forward_impl (which uses _sequence_parallel_context
+    and _maybe_dispatch — both of which access ForwardContext and cause
+    torch.compile graph breaks), for dp_size==1 we inline the quant-config
+    init, gate application, _apply_quant_method and _maybe_combine directly.
+    This also bypasses self.layer_name (a per-layer string) so dynamo no
+    longer emits per-layer string guards that trigger recompilation.
 
-    The post-forward reduction sequence mirrors upstream
-    MoERunner.forward (vllm/model_executor/layers/fused_moe/runner/
-    moe_runner.py) so we stay in sync with the new shared/fused
-    output combination logic introduced by upstream PR #35949.
+    After upstream PR #41184 (FusedMoE/MoERunner inversion), `self` IS the
+    MoERunner: the expert weights and quant_method live on
+    self.routed_experts, quant init moved to
+    routed_experts._ensure_moe_quant_config_init(), and _apply_quant_method
+    no longer takes a `layer` argument. The post-forward reduction sequence
+    mirrors upstream MoERunner.forward so we stay in sync with the shared/
+    fused output combination logic.
     """
     hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
-    hidden_states, og_hidden_dims = self._maybe_pad_hidden_states(shared_experts_input, hidden_states)
+    # Upstream _maybe_pad_hidden_states now returns a 3-tuple: the (possibly
+    # padded) hidden_states plus two truncation sizes. og_hidden_dim_pre_xform
+    # trims fused_output before the routed-output transform (latent MoE);
+    # og_hidden_dim_post_xform strips kernel padding after the final all-reduce.
+    hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = self._maybe_pad_hidden_states(
+        shared_experts_input, hidden_states)
 
     if self.moe_config.dp_size == 1:
         # Bypass _forward_impl entirely for dp_size==1 to eliminate
@@ -251,14 +324,18 @@ def patched_fused_moe_forward(
         # would redundantly repeat.
         if self.moe_config.pcp_size > 1:
             raise RuntimeError("dp_size==1 fast path does not support pcp_size > 1")
-        layer = self._hpu_layer_ref
-        layer.ensure_moe_quant_config_init()
+        # Mirrors upstream MoERunner._forward_impl; the quant config init can be
+        # dropped once upstream completes its Modular Kernel (MK) migration.
+        self.routed_experts._ensure_moe_quant_config_init()
         self._maybe_sync_shared_experts_stream(shared_experts_input)
-        gate = self.gate or getattr(self, "_hpu_gate_ref", None)
-        if gate is not None:
-            router_logits, _ = gate(hidden_states)
+        # Apply the gate if the runner holds it (mirrors _forward_impl).
+        if self.gate is not None:
+            if self._fse_fuse_gate:
+                self._maybe_fuse_gate_weights()
+                router_logits = torch.nn.functional.linear(hidden_states, self._combined_gate_weight)
+            else:
+                router_logits, _ = self.gate(hidden_states)
         shared_output, fused_hidden = self._apply_quant_method(
-            layer=layer,
             hidden_states=hidden_states,
             router_logits=router_logits,
             shared_experts_input=shared_experts_input,
@@ -266,8 +343,13 @@ def patched_fused_moe_forward(
         )
         result = self._maybe_combine(shared_output, fused_hidden)
     else:
+        # Upstream PR #41184 dropped MoERunner._trtllm_mxfp4_unpadded_dim(); the
+        # TRT-LLM MXFP4 unpadded hidden dim now comes from moe_config and is only
+        # non-zero when the quant method produces unpadded output. Mirror
+        # MoERunner.forward exactly so we stay in sync with the custom-op signature.
+        hidden_dim_unpadded = (self.moe_config.hidden_dim_unpadded if self._quant_method.has_unpadded_output else 0)
         result = self._forward_entry(hidden_states, router_logits, shared_experts_input, input_ids,
-                                     self._encode_layer_name(), self._trtllm_mxfp4_unpadded_dim())
+                                     self._encode_layer_name(), hidden_dim_unpadded)
 
     # Mirror upstream MoERunner.forward post-_forward_entry pipeline.
     if isinstance(result, tuple):
@@ -275,13 +357,18 @@ def patched_fused_moe_forward(
     else:
         shared_output, fused_output = None, result
 
+    # Trim padding from fused_output before the routed-output transform, matching
+    # upstream MoERunner.forward (latent MoE with shared experts).
+    if og_hidden_dim_pre_xform is not None:
+        fused_output = fused_output[..., :og_hidden_dim_pre_xform]
+
     shared_output = self._maybe_reduce_shared_expert_output(shared_output)
     shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
     fused_output = self.apply_routed_output_transform(fused_output)
 
     combined = (shared_output + fused_output) if shared_output is not None else fused_output
 
-    combined = self._maybe_reduce_final_output(combined, og_hidden_dims)
+    combined = self._maybe_reduce_final_output(combined, og_hidden_dim_post_xform)
     return self._maybe_add_zero_expert_output(combined)
 
 
@@ -321,7 +408,6 @@ def create_fused_moe_router(
     top_k: int,
     global_num_experts: int,
     renormalize: bool = True,
-    indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     # grouped topk parameters
     use_grouped_topk: bool = False,
     num_expert_group: int | None = None,
@@ -356,7 +442,6 @@ def create_fused_moe_router(
         top_k: Number of experts to select per token
         global_num_experts: Total number of experts in the model
         renormalize: Whether to renormalize the routing weights
-        indices_type_getter: Function to get the desired indices dtype
 
     Grouped topk arguments:
         use_grouped_topk: Whether to use grouped top-k routing
@@ -395,7 +480,6 @@ def create_fused_moe_router(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            indices_type_getter=indices_type_getter,
         )
 
     if zero_expert_type is not None:
@@ -411,7 +495,6 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            indices_type_getter=indices_type_getter,
         )
 
     if use_grouped_topk:
@@ -429,7 +512,6 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
-            indices_type_getter=indices_type_getter,
         )
         return grouped_topk_router
 
@@ -440,7 +522,6 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             custom_routing_function=custom_routing_function,
             renormalize=renormalize,
-            indices_type_getter=indices_type_getter,
         )
 
     assert scoring_func in ["sigmoid", "softmax", "sqrtsoftplus"]
@@ -454,7 +535,6 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            indices_type_getter=indices_type_getter,
             hash_indices_table=hash_indices_table,
         )
 
@@ -464,7 +544,6 @@ def create_fused_moe_router(
         eplb_state=eplb_state,
         renormalize=renormalize,
         scoring_func=scoring_func,
-        indices_type_getter=indices_type_getter,
     )
 
 
@@ -486,22 +565,11 @@ def _patched_default_moe_runner_forward(self, *args, **kwargs):
 
 MoERunnerBase.forward = _patched_default_moe_runner_forward
 
-# Save FusedMoE layer reference on runner for direct _forward_impl calls.
-# This lets patched_fused_moe_forward bypass get_layer_from_name() and the
-# self.layer_name string access for dp_size==1, avoiding both ForwardContext
-# graph breaks and dynamo per-layer string guards.
-_orig_fused_moe_init = FusedMoE.__init__
-
-
-def _hpu_fused_moe_init(self, *args, **kwargs):
-    _orig_fused_moe_init(self, *args, **kwargs)
-    if hasattr(self, "runner"):
-        object.__setattr__(self.runner, "_hpu_layer_ref", self)
-        if self.runner.gate is not None:
-            object.__setattr__(self.runner, "_hpu_gate_ref", self.runner.gate)
-
-
-FusedMoE.__init__ = _hpu_fused_moe_init
+# Note: after upstream PR #41184, FusedMoE is a factory function (not an
+# nn.Module subclass), so there is no FusedMoE.__init__ to patch. The
+# dp_size==1 fast path in patched_fused_moe_forward operates directly on the
+# MoERunner (self.routed_experts / self.gate), so no stashed layer reference
+# is required.
 
 vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = get_compressed_expert_map
 vllm.model_executor.layers.fused_moe.router.router_factory.create_fused_moe_router = create_fused_moe_router
