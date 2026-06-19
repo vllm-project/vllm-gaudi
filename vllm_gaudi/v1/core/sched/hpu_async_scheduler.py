@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Iterable
+from typing import Any
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.request import Request, RequestStatus
@@ -7,7 +8,7 @@ from vllm.v1.request import Request, RequestStatus
 
 class HPUAsyncScheduler(AsyncScheduler):
 
-    def schedule(self):
+    def schedule(self, *args: Any, **kwargs: Any):
         """HPU override: fix stale cached-token accounting after preemption.
 
         After preemption a request is requeued with num_computed_tokens reset.
@@ -24,8 +25,13 @@ class HPUAsyncScheduler(AsyncScheduler):
         re-scheduled stays in self.waiting and the inconsistency persists
         until it is picked up. The Prometheus clamp in vllm_gaudi/utils.py
         guards the metrics path during that window.
+
+        Accepts *args/**kwargs and forwards them verbatim to the base
+        schedule() so this override stays compatible as upstream evolves the
+        signature (e.g. the throttle_prefills flag passed by
+        step_with_batch_queue under --async-scheduling).
         """
-        output = super().schedule()
+        output = super().schedule(*args, **kwargs)
         for request in self.running:
             # vLLM Request no longer exposes num_cached_tokens on newer
             # branches. Keep the old fix only when the field exists.
