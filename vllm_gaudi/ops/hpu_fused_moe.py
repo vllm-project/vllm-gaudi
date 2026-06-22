@@ -353,13 +353,14 @@ def patched_fused_moe_forward(
                 router_logits = torch.nn.functional.linear(hidden_states, self._combined_gate_weight)
             else:
                 router_logits, _ = self.gate(hidden_states)
-        # Core MoERunner._apply_quant_method now takes the owning FusedMoE
-        # layer as a required positional arg. On a MoERunner the layer is
-        # reachable (self.layer); fall back to the routed-experts container
-        # if that attribute name differs across core versions.
-        _quant_layer = getattr(self, 'layer', None)
-        if _quant_layer is None:
-            _quant_layer = getattr(self, 'routed_experts', self)
+        # Core MoERunner._apply_quant_method now takes the owning RoutedExperts
+        # layer as a required positional arg. The MoERunner doesn't store a direct
+        # reference to the layer, so we retrieve it from the layer registry using
+        # the layer_name. This matches how upstream's custom ops resolve the layer.
+        from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+            get_layer_from_name,
+        )
+        _quant_layer = get_layer_from_name(self.layer_name)
         shared_output, fused_hidden = self._apply_quant_method(
             _quant_layer,
             hidden_states=hidden_states,
