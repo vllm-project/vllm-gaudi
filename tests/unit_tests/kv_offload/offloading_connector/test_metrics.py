@@ -1,242 +1,147 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Unit tests for ``OffloadingConnectorStats``.
+
+Upstream vLLM PR #35669 ("Feature/offloading manager stats") rewrote
+``OffloadingConnectorStats`` from a per-direction
+``{"CPU_to_GPU": [{op_size, op_time}], "GPU_to_CPU": [...]}`` list payload to a
+self-describing flat structure keyed by ``{"types": {...}, "data": {...}}`` with
+flat prometheus metric names. These tests track the new contract so the
+HPU CPU-offloading connector keeps verifying against the live upstream API.
+"""
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
     OffloadingConnectorStats,
 )
 
+# Flat metric names emitted by the upstream connector. Kept as module-level
+# constants so the tests read against names instead of magic strings.
+LOAD_BYTES = "vllm:kv_offload_load_bytes"
+LOAD_TIME = "vllm:kv_offload_load_time"
+LOAD_SIZE = "vllm:kv_offload_load_size"
+STORE_BYTES = "vllm:kv_offload_store_bytes"
+STORE_SIZE = "vllm:kv_offload_store_size"
+
+
+def _make_populated_stats() -> OffloadingConnectorStats:
+    """Build a stats object exercising counter, gauge, and histogram metrics."""
+    stats = OffloadingConnectorStats()
+    stats.increase_counter(LOAD_BYTES, 16)
+    stats.increase_counter(LOAD_BYTES, 8)
+    stats.increase_counter(LOAD_TIME, 1.5)
+    stats.observe_histogram(LOAD_SIZE, 16)
+    stats.observe_histogram(LOAD_SIZE, 8)
+    return stats
+
 
 def test_build_kv_connector_stats_with_none():
-    """Test that build_kv_connector_stats returns empty stats when given None."""
+    """``build_kv_connector_stats(None)`` returns an empty, self-describing stats."""
     stats = OffloadingConnector.build_kv_connector_stats(data=None)
 
     assert stats is not None
     assert isinstance(stats, OffloadingConnectorStats)
-    assert len(stats.data) == 0
+    # The flat payload always carries the "types"/"data" envelope, and is
+    # considered empty while the inner "data" map has no observations.
     assert stats.is_empty()
+    assert stats.data["data"] == {}
+    assert stats.data["types"] == {}
 
 
 def test_build_kv_connector_stats_with_empty_dict():
-    """Test that build_kv_connector_stats returns empty stats with empty dict."""
+    """An explicit empty dict is normalized to the self-describing envelope."""
     stats = OffloadingConnector.build_kv_connector_stats(data={})
 
     assert stats is not None
     assert isinstance(stats, OffloadingConnectorStats)
-    assert len(stats.data) == 0
     assert stats.is_empty()
+    assert stats.data["data"] == {}
+    assert stats.data["types"] == {}
 
 
 def test_build_kv_connector_stats_reconstructs_offload_stats():
-    """Test that OffloadingConnector stats are properly reconstructed with
-    correct data."""
+    """A serialized flat payload round-trips back into an equivalent stats."""
     serialized_data = {
-        "CPU_to_GPU": [
-            {
-                "op_size": 16,
-                "op_time": 1.0
-            },
-            {
-                "op_size": 8,
-                "op_time": 0.5
-            },
-        ],
-        "GPU_to_CPU": [
-            {
-                "op_size": 1,
-                "op_time": 0.1
-            },
-            {
-                "op_size": 2,
-                "op_time": 0.2
-            },
-        ],
+        "types": {
+            LOAD_BYTES: "counter",
+            LOAD_SIZE: "histogram",
+        },
+        "data": {
+            LOAD_BYTES: 24,
+            LOAD_SIZE: [16, 8],
+        },
     }
 
     stats = OffloadingConnector.build_kv_connector_stats(data=serialized_data)
 
-    offload_connector_stats = stats
-    assert isinstance(offload_connector_stats, OffloadingConnectorStats)
-    assert offload_connector_stats.data["CPU_to_GPU"] == [
-        {
-            "op_size": 16,
-            "op_time": 1.0
-        },
-        {
-            "op_size": 8,
-            "op_time": 0.5
-        },
-    ]
-    assert offload_connector_stats.data["GPU_to_CPU"] == [
-        {
-            "op_size": 1,
-            "op_time": 0.1
-        },
-        {
-            "op_size": 2,
-            "op_time": 0.2
-        },
-    ]
+    assert isinstance(stats, OffloadingConnectorStats)
+    assert not stats.is_empty()
+    assert stats.data["data"][LOAD_BYTES] == 24
+    assert stats.data["data"][LOAD_SIZE] == [16, 8]
+    assert stats.data["types"][LOAD_BYTES] == "counter"
+    assert stats.data["types"][LOAD_SIZE] == "histogram"
 
 
 def test_aggregate_same_connector():
-    """Test aggregating stats from the same connector type."""
-    stats1 = OffloadingConnectorStats(
-        data={
-            "CPU_to_GPU": [
-                {
-                    "op_size": 16,
-                    "op_time": 1.0
-                },
-                {
-                    "op_size": 8,
-                    "op_time": 0.5
-                },
-            ],
-            "GPU_to_CPU": [
-                {
-                    "op_size": 1,
-                    "op_time": 0.1
-                },
-                {
-                    "op_size": 2,
-                    "op_time": 0.2
-                },
-            ],
-        })
+    """Aggregating sums counters and concatenates histogram observations."""
+    stats1 = _make_populated_stats()
 
-    stats2 = OffloadingConnectorStats(
-        data={
-            "CPU_to_GPU": [
-                {
-                    "op_size": 3,
-                    "op_time": 0.2
-                },
-                {
-                    "op_size": 7,
-                    "op_time": 0.9
-                },
-            ],
-            "GPU_to_CPU": [{
-                "op_size": 16,
-                "op_time": 2
-            }],
-        })
+    stats2 = OffloadingConnectorStats()
+    stats2.increase_counter(LOAD_BYTES, 10)
+    stats2.observe_histogram(LOAD_SIZE, 3)
+    stats2.increase_counter(STORE_BYTES, 16)
 
     result = stats1.aggregate(stats2)
 
-    assert result is stats1  # Should return self
-    offload_connector_stats = result
-    assert offload_connector_stats.data["CPU_to_GPU"] == [
-        {
-            "op_size": 16,
-            "op_time": 1.0
-        },
-        {
-            "op_size": 8,
-            "op_time": 0.5
-        },
-        {
-            "op_size": 3,
-            "op_time": 0.2
-        },
-        {
-            "op_size": 7,
-            "op_time": 0.9
-        },
-    ]
-    assert offload_connector_stats.data["GPU_to_CPU"] == [
-        {
-            "op_size": 1,
-            "op_time": 0.1
-        },
-        {
-            "op_size": 2,
-            "op_time": 0.2
-        },
-        {
-            "op_size": 16,
-            "op_time": 2
-        },
-    ]
+    assert result is stats1  # aggregate mutates and returns self
+    # Counters accumulate across both stats.
+    assert result.data["data"][LOAD_BYTES] == 34
+    assert result.data["data"][STORE_BYTES] == 16
+    # Histogram observations are concatenated in order.
+    assert result.data["data"][LOAD_SIZE] == [16, 8, 3]
+
+
+def test_aggregate_empty_other_is_noop():
+    """Aggregating an empty stats leaves the receiver unchanged."""
+    stats = _make_populated_stats()
+    empty = OffloadingConnectorStats()
+
+    result = stats.aggregate(empty)
+
+    assert result is stats
+    assert result.data["data"][LOAD_BYTES] == 24
+    assert result.data["data"][LOAD_SIZE] == [16, 8]
 
 
 def test_reduce():
-    """Test that reduce() correctly reduces all nested connector stats."""
-    stats = OffloadingConnectorStats(
-        data={
-            "CPU_to_GPU": [
-                {
-                    "op_size": 16,
-                    "op_time": 1.0
-                },
-                {
-                    "op_size": 8,
-                    "op_time": 0.5
-                },
-                {
-                    "op_size": 3,
-                    "op_time": 0.2
-                },
-                {
-                    "op_size": 7,
-                    "op_time": 0.9
-                },
-            ],
-            "GPU_to_CPU": [
-                {
-                    "op_size": 1,
-                    "op_time": 0.1
-                },
-                {
-                    "op_size": 2,
-                    "op_time": 0.2
-                },
-                {
-                    "op_size": 16,
-                    "op_time": 2
-                },
-            ],
-        })
+    """``reduce()`` flattens counters as-is and histograms to count/sum pairs."""
+    stats = OffloadingConnectorStats()
+    stats.increase_counter(LOAD_BYTES, 34)
+    stats.increase_counter(LOAD_TIME, 2.6)
+    stats.increase_counter(STORE_BYTES, 19)
+    stats.observe_histogram(LOAD_SIZE, 16)
+    stats.observe_histogram(LOAD_SIZE, 8)
 
     reduced = stats.reduce()
 
     assert isinstance(reduced, dict)
-    # Check that the stats were reduced (should have aggregated values)
-    assert "CPU_to_GPU_total_bytes" in reduced
-    assert "CPU_to_GPU_total_time" in reduced
-    assert "GPU_to_CPU_total_bytes" in reduced
-    assert "GPU_to_CPU_total_time" in reduced
-    assert reduced["CPU_to_GPU_total_bytes"] == 34
-    assert reduced["CPU_to_GPU_total_time"] == 2.6
-    assert reduced["GPU_to_CPU_total_time"] == 2.3
-    assert reduced["GPU_to_CPU_total_bytes"] == 19
+    # Counters pass through unchanged under their flat metric name.
+    assert reduced[LOAD_BYTES] == 34
+    assert reduced[LOAD_TIME] == 2.6
+    assert reduced[STORE_BYTES] == 19
+    # Histograms reduce to a count and a sum suffix.
+    assert reduced[f"{LOAD_SIZE}_count"] == 2
+    assert reduced[f"{LOAD_SIZE}_sum"] == 24
 
 
 def test_reset():
-    """Test that reset() resets all nested connector stats."""
-    offload_connector_stats = OffloadingConnectorStats(
-        data={
-            "CPU_to_GPU": [
-                {
-                    "op_size": 3,
-                    "op_time": 0.2
-                },
-                {
-                    "op_size": 7,
-                    "op_time": 0.9
-                },
-            ],
-            "GPU_to_CPU": [{
-                "op_size": 16,
-                "op_time": 2
-            }],
-        })
+    """``reset()`` clears all observations back to the empty envelope."""
+    stats = _make_populated_stats()
 
-    assert not offload_connector_stats.is_empty()
+    assert not stats.is_empty()
 
-    offload_connector_stats.reset()
+    stats.reset()
 
-    # After reset, stats should be empty
-    assert offload_connector_stats.is_empty()
-    assert len(offload_connector_stats.data) == 0
+    assert stats.is_empty()
+    assert stats.data["data"] == {}
+    assert stats.data["types"] == {}
