@@ -29,7 +29,7 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.server_utils import get_uvicorn_log_config
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import cli_env_setup, process_lora_modules
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -513,8 +513,7 @@ async def _init_multi_model_state(
         log_error_stack=args.log_error_stack,
     )
 
-    state.openai_serving_tokenization = OpenAIServingTokenization(
-        engine_client,
+    state.openai_serving_tokenization = ServingTokenization(
         state.openai_serving_models,
         state.openai_serving_render,
         request_logger=request_logger,
