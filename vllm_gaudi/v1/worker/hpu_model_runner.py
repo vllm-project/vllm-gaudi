@@ -6642,7 +6642,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
+        # vLLM PR #32374 (Dynamic SD) added a leading num_speculative_tokens
+        # positional arg to NgramProposer.propose(). Pass the statically
+        # configured count to match the new signature.
+        num_speculative_tokens = self.speculative_config.num_speculative_tokens
         draft_token_ids = self.drafter.propose(
+            num_speculative_tokens,
             sampled_token_ids,
             self.input_batch.num_tokens_no_spec,
             self.input_batch.token_ids_cpu,
