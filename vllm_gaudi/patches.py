@@ -44,8 +44,27 @@ import gc
 import torch
 
 from vllm import envs
-from vllm.distributed import parallel_state
-from vllm.platforms import current_platform
+
+# NOTE: neither ``vllm.platforms.current_platform`` nor
+# ``vllm.distributed.parallel_state`` is imported at module top level — both
+# force re-entrant platform resolution *while this module is being imported by
+# ``vllm_gaudi.register()``*, leaving ``vllm_gaudi`` partially initialized so
+# the HPU platform plugin is silently dropped and vLLM falls back to
+# ``UnspecifiedPlatform`` ("RuntimeError: Failed to infer device type / Device
+# string must not be empty"). Concretely:
+#
+# * ``current_platform`` is a lazily-resolved attribute (see
+#   ``vllm/platforms/__init__.py.__getattr__``): importing it eagerly runs
+#   ``resolve_current_platform_cls_qualname()`` directly.
+# * ``parallel_state`` transitively imports ``vllm.utils.torch_utils``, whose
+#   module-level ``PIN_MEMORY = is_pin_memory_available()`` (vllm PR #45424)
+#   resolves ``current_platform`` at import time — the same re-entry, one hop
+#   removed.
+#
+# Both are therefore imported lazily inside the functions that use them, and
+# the ``cleanup_dist_env_and_memory`` patch (which needs ``parallel_state``)
+# is deferred to ``load_general_plugins`` time rather than ``apply()``
+# (platform-registration time). See GAUDISW-249622.
 
 
 def _hpu_accelerator_empty_cache() -> None:
@@ -56,6 +75,8 @@ def _hpu_accelerator_empty_cache() -> None:
     ``RuntimeError``.  Route through ``current_platform.empty_cache``
     instead (which is ``None`` on HPU, making this a no-op).
     """
+    from vllm.platforms import current_platform
+
     empty_cache = current_platform.empty_cache
     if empty_cache is not None:
         empty_cache()
@@ -132,6 +153,9 @@ def _hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
     ``torch.accelerator.empty_cache()`` (which is incompatible with the
     HPU allocator).
     """
+    from vllm.distributed import parallel_state
+    from vllm.platforms import current_platform
+
     # Re-apply lazy runtime patches that may depend on import timing.
     _patch_hf3fs_mock_client_for_cpu_only()
 
@@ -235,6 +259,22 @@ def _patch_batched_count_greater_than() -> None:
     _sampler_mod.batched_count_greater_than = _hpu_batched_count_greater_than
 
 
+def _patch_cleanup_dist_env_and_memory() -> None:
+    """Install the HPU-safe ``cleanup_dist_env_and_memory`` replacement.
+
+    Deferred to ``load_general_plugins`` time (rather than ``apply()`` at
+    platform-registration time) so the ``vllm.distributed.parallel_state``
+    import chain runs *after* the platform is initialised and *after*
+    ``vllm.utils.torch_utils`` has finished importing (see ``apply()`` and
+    the module-level NOTE — GAUDISW-249622).
+    """
+    from vllm.distributed import parallel_state
+    import vllm.distributed as _vllm_distributed
+
+    parallel_state.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
+    _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
+
+
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
     # --- torch.accelerator.empty_cache ---
@@ -244,25 +284,25 @@ def apply() -> None:
     if not hasattr(torch._C, "_host_emptyCache"):
         torch._C._host_emptyCache = lambda: None
 
-    # --- cleanup_dist_env_and_memory ---
-    parallel_state.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
-    import vllm.distributed as _vllm_distributed
-
-    _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
     _patch_hf3fs_mock_client_for_cpu_only()
 
-    # --- batched_count_greater_than (deferred) ---
-    # We cannot import the sampler modules here because the import chain
-    # triggers platform re-initialisation ("Device string must not be
-    # empty").  Instead we hook into ``load_general_plugins`` which runs
-    # in every process (parent + EngineCore subprocess) after the platform
-    # is ready.
+    # --- Deferred patches (cleanup_dist_env_and_memory + sampler) ---
+    # We cannot import ``vllm.distributed.parallel_state`` or the sampler
+    # modules here, at platform-registration time.  Their import chain
+    # re-enters ``vllm.utils.torch_utils`` while it is still initialising
+    # (vllm PR #45424 made ``PIN_MEMORY`` resolve the current platform at
+    # ``torch_utils`` import time, and that platform resolution is exactly
+    # what triggers this plugin's registration).  The re-entry aborts HPU
+    # platform detection ("Failed to infer device type").  Instead we hook
+    # into ``load_general_plugins`` which runs in every process (parent +
+    # EngineCore subprocess) after the platform is ready.
     import vllm.plugins as _plugins_mod
 
     _original_load_general = _plugins_mod.load_general_plugins
 
     def _load_general_with_hpu_patches():
         _original_load_general()
+        _patch_cleanup_dist_env_and_memory()
         _patch_batched_count_greater_than()
         _patch_gather_logprobs()
 
