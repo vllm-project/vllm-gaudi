@@ -6755,6 +6755,36 @@ class TensorTuple(tuple):
         """Returns the torch.dtype of the tensors within the tuple."""
         return self._dtype
 
+    def _first_tensor(self) -> torch.Tensor:
+        """Return the first contained torch.Tensor.
+
+        Raises:
+            ValueError: If the tuple holds no tensors.
+        """
+        for item in self:
+            if isinstance(item, torch.Tensor):
+                return item
+        raise ValueError("TensorTuple contains no torch.Tensor")
+
+    def untyped_storage(self):
+        """Delegate to the first contained tensor's untyped storage.
+
+        Upstream NIXL ``register_kv_caches`` (vLLM #44577) probes each cache
+        value with ``untyped_storage()``/``data_ptr()`` to detect DSv4-style
+        packed allocations. HPU returns a :class:`TensorTuple` of (K, V) per
+        layer; each layer is independently allocated, so exposing the first
+        tensor's storage yields distinct per-layer storage pointers and makes
+        the packed-path detection fall through to regular registration.
+        """
+        return self._first_tensor().untyped_storage()
+
+    def data_ptr(self) -> int:
+        """Delegate to the first contained tensor's data pointer.
+
+        See :meth:`untyped_storage` for why this is needed.
+        """
+        return self._first_tensor().data_ptr()
+
 
 class HPUAttentionMetadataProcessor:
     """
