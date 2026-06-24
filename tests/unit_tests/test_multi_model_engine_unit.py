@@ -550,3 +550,93 @@ def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypa
     assert cache_config.mamba_cache_mode == "align"
     assert cache_config.mamba_block_size == 528
     assert cache_config.mamba_page_size_padded == 2111
+
+
+def test_update_block_size_for_backend_realigns_mamba_page_size(monkeypatch):
+    """Regression: update_block_size_for_backend must re-align mamba_page_size_padded
+    after computing the granitemoehybrid block_size.
+
+    check_and_update_config runs first and aligns mamba_page_size_padded to
+    block_size=128 (the HPU default).  update_block_size_for_backend then bumps
+    block_size to a larger value (e.g. 32 with these toy numbers, 528 for real
+    granite-4.0-h-small).  Without the fix, mamba_page_size_padded is left
+    aligned to the old attn_page, making attn_page and mamba_page non-divisible
+    and causing unify_kv_cache_spec_page_size to raise NotImplementedError
+    (observed as granite-guardian-3.3 -> granite-4.0-h-small switch failure).
+    """
+    from vllm_gaudi.platform import HpuPlatform
+    from vllm.platforms import Platform
+
+    # --- Fake model/spec helpers ---
+
+    class _FakeModelCls:
+
+        @staticmethod
+        def get_mamba_state_shape_from_config(_c):
+            return [(1, )]
+
+        @staticmethod
+        def get_mamba_state_dtype_from_config(_c):
+            return [torch.uint8]
+
+    # attn_1tok = 2 (K+V) * num_kv_heads=1 * head_size=1 * 2 bytes (bf16) * block_size
+    # => page_size_bytes(block_size=1) = 4
+    class _FakeFullAttentionSpec:
+
+        def __init__(self, block_size=1, **_kw):
+            self.page_size_bytes = block_size * 4
+
+    # raw mamba state = 100 bytes
+    class _FakeMambaSpec:
+
+        def __init__(self, **_kw):
+            self.page_size_bytes = 100
+
+    # With these toy values (no prefix caching → alignment=16):
+    #   attn_1tok = 4
+    #   attn_block_size = 16 * cdiv(100, 16*4) = 16 * cdiv(100, 64) = 16*2 = 32
+    #   new_attn_page  = 4 * 32 = 128
+    #   new_padded     = ceil(100 / 128) * 128 = 128
+    #
+    # Before the fix, mamba_page_size_padded was 512 (= ceil(100/512)*512, aligned
+    # to the old block_size=128 attn_page of 4*128=512), leaving attn_page=128 and
+    # mamba_page=512 non-divisible (512 % 128 == 0 but 128 % 512 != 0 and they
+    # represent different layers in kv_cache_utils.unify_kv_cache_spec_page_size).
+    model_config = SimpleNamespace(
+        is_hybrid=True,
+        architecture="GraniteMoeHybridForCausalLM",
+        hf_config=SimpleNamespace(model_type="granitemoehybrid"),
+        dtype=torch.bfloat16,
+        get_num_kv_heads=lambda _p: 1,
+        get_head_size=lambda: 1,
+    )
+    cache_config = SimpleNamespace(
+        block_size=128,
+        user_specified_block_size=False,
+        mamba_block_size=128,
+        mamba_cache_mode="align",
+        mamba_page_size_padded=512,  # wrongly aligned to old block_size=128
+        cache_dtype="auto",
+        enable_prefix_caching=False,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=SimpleNamespace(),
+    )
+
+    monkeypatch.setattr("vllm.v1.kv_cache_interface.FullAttentionSpec", _FakeFullAttentionSpec)
+    monkeypatch.setattr("vllm.v1.kv_cache_interface.MambaSpec", _FakeMambaSpec)
+    monkeypatch.setattr(
+        "vllm.model_executor.models.ModelRegistry.resolve_model_cls",
+        staticmethod(lambda *_a, **_kw: (_FakeModelCls, None)),
+    )
+    # Stub out the Platform base-class call to avoid unrelated dependencies.
+    with patch.object(Platform, "update_block_size_for_backend"):
+        HpuPlatform.update_block_size_for_backend(vllm_config)
+
+    assert cache_config.block_size == 32, (
+        "block_size should be updated to the granitemoehybrid-aligned value")
+    assert cache_config.mamba_page_size_padded == 128, (
+        "mamba_page_size_padded must be re-aligned to the new attn_page (128), "
+        "not the stale value (512) aligned to the old block_size=128")
