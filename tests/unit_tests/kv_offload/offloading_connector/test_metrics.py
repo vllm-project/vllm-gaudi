@@ -6,8 +6,14 @@ Upstream vLLM PR #35669 ("Feature/offloading manager stats") rewrote
 ``OffloadingConnectorStats`` from a per-direction
 ``{"CPU_to_GPU": [{op_size, op_time}], "GPU_to_CPU": [...]}`` list payload to a
 self-describing flat structure keyed by ``{"types": {...}, "data": {...}}`` with
-flat prometheus metric names. These tests track the new contract so the
-HPU CPU-offloading connector keeps verifying against the live upstream API.
+flat prometheus metric names.
+
+Upstream vLLM PR #45957 ("[KV Offloading] Add labeled metrics support") then
+nested every per-metric value under a label-values tuple, so each ``data``
+entry is now ``{labelvalues: value}`` instead of a bare value. Unlabeled
+metrics use ``()`` as their label-values tuple. These tests track the new
+contract so the HPU CPU-offloading connector keeps verifying against the live
+upstream API.
 """
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
@@ -67,8 +73,12 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
             LOAD_SIZE: "histogram",
         },
         "data": {
-            LOAD_BYTES: 24,
-            LOAD_SIZE: [16, 8],
+            LOAD_BYTES: {
+                (): 24
+            },
+            LOAD_SIZE: {
+                (): [16, 8]
+            },
         },
     }
 
@@ -76,8 +86,8 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
 
     assert isinstance(stats, OffloadingConnectorStats)
     assert not stats.is_empty()
-    assert stats.data["data"][LOAD_BYTES] == 24
-    assert stats.data["data"][LOAD_SIZE] == [16, 8]
+    assert stats.data["data"][LOAD_BYTES] == {(): 24}
+    assert stats.data["data"][LOAD_SIZE] == {(): [16, 8]}
     assert stats.data["types"][LOAD_BYTES] == "counter"
     assert stats.data["types"][LOAD_SIZE] == "histogram"
 
@@ -94,11 +104,11 @@ def test_aggregate_same_connector():
     result = stats1.aggregate(stats2)
 
     assert result is stats1  # aggregate mutates and returns self
-    # Counters accumulate across both stats.
-    assert result.data["data"][LOAD_BYTES] == 34
-    assert result.data["data"][STORE_BYTES] == 16
+    # Counters accumulate across both stats, nested under the unlabeled tuple.
+    assert result.data["data"][LOAD_BYTES] == {(): 34}
+    assert result.data["data"][STORE_BYTES] == {(): 16}
     # Histogram observations are concatenated in order.
-    assert result.data["data"][LOAD_SIZE] == [16, 8, 3]
+    assert result.data["data"][LOAD_SIZE] == {(): [16, 8, 3]}
 
 
 def test_aggregate_empty_other_is_noop():
@@ -109,8 +119,8 @@ def test_aggregate_empty_other_is_noop():
     result = stats.aggregate(empty)
 
     assert result is stats
-    assert result.data["data"][LOAD_BYTES] == 24
-    assert result.data["data"][LOAD_SIZE] == [16, 8]
+    assert result.data["data"][LOAD_BYTES] == {(): 24}
+    assert result.data["data"][LOAD_SIZE] == {(): [16, 8]}
 
 
 def test_reduce():
