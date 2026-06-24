@@ -1423,7 +1423,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             device,
             model.embedding_modules,
         )
-        return self.lora_manager.create_lora_manager(model)
+        return self.lora_manager.create_lora_manager(model, vllm_config)
 
     def set_active_loras(self, lora_requests: set[LoRARequest], lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
