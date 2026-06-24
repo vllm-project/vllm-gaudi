@@ -5915,19 +5915,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         if self.num_mamba_like_layers > 0:
-            # NOTE: Do NOT reassign self.block_size or
-            # bucketing_manager.block_size from cache_config here.
-            # For hybrid models the upstream HybridAttentionMambaModelConfig
-            # inflates cache_config.block_size to align mamba pages (e.g.
-            # 1152 for Qwen3.5), but the HPU attention kernel operates at
-            # 128-token granularity.  _create_decode_input_data computes
-            # num_blocks using self.attn_block_size (set below from
-            # prepare_kernel_block_sizes), so the bucketing manager must
-            # also use that same granularity.  Overwriting block_size with
-            # the inflated KV-manager page size caused decode buckets to be
-            # generated at 1152-token granularity while runtime used
-            # 128-token granularity, leading to permanent "not warmed-up"
-            # warnings and recompilations.
+            if self.num_gdn == 0:
+                # Granite 4.0-H (non-GDN mamba hybrid): the platform inflates
+                # cache_config.block_size to 528 (no prefix caching) for mamba
+                # page alignment, and the attention kernel runs at that size.
+                # Align self.block_size and the bucketing manager to the same
+                # value so decode bucketing matches the kernel granularity.
+                # Without this they stay at 128 (split-brain: 528 kernel vs
+                # 128 bucketing), causing "not warmed-up" recompilations and
+                # non-deterministic tool-calling output.
+                # GDN hybrids (e.g. Qwen3.5) are intentionally left untouched:
+                # their KV-manager block_size is inflated (e.g. 1152) but the
+                # HPU kernel operates at 128-token granularity via virtual
+                # block splitting, so self.block_size must stay at 128.
+                self.block_size = self.vllm_config.cache_config.block_size
+                if self.enable_bucketing:
+                    self.bucketing_manager.block_size = self.block_size
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
 
