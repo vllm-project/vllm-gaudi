@@ -77,7 +77,14 @@ class VLLMKVCache(torch.nn.Module):
 
     def fetch_from_cache(self, cache, blocks, scales=None, **kwargs):
         if self.use_contiguous_pa:
-            return cache[:blocks.size(0)]
+            # `blocks` holds physical block ids; with contiguous PA they are not
+            # necessarily packed into [0, len(blocks)). Slicing `cache[:n]` only
+            # returns the first n physical rows, which at long context (where the
+            # ids range far above n) reads the wrong KV and corrupts attention.
+            # Fetch the actual rows by id instead. clamp() keeps padding ids
+            # (e.g. -1 / num_blocks) in-bounds; their contribution is masked out
+            # downstream via block_usage/block_bias.
+            return cache.index_select(0, blocks.clamp(0, cache.size(0) - 1))
         else:
             return cache.index_select(0, blocks)
 
