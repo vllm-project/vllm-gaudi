@@ -124,6 +124,7 @@ class HPUAsyncScheduler(AsyncScheduler):
         num_new_tokens: int,
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
+        num_uncached_common_prefix_tokens: int = 0,
     ) -> int:
         """HPU override: align chunked-prefill splits to mamba_chunk_size.
 
@@ -137,7 +138,8 @@ class HPUAsyncScheduler(AsyncScheduler):
             self.vllm_config.parallel_config, "mamba")
         if num_mamba_layers == 0 or not self.vllm_config.cache_config.enable_prefix_caching:
             return super()._mamba_block_aligned_split(request, num_new_tokens, num_new_local_computed_tokens,
-                                                      num_external_computed_tokens)
+                                                      num_external_computed_tokens,
+                                                      num_uncached_common_prefix_tokens)
 
         num_computed_tokens = (request.num_computed_tokens + num_new_local_computed_tokens +
                                num_external_computed_tokens)
