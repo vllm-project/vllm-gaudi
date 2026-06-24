@@ -186,7 +186,8 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
         # backend-specific alignment should be handled by platform hooks.
         from vllm.model_executor.models import ModelRegistry
 
-        if getattr(cache_config, "mamba_page_size_padded", None) is None:
+        mamba_page_size_was_none = getattr(cache_config, "mamba_page_size_padded", None) is None
+        if mamba_page_size_was_none:
             model_cls, _ = ModelRegistry.resolve_model_cls(
                 model_config.architecture,
                 model_config=model_config,
@@ -198,12 +199,13 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
             ).page_size_bytes
             cache_config.mamba_page_size_padded = raw_mamba_page
 
-        # Re-run platform normalization after applying Granite-specific
-        # fallback fields so alignment math stays centralized.
-        _run_platform_normalization(
-            config,
-            "[gaudi_reconfigure] Granite hybrid mamba alignment fallback failed for model %s: %s",
-        )
+        # Re-run platform normalization only when the fallback above had to
+        # supply mamba_page_size_padded from scratch (it was None).
+        if mamba_page_size_was_none:
+            _run_platform_normalization(
+                config,
+                "[gaudi_reconfigure] Granite hybrid mamba alignment fallback failed for model %s: %s",
+            )
     except Exception:
         raise
 
