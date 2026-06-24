@@ -310,6 +310,30 @@ class HpuPlatform(Platform):
                     mamba_page_size,
                     cache_config.enable_prefix_caching,
                 )
+                # Re-align mamba_page_size_padded to the final HPU block size.
+                # check_and_update_config aligns mamba_page_size_padded to
+                # the HPU default block_size=128, but update_block_size_for_backend
+                # then changes block_size to attn_block_size (e.g. 528).  Unless
+                # mamba_page_size_padded is also realigned to the new attn_page,
+                # unify_kv_cache_spec_page_size() will fail with "page size of the
+                # layer is not divisible by the maximum page size" when switching
+                # to this model (e.g. granite-guardian-3.3 → granite-4.0-h-small).
+                new_attn_page = attn_1tok * attn_block_size
+                if new_attn_page > 0:
+                    from math import ceil
+                    old_padded = getattr(cache_config, "mamba_page_size_padded", None)
+                    new_padded = ceil(mamba_page_size / new_attn_page) * new_attn_page
+                    if old_padded != new_padded:
+                        cache_config.mamba_page_size_padded = new_padded
+                        logger.info(
+                            "Re-aligned mamba_page_size_padded from %s to %d "
+                            "to match granitemoehybrid block_size=%d "
+                            "(new_attn_page=%d).",
+                            old_padded,
+                            new_padded,
+                            attn_block_size,
+                            new_attn_page,
+                        )
             if not cache_config.user_specified_block_size:
                 cache_config.user_specified_block_size = True
                 super().update_block_size_for_backend(vllm_config)
