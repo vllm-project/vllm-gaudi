@@ -29,7 +29,7 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.server_utils import get_uvicorn_log_config
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import cli_env_setup, process_lora_modules
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -513,7 +513,8 @@ async def _init_multi_model_state(
         log_error_stack=args.log_error_stack,
     )
 
-    state.serving_tokenization = ServingTokenization(
+    state.openai_serving_tokenization = OpenAIServingTokenization(
+        engine_client,
         state.openai_serving_models,
         state.openai_serving_render,
         request_logger=request_logger,
@@ -532,13 +533,19 @@ async def _init_multi_model_state(
         state_args.chat_template = frontend_settings.chat_template
         await init_generate_state(engine_client, state, state_args, request_logger, supported_tasks)
 
-    if "transcription" in supported_tasks or "realtime" in supported_tasks:
-        from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
+    if "transcription" in supported_tasks:
+        from vllm.entrypoints.openai.speech_to_text.api_router import (
+            init_transcription_state, )
 
-        init_speech_to_text_state(engine_client, state, args, request_logger, supported_tasks)
+        init_transcription_state(engine_client, state, args, request_logger, supported_tasks)
+
+    if "realtime" in supported_tasks:
+        from vllm.entrypoints.openai.realtime.api_router import init_realtime_state
+
+        init_realtime_state(engine_client, state, args, request_logger, supported_tasks)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling.factories import init_pooling_state
+        from vllm.entrypoints.pooling import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 

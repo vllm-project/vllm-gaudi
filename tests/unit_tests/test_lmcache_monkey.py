@@ -10,7 +10,7 @@ import importlib
 import json
 import sys
 from types import ModuleType
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -35,16 +35,13 @@ def _load_init_module():
     platform_mod = ModuleType(_MOCK_PLATFORM_MODULE)
     platform_mod.HpuPlatform = mock_platform  # type: ignore[attr-defined]
 
-    # Keep the mocked platform module in ``sys.modules`` (without a
-    # short-lived ``patch.dict`` context) so that ``register()``'s lazy
-    # ``from vllm_gaudi.platform import HpuPlatform`` resolves to the mock
-    # instead of importing the real (HPU-dependent) platform. The autouse
-    # fixture restores the module cache after each test.
-    sys.modules[_MOCK_PLATFORM_MODULE] = platform_mod
-    # Remove cached vllm_gaudi so importlib reloads __init__.py
-    sys.modules.pop("vllm_gaudi", None)
-    mod = importlib.import_module("vllm_gaudi")
-    return mod, mock_platform
+    with patch.dict(sys.modules, {_MOCK_PLATFORM_MODULE: platform_mod}):
+        # Remove cached vllm_gaudi so importlib reloads __init__.py
+        sys.modules.pop("vllm_gaudi", None)
+        mod = importlib.import_module("vllm_gaudi")
+        # Patch in the mock so register() sees it
+        mod.HpuPlatform = mock_platform  # type: ignore[attr-defined]
+        return mod, mock_platform
 
 
 class TestRegisterAdjustCudaHooks:
@@ -57,15 +54,6 @@ class TestRegisterAdjustCudaHooks:
         monkeypatch.delenv("VLLM_KV_CONNECTOR", raising=False)
         # Default to bare argv so CLI detection doesn't pick up pytest flags
         monkeypatch.setattr(sys, "argv", ["vllm"])
-        # Preserve and restore the module cache around each test so the mocked
-        # platform module injected by _load_init_module() does not leak.
-        saved = {k: sys.modules.get(k) for k in ("vllm_gaudi", _MOCK_PLATFORM_MODULE)}
-        yield
-        for name, module in saved.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
 
     # ------------------------------------------------------------------
     # Cases where adjust_cuda_hooks SHOULD be called
