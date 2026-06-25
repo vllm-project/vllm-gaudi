@@ -1653,7 +1653,7 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
                         d_scale_w3,
                         block_size=block_size,
                         permuted_weights=True,
-                        activation="silu",
+                        activation=activation,
                         experts_min=experts_min,
                         experts_max=experts_max,
                         is_fp4=True,
