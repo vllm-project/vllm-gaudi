@@ -75,12 +75,18 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         else:
             dispatch_fn = None
 
+        # GPT-OSS uses SwiGLU-OAI: per-expert bias on both projections, applied
+        # by the native op via the GPT_SWIGLU flag (alpha/limit). When the layer
+        # carries w13_bias/w2_bias, route through bias_mxfp4_fused_weights.
+        has_bias = hasattr(layer, "w13_bias") and hasattr(layer, "w2_bias")
+
         layer.moe_op = VllmMixtureOfExpertsOpMXFP4(
             layer.global_num_experts,
             num_experts,
             experts_min,
             experts_max,
             block_size=self.MXFP4_BLOCK_SIZE,
+            has_bias=has_bias,
             dispatch_fn=dispatch_fn,
         )
 
@@ -89,6 +95,9 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
             layer.moe_op.w13_list[expert_id].set_scale(layer.w13_weight_scale.data[expert_id])
             layer.moe_op.w2_list[expert_id].set_weight(layer.w2_weight.data[expert_id])
             layer.moe_op.w2_list[expert_id].set_scale(layer.w2_weight_scale.data[expert_id])
+            if has_bias:
+                layer.moe_op.w13_list[expert_id].set_bias(layer.w13_bias.data[expert_id])
+                layer.moe_op.w2_list[expert_id].set_bias(layer.w2_bias.data[expert_id])
 
         layer.moe_op._cache_weight_lists()
 
@@ -107,9 +116,7 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
             topk_weights = F.softmax(topk_weights, dim=-1, dtype=torch.float32)
         else:
             if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-                topk_weights, topk_ids = layer.router.select_experts(
-                    hidden_states=x, router_logits=router_logits
-                )
+                topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
             else:
                 topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
                 topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
