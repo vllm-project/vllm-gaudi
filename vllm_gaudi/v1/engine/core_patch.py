@@ -336,13 +336,11 @@ def install_engine_core_patch() -> None:
             if kv_connector is not None:
                 xfer_handshake_metadata = self.model_executor.get_kv_connector_handshake_metadata()
                 if xfer_handshake_metadata:
-                    # Worker dicts are now keyed by (pp_rank, tp_rank) tuples, so
-                    # mirror upstream EngineCore and use the pp-aware setter.
-                    content: dict[tuple[int, int], Any] = {}
+                    content: dict[int, Any] = {}
                     for worker_dict in xfer_handshake_metadata:
                         if worker_dict is not None:
                             content.update(worker_dict)
-                    kv_connector.set_xfer_handshake_metadata_pp_aware(content)
+                    kv_connector.set_xfer_handshake_metadata(content)
                     logger.info("[gaudi_reconfigure] kv connector handshake metadata refreshed")
 
             # Rebuild batch queue and scheduling helpers.

@@ -141,11 +141,7 @@ def rejection_sample(
     sampling_metadata: SamplingMetadata,
     synthetic_mode: bool = False,
     synthetic_conditional_rates: Optional[torch.Tensor] = None,
-    use_fp64_gumbel: bool = False,
 ) -> torch.Tensor:
-    # NOTE: HPU spec decode only supports greedy sampling, so the
-    # `use_fp64_gumbel` knob (used by the random/gumbel recovery path upstream)
-    # is accepted for signature parity but intentionally unused here.
     assert sampling_metadata.all_greedy, "Only greedy sampling is supported."
 
     # Rejection sampling for greedy sampling requests.

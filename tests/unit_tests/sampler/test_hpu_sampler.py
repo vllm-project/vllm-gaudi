@@ -207,7 +207,6 @@ def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float, mi
     def _mock_random_sample(
         probs: torch.Tensor,
         generators: dict[int, torch.Generator],
-        use_fp64_gumbel: bool = False,
     ) -> torch.Tensor:
         nonlocal sample_probs
         sample_probs = probs

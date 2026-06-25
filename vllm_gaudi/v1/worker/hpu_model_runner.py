@@ -48,7 +48,7 @@ from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_pa
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe.layer import MoERunner
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
@@ -1463,7 +1463,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     logger.error("KV sharing validation failed for %s -> %s: %s", layer_name,
                                  kv_sharing_target_layer_name, e)
                 continue
-            if isinstance(attn_module, MoERunner):
+            if isinstance(attn_module, FusedMoE):
                 continue
 
             # TODO: Support other attention modules, e.g., sliding window,
@@ -4776,13 +4776,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
                 # Force external router path: the model's forward checks
                 # experts.is_internal_router to decide the gate path.
-                if isinstance(experts, MoERunner):
-                    # is_internal_router is a read-only property backed by
-                    # the public `gate` attribute (returns gate is not None);
-                    # clearing gate makes it return False. Upstream #41184
-                    # inverted FusedMoE into a MoERunner factory, so the gate
-                    # now lives directly on the runner instead of `_gate`.
-                    experts.gate = None
+                if isinstance(experts, FusedMoE):
+                    # is_internal_router is a read-only property backed
+                    # by _gate; setting _gate=None makes it return False.
+                    experts._gate = None
                 else:
                     # INC wrappers (e.g. PatchedMixtralMoE) may inherit
                     # is_internal_router as a read-only @property;
@@ -4829,7 +4826,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 setattr(module, name, bool(getattr(moe_config, name, False)))
 
         for mod in self.model.modules():
-            if isinstance(mod, MoERunner):
+            if isinstance(mod, FusedMoE):
                 _sync_moe_kernel_flags(mod)
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
