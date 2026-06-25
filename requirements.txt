@@ -4,7 +4,6 @@ numba>=0.58.0
 numpy>=1.26.0
 kaldi-native-fbank >= 1.18.7
 tblib==3.1.0
-transformers==5.9.0
 # Cap FastAPI below 0.137: that release made include_router() build a route
 # tree (_IncludedRouter nodes in app.routes) instead of a flat APIRoute list,
 # which prometheus-fastapi-instrumentator (<=8.0.0) chokes on while resolving
