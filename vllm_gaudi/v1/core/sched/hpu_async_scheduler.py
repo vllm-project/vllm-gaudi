@@ -7,7 +7,7 @@ from vllm.v1.request import Request, RequestStatus
 
 class HPUAsyncScheduler(AsyncScheduler):
 
-    def schedule(self, throttle_prefills: bool = False):
+    def schedule(self):
         """HPU override: fix stale cached-token accounting after preemption.
 
         After preemption a request is requeued with num_computed_tokens reset.
@@ -24,13 +24,8 @@ class HPUAsyncScheduler(AsyncScheduler):
         re-scheduled stays in self.waiting and the inconsistency persists
         until it is picked up. The Prometheus clamp in vllm_gaudi/utils.py
         guards the metrics path during that window.
-
-        Args:
-            throttle_prefills: Forwarded verbatim to the base scheduler. Added
-                upstream by vllm-project/vllm#44558, which made EngineCore call
-                ``schedule(self._should_throttle_prefills())`` positionally.
         """
-        output = super().schedule(throttle_prefills)
+        output = super().schedule()
         for request in self.running:
             # vLLM Request no longer exposes num_cached_tokens on newer
             # branches. Keep the old fix only when the field exists.
