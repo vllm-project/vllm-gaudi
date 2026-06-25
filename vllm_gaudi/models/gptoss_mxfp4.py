@@ -339,7 +339,7 @@ def patched_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> s
             ep_rank_start = ep_rank * experts_per_rank
             ep_rank_end = (ep_rank + 1) * experts_per_rank
 
-            return self._load_weights_mxfp4(
+            return self._load_weights_mxfp4_dequantize_hpu(
                 ep_rank_end,
                 ep_rank_start,
                 heads_per_rank,
