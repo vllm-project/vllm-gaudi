@@ -37,12 +37,10 @@ def _patched_normalize_quantization_config(self, config: PretrainedConfig):
     # config so that BF16 params are allocated and we dequantize at load time.
     # When HPU_MXFP4_NATIVE=True, let the quant config flow through so
     # GptOssMxfp4Config is used and uint8 params are properly allocated.
-    if False:
-        if getattr(config, "model_type", None) == "gpt_oss":
-            quant_cfg = getattr(config, "quantization_config", None)
-            if quant_cfg is not None and quant_cfg.get("quant_method", "").lower() == "mxfp4":
-                return None
-    print(f"HPU_MXFP4_NATIVE={'enabled' if HPU_MXFP4_NATIVE else 'disabled'}: ")
+    if not HPU_MXFP4_NATIVE and getattr(config, "model_type", None) == "gpt_oss":
+        quant_cfg = getattr(config, "quantization_config", None)
+        if quant_cfg is not None and quant_cfg.get("quant_method", "").lower() == "mxfp4":
+            return None
     # For all other models (or native mode), use the original implementation
     return _original_normalize_quantization_config(self, config)
 
@@ -310,14 +308,14 @@ def patched_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> s
 
     # Only use custom loading for gpt_oss + mxfp4.
     if quant_method == "gpt_oss_mxfp4":
-        if 0:
-            print("HPU_MXFP4_NATIVE enabled: using upstream MXFP4 weight loading logic for MoE layers")
+        if HPU_MXFP4_NATIVE:
             # Native mode: quant config is active, uint8 params are allocated
-            # by GptOssMxfp4MoEMethod.create_weights(). Use upstream loader
-            # which handles TP-sliced loading into uint8 params directly.
+            # by HPUGptOssMxfp4MoEMethod.create_weights(). Use upstream loader
+            # which handles TP-sliced loading into uint8 params (packed weights,
+            # E8M0 scales, and w13_bias/w2_bias) directly, then
+            # process_weights_after_loading() builds VllmMixtureOfExpertsOpMXFP4.
             return _original_load_weights(self, weights)
         else:
-            print("HPU_MXFP4_NATIVE disabled: using HPU MXFP4 weight loading logic for MoE layers with dequantization to BF16")
             # Legacy mode: quant config suppressed, BF16 params allocated.
             # Dequantize packed MXFP4 weights at load time.
             stacked_params_mapping = [
