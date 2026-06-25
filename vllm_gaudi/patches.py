@@ -231,7 +231,8 @@ def _patch_gather_logprobs() -> None:
     if 'mark_unbacked' not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
         return  # Not affected — older vLLM without PR #38933.
 
-    _sampler_mod.Sampler.gather_logprobs = staticmethod(_hpu_gather_logprobs)
+    _sampler_mod.Sampler.gather_logprobs = staticmethod(  # type: ignore[method-assign]
+        _hpu_gather_logprobs)
 
 
 def _hpu_batched_count_greater_than(x: torch.Tensor, values: torch.Tensor) -> torch.Tensor:

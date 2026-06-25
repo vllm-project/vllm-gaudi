@@ -622,8 +622,7 @@ def test_normalize_reconfigure_resets_mamba_block_size_from_max_model_len_sentin
     # Mode must be updated and mamba_block_size must be reset from the sentinel.
     assert cache_config.mamba_cache_mode == "align"
     assert cache_config.mamba_block_size == 528, (
-        "mamba_block_size must be reset from max_model_len sentinel to block_size"
-    )
+        "mamba_block_size must be reset from max_model_len sentinel to block_size")
     # mamba_page_size_padded was already set, so no second normalization pass.
     assert check_and_update_config.call_count == 1
     assert update_block_size_for_backend.call_count == 1

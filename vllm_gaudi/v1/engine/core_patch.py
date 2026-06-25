@@ -189,9 +189,7 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
         # Treat None, 0, and max_model_len as "unset" and use block_size.
         max_model_len = getattr(model_config, "max_model_len", None)
         mamba_bs = getattr(cache_config, "mamba_block_size", None)
-        if mamba_bs is None or mamba_bs == 0 or (
-            max_model_len is not None and mamba_bs == max_model_len
-        ):
+        if mamba_bs is None or mamba_bs == 0 or (max_model_len is not None and mamba_bs == max_model_len):
             cache_config.mamba_block_size = cache_config.block_size
 
         # Ensure mamba_page_size_padded exists. Final divisibility and other
