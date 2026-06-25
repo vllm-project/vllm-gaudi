@@ -226,8 +226,7 @@ def test_update_block_size_for_backend_realigns_mamba_page_size(monkeypatch):
     with patch.object(Platform, "update_block_size_for_backend"):
         HpuPlatform.update_block_size_for_backend(vllm_config)
 
-    assert cache_config.block_size == 32, (
-        "block_size should be updated to the granitemoehybrid-aligned value")
+    assert cache_config.block_size == 32, ("block_size should be updated to the granitemoehybrid-aligned value")
     assert cache_config.mamba_page_size_padded == 128, (
         "mamba_page_size_padded must be re-aligned to the new attn_page (128), "
         "not the stale value (512) aligned to the old block_size=128")
@@ -298,9 +297,7 @@ def test_check_and_update_config_does_not_rescale_granitemoehybrid_mamba_page_si
             mode=None,
         ),
         load_config=SimpleNamespace(device=None),
-        scheduler_config=SimpleNamespace(
-            async_scheduling=False,
-        ),
+        scheduler_config=SimpleNamespace(async_scheduling=False, ),
         speculative_config=None,
     )
 

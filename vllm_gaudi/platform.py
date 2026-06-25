@@ -168,14 +168,11 @@ class HpuPlatform(Platform):
         # would corrupt the value already set by update_block_size_for_backend
         # (e.g. 2162688 → 2621440) on every subsequent check_and_update_config
         # call (config deserialization, reconfigure path, etc.).
-        _is_granitemoehybrid = (
-            vllm_config.model_config is not None
-            and getattr(getattr(vllm_config.model_config, "hf_config", None), "model_type", None)
-            == "granitemoehybrid"
-        )
-        if (not _is_granitemoehybrid
-                and cache_config and cache_config.block_size is not None and vllm_config.model_config is not None
-                and vllm_config.model_config.is_hybrid and cache_config.mamba_page_size_padded is not None):
+        _is_granitemoehybrid = (vllm_config.model_config is not None and getattr(
+            getattr(vllm_config.model_config, "hf_config", None), "model_type", None) == "granitemoehybrid")
+        if (not _is_granitemoehybrid and cache_config and cache_config.block_size is not None
+                and vllm_config.model_config is not None and vllm_config.model_config.is_hybrid
+                and cache_config.mamba_page_size_padded is not None):
             # Recompute mamba_page_size_padded so it is a multiple of
             # the HPU attention page size.
             from vllm.utils.torch_utils import get_dtype_size
