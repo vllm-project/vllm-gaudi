@@ -640,3 +640,165 @@ def test_update_block_size_for_backend_realigns_mamba_page_size(monkeypatch):
     assert cache_config.mamba_page_size_padded == 128, (
         "mamba_page_size_padded must be re-aligned to the new attn_page (128), "
         "not the stale value (512) aligned to the old block_size=128")
+
+
+def test_normalize_reconfigure_resets_mamba_block_size_from_max_model_len_sentinel(monkeypatch):
+    """Regression: _normalize_reconfigure_config_for_platform must reset
+    mamba_block_size when it equals max_model_len (the 'none' mode sentinel).
+
+    In vLLM's HybridAttentionMambaModelConfig.verify_and_update_config, when
+    prefix caching is disabled (mamba_cache_mode='none'), mamba_block_size is
+    set to max_model_len as a sentinel value meaning "one block per sequence".
+    When the reconfigure path changes mamba_cache_mode to 'align', the old
+    sentinel must be replaced with cache_config.block_size.  Without the fix,
+    the KVCacheCoordinatorBase assertion (scheduler_block_size %
+    mamba_block_size == 0) fails because max_model_len (e.g. 32768) is not
+    divisible by the HPU attention block size (e.g. 528).
+    """
+
+    class _FakeModelClass:
+
+        @staticmethod
+        def get_mamba_state_shape_from_config(_config):
+            return [(1, )]
+
+        @staticmethod
+        def get_mamba_state_dtype_from_config(_config):
+            return [torch.uint8]
+
+    class _FakeMambaSpec:
+
+        def __init__(self, **_kwargs):
+            self.page_size_bytes = 2111
+
+    MAX_MODEL_LEN = 32768
+
+    model_config = SimpleNamespace(
+        model="ibm-granite/granite-4.0-h-small",
+        is_hybrid=True,
+        architecture="GraniteMoeHybridForCausalLM",
+        hf_config=SimpleNamespace(model_type="granitemoehybrid"),
+        dtype=torch.bfloat16,
+        get_num_kv_heads=lambda _parallel: 1,
+        get_head_size=lambda: 1,
+        max_model_len=MAX_MODEL_LEN,
+    )
+    cache_config = SimpleNamespace(
+        block_size=528,
+        mamba_block_size=MAX_MODEL_LEN,  # sentinel set by vLLM for "none" mode
+        mamba_cache_mode="none",
+        mamba_page_size_padded=2162688,
+        cache_dtype="auto",
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=SimpleNamespace(),
+        scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
+    )
+
+    check_and_update_config = Mock()
+    update_block_size_for_backend = Mock()
+    monkeypatch.setattr(core_patch.current_platform, "check_and_update_config", check_and_update_config)
+    monkeypatch.setattr(core_patch.current_platform, "update_block_size_for_backend", update_block_size_for_backend)
+    monkeypatch.setattr(core_patch, "MambaSpec", _FakeMambaSpec)
+    monkeypatch.setattr(
+        "vllm.model_executor.models.ModelRegistry.resolve_model_cls",
+        lambda *_args, **_kwargs: (_FakeModelClass, None),
+    )
+
+    core_patch._normalize_reconfigure_config_for_platform(config)
+
+    # Mode must be updated and mamba_block_size must be reset from the sentinel.
+    assert cache_config.mamba_cache_mode == "align"
+    assert cache_config.mamba_block_size == 528, (
+        "mamba_block_size must be reset from max_model_len sentinel to block_size"
+    )
+    # mamba_page_size_padded was already set, so no second normalization pass.
+    assert check_and_update_config.call_count == 1
+    assert update_block_size_for_backend.call_count == 1
+
+
+def test_check_and_update_config_does_not_rescale_granitemoehybrid_mamba_page_size(monkeypatch):
+    """Regression: check_and_update_config must NOT rescale mamba_page_size_padded
+    for granitemoehybrid models.
+
+    update_block_size_for_backend() computes the correct block_size (528 tokens
+    for granite-4.0-h-small) and aligns mamba_page_size_padded to that larger
+    attention page (2162688).  If check_and_update_config() ran the rescaling
+    with block_size=128 it would corrupt the value to 2621440:
+
+      attn_page(128) = 2*128*8*128*2 = 524288
+      ceil(2162688 / 524288) * 524288 = 5 * 524288 = 2621440
+
+    This happens every time VllmConfig is deserialized (pydantic-v2 dataclass
+    __reduce__ calls __init__/__post_init__ during pickle reconstruction), e.g.
+    in the EngineCore subprocess or via gaudi_reconfigure_engine's
+    cloudpickle.loads path.
+    """
+    from vllm_gaudi.platform import HpuPlatform
+    from vllm.platforms import Platform
+
+    # Correct value set by update_block_size_for_backend:
+    #   attn_page(528) = 2 * 528 * 8 * 128 * 2 = 2162688
+    #   mamba_page_size_padded = ceil(raw / 2162688) * 2162688 = 2162688
+    CORRECT_MAMBA_PAGE_SIZE_PADDED = 2162688
+
+    # What check_and_update_config would corrupt it to with block_size=128:
+    #   attn_page(128) = 2 * 128 * 8 * 128 * 2 = 524288
+    #   ceil(2162688 / 524288) * 524288 = 5 * 524288 = 2621440
+    CORRUPTED_MAMBA_PAGE_SIZE_PADDED = 2621440
+
+    model_config = SimpleNamespace(
+        model="ibm-granite/granite-4.0-h-small",
+        is_hybrid=True,
+        architecture="GraniteMoeHybridForCausalLM",
+        hf_config=SimpleNamespace(model_type="granitemoehybrid"),
+        dtype=torch.bfloat16,
+        quantization=None,
+        get_num_kv_heads=lambda _parallel: 8,
+        get_head_size=lambda: 128,
+    )
+    cache_config = SimpleNamespace(
+        # block_size=128 as would be set by check_and_update_config's default
+        # before update_block_size_for_backend overwrites it to 528.
+        block_size=128,
+        user_specified_block_size=False,
+        mamba_block_size=528,
+        mamba_cache_mode="align",
+        mamba_page_size_padded=CORRECT_MAMBA_PAGE_SIZE_PADDED,
+        cache_dtype="auto",
+        enable_prefix_caching=False,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=SimpleNamespace(
+            worker_cls="auto",
+            distributed_executor_backend="mp",
+        ),
+        compilation_config=SimpleNamespace(
+            custom_ops=[],
+            cudagraph_mode=None,
+            cudagraph_capture_sizes=[],
+            mode=None,
+        ),
+        load_config=SimpleNamespace(device=None),
+        scheduler_config=SimpleNamespace(
+            async_scheduling=False,
+        ),
+        speculative_config=None,
+    )
+
+    # Stub out the Platform base-class call to avoid unrelated dependencies,
+    # and set_compile_env_defaults to keep the test hermetic (no env mutation).
+    with patch.object(Platform, "check_and_update_config"), \
+         patch.object(HpuPlatform, "set_compile_env_defaults"):
+        HpuPlatform.check_and_update_config(vllm_config)
+
+    assert cache_config.mamba_page_size_padded == CORRECT_MAMBA_PAGE_SIZE_PADDED, (
+        f"check_and_update_config must NOT rescale mamba_page_size_padded for "
+        f"granitemoehybrid models. Expected {CORRECT_MAMBA_PAGE_SIZE_PADDED}, "
+        f"got {cache_config.mamba_page_size_padded} "
+        f"(would be {CORRUPTED_MAMBA_PAGE_SIZE_PADDED} if rescaled with block_size=128)."
+    )

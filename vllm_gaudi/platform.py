@@ -160,7 +160,21 @@ class HpuPlatform(Platform):
         # size (block_size * per-token KV bytes).  Without this the upstream
         # unify_kv_cache_spec_page_size() fails because the two page sizes
         # are not divisible.
-        if (cache_config and cache_config.block_size is not None and vllm_config.model_config is not None
+        #
+        # Exception: granitemoehybrid models skip this rescaling here because
+        # update_block_size_for_backend() computes the correct block_size
+        # (528 or 768 tokens) and re-aligns mamba_page_size_padded to that
+        # larger attention page.  If we rescaled here with block_size=128 we
+        # would corrupt the value already set by update_block_size_for_backend
+        # (e.g. 2162688 → 2621440) on every subsequent check_and_update_config
+        # call (config deserialization, reconfigure path, etc.).
+        _is_granitemoehybrid = (
+            vllm_config.model_config is not None
+            and getattr(getattr(vllm_config.model_config, "hf_config", None), "model_type", None)
+            == "granitemoehybrid"
+        )
+        if (not _is_granitemoehybrid
+                and cache_config and cache_config.block_size is not None and vllm_config.model_config is not None
                 and vllm_config.model_config.is_hybrid and cache_config.mamba_page_size_padded is not None):
             # Recompute mamba_page_size_padded so it is a multiple of
             # the HPU attention page size.

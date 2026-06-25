@@ -179,7 +179,19 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
         if isinstance(mamba_mode, str) and mamba_mode.lower() == "none":
             cache_config.mamba_cache_mode = "align"
 
-        if getattr(cache_config, "mamba_block_size", None) in (None, 0):
+        # When mamba_cache_mode is "none" (no prefix caching), vLLM's
+        # HybridAttentionMambaModelConfig sets mamba_block_size to
+        # max_model_len as a sentinel meaning "one block per sequence".
+        # That sentinel is not valid for "align" mode and would fail the
+        # KVCacheCoordinatorBase assertion (scheduler_block_size %
+        # mamba_block_size == 0) because max_model_len (e.g. 32768) is
+        # not divisible by the HPU attention block size (e.g. 528).
+        # Treat None, 0, and max_model_len as "unset" and use block_size.
+        max_model_len = getattr(model_config, "max_model_len", None)
+        mamba_bs = getattr(cache_config, "mamba_block_size", None)
+        if mamba_bs is None or mamba_bs == 0 or (
+            max_model_len is not None and mamba_bs == max_model_len
+        ):
             cache_config.mamba_block_size = cache_config.block_size
 
         # Ensure mamba_page_size_padded exists. Final divisibility and other
