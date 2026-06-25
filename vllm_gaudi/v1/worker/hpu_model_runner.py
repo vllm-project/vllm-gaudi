@@ -5241,6 +5241,41 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if prompt_cfg:
             prompt_bs, prompt_query_len, prompt_num_blocks = prompt_cfg
 
+            # Granite 4.0-H (non-GDN mamba hybrid): self.block_size is 528
+            # (mamba page alignment). The prompt-warmup context is materialized
+            # as prompt_num_blocks * self.block_size KV tokens, so the largest
+            # long-context bucket (e.g. 249 blocks) would build a ~131K-token
+            # context and OOM at gpu_memory_util 0.9 during warmup. The compiled
+            # graph key is (bs, query_len, num_blocks) where num_blocks is the
+            # context-block COUNT, so we cap only the warmed block COUNT here;
+            # this bounds the warmup activation peak WITHOUT changing the 528
+            # kernel/bucketing/runtime semantics. Realistic tool-calling and
+            # humaneval requests carry only a short context (tool defs + query,
+            # far below this cap), so they still hit warmed buckets and incur no
+            # runtime "not warmed-up" recompilation; only requests approaching
+            # the 131K max capacity would. GDN hybrids and non-mamba models are
+            # untouched (block_size stays 128 there, so no oversized context).
+            if (self.num_mamba_like_layers > 0 and self.num_gdn == 0 and not self.is_pooling_model):
+                # ~33K tokens matches the historically OOM-safe short-context
+                # warmup peak (the short-ctx profile warms up to ~64 blocks of
+                # 528 ≈ 33K tokens at 0.9 without OOM).
+                warmup_ctx_token_cap = 33792
+                max_warmup_ctx_blocks = max(1, warmup_ctx_token_cap // self.block_size)
+                if prompt_num_blocks > max_warmup_ctx_blocks:
+                    # Emit once so a cold-start "Configuration was not
+                    # warmed-up" on a genuinely long-context request is
+                    # traceable back to this intentional warmup cap rather
+                    # than mistaken for a bucketing bug.
+                    logger.warning_once(
+                        "Capping non-GDN mamba-hybrid prompt warmup context "
+                        "from %s to %s blocks (block_size=%s, ~%s tokens) to "
+                        "bound the warmup activation peak. Requests whose "
+                        "prompt context exceeds ~%s tokens are not pre-warmed "
+                        "and may recompile once on first use.", prompt_num_blocks, max_warmup_ctx_blocks,
+                        self.block_size, max_warmup_ctx_blocks * self.block_size,
+                        max_warmup_ctx_blocks * self.block_size)
+                prompt_num_blocks = min(prompt_num_blocks, max_warmup_ctx_blocks)
+
             if self.is_pooling_model:
                 prompt_total_tokens = [prompt_query_len]
                 prompt_num_context_blocks = [0]
@@ -5912,19 +5947,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         if self.num_mamba_like_layers > 0:
-            # NOTE: Do NOT reassign self.block_size or
-            # bucketing_manager.block_size from cache_config here.
-            # For hybrid models the upstream HybridAttentionMambaModelConfig
-            # inflates cache_config.block_size to align mamba pages (e.g.
-            # 1152 for Qwen3.5), but the HPU attention kernel operates at
-            # 128-token granularity.  _create_decode_input_data computes
-            # num_blocks using self.attn_block_size (set below from
-            # prepare_kernel_block_sizes), so the bucketing manager must
-            # also use that same granularity.  Overwriting block_size with
-            # the inflated KV-manager page size caused decode buckets to be
-            # generated at 1152-token granularity while runtime used
-            # 128-token granularity, leading to permanent "not warmed-up"
-            # warnings and recompilations.
+            if self.num_gdn == 0:
+                # Granite 4.0-H (non-GDN mamba hybrid): the platform inflates
+                # cache_config.block_size to 528 (no prefix caching) for mamba
+                # page alignment, and the attention kernel runs at that size.
+                # Align self.block_size and the bucketing manager to the same
+                # value so decode bucketing matches the kernel granularity.
+                # Without this they stay at 128 (split-brain: 528 kernel vs
+                # 128 bucketing), causing "not warmed-up" recompilations and
+                # non-deterministic tool-calling output.
+                # GDN hybrids (e.g. Qwen3.5) are intentionally left untouched:
+                # their KV-manager block_size is inflated (e.g. 1152) but the
+                # HPU kernel operates at 128-token granularity via virtual
+                # block splitting, so self.block_size must stay at 128.
+                self.block_size = self.vllm_config.cache_config.block_size
+                if self.enable_bucketing:
+                    self.bucketing_manager.block_size = self.block_size
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
 
