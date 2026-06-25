@@ -1523,10 +1523,11 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
 
 
 class MoeMXFP4Matmul(torch.nn.Module):
-    """Weight holder for packed MXFP4 weights + E8M0 scales."""
+    """Weight holder for packed MXFP4 weights + E8M0 scales (+ optional bias)."""
 
     def __init__(self):
         super().__init__()
+        self.bias = None
 
     def set_weight(self, w: torch.Tensor):
         """w: packed uint8 tensor, shape (rows, ceil(cols/2))."""
@@ -1535,6 +1536,10 @@ class MoeMXFP4Matmul(torch.nn.Module):
     def set_scale(self, s: torch.Tensor):
         """s: uint8 E8M0 scale tensor, shape (rows, ceil(cols/32))."""
         self.scale = s
+
+    def set_bias(self, b: torch.Tensor):
+        """b: bf16 per-expert bias (GPT-OSS SwiGLU-OAI), shape (out_features,)."""
+        self.bias = b
 
 
 class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
@@ -1555,9 +1560,18 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
                  experts_min: int = 0,
                  experts_max: int = 8,
                  block_size: int = 32,
+                 has_bias: bool = False,
+                 alpha: float = 1.702,
+                 limit: float = 7.0,
                  dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
         super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, None, dispatch_fn)
         self.block_size = block_size
+        # GPT-OSS SwiGLU-OAI: per-expert bias on both projections + alpha/limit.
+        # When has_bias is set, the op applies gpt_swiglu (clamp ±limit, alpha-silu)
+        # internally and the "activation" string is ignored.
+        self.has_bias = has_bias
+        self.alpha = alpha
+        self.limit = limit
         self.w13_list = torch.nn.ModuleList([MoeMXFP4Matmul() for _ in range(num_total_experts)])
         self.w2_list = torch.nn.ModuleList([MoeMXFP4Matmul() for _ in range(num_total_experts)])
 
@@ -1565,6 +1579,8 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
         self._cached_w2_views = None
         self._cached_w13_scale_views = None
         self._cached_w2_scale_views = None
+        self._cached_w13_bias_views = None
+        self._cached_w2_bias_views = None
         self._compiled_forward = None
 
     def _cache_weight_lists(self):
@@ -1573,6 +1589,12 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
         self._cached_w2_views = tuple(self.w2_list[i].weight for i in experts_range)
         self._cached_w13_scale_views = tuple(self.w13_list[i].scale for i in experts_range)
         self._cached_w2_scale_views = tuple(self.w2_list[i].scale for i in experts_range)
+        if self.has_bias:
+            self._cached_w13_bias_views = tuple(self.w13_list[i].bias for i in experts_range)
+            self._cached_w2_bias_views = tuple(self.w2_list[i].bias for i in experts_range)
+        else:
+            self._cached_w13_bias_views = None
+            self._cached_w2_bias_views = None
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
                               error_msgs):
@@ -1587,23 +1609,59 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
 
     def _get_compiled_forward(self):
         if self._compiled_forward is None:
-            @torch.compile(backend="hpu_backend")
-            def _mxfp4_fused_fwd(hidden_states, expert_routing_table, router_weights,
-                                 w12_list, w3_list, d_scale_w12, d_scale_w3,
-                                 block_size, activation, experts_min, experts_max,
-                                 chunk_size, total_experts):
-                return torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights(
-                    hidden_states, expert_routing_table, router_weights,
-                    w12_list, w3_list, d_scale_w12, d_scale_w3,
-                    block_size=block_size,
-                    permuted_weights=True,
-                    activation="silu",
-                    experts_min=experts_min,
-                    experts_max=experts_max,
-                    chunk_size=chunk_size,
-                    total_experts=total_experts,
-                )
-            self._compiled_forward = _mxfp4_fused_fwd
+            if self.has_bias:
+
+                @torch.compile(backend="hpu_backend")
+                def _mxfp4_bias_fused_fwd(hidden_states, expert_routing_table, router_weights, w12_list, w3_list,
+                                          w12_bias, w3_bias, d_scale_w12, d_scale_w3, block_size, experts_min,
+                                          experts_max, chunk_size, total_experts, alpha, limit):
+                    return torch.ops.hpu.mixture_of_experts.bias_mxfp4_fused_weights(
+                        hidden_states,
+                        expert_routing_table,
+                        router_weights,
+                        w12_list,
+                        w3_list,
+                        w12_bias,
+                        w3_bias,
+                        d_scale_w12,
+                        d_scale_w3,
+                        block_size=block_size,
+                        permuted_weights=True,
+                        experts_min=experts_min,
+                        experts_max=experts_max,
+                        is_fp4=True,
+                        chunk_size=chunk_size,
+                        total_experts=total_experts,
+                        alpha=alpha,
+                        limit=limit,
+                    )
+
+                self._compiled_forward = _mxfp4_bias_fused_fwd
+            else:
+
+                @torch.compile(backend="hpu_backend")
+                def _mxfp4_fused_fwd(hidden_states, expert_routing_table, router_weights, w12_list, w3_list,
+                                     d_scale_w12, d_scale_w3, block_size, activation, experts_min, experts_max,
+                                     chunk_size, total_experts):
+                    return torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights(
+                        hidden_states,
+                        expert_routing_table,
+                        router_weights,
+                        w12_list,
+                        w3_list,
+                        d_scale_w12,
+                        d_scale_w3,
+                        block_size=block_size,
+                        permuted_weights=True,
+                        activation="silu",
+                        experts_min=experts_min,
+                        experts_max=experts_max,
+                        is_fp4=True,
+                        chunk_size=chunk_size,
+                        total_experts=total_experts,
+                    )
+
+                self._compiled_forward = _mxfp4_fused_fwd
         return self._compiled_forward
 
     def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
@@ -1626,11 +1684,39 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
             expert_routing_table = expert_routing_table.to(torch.int32)
 
         compiled_fwd = self._get_compiled_forward()
+        if self.has_bias:
+            return compiled_fwd(
+                hidden_states,
+                expert_routing_table,
+                router_weights,
+                w13_list,
+                w2_list,
+                self._cached_w13_bias_views,
+                self._cached_w2_bias_views,
+                w13_scale,
+                w2_scale,
+                self.block_size,
+                self.experts_min,
+                self.experts_max,
+                chunk_size,
+                total_experts,
+                self.alpha,
+                self.limit,
+            )
         return compiled_fwd(
-            hidden_states, expert_routing_table, router_weights,
-            w13_list, w2_list, w13_scale, w2_scale,
-            self.block_size, activation, self.experts_min, self.experts_max,
-            chunk_size, total_experts,
+            hidden_states,
+            expert_routing_table,
+            router_weights,
+            w13_list,
+            w2_list,
+            w13_scale,
+            w2_scale,
+            self.block_size,
+            activation,
+            self.experts_min,
+            self.experts_max,
+            chunk_size,
+            total_experts,
         )
 
 
