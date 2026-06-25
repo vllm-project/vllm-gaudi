@@ -2,8 +2,6 @@ import os
 import json
 import sys
 
-from vllm_gaudi.platform import HpuPlatform
-
 
 def _uses_lmcache_connector() -> bool:
     """Check if lmcache is configured as the KV connector.
@@ -52,6 +50,13 @@ def _uses_lmcache_connector() -> bool:
 
 def register():
     """Register the HPU platform."""
+    # Import lazily so that `import vllm_gaudi` (performed by vLLM's plugin
+    # loader to obtain this `register` callable) does not pull in
+    # `vllm_gaudi.platform` -> `vllm` at package-import time. Importing `vllm`
+    # eagerly resolves `current_platform` (via torch_utils PIN_MEMORY), which
+    # would re-enter the plugin loader while `vllm_gaudi` is only partially
+    # initialized and `register` is not yet defined.
+    from vllm_gaudi.platform import HpuPlatform
     HpuPlatform.set_torch_compile()
     # Monkey patch for LMCache
     # LMCache requires PT_HPU_GPU_MIGRATION=1
