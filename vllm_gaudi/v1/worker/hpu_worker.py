@@ -32,7 +32,7 @@ from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerO
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.utils import is_fake_hpu
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, _GDN_MAMBA_TYPES
+from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, _GDN_MAMBA_TYPES, _move_remaining_tensors_to_device
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -649,6 +649,9 @@ class HPUWorker(WorkerBase):
         else:
             with HabanaMemoryProfiler() as m:
                 self.model_runner.model.to("cpu")
+                # Move non-Parameter/non-Buffer HPU tensors that
+                # nn.Module.to() would not touch.
+                _move_remaining_tensors_to_device(self.model_runner.model, "cpu")
                 gc.collect()
                 torch.hpu.synchronize()
             msg = f"Moving model to CPU for sleep mode took {m.get_summary_string()}"
@@ -697,6 +700,12 @@ class HPUWorker(WorkerBase):
             else:
                 with HabanaMemoryProfiler() as m:
                     self.model_runner.model.to(self.vllm_config.device_config.device)
+                    # Move back non-Parameter/non-Buffer tensors that were
+                    # sent to CPU during sleep.
+                    _move_remaining_tensors_to_device(
+                        self.model_runner.model,
+                        str(self.vllm_config.device_config.device),
+                    )
                     gc.collect()
                     torch.hpu.synchronize()
                 msg = f"Waking up model, moving it back to HPU took {m.get_summary_string()}"
