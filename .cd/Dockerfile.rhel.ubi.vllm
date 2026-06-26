@@ -214,7 +214,6 @@ RUN set -e && \
       v[0-9]*.*) export SETUPTOOLS_SCM_PRETEND_VERSION="${VLLM_GAUDI_COMMIT#v}" ;; \
     esac; \
     VLLM_TARGET_DEVICE=empty pip install --no-cache-dir --no-build-isolation . && \
-
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
     VLLM_TARGET_DEVICE=hpu pip install --no-cache-dir -v . --no-build-isolation && \
