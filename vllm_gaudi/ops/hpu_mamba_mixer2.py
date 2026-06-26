@@ -342,16 +342,12 @@ class HPUMambaMixer2(MambaMixer2):
         # so that model.to(device/dtype) moves them automatically.
         # persistent=False keeps them out of state_dict — they are derived
         # from in_proj.weight and must not be saved/loaded independently.
-        self.register_buffer("_states_weight", w[gate_size:].clone(),
-                             persistent=False)  # [states_out, hidden]
-        self.register_buffer("_gate_weight", w[:gate_size].clone(),
-                             persistent=False)  # [gate_out, hidden]
+        self.register_buffer("_states_weight", w[gate_size:].clone(), persistent=False)  # [states_out, hidden]
+        self.register_buffer("_gate_weight", w[:gate_size].clone(), persistent=False)  # [gate_out, hidden]
 
         if b is not None:
-            self.register_buffer("_states_bias", b[gate_size:].clone(),
-                                 persistent=False)
-            self.register_buffer("_gate_bias", b[:gate_size].clone(),
-                                 persistent=False)
+            self.register_buffer("_states_bias", b[gate_size:].clone(), persistent=False)
+            self.register_buffer("_gate_bias", b[:gate_size].clone(), persistent=False)
         else:
             self.register_buffer("_states_bias", None, persistent=False)
             self.register_buffer("_gate_bias", None, persistent=False)
