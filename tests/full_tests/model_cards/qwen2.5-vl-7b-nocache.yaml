@@ -1,4 +1,4 @@
-model_name: "Qwen/Qwen2.5-VL-7B-Instruct"
+model_name: "/mnt/weka/data/pytorch/Qwen/Qwen2.5-VL-7B-Instruct"
 test_config:
   - modality: image
     extra_engine_args:
