@@ -63,6 +63,18 @@ class OnlineDefragmenter:
         self.kv_caches = tuple(kv_caches)
         self.is_mla = all([cache[1] is None for cache in self.kv_caches])
         self.block_size = block_size
+
+        # Attention caches: first dim = num_blocks * block_size.
+        # State caches (GDN/Mamba): first dim = num_blocks + 1.
+        self._attn_indices: list[int] = []
+        self._state_indices: list[int] = []
+        for i, cache in enumerate(self.kv_caches):
+            first_dim = cache[0].shape[0]
+            if first_dim % block_size == 0 and first_dim >= block_size:
+                self._attn_indices.append(i)
+            else:
+                self._state_indices.append(i)
+
         self.cache_utils = CacheSwapUtils(block_size, kv_caches[0][0].device)
         if self.graphed:
             config = get_config()
@@ -196,6 +208,19 @@ class OnlineDefragmenter:
             post_status = f'max_id_used={pre_max_used}->{max_used} num_used={num_used} swapped={len(to_swap)}/{to_swap_pad}'
             self.debug(f'defragmentation done {post_status}')
 
+    def _swap_state_caches(self, srcs: torch.tensor, dsts: torch.tensor, caches: list[torch.tensor]):
+        """Swap state caches (e.g. GDN/Mamba) indexed by block_id directly."""
+        htorch.core.mark_step()
+        for cache in caches:
+            prev_srcs = cache.index_select(0, srcs)
+            if self.cache_utils.enable_prefix_caching:
+                prev_dsts = cache.index_select(0, dsts)
+                cache.index_copy_(0, srcs, prev_dsts)
+                prev_dsts = None
+            cache.index_copy_(0, dsts, prev_srcs)
+            prev_srcs = None
+        htorch.core.mark_step()
+
     def _swap(self, to_swap, threshold):
         """ Swap block_ids between srcs and dsts"""
         assert self.cache_utils is not None
@@ -204,11 +229,18 @@ class OnlineDefragmenter:
         dsts = pad_list(list(dsts), threshold, itertools.repeat(-1))
         srcs = torch.tensor(srcs, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
         dsts = torch.tensor(dsts, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
-        key_caches = [cache[0] for cache in self.kv_caches]
-        self.cache_utils(srcs, dsts, key_caches, self.block_size)
-        if not self.is_mla:
-            value_caches = [cache[1] for cache in self.kv_caches]
-            self.cache_utils(srcs, dsts, value_caches, self.block_size)
+        if self._attn_indices:
+            key_caches = [self.kv_caches[i][0] for i in self._attn_indices]
+            self.cache_utils(srcs, dsts, key_caches, self.block_size)
+            if not self.is_mla:
+                value_caches = [self.kv_caches[i][1] for i in self._attn_indices]
+                self.cache_utils(srcs, dsts, value_caches, self.block_size)
+        if self._state_indices:
+            for slot in range(2):  # conv_state and temporal_state
+                state_caches = [self.kv_caches[i][slot] for i in self._state_indices
+                                if len(self.kv_caches[i]) > slot and self.kv_caches[i][slot] is not None]
+                if state_caches:
+                    self._swap_state_caches(srcs, dsts, state_caches)
 
     def warmup(self):
         """Warm up defragmentation swap graphs for different thresholds.
