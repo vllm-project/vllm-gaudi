@@ -30,6 +30,23 @@ from vllm._aiter_ops import rocm_aiter_ops
 logger = init_logger()
 
 
+def _set_fetch_by_id(kv_cache, value: bool) -> None:
+    """Toggle id-based KV fetch (vs. the contiguous-PA zero-copy slice) on a KV cache.
+
+    GAUDISW-248985: the prefill-context block_list holds raw scattered ids and must be
+    gathered by id, whereas the decode block_list is the contiguous-identity layout and
+    can use the zero-copy slice. We flag the module instead of passing a kwarg because
+    INC's PatchedVLLMKVCache wraps fetch_from_cache with a fixed signature and delegates
+    to orig_mod; set the flag there too so the original method (which INC calls) sees it.
+    """
+    if kv_cache is None:
+        return
+    kv_cache._fetch_by_id = value
+    orig = getattr(kv_cache, "orig_mod", None)
+    if orig is not None:
+        orig._fetch_by_id = value
+
+
 class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
@@ -594,6 +611,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             block_list = attn_metadata.block_list if attn_metadata \
                 and attn_metadata.block_list is not None else None
 
+            # GAUDISW-248985: prefill context blocks are raw scattered ids, so the
+            # contiguous-PA fetch must gather by id (cache[:n] would read wrong rows).
+            _set_fetch_by_id(self.k_cache, True)
+            _set_fetch_by_id(self.v_cache, True)
+
             common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size,
                                                      k_scales, v_scales)
 
@@ -621,6 +643,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
+            # GAUDISW-248985: decode block_list is the contiguous-identity layout, so
+            # keep the zero-copy slice fetch (cache[:n]); only prefill needs gather.
+            _set_fetch_by_id(self.k_cache, False)
+            _set_fetch_by_id(self.v_cache, False)
             if self.sliding_window and \
                 attn_metadata.window_block_list is not None:
                 block_list = attn_metadata.window_block_list
