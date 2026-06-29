@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict, deque
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,6 +22,7 @@ from vllm.v1.kv_offload.cpu.gpu_worker import (
     CPUOffloadingWorker,
     SingleDirectionOffloadingHandler,
 )
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import OffloadingConnectorWorker
 
 logger = init_logger(__name__)
@@ -430,3 +432,66 @@ def register_kv_caches(
 
 
 OffloadingConnectorWorker.register_kv_caches = register_kv_caches
+
+
+def _hpu_get_worker(self, kv_caches: CanonicalKVCaches):
+    """HPU ``CPUOffloadingSpec.get_worker`` without the CUDA/XPU platform guard.
+
+    Older-API upstream (e.g. vllm ``2396d91e``) gates ``get_worker`` on
+    ``current_platform.is_cuda_alike() or is_xpu()``. The HPU offloading path is
+    implemented and validated via the ``CPUOffloadingWorker`` overrides in this
+    module, so this mirrors upstream minus that guard, staying a thin wrapper
+    over ``create_worker``.
+
+    Args:
+        kv_caches: canonicalized GPU KV caches to offload.
+
+    Returns:
+        The cached ``OffloadingWorker`` for this spec.
+    """
+    if not self._worker:
+        self._worker = self.create_worker(kv_caches)
+
+    assert self._worker is not None
+    return self._worker
+
+
+def _hpu_get_handlers(
+    self,
+    kv_caches: CanonicalKVCaches,
+) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], object]]:
+    """HPU ``CPUOffloadingSpec.get_handlers`` without the CUDA/XPU platform guard.
+
+    Newer-API upstream (vllm commit
+    810966453a2576f45880c899db2af2e604207ed4, PR #36423) gates ``get_handlers``
+    on ``current_platform.is_cuda_alike() or is_xpu()``. This mirrors upstream
+    minus that guard, staying a thin wrapper over ``create_handlers``. The
+    GPU/CPU ``LoadStoreSpec`` types are imported lazily so this module still
+    imports cleanly against the older API where they do not exist.
+
+    Args:
+        kv_caches: canonicalized GPU KV caches to offload.
+
+    Yields:
+        Tuples of ``(src_spec_type, dst_spec_type, offloading_handler)`` for the
+        GPU->CPU (store) and CPU->GPU (load) directions.
+    """
+    from vllm.v1.kv_offload.base import GPULoadStoreSpec
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+
+    if not self._handlers:
+        self._handlers = self.create_handlers(kv_caches)
+
+    assert self._handlers is not None
+    yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler
+    yield CPULoadStoreSpec, GPULoadStoreSpec, self._handlers.cpu_to_gpu_handler
+
+
+# Patch whichever guarded entry point this vLLM exposes. The offloading worker
+# API changed upstream: older trees gate ``get_worker`` (returns an
+# ``OffloadingWorker``); newer trees gate ``get_handlers`` (yields handler
+# tuples). Patch the one that exists so the HPU path survives either generation.
+if hasattr(CPUOffloadingSpec, "get_worker"):
+    CPUOffloadingSpec.get_worker = _hpu_get_worker
+if hasattr(CPUOffloadingSpec, "get_handlers"):
+    CPUOffloadingSpec.get_handlers = _hpu_get_handlers
