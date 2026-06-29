@@ -4739,6 +4739,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 and runner._modules.get('gate', None) is block_gate):
                             del runner._modules['gate']
                             object.__setattr__(runner, 'gate', block_gate)
+                        # After upstream vLLM PR #41184, FusedMoE is a factory
+                        # that returns a MoERunner directly, so `mlp.experts`
+                        # *is* the MoERunner: there is no experts.runner child
+                        # and the shared gate is registered straight on
+                        # experts._modules['gate'] (not experts._gate). INC's
+                        # generate_model_info() then sees the gate under both
+                        # mlp and mlp.experts and (last-seen parent wins)
+                        # patches experts.gate, leaving mlp.gate as a stale
+                        # module whose weight is mutated in-place to fp8 -> the
+                        # unpatched mlp.gate(hs) forward hits a bf16/fp8 shape
+                        # mismatch. Detach the gate from the runner so INC
+                        # patches only the block-level mlp.gate;
+                        # _sync_shared_moe_gates() clears experts.gate after.
+                        elif (isinstance(experts, torch.nn.Module)
+                              and experts._modules.get('gate', None) is block_gate):
+                            del experts._modules['gate']
+                            object.__setattr__(experts, 'gate', block_gate)
+                            self._detached_moe_gates.add(id(experts))
 
     def _sync_shared_moe_gates(self):
         """Apply SharedFusedMoE post-INC synchronization and compatibility.
