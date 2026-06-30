@@ -64,7 +64,7 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
     def process_weights_after_loading(self, layer) -> None:
         """Build VllmMixtureOfExpertsOpMXFP4 from the uint8 params loaded by upstream."""
         num_experts = layer.local_num_experts
-        ep_shift = layer.ep_rank * num_experts
+        ep_shift = layer.moe_config.ep_rank * num_experts
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
 
         if layer.moe_config.dp_size > 1 and self.use_dispatch_fn:
@@ -131,13 +131,13 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()
             hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
-            x = dispatch_tensor(x, hidden_states_across_dp, layer.is_sequence_parallel)
+            x = dispatch_tensor(x, hidden_states_across_dp, layer.moe_config.is_sequence_parallel)
 
             topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
-            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.is_sequence_parallel)
+            topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.moe_config.is_sequence_parallel)
 
             topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
-            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.is_sequence_parallel)
+            topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.moe_config.is_sequence_parallel)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
