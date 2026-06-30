@@ -1522,6 +1522,118 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         return final_hidden_states
 
 
+class MoeMXFP4Matmul(torch.nn.Module):
+    """Weight holder for packed MXFP4 weights + E8M0 scales."""
+
+    def __init__(self):
+        super().__init__()
+
+    def set_weight(self, w: torch.Tensor):
+        """w: packed uint8 tensor, shape (rows, ceil(cols/2))."""
+        self.weight = w
+
+    def set_scale(self, s: torch.Tensor):
+        """s: uint8 E8M0 scale tensor, shape (rows, ceil(cols/32))."""
+        self.scale = s
+
+
+class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
+    """Native MXFP4 MOE op using torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights.
+
+    Weights are stored in packed uint8 MXFP4 format (2 FP4 E2M1 values per byte)
+    with uint8 E8M0 scales (one per group of 32 elements). The native TPC kernel
+    performs dequantization on-the-fly during the MOE computation.
+
+    IMPORTANT: The mxfp4 ops have frontend_blocklist: [eager], meaning they can
+    only execute through the graph compilation path (torch.compile with hpu_backend).
+    The forward() method is decorated accordingly.
+    """
+
+    def __init__(self,
+                 global_num_experts: int,
+                 num_total_experts: int,
+                 experts_min: int = 0,
+                 experts_max: int = 8,
+                 block_size: int = 32,
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
+        super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, None, dispatch_fn)
+        self.block_size = block_size
+        self.w13_list = torch.nn.ModuleList([MoeMXFP4Matmul() for _ in range(num_total_experts)])
+        self.w2_list = torch.nn.ModuleList([MoeMXFP4Matmul() for _ in range(num_total_experts)])
+
+        self._cached_w13_views = None
+        self._cached_w2_views = None
+        self._cached_w13_scale_views = None
+        self._cached_w2_scale_views = None
+        self._compiled_forward = None
+
+    def _cache_weight_lists(self):
+        experts_range = range(self.num_experts)
+        self._cached_w13_views = tuple(self.w13_list[i].weight for i in experts_range)
+        self._cached_w2_views = tuple(self.w2_list[i].weight for i in experts_range)
+        self._cached_w13_scale_views = tuple(self.w13_list[i].scale for i in experts_range)
+        self._cached_w2_scale_views = tuple(self.w2_list[i].scale for i in experts_range)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
+                              error_msgs):
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
+                                      error_msgs)
+        self._cache_weight_lists()
+
+    def _apply(self, fn):
+        ret = super()._apply(fn)
+        self._cache_weight_lists()
+        return ret
+
+    def _get_compiled_forward(self):
+        if self._compiled_forward is None:
+            @torch.compile(backend="hpu_backend")
+            def _mxfp4_fused_fwd(hidden_states, expert_routing_table, router_weights,
+                                 w12_list, w3_list, d_scale_w12, d_scale_w3,
+                                 block_size, activation, experts_min, experts_max,
+                                 chunk_size, total_experts):
+                return torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights(
+                    hidden_states, expert_routing_table, router_weights,
+                    w12_list, w3_list, d_scale_w12, d_scale_w3,
+                    block_size=block_size,
+                    permuted_weights=True,
+                    activation="silu",
+                    experts_min=experts_min,
+                    experts_max=experts_max,
+                    chunk_size=chunk_size,
+                    total_experts=total_experts,
+                )
+            self._compiled_forward = _mxfp4_fused_fwd
+        return self._compiled_forward
+
+    def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
+        tokens_num, _ = hidden_states.shape
+        activation = _as_activation_str(activation)
+        kwargs = self._get_extra_kwargs(tokens_num)
+        chunk_size = kwargs.get("chunk_size", 0)
+        total_experts = kwargs.get("total_experts", 0)
+
+        if self._cached_w13_views is None or self._cached_w2_views is None:
+            self._cache_weight_lists()
+
+        w13_list = self._cached_w13_views
+        w2_list = self._cached_w2_views
+        w13_scale = self._cached_w13_scale_views
+        w2_scale = self._cached_w2_scale_views
+
+        # expert_routing_table must be int32 for the mxfp4 op
+        if expert_routing_table.dtype != torch.int32:
+            expert_routing_table = expert_routing_table.to(torch.int32)
+
+        compiled_fwd = self._get_compiled_forward()
+        return compiled_fwd(
+            hidden_states, expert_routing_table, router_weights,
+            w13_list, w2_list, w13_scale, w2_scale,
+            self.block_size, activation, self.experts_min, self.experts_max,
+            chunk_size, total_experts,
+        )
+
+
 def oot_get_quantization_config(quantization: str) -> QuantizationConfig:
     from .quant import _FakeINCConfig
     if quantization == "inc":
