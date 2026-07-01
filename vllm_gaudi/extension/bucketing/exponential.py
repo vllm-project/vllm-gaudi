@@ -92,6 +92,11 @@ class ExponentialBucketingStrategy():
         max_decode_blocks = math.ceil(max_model_len / block_size) * max_num_seqs
         max_decode_blocks = min(max_blocks, max_decode_blocks) if use_contiguous_pa else max_decode_blocks
         decode_blocks_limit = math.ceil(math.log2(max_decode_blocks)) + 1
+        # Compensate for wider range: add extra buckets to maintain density at high end
+        if not use_contiguous_pa and max_blocks > 0:
+            bounded_max = max_blocks * 3
+            if max_decode_blocks > bounded_max:
+                decode_blocks_limit += math.ceil(math.log2(max_decode_blocks / bounded_max)) + 1
         decode_block_bucket_cfg = [1, max_num_seqs, max_decode_blocks, decode_blocks_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "
