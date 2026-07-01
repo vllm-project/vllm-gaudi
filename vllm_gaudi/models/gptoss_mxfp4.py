@@ -133,6 +133,21 @@ def _load_weights_mxfp4_dequantize_hpu(
     params_dict = dict(self.named_parameters())
     loaded_params: set[str] = set()
 
+    def _param_key(n: str) -> str:
+        # Upstream PR #41184 nests routed expert weights under a
+        # ``routed_experts`` child module, so checkpoint names like
+        # ``...experts.w13_weight`` now map to parameters
+        # ``...experts.routed_experts.w13_weight``. Resolve to the actual
+        # parameter key. No-op on vLLM versions without the refactor and for
+        # non-expert weights.
+        if n in params_dict:
+            return n
+        if ".experts." in n and ".experts.routed_experts." not in n:
+            cand = n.replace(".experts.", ".experts.routed_experts.", 1)
+            if cand in params_dict:
+                return cand
+        return n
+
     use_ep = self.parallel_config.enable_expert_parallel
 
     # In MoE, we need to flatten the tensor parallel size across the data
@@ -193,7 +208,7 @@ def _load_weights_mxfp4_dequantize_hpu(
                 else:
                     raise ValueError(f"Expected block weight for {block_name} not found when processing {name}")
             block_weight = block_weight_dict[block_name]
-            param = params_dict[block_name]
+            param = params_dict[_param_key(block_name)]
 
             weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
             if use_ep:
@@ -210,7 +225,7 @@ def _load_weights_mxfp4_dequantize_hpu(
                 narrow_weight = weight[:, 2 * tp_rank_start:2 * tp_rank_end, :, :]
             narrow_weight = narrow_weight.contiguous()
             block_weight_dict[name] = narrow_weight
-            loaded_params.add(name)
+            loaded_params.add(_param_key(name))
             continue
         elif ".w2_weight_scale" in name:
             # Handle MLP down projection weights
@@ -230,7 +245,7 @@ def _load_weights_mxfp4_dequantize_hpu(
                 else:
                     raise ValueError(f"Expected block weight for {block_name} not found when processing {name}")
             block_weight = block_weight_dict[block_name]
-            param = params_dict[block_name]
+            param = params_dict[_param_key(block_name)]
 
             weight = convert_moe_packed_tensors(block_weight, narrow_weight_scale)
             if use_ep:
@@ -248,7 +263,7 @@ def _load_weights_mxfp4_dequantize_hpu(
                 narrow_weight = weight[:, :, k_block_start:k_block_end, :]
             narrow_weight = narrow_weight.contiguous()
             block_weight_dict[name] = narrow_weight
-            loaded_params.add(name)
+            loaded_params.add(_param_key(name))
             continue
         elif ".w13_bias" in name:
             # Handle MLP gate and up projection biases
@@ -259,12 +274,12 @@ def _load_weights_mxfp4_dequantize_hpu(
                 narrow_weight = weight[:, 2 * tp_rank_start:2 * tp_rank_end]
             narrow_weight = narrow_weight.contiguous()
 
-            param = params_dict[name]
+            param = params_dict[_param_key(name)]
             if use_ep:
                 param.copy_(narrow_weight)
             else:
                 param[:, :2 * (tp_rank_end - tp_rank_start)] = narrow_weight
-            loaded_params.add(name)
+            loaded_params.add(_param_key(name))
             continue
         elif ".w2_bias" in name:
             # Handle MLP down projection bias
@@ -274,9 +289,9 @@ def _load_weights_mxfp4_dequantize_hpu(
                 # (only load on rank 0 to avoid duplication)
                 if tp_rank != 0:
                     weight.zero_()
-            param = params_dict[name]
+            param = params_dict[_param_key(name)]
             param.copy_(weight)
-            loaded_params.add(name)
+            loaded_params.add(_param_key(name))
             continue
         elif "sinks" in name:
             # Handle attention sinks (distributed across ranks)

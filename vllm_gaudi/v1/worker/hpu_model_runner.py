@@ -282,6 +282,53 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
         logger.info("Moved %d stray tensors to %s", moved, device)
 
 
+def _dedup_moe_op_weights(model: torch.nn.Module) -> None:
+    """Release the dead duplicate device copy of MoE expert weights after INC.
+
+    For FP8 MoE, INC's ``fp8_quant`` conversion re-registers each per-expert
+    weight as a fresh (transposed, contiguous) Parameter inside the patched
+    ``moe_op`` (copy B). The original ``w13_weight`` / ``w2_weight`` Parameter
+    (copy A) is then dead — the forward runs entirely through ``moe_op`` — yet
+    it is still moved to device, doubling expert-weight memory and starving the
+    KV cache.
+
+    Free copy A only when every expert weight is accounted for in ``moe_op`` and
+    none of them share storage with the Parameter (i.e. INC made a genuine
+    second copy). It is a no-op when the op still aliases the Parameter
+    (non-INC / measure path), detected via storage identity.
+    """
+
+    def _storage_id(t: torch.Tensor) -> int:
+        try:
+            return t.untyped_storage().data_ptr()
+        except Exception:
+            return t.data_ptr()
+
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if moe_op is None:
+            continue
+        for param_name, list_name in (("w13_weight", "w13_list"), ("w2_weight", "w2_list")):
+            param = getattr(module, param_name, None)
+            weight_list = getattr(moe_op, list_name, None)
+            if not isinstance(param, torch.Tensor) or weight_list is None:
+                continue
+            if param.dim() == 0 or param.shape[0] != len(weight_list):
+                continue
+            op_storages = set()
+            op_tensors = 0
+            for item in weight_list:
+                w = getattr(item, "weight", None)
+                if isinstance(w, torch.Tensor):
+                    op_tensors += 1
+                    op_storages.add(_storage_id(w))
+            if op_tensors != len(weight_list):
+                continue
+            if _storage_id(param) in op_storages:
+                continue
+            param.data = torch.empty(0, dtype=param.dtype, device=param.device)
+
+
 class BucketingFailedException(Exception):
     pass
 
@@ -4493,6 +4540,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if not is_fake_hpu():
                     self.model = self.model.to("hpu")
                     _move_remaining_tensors_to_device(self.model, "hpu")
+                    _dedup_moe_op_weights(self.model)
                     htorch.core.mark_step()
                 if not disable_mark_scales_as_const:
                     htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
