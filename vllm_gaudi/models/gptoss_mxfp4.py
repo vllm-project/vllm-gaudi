@@ -16,7 +16,10 @@ from vllm.distributed import (
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.models.utils import is_pp_missing_parameter
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    remap_moe_expert_weights,
+)
 
 # HPU_MXFP4_NATIVE controls the MXFP4 execution strategy:
 #   True (HPU_MXFP4_NATIVE=1): If weights are packed, use native
@@ -166,7 +169,7 @@ def _load_weights_mxfp4_dequantize_hpu(
 
     block_weight_dict = {}
 
-    for name, weight in weights:
+    for name, weight in remap_moe_expert_weights(weights, params_dict):
         # Skip layers on other devices.
         if is_pp_missing_parameter(name, self):
             continue
@@ -184,7 +187,11 @@ def _load_weights_mxfp4_dequantize_hpu(
             # Read block weight
             block_name = name.replace("weight_scale", "weight")
             if block_name not in block_weight_dict:
-                raise ValueError(f"Expected block weight for {block_name} not found when processing {name}")
+                routed_block_name = block_name.replace(".experts.", ".experts.routed_experts.", 1)
+                if routed_block_name in block_weight_dict:
+                    block_name = routed_block_name
+                else:
+                    raise ValueError(f"Expected block weight for {block_name} not found when processing {name}")
             block_weight = block_weight_dict[block_name]
             param = params_dict[block_name]
 
@@ -216,7 +223,12 @@ def _load_weights_mxfp4_dequantize_hpu(
             # Read block weight
             block_name = name.replace("weight_scale", "weight")
             if block_name not in block_weight_dict:
-                raise ValueError(f"Expected block weight for {block_name} not found when processing {name}")
+                if block_name not in block_weight_dict:
+                    routed_block_name = block_name.replace(".experts.", ".experts.routed_experts.", 1)
+                if routed_block_name in block_weight_dict:
+                    block_name = routed_block_name
+                else:
+                    raise ValueError(f"Expected block weight for {block_name} not found when processing {name}")
             block_weight = block_weight_dict[block_name]
             param = params_dict[block_name]
 
