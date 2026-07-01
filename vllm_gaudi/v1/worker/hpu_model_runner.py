@@ -321,6 +321,7 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
         if hasattr(moe_op, "_cache_weight_lists"):
             moe_op._cache_weight_lists()
 
+
 def _dedup_moe_op_weights(model: torch.nn.Module) -> None:
     """Release the dead duplicate device copy of MoE expert weights after INC.
 
