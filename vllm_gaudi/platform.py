@@ -324,12 +324,11 @@ class HpuPlatform(Platform):
                 # Re-align mamba_page_size_padded to the final HPU block size.
                 # check_and_update_config aligns mamba_page_size_padded to
                 # the HPU default block_size=128, but update_block_size_for_backend
-                # then changes block_size to attn_block_size (e.g. 528).  
+                # then changes block_size to attn_block_size (e.g. 528).
                 new_attn_page = attn_1tok * attn_block_size
                 if new_attn_page > 0:
-                    from math import ceil
                     old_padded = getattr(cache_config, "mamba_page_size_padded", None)
-                    new_padded = ceil(mamba_page_size / new_attn_page) * new_attn_page
+                    new_padded = cdiv(mamba_page_size, new_attn_page) * new_attn_page
                     if old_padded != new_padded:
                         cache_config.mamba_page_size_padded = new_padded
                         logger.info(

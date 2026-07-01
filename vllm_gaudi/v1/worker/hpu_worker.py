@@ -707,7 +707,7 @@ class HPUWorker(WorkerBase):
                     self.model_runner.model.to(self.vllm_config.device_config.device)
                     # Re-derive MoeMatmul.weight slices from the now-moved
                     # parent FusedMoE registered params (w13_weight/w2_weight)
-                    # before the stray scan.                  
+                    # before the stray scan.
                     _rebind_moe_expert_weights(self.model_runner.model)
                     # Move back non-Parameter/non-Buffer tensors that were
                     # sent to CPU during sleep.
