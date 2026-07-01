@@ -297,27 +297,29 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
     _move_remaining_tensors_to_device so that the stray scan finds all
     MoeMatmul.weight tensors already on the correct device and skips them.
     """
-    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOp  # local to avoid circular import
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
     for module in model.modules():
-        moe_op = getattr(module, 'moe_op', None)
-        if not isinstance(moe_op, VllmMixtureOfExpertsOp):
+        moe_op = getattr(module, "moe_op", None)
+        if not isinstance(moe_op, VllmMixtureOfExpertsOpBase):
             continue
-        w13_weight = getattr(module, 'w13_weight', None)
-        w2_weight = getattr(module, 'w2_weight', None)
+        w13_weight = getattr(module, "w13_weight", None)
+        w2_weight = getattr(module, "w2_weight", None)
         if w13_weight is None or w2_weight is None:
             continue
         n = moe_op.num_experts
         for i in range(n):
             moe_op.w13_list[i].set_weight(w13_weight[i])
             moe_op.w2_list[i].set_weight(w2_weight[i])
-        w13_bias = getattr(module, 'w13_bias', None)
-        w2_bias = getattr(module, 'w2_bias', None)
+        w13_bias = getattr(module, "w13_bias", None)
+        w2_bias = getattr(module, "w2_bias", None)
         if w13_bias is not None and w2_bias is not None:
             for i in range(n):
-                moe_op.w13_list[i].set_bias(w13_bias[i])
-                moe_op.w2_list[i].set_bias(w2_bias[i])
-        moe_op._cache_weight_lists()
-
+                if hasattr(moe_op.w13_list[i], "set_bias"):
+                    moe_op.w13_list[i].set_bias(w13_bias[i])
+                if hasattr(moe_op.w2_list[i], "set_bias"):
+                    moe_op.w2_list[i].set_bias(w2_bias[i])
+        if hasattr(moe_op, "_cache_weight_lists"):
+            moe_op._cache_weight_lists()
 
 def _rebind_moe_op_weights_to_device(model: torch.nn.Module, device: str) -> None:
     """Rebind ``moe_op`` expert-weight views onto the moved on-device Parameters.
