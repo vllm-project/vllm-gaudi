@@ -281,6 +281,41 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
     if moved:
         logger.info("Moved %d stray tensors to %s", moved, device)
 
+def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
+    """Re-derive MoeMatmul.weight slices from the parent layer's registered weights.
+
+    MoeMatmul.weight is a plain tensor attribute (set via set_weight()) that
+    holds a view/slice of the parent FusedMoE layer's w13_weight / w2_weight
+    registered parameters.  After model.to(device), the registered params are
+    on the new device but MoeMatmul.weight still points to the OLD device's
+    storage, making it stale.  If the stray scan runs before rebinding, it
+    would move these stale views independently, creating duplicate copies of
+    the expert weights on the target device.
+
+    Call this AFTER model.to(device) and BEFORE
+    _move_remaining_tensors_to_device so that the stray scan finds all
+    MoeMatmul.weight tensors already on the correct device and skips them.
+    """
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOp  # local to avoid circular import
+    for module in model.modules():
+        moe_op = getattr(module, 'moe_op', None)
+        if not isinstance(moe_op, VllmMixtureOfExpertsOp):
+            continue
+        w13_weight = getattr(module, 'w13_weight', None)
+        w2_weight = getattr(module, 'w2_weight', None)
+        if w13_weight is None or w2_weight is None:
+            continue
+        n = moe_op.num_experts
+        for i in range(n):
+            moe_op.w13_list[i].set_weight(w13_weight[i])
+            moe_op.w2_list[i].set_weight(w2_weight[i])
+        w13_bias = getattr(module, 'w13_bias', None)
+        w2_bias = getattr(module, 'w2_bias', None)
+        if w13_bias is not None and w2_bias is not None:
+            for i in range(n):
+                moe_op.w13_list[i].set_bias(w13_bias[i])
+                moe_op.w2_list[i].set_bias(w2_bias[i])
+        moe_op._cache_weight_lists()
 
 def _rebind_moe_op_weights_to_device(model: torch.nn.Module, device: str) -> None:
     """Rebind ``moe_op`` expert-weight views onto the moved on-device Parameters.

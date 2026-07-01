@@ -659,7 +659,15 @@ class VllmMixtureOfExpertsOp(VllmMixtureOfExpertsOpBase):
         self._cache_weight_lists()
 
     def _apply(self, fn):
-        # called by .to(device/dtype), etc. Always rebuild packed cache.
+        # called by .to(device/dtype), etc. Always rebuild packed cache so
+        # _cached_w13_views / _cached_w2_views stay consistent with the
+        # registered w13_weight / w2_weight parameters.
+        # NOTE: after a cross-device move (e.g. hpu → cpu or cpu → hpu),
+        # moe_matmul.weight is a stale view of the OLD device's w13_weight.
+        # _rebind_moe_expert_weights() (called from hpu_worker.py before any
+        # stray-tensor scan) will re-derive the slices from the now-moved
+        # registered params and call _cache_weight_lists() again with correct
+        # tensors.
         ret = super()._apply(fn)
         self._cache_weight_lists()
         return ret
