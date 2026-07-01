@@ -321,6 +321,7 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
         if hasattr(moe_op, "_cache_weight_lists"):
             moe_op._cache_weight_lists()
 
+
 def _rebind_moe_op_weights_to_device(model: torch.nn.Module, device: str) -> None:
     """Rebind ``moe_op`` expert-weight views onto the moved on-device Parameters.
 
