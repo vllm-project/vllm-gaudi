@@ -281,6 +281,7 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
     if moved:
         logger.info("Moved %d stray tensors to %s", moved, device)
 
+
 def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
     """Re-derive MoeMatmul.weight slices from the parent layer's registered weights.
 
@@ -316,6 +317,7 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
                 moe_op.w13_list[i].set_bias(w13_bias[i])
                 moe_op.w2_list[i].set_bias(w2_bias[i])
         moe_op._cache_weight_lists()
+
 
 def _rebind_moe_op_weights_to_device(model: torch.nn.Module, device: str) -> None:
     """Rebind ``moe_op`` expert-weight views onto the moved on-device Parameters.

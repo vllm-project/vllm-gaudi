@@ -313,7 +313,7 @@ def install_engine_core_patch() -> None:
                 new_config.scheduler_config.enable_chunked_prefill = False
 
             # Use the same block-size resolution as the initial EngineCore startup
-            # (core.py). 
+            # (core.py).
             scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, new_config)
 
             self.scheduler = Scheduler(
