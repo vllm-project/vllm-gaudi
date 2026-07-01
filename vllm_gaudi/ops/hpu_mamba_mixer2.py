@@ -338,15 +338,19 @@ class HPUMambaMixer2(MambaMixer2):
         w = self.in_proj.weight  # [total_out, hidden_size]
         b = self.in_proj.bias  # [total_out] or None
 
-        self._states_weight = w[gate_size:].clone()  # [states_out, hidden]
-        self._gate_weight = w[:gate_size].clone()  # [gate_out, hidden]
+        # Register as non-persistent buffers (same pattern as conv_weights)
+        # so that model.to(device/dtype) moves them automatically.
+        # persistent=False keeps them out of state_dict — they are derived
+        # from in_proj.weight and must not be saved/loaded independently.
+        self.register_buffer("_states_weight", w[gate_size:].clone(), persistent=False)  # [states_out, hidden]
+        self.register_buffer("_gate_weight", w[:gate_size].clone(), persistent=False)  # [gate_out, hidden]
 
         if b is not None:
-            self._states_bias = b[gate_size:].clone()
-            self._gate_bias = b[:gate_size].clone()
+            self.register_buffer("_states_bias", b[gate_size:].clone(), persistent=False)
+            self.register_buffer("_gate_bias", b[:gate_size].clone(), persistent=False)
         else:
-            self._states_bias = None
-            self._gate_bias = None
+            self.register_buffer("_states_bias", None, persistent=False)
+            self.register_buffer("_gate_bias", None, persistent=False)
 
         self._split_weights_ready = True
 
