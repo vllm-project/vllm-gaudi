@@ -436,10 +436,18 @@ def request_finished(
             block_ids,
             block_ids_on_save,
         )
+    # remote_block_ids nesting is path-dependent. When the sender resizes blocks
+    # on save (block_size_ratio > 1), block_ids_on_save is a fresh flat list that
+    # is NOT re-nested downstream, so wrap it per-group here. When ratio == 1 the
+    # downstream _logical_to_remote_kernel_block_ids re-nests, so send it flat.
+    if block_size_ratio > 1:
+        remote_block_ids_payload = [block_ids_on_save]
+    else:
+        remote_block_ids_payload = block_ids_on_save
     return delay_free_blocks, dict(
         do_remote_prefill=True,
         do_remote_decode=False,
-        remote_block_ids=[block_ids_on_save],  # Wrap in list for GPU compatibility (list[list[int]])
+        remote_block_ids=remote_block_ids_payload,
         remote_engine_id=self.engine_id,
         remote_request_id=request.request_id,
         remote_host=self.side_channel_host,
@@ -579,6 +587,10 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     # Protects _handshake_futures and _remote_agents.
     self._handshake_lock = threading.RLock()
 
+    # TTL-based eviction of stale remote engine state.
+    self._engine_last_active: dict[EngineId, float] = {}  # type: ignore[misc]
+    self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config("engine_ttl", 3600.0)
+
     self.block_size = vllm_config.cache_config.block_size
     self.model_config = vllm_config.model_config
     self.cache_config = vllm_config.cache_config
@@ -646,6 +658,24 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     self._is_hma_required = (not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
                              and any(not isinstance(g.kv_cache_spec, FullAttentionSpec)
                                      for g in kv_cache_config.kv_cache_groups))
+
+    # Attributes expected by the (non-overridden) upstream base_worker
+    # handshake/validation code. Mirror upstream NixlConnectorWorker.__init__.
+    self.attn_backends = [backend]
+    self.kv_cache_config = kv_cache_config
+    self._layer_specs = {
+        layer: group.kv_cache_spec
+        for group in kv_cache_config.kv_cache_groups
+        for layer in group.layer_names
+    }
+    self.hma_group_size = len(kv_cache_config.kv_cache_tensors)
+    # Conv state sub-projection decomposition (None when no Mamba).
+    self._conv_decomp = None
+    # Per-region MLA flags; populated in register_kv_caches once regions known.
+    self._region_is_mla = list[bool]()
+    # Set in register_kv_caches; safe defaults for pre-registration reads.
+    self._logical_num_blocks = 0
+    self.num_descs = 0
 
     # Initialize lease extension for heartbeat handling
     kv_lease_duration: int = vllm_config.kv_transfer_config.get_from_extra_config("kv_lease_duration", 30)
@@ -783,6 +813,12 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         # be able to index K/V separately. Hence we double the number
         # of 'virtual' regions here and halve `block_len` below.
         self.num_regions *= 2
+
+    # Attributes expected by upstream base_worker handshake/validation.
+    # Non-MLA HPU path: no region is a replicated (MLA) region.
+    self._region_is_mla = [False] * len(self.block_len_per_layer)
+    self._logical_num_blocks = self.num_blocks
+    self.num_descs = self.num_regions * self.num_blocks
 
     # Register local/src descr for NIXL xfer.
     self.seen_base_addresses = seen_base_addresses
