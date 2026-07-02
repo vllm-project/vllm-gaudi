@@ -1,4 +1,6 @@
+# NIXL is NOT installed from PyPI here: the HPU GDR (kv_buffer_device=hpu) path
+# needs the gaudi_gdr-enabled build produced by ../../install_nixl.py, which also
+# pip-installs its own nixl wheel. The run_*.sh scripts build it on first run.
 pytest
-nixl
 lm-eval
 lm-eval[api]
