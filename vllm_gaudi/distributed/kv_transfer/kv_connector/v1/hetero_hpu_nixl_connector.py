@@ -165,6 +165,31 @@ def if_postprocess_kvcache_on_save(vllm_config, current_block_size, current_kv_c
     return postprocess_kv_caches_on_save, kv_cache_layout_on_save, block_size_on_save
 
 
+def joint_kv_staging_slots(vllm_config, block_size_on_save: int) -> int:
+    """Size the joint-KV staging pool to the FULL workload bound.
+
+    The pool must be large enough that every request that can be scheduled
+    concurrently is guaranteed a staging reservation. If it were smaller, a
+    request could reach request_finished (already dispatched to the decode
+    instance) without slots and crash the decode. So the pool is sized to the
+    hard upper bound of concurrent on-save blocks:
+
+        max_num_seqs * ceil(max_model_len / block_size_on_save)
+
+    A memory-feasibility check (whether this fits device memory) is enforced
+    separately at registration time; see check_joint_kv_staging_fits.
+
+    Must return the same value in the scheduler and worker processes; it
+    depends only on config, so it does. VLLM_HPU_NIXL_STAGING_SLOTS overrides.
+    """
+    override = int(envs.VLLM_HPU_NIXL_STAGING_SLOTS)
+    if override > 0:
+        return override
+    mc = vllm_config.model_config
+    sc = vllm_config.scheduler_config
+    return int(sc.max_num_seqs) * math.ceil(mc.max_model_len / block_size_on_save)
+
+
 def get_mapped_blocks(block_ids, block_size_ratio, num_blocks):
     """
         Calculates the new set of block IDs by mapping every element
@@ -226,6 +251,22 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, 
             self.kv_cache_layout_on_save,
             self.block_size_on_save,
         ) = if_postprocess_kvcache_on_save(self.vllm_config, self.block_size, self.kv_cache_layout)
+
+    # Joint-KV staging slot allocator (scheduler side is source of truth).
+    # The slot ids assigned here are what we advertise to the D worker as
+    # remote_block_ids, and what the P worker copies transformed KV into.
+    self.use_joint_kv_staging = bool(envs.VLLM_HPU_NIXL_JOINT_KV) and self.postprocess_kv_caches_on_save
+    self._staging_num_slots = 0
+    self._staging_free: list[int] = []
+    self._staging_by_req: dict[ReqId, list[int]] = {}  # type: ignore[misc]
+    # Saves deferred because the pool was momentarily full; retried each step.
+    self._deferred_saves: dict[ReqId, tuple] = {}  # type: ignore[misc]
+    if self.use_joint_kv_staging:
+        # Must match the worker's register_kv_caches computation exactly.
+        self._staging_num_slots = joint_kv_staging_slots(vllm_config, self.block_size_on_save)
+        self._staging_free = list(range(self._staging_num_slots))
+        logger.info("[JOINT_KV] scheduler staging pool: %d slots", self._staging_num_slots)
+
     logger.info("Initializing NIXL Scheduler %s", engine_id)
 
     # Background thread for handling new handshake requests.
@@ -299,11 +340,90 @@ def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", 
         params["do_remote_prefill"] = False
 
 
+def update_connector_output(self, connector_output):
+    """Free joint-KV staging slots for sends the D side finished reading."""
+    # Preserve base behavior (stop heartbeats for finished recvs).
+    for req_id in getattr(connector_output, "finished_recving", None) or ():
+        self._stop_heartbeat(req_id)
+    if self.use_joint_kv_staging:
+        for req_id in getattr(connector_output, "finished_sending", None) or ():
+            self._free_staging_slots(req_id)
+
+
+def _alloc_staging_slots(self, req_id: ReqId, n: int) -> list[int] | None:
+    """Reserve n joint-KV staging slots for a request (scheduler side).
+
+    All-or-nothing: returns the assigned slot ids, or None when the pool
+    cannot satisfy the request in full (caller defers and retries, or fails
+    the request cleanly). Never returns a partial reservation, which would
+    cause an incomplete KV transfer. Idempotent: a request that already has
+    slots gets the same list back.
+    """
+    existing = self._staging_by_req.get(req_id)
+    if existing is not None:
+        return existing
+    if len(self._staging_free) < n:
+        return None
+    slots = [self._staging_free.pop() for _ in range(n)]
+    self._staging_by_req[req_id] = slots
+    return slots
+
+
+def _free_staging_slots(self, req_id: ReqId) -> None:
+    """Return a request's staging slots to the free list (scheduler side)."""
+    slots = self._staging_by_req.pop(req_id, None)
+    if slots:
+        self._staging_free.extend(slots)
+        logger.debug("[JOINT_KV] freed %d staging slots for req=%s (free now=%d)",
+                     len(slots), req_id, len(self._staging_free))
+
+
+def _try_schedule_joint_save(self, meta, req_id, req, new_block_ids) -> bool:
+    """Reserve staging slots and schedule the save for a request.
+
+    Returns True if slots were reserved and the save was added to `meta`;
+    False if the pool is currently full (caller should defer and retry).
+    """
+    flat = new_block_ids[0]
+    ratio = self.block_size // self.block_size_on_save
+    # Use num_prompt_tokens (stable, == the decode's num_external_tokens) rather
+    # than num_tokens, which grows across chunked-prefill steps. build and
+    # request_finished must agree, and the decode allocates
+    # ceil(num_external_tokens / block_size_on_save) local blocks -- match that.
+    num_save_blocks = math.ceil(req.num_prompt_tokens / self.block_size_on_save) \
+        if ratio > 1 else len(flat)
+    slots = self._alloc_staging_slots(req_id, num_save_blocks)
+    if slots is None:
+        return False
+    meta.add_new_req_to_save(
+        request_id=req_id,
+        local_block_ids=new_block_ids,
+        kv_transfer_params=req.kv_transfer_params,
+    )
+    meta.reqs_to_save[req_id].staging_slots = slots  # type: ignore[attr-defined]
+    logger.debug("[JOINT_KV] scheduled save req=%s: %d slots (free left=%d) slots[:8]=%s",
+                 req_id, len(slots), len(self._staging_free), slots[:8])
+    return True
+
+
 def build_connector_meta(
     self,
     scheduler_output: SchedulerOutput,
 ) -> KVConnectorMetadata:
     meta = NixlConnectorMetadata()
+
+    # Drain deferred saves first: requests whose KV is held on the HPU because
+    # the staging pool was momentarily full. Retry now that in-flight transfers
+    # may have freed slots. A finished prefill is not re-yielded by
+    # yield_req_data, so this explicit queue is what retries it.
+    if self.use_joint_kv_staging and self._deferred_saves:
+        still: dict[ReqId, tuple] = {}
+        for d_id, (d_req, d_blocks) in self._deferred_saves.items():
+            if not _try_schedule_joint_save(self, meta, d_id, d_req, d_blocks):
+                still[d_id] = (d_req, d_blocks)
+        if still:
+            logger.debug("[JOINT_KV] %d save(s) still deferred (pool full)", len(still))
+        self._deferred_saves = still
 
     # Loop through scheduled reqs and convert to ReqMeta.
     for req_id, (req, block_ids) in self._reqs_need_recv.items():
@@ -339,13 +459,25 @@ def build_connector_meta(
             new_block_ids = [new_block_ids_flat]
         else:
             new_block_ids = new_block_id_groups
-        # set any chunked prefill as partial, except the last chunk
-        # only submit as new req when not partial
-        meta.add_new_req_to_save(
-            request_id=req_id,
-            local_block_ids=new_block_ids,
-            kv_transfer_params=req.kv_transfer_params,
-        )
+        if not is_partial and self.use_joint_kv_staging:
+            # Reserve staging slots and schedule the save. The pool is sized to
+            # max_num_seqs worth of blocks, but requests hold slots until the
+            # DECODE fetches them, so under load more requests than max_num_seqs
+            # can have outstanding reservations and the pool may be momentarily
+            # full. In that case defer: keep the request's KV on the HPU and
+            # retry the save on a later step (see the deferred-save drain).
+            if not _try_schedule_joint_save(self, meta, req_id, req, new_block_ids):
+                self._deferred_saves[req_id] = (req, new_block_ids)
+                logger.debug("[JOINT_KV] build_meta req=%s deferred (pool full, free=%d)",
+                             req_id, len(self._staging_free))
+        else:
+            # set any chunked prefill as partial, except the last chunk
+            # only submit as new req when not partial
+            meta.add_new_req_to_save(
+                request_id=req_id,
+                local_block_ids=new_block_ids,
+                kv_transfer_params=req.kv_transfer_params,
+            )
         if not is_partial:
             # For non-partial prefills, once new req_meta is scheduled, it
             # can be removed from _reqs_need_save.
@@ -436,6 +568,31 @@ def request_finished(
             block_ids,
             block_ids_on_save,
         )
+    if self.use_joint_kv_staging:
+        # The D worker reads from our staging slots, not from raw kernel block
+        # ids. Advertise the assigned slot ids as remote_block_ids.
+        # Count from num_prompt_tokens (stable, == the decode's
+        # num_external_tokens); num_tokens grows during prefill and would
+        # disagree by a block at chunk boundaries.
+        num_save_blocks = math.ceil(request.num_prompt_tokens / self.block_size_on_save) \
+            if block_size_ratio > 1 else len(block_ids)
+        block_ids_on_save = self._alloc_staging_slots(request.request_id, num_save_blocks)
+        if block_ids_on_save is None:
+            # Pool momentarily full and this request's save was neither
+            # scheduled nor drained yet. Do NOT crash the engine (that would
+            # kill every in-flight request). Fail just this one: advertise no
+            # blocks so the decode records a clean KV-load failure for it.
+            # Its slots (if later deferred-drained) are freed by the timeout.
+            logger.warning("[JOINT_KV] req=%s no staging slots at finish (need %d, free %d, total %d); "
+                           "failing this request only. Raise VLLM_HPU_NIXL_STAGING_SLOTS or lower load.",
+                           request.request_id, num_save_blocks, len(self._staging_free),
+                           self._staging_num_slots)
+            self._deferred_saves.pop(request.request_id, None)
+            self._reqs_need_send.pop(request.request_id, None)
+            self._reqs_not_processed.add(request.request_id)
+            return False, None
+        logger.debug("[JOINT_KV] request_finished req=%s advertising %d staging slots as remote_block_ids slots[:8]=%s",
+                     request.request_id, len(block_ids_on_save), block_ids_on_save[:8])
     return delay_free_blocks, dict(
         do_remote_prefill=True,
         do_remote_decode=False,
@@ -539,6 +696,18 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     self.num_regions = 0
     self.num_layers = 0
 
+    # Joint-KV staging pool (heterogeneous HPU-prefill -> GPU-decode).
+    # The GPU decode (FLASH_ATTN, blocks-first) registers ONE joint region
+    # per layer and reads V at `block_len // 2` within each block. HPU keeps
+    # K and V in separate tensors, so to be byte-compatible we stage each
+    # transferred block into a joint buffer laid out blocks-first
+    # [num_slots, 2(K,V), n_kv_heads, block_size_on_save, head_size].
+    # Populated in register_kv_caches when joint staging is required.
+    self.use_joint_kv_staging = False
+    # Per-layer joint staging tensors, indexed by layer registration order.
+    self.kv_staging_buffers: list[torch.Tensor] = []  # type: ignore[misc]
+    self.num_staging_slots = 0
+
     # nixl_prepped_dlist_handle.
     self.src_xfer_handles_by_block_size: dict[int, int] = {}  # type: ignore[misc]
     # Populated dynamically during handshake based on remote configuration.
@@ -632,6 +801,10 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     # Default SSM sizes for non-Mamba models
     self._mamba_ssm_size = (0, 0)
 
+    # Needed by _logical_to_kernel_block_ids (upstream stores this in its own
+    # register_kv_caches; the gaudi override does not, so keep it here).
+    self.kv_cache_config = kv_cache_config
+
     # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
     self._group_spec_types = tuple(
         get_representative_spec_type(g.kv_cache_spec) for g in kv_cache_config.kv_cache_groups)
@@ -651,9 +824,163 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     kv_lease_duration: int = vllm_config.kv_transfer_config.get_from_extra_config("kv_lease_duration", 30)
     self._lease_extension = kv_lease_duration * 2 // 3
 
+    # Joint-KV staging: when the remote decode (e.g. GPU FLASH_ATTN,
+    # blocks-first) registers ONE joint [K|V] region per layer, HPU must
+    # advertise the same region model. Enabled via VLLM_HPU_NIXL_JOINT_KV.
+    # Only meaningful in hetero mode with permute-on-save (block/layout xform).
+    self.use_joint_kv_staging = bool(envs.VLLM_HPU_NIXL_JOINT_KV) and self.postprocess_kv_caches_on_save
+    if envs.VLLM_HPU_NIXL_JOINT_KV and not self.postprocess_kv_caches_on_save:
+        logger.warning("[JOINT_KV] VLLM_HPU_NIXL_JOINT_KV set but permute-on-save is "
+                       "disabled; joint-KV staging will NOT be used.")
+    logger.info("[JOINT_KV] use_joint_kv_staging=%s (env=%s, postprocess_on_save=%s)",
+                self.use_joint_kv_staging, bool(envs.VLLM_HPU_NIXL_JOINT_KV), self.postprocess_kv_caches_on_save)
+    # req_id -> list[int] staging slot ids assigned for that request.
+    self._req_staging_slots: dict[ReqId, list[int]] = {}  # type: ignore[misc]
+    # Free slot ids (populated in register_kv_caches once pool size is known).
+    self._free_staging_slots: list[int] = []  # type: ignore[misc]
+
+
+def register_joint_kv_staging(self, kv_caches: dict[str, torch.Tensor]):
+    """Register KV caches as joint [K|V] regions for a GPU decode consumer.
+
+    The GPU decode (FLASH_ATTN, blocks-first) registers ONE region per layer
+    and reads V at `block_len // 2` within each block. HPU stores K and V in
+    separate tensors, so we allocate a joint staging buffer per layer laid out
+    blocks-first HND: [num_slots, 2(K,V), n_kv_heads, block_size_on_save,
+    head_size]. On save, the per-request blocks are transformed and copied into
+    assigned slots; the GPU then pulls whole joint blocks.
+    """
+    self.device_kv_caches = kv_caches
+    # HPU KV cache tensors are flattened per HPUPagedAttention.get_kv_cache_shape:
+    #   [num_blocks * block_size, n_kv_heads, head_size]
+    # (K and V are stored as separate tensors per layer.)
+    _sample_entry = list(kv_caches.values())[0]
+    sample = _sample_entry[0] if isinstance(_sample_entry, (list, tuple)) else _sample_entry
+    dtype = sample.dtype
+    device = sample.device
+    n_kv_heads = int(sample.shape[-2])
+    head_size = int(sample.shape[-1])
+    logger.info("[JOINT_KV] device KV entry type=%s, K tensor shape=%s dtype=%s (block_size=%s block_size_on_save=%s)",
+                type(_sample_entry).__name__, tuple(sample.shape), dtype, self.block_size, self.block_size_on_save)
+    # Each staging slot IS exactly one transfer block (block_size_on_save
+    # tokens); there is no further logical->physical expansion on the staging
+    # buffer. Advertise 1 so the D worker does not multiply remote block ids
+    # by a physical factor (which caused num_remote_blocks = 8 * num_local).
+    self._physical_blocks_per_logical_kv_block = 1
+
+    # Joint block bytes = 2(K,V) * heads * block_size_on_save * head_size * elem.
+    joint_block_bytes = 2 * n_kv_heads * self.block_size_on_save * head_size * sample.element_size()
+    # Deterministic size (must match the scheduler's computation exactly).
+    num_slots = joint_kv_staging_slots(self.vllm_config, self.block_size_on_save)
+    self.num_staging_slots = num_slots
+
+    # Fail fast if the (guaranteed-fit) pool does not fit in free device
+    # memory. The pool is sized to the full concurrent workload so that a
+    # request never reaches request_finished (already dispatched to the decode
+    # instance) without a reservation -- an undersized pool would crash the
+    # decode. If it does not fit, refuse to start with actionable guidance
+    # rather than OOM mid-run or corrupt a transfer.
+    pool_bytes = num_slots * joint_block_bytes * len(kv_caches)
+    try:
+        free_bytes = torch.hpu.mem_get_info()[0]
+    except Exception:  # noqa: BLE001
+        free_bytes = None
+    if free_bytes is not None and pool_bytes > free_bytes:
+        raise RuntimeError(
+            f"[JOINT_KV] staging pool needs {pool_bytes / 1024**3:.1f} GiB "
+            f"({num_slots} slots x {joint_block_bytes * len(kv_caches) / 1024**2:.1f} MiB) "
+            f"but only {free_bytes / 1024**3:.1f} GiB is free after weights + KV cache. "
+            f"Reduce --max-num-seqs or --max-model-len, lower --gpu-memory-utilization to "
+            f"free device memory, or set VLLM_HPU_NIXL_STAGING_SLOTS to a smaller value "
+            f"(only safe if peak concurrent demand stays under it)."
+        )
+
+    logger.info(
+        "[JOINT_KV] Registering joint staging: layers=%d slots=%d "
+        "joint_block_bytes=%d (K/V half=%d) dims[heads=%d block_size_on_save=%d head_size=%d] "
+        "dtype=%s est_mem=%.2f GiB",
+        len(kv_caches), num_slots, joint_block_bytes, joint_block_bytes // 2,
+        n_kv_heads, self.block_size_on_save, head_size, dtype,
+        len(kv_caches) * num_slots * joint_block_bytes / (1024**3))
+
+    caches_data = []
+    seen_base_addresses = []
+    self.kv_staging_buffers = []
+    self.block_len_per_layer = list[int]()
+    self.slot_size_per_layer = list[int]()
+    block_len_per_layer_on_save = list[int]()
+    for layer_name in kv_caches.keys():
+        staging = torch.zeros(
+            (num_slots, 2, n_kv_heads, self.block_size_on_save, head_size),
+            dtype=dtype, device=device,
+        )
+        self.kv_staging_buffers.append(staging)
+        base_addr = staging.data_ptr()
+        seen_base_addresses.append(base_addr)
+        self.device_id = max(staging.get_device(), 0)
+        region_bytes = num_slots * joint_block_bytes
+        caches_data.append((base_addr, region_bytes, self.device_id, ""))
+        self.block_len_per_layer.append(joint_block_bytes)
+        block_len_per_layer_on_save.append(joint_block_bytes)
+        # slot_size = per-token bytes within one K (or V) half.
+        self.slot_size_per_layer.append(joint_block_bytes // 2 // self.block_size_on_save)
+
+    self.num_blocks = num_slots
+    num_blocks_on_save = num_slots
+    self.seen_base_addresses = seen_base_addresses
+    self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
+    self.num_regions = len(caches_data)
+    self.num_layers = len(kv_caches.keys())
+    self.dst_num_blocks[self.engine_id] = num_slots
+    self._free_staging_slots = list(range(num_slots))
+
+    descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
+    logger.info("[JOINT_KV] registering %d joint regions, %d bytes each",
+                len(caches_data), caches_data[0][1] if caches_data else 0)
+    self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+    self._registered_descs.append(descs)
+
+    # Register a local src handler over the staging buffer (used only if this
+    # engine ever acts as reader; harmless for the producer path).
+    try:
+        (
+            self.src_xfer_handles_by_block_size[self.block_size_on_save],
+            self.src_blocks_data,
+        ) = self.register_local_xfer_handler(self.block_size_on_save)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[JOINT_KV] local xfer handler registration skipped: %s", e)
+
+    agent_metadata = NixlAgentMetadata(
+        engine_id=self.engine_id,
+        agent_metadata=self.nixl_wrapper.get_agent_metadata(),
+        device_id=self.device_id,
+        kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id][self.tp_rank],
+        num_blocks=num_blocks_on_save,
+        block_lens=block_len_per_layer_on_save,
+        kv_cache_layout=self.kv_cache_layout_on_save,
+        block_size=self.block_size_on_save,
+        ssm_sizes=self._mamba_ssm_size,
+        attn_backend_name=self.backend_name,
+        physical_blocks_per_logical_kv_block=self._physical_blocks_per_logical_kv_block,
+    )
+    logger.info(
+        "[JOINT_KV] advertising metadata: regions(block_lens)=%d num_blocks=%d "
+        "block_size=%d layout=%s phys_per_logical=%d",
+        len(block_len_per_layer_on_save), num_blocks_on_save, self.block_size_on_save,
+        self.kv_cache_layout_on_save, self._physical_blocks_per_logical_kv_block)
+    encoder = msgspec.msgpack.Encoder()
+    self.xfer_handshake_metadata = NixlHandshakePayload(
+        compatibility_hash=self.compat_hash,
+        agent_metadata_bytes=encoder.encode(agent_metadata),
+    )
+
 
 def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
     """Register the KV Cache data in nixl."""
+
+    if self.use_joint_kv_staging:
+        logger.info("[JOINT_KV] register_kv_caches: taking joint-KV staging path")
+        return register_joint_kv_staging(self, kv_caches)
 
     if self.use_host_buffer:
         self.initialize_host_xfer_buffer(kv_caches=kv_caches)
@@ -885,12 +1212,90 @@ def register_local_xfer_handler(
     return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
 
 
+def _save_kv_to_staging(self, logical_block_ids: list[int], slot_ids: list[int]):
+    """Copy transformed KV of one request into its joint staging slots.
+
+    logical_block_ids are indices into the device KV cache, which is 4-D
+    [num_blocks, block_size, n_kv_heads, head_size]. Each logical block of
+    block_size tokens maps to ratio = block_size // block_size_on_save staging
+    slots; slot_ids are ordered as (logical b -> slots[b*ratio .. +ratio-1]),
+    matching get_mapped_blocks() used to advertise remote_block_ids.
+
+    For each (logical block, sub-index r) we take tokens [r*bs : (r+1)*bs],
+    permute NHD->HND [H, bs, D], and write K -> staging[slot, 0],
+    V -> staging[slot, 1].
+    """
+    if not logical_block_ids or not slot_ids:
+        logger.warning("[JOINT_KV] save: empty logical_block_ids=%d slot_ids=%d; skip",
+                       len(logical_block_ids), len(slot_ids))
+        return
+    bs = self.block_size_on_save
+    sample = list(self.device_kv_caches.values())[0]
+    sample = sample[0] if isinstance(sample, (list, tuple)) else sample
+    blk_tok = int(sample.shape[1])  # tokens per device block (e.g. 128)
+    ratio = max(1, blk_tok // bs)
+    if not getattr(self, "_logged_save_shape", False):
+        logger.info("[JOINT_KV] save: device K ndim=%d shape=%s blk_tok=%d bs_save=%d ratio=%d",
+                    sample.dim(), tuple(sample.shape), blk_tok, bs, ratio)
+        self._logged_save_shape = True
+
+    # Expand each logical block into `ratio` (src_block, tok_offset) pairs, in
+    # slot order, then align with the advertised slots.
+    src_blocks: list[int] = []
+    tok_starts: list[int] = []
+    for lb in logical_block_ids:
+        for r in range(ratio):
+            src_blocks.append(lb)
+            tok_starts.append(r * bs)
+    n = min(len(src_blocks), len(slot_ids))
+    if len(src_blocks) != len(slot_ids):
+        logger.warning("[JOINT_KV] save: expanded blocks(%d = %d logical * %d) != slot_ids(%d); using first %d",
+                       len(src_blocks), len(logical_block_ids), ratio, len(slot_ids), n)
+    src = torch.tensor(src_blocks[:n], dtype=torch.long)
+    off = torch.tensor(tok_starts[:n], dtype=torch.long)
+    slots = torch.tensor(slot_ids[:n], dtype=torch.long)
+    # Per-item token index range [n, bs].
+    tok_idx = off.view(-1, 1) + torch.arange(bs).view(1, -1)  # [n, bs]
+
+    for layer_i, (layer_name, cache_or_caches) in enumerate(self.device_kv_caches.items()):
+        k_cache, v_cache = cache_or_caches[0], cache_or_caches[1]  # [B, blk_tok, H, D]
+        staging = self.kv_staging_buffers[layer_i]  # [slots, 2, H, bs, D]
+        H, D = k_cache.shape[2], k_cache.shape[3]
+        s = src.to(k_cache.device)
+        ti = tok_idx.to(k_cache.device)
+        gidx = ti.view(n, bs, 1, 1).expand(n, bs, H, D)
+        k_sel = k_cache.index_select(0, s)  # [n, blk_tok, H, D]
+        v_sel = v_cache.index_select(0, s)
+        # [n, bs, H, D] -> HND [n, H, bs, D]
+        k_blk = torch.gather(k_sel, 1, gidx).permute(0, 2, 1, 3).contiguous()
+        v_blk = torch.gather(v_sel, 1, gidx).permute(0, 2, 1, 3).contiguous()
+        dst = slots.to(staging.device)
+        staging[:, 0].index_copy_(0, dst, k_blk)
+        staging[:, 1].index_copy_(0, dst, v_blk)
+    logger.debug("[JOINT_KV] save: wrote %d sub-blocks -> %d slots (%d logical * ratio %d, layers=%d) logical[:8]=%s slots[:8]=%s",
+                 n, n, len(logical_block_ids), ratio, len(self.device_kv_caches), logical_block_ids[:8], slot_ids[:8])
+
+
 def kv_caches_postprocess(self, metadata: NixlConnectorMetadata):
     """Post-process the kv caches after receiving from remote.
 
     This includes permuting the layout if needed and handling
     block size mismatches.
     """
+    if self.use_joint_kv_staging:
+        for req_id, meta in metadata.reqs_to_save.items():
+            # meta.local_block_ids are logical block ids (self.block_size
+            # tokens each). Flatten group nesting.
+            logical = meta.local_block_ids
+            if logical and isinstance(logical[0], (list, tuple)):
+                logical = [b for grp in logical for b in grp]
+            slot_ids = getattr(meta, "staging_slots", None)
+            if slot_ids is None:
+                logger.error("[JOINT_KV] save: req=%s has no staging_slots on ReqMeta; skipping", req_id)
+                continue
+            _save_kv_to_staging(self, list(logical), slot_ids)
+        return
+
     block_ids_to_permute = []
     for _, meta in metadata.reqs_to_save.items():
         meta.local_physical_block_ids = self._logical_to_kernel_block_ids(meta.local_block_ids)
@@ -1130,6 +1535,10 @@ NixlConnectorScheduler.__init__ = NixlConnectorScheduler_init_
 NixlConnectorScheduler.update_state_after_alloc = update_state_after_alloc
 NixlConnectorScheduler.build_connector_meta = build_connector_meta
 NixlConnectorScheduler.request_finished = request_finished
+NixlConnectorScheduler.update_connector_output = update_connector_output
+NixlConnectorScheduler._alloc_staging_slots = _alloc_staging_slots
+NixlConnectorScheduler._free_staging_slots = _free_staging_slots
+NixlConnectorWorker.register_joint_kv_staging = register_joint_kv_staging
 NixlConnectorWorker.__init__ = NixlConnectorWorker_init_
 NixlConnectorWorker.register_kv_caches = register_kv_caches
 NixlConnectorWorker.register_local_xfer_handler = register_local_xfer_handler
