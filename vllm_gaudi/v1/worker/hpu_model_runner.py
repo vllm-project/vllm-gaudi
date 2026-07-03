@@ -302,22 +302,31 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
         moe_op = getattr(module, "moe_op", None)
         if not isinstance(moe_op, VllmMixtureOfExpertsOpBase):
             continue
+        n = moe_op.num_experts
         w13_weight = getattr(module, "w13_weight", None)
         w2_weight = getattr(module, "w2_weight", None)
-        if w13_weight is None or w2_weight is None:
-            continue
-        n = moe_op.num_experts
-        for i in range(n):
-            moe_op.w13_list[i].set_weight(w13_weight[i])
-            moe_op.w2_list[i].set_weight(w2_weight[i])
-        w13_bias = getattr(module, "w13_bias", None)
-        w2_bias = getattr(module, "w2_bias", None)
-        if w13_bias is not None and w2_bias is not None:
+        # Rebind per-expert weight views only when the parent contiguous
+        # parameter is intact (non-empty, shape[0] matches expert count).
+        # After _dedup_moe_op_weights() the param is emptied to
+        # torch.empty(0, ...) and the real weights live as registered
+        # Parameters inside moe_op (FP8 convert path); model.to() moves
+        # those correctly so only the cache refresh below is needed.
+        if (w13_weight is not None and w2_weight is not None
+                and w13_weight.dim() > 0 and w13_weight.shape[0] == n
+                and w2_weight.dim() > 0 and w2_weight.shape[0] == n):
             for i in range(n):
-                if hasattr(moe_op.w13_list[i], "set_bias"):
-                    moe_op.w13_list[i].set_bias(w13_bias[i])
-                if hasattr(moe_op.w2_list[i], "set_bias"):
-                    moe_op.w2_list[i].set_bias(w2_bias[i])
+                moe_op.w13_list[i].set_weight(w13_weight[i])
+                moe_op.w2_list[i].set_weight(w2_weight[i])
+            w13_bias = getattr(module, "w13_bias", None)
+            w2_bias = getattr(module, "w2_bias", None)
+            if w13_bias is not None and w2_bias is not None:
+                for i in range(n):
+                    if hasattr(moe_op.w13_list[i], "set_bias"):
+                        moe_op.w13_list[i].set_bias(w13_bias[i])
+                    if hasattr(moe_op.w2_list[i], "set_bias"):
+                        moe_op.w2_list[i].set_bias(w2_bias[i])
+        # Always rebuild the packed cache so forward() uses correct tensors,
+        # regardless of whether the per-expert rebind above ran.
         if hasattr(moe_op, "_cache_weight_lists"):
             moe_op._cache_weight_lists()
 
@@ -4579,9 +4588,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._sync_shared_moe_gates()
                 if not is_fake_hpu():
                     self.model = self.model.to("hpu")
-                    # Re-derive MoeMatmul.weight slices from the now-HPU params
-                    # BEFORE the stray scan, so it doesn't move stale CPU
-                    # views as duplicate HPU copies.
                     _rebind_moe_expert_weights(self.model)
                     _move_remaining_tensors_to_device(self.model, "hpu")
                     _dedup_moe_op_weights(self.model)
