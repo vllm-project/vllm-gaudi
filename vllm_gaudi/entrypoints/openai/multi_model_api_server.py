@@ -28,7 +28,7 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.server_utils import get_uvicorn_log_config
-from vllm.entrypoints.serve.render.serving import ServingRender
+from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -504,6 +504,8 @@ async def _init_multi_model_state(
     # (ServingRender) plus an OnlineRenderer/OnlineDerenderer pair that own the
     # chat-template, tool and reasoning configuration. Mirror that construction
     # here so the multi-model server matches the engine-backed api_server path.
+    # vllm#44512 (scale-out consolidation) then dropped the derenderer arg from
+    # ServingRender.__init__; derender now lives in a separate ServingDerender.
     render_kwargs = dict(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
@@ -523,7 +525,6 @@ async def _init_multi_model_state(
     state.openai_serving_render = ServingRender(
         state.openai_serving_models,
         state.online_renderer,
-        state.online_derenderer,
         request_logger=request_logger,
     )
 
