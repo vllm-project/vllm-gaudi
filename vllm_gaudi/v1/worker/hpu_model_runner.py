@@ -325,10 +325,11 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
                         moe_op.w13_list[i].set_bias(w13_bias[i])
                     if hasattr(moe_op.w2_list[i], "set_bias"):
                         moe_op.w2_list[i].set_bias(w2_bias[i])
-        # Always rebuild the packed cache so forward() uses correct tensors,
-        # regardless of whether the per-expert rebind above ran.
-        if hasattr(moe_op, "_cache_weight_lists"):
-            moe_op._cache_weight_lists()
+            # Rebuild cache only when we rebound the plain-attr views, because
+            # model.to() → _apply() left the cache pointing at the old device's
+            # storage.  
+            if hasattr(moe_op, "_cache_weight_lists"):
+                moe_op._cache_weight_lists()
 
 
 def _rebind_moe_op_weights_to_device(model: torch.nn.Module, device: str) -> None:
