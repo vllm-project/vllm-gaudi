@@ -311,8 +311,7 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
         # torch.empty(0, ...) and the real weights live as registered
         # Parameters inside moe_op (FP8 convert path); model.to() moves
         # those correctly so only the cache refresh below is needed.
-        if (w13_weight is not None and w2_weight is not None
-                and w13_weight.dim() > 0 and w13_weight.shape[0] == n
+        if (w13_weight is not None and w2_weight is not None and w13_weight.dim() > 0 and w13_weight.shape[0] == n
                 and w2_weight.dim() > 0 and w2_weight.shape[0] == n):
             for i in range(n):
                 moe_op.w13_list[i].set_weight(w13_weight[i])
@@ -327,7 +326,7 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
                         moe_op.w2_list[i].set_bias(w2_bias[i])
             # Rebuild cache only when we rebound the plain-attr views, because
             # model.to() → _apply() left the cache pointing at the old device's
-            # storage.  
+            # storage.
             if hasattr(moe_op, "_cache_weight_lists"):
                 moe_op._cache_weight_lists()
 

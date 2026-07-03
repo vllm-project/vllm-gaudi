@@ -340,8 +340,6 @@ class HPUMambaMixer2(MambaMixer2):
 
         # Register as non-persistent buffers (same pattern as conv_weights)
         # so that model.to(device/dtype) moves them automatically.
-        # persistent=False keeps them out of state_dict — they are derived
-        # from in_proj.weight and must not be saved/loaded independently.
         self.register_buffer("_states_weight", w[gate_size:].clone(), persistent=False)  # [states_out, hidden]
         self.register_buffer("_gate_weight", w[:gate_size].clone(), persistent=False)  # [gate_out, hidden]
 
