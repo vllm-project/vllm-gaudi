@@ -257,7 +257,7 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, 
     # remote_block_ids, and what the P worker copies transformed KV into.
     self.use_joint_kv_staging = bool(envs.VLLM_HPU_NIXL_JOINT_KV) and self.postprocess_kv_caches_on_save
     self._staging_num_slots = 0
-    self._staging_free: list[int] = []
+    self._staging_free: list[int] = []  # type: ignore[misc]
     self._staging_by_req: dict[ReqId, list[int]] = {}  # type: ignore[misc]
     # Saves deferred because the pool was momentarily full; retried each step.
     self._deferred_saves: dict[ReqId, tuple] = {}  # type: ignore[misc]
@@ -601,7 +601,7 @@ def request_finished(
         # flat list that is NOT re-nested downstream, so wrap it per-group here.
         # When ratio == 1 the downstream _logical_to_remote_kernel_block_ids
         # re-nests, so send it flat.
-        remote_block_ids_payload = [block_ids_on_save] if block_size_ratio > 1 else block_ids_on_save
+        remote_block_ids_payload = [block_ids_on_save] if block_size_ratio > 1 else block_ids_on_save  # type: ignore[assignment]
     return delay_free_blocks, dict(
         do_remote_prefill=True,
         do_remote_decode=False,
@@ -759,7 +759,8 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
 
     # TTL-based eviction of stale remote engine state.
     self._engine_last_active: dict[EngineId, float] = {}  # type: ignore[misc]
-    self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config("engine_ttl", 3600.0)
+    self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(  # type: ignore[misc]
+        "engine_ttl", 3600.0)
 
     self.block_size = vllm_config.cache_config.block_size
     self.model_config = vllm_config.model_config
