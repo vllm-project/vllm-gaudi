@@ -374,8 +374,8 @@ def _free_staging_slots(self, req_id: ReqId) -> None:
     slots = self._staging_by_req.pop(req_id, None)
     if slots:
         self._staging_free.extend(slots)
-        logger.debug("[JOINT_KV] freed %d staging slots for req=%s (free now=%d)",
-                     len(slots), req_id, len(self._staging_free))
+        logger.debug("[JOINT_KV] freed %d staging slots for req=%s (free now=%d)", len(slots), req_id,
+                     len(self._staging_free))
 
 
 def _try_schedule_joint_save(self, meta, req_id, req, new_block_ids) -> bool:
@@ -401,8 +401,8 @@ def _try_schedule_joint_save(self, meta, req_id, req, new_block_ids) -> bool:
         kv_transfer_params=req.kv_transfer_params,
     )
     meta.reqs_to_save[req_id].staging_slots = slots  # type: ignore[attr-defined]
-    logger.debug("[JOINT_KV] scheduled save req=%s: %d slots (free left=%d) slots[:8]=%s",
-                 req_id, len(slots), len(self._staging_free), slots[:8])
+    logger.debug("[JOINT_KV] scheduled save req=%s: %d slots (free left=%d) slots[:8]=%s", req_id, len(slots),
+                 len(self._staging_free), slots[:8])
     return True
 
 
@@ -468,8 +468,8 @@ def build_connector_meta(
             # retry the save on a later step (see the deferred-save drain).
             if not _try_schedule_joint_save(self, meta, req_id, req, new_block_ids):
                 self._deferred_saves[req_id] = (req, new_block_ids)
-                logger.debug("[JOINT_KV] build_meta req=%s deferred (pool full, free=%d)",
-                             req_id, len(self._staging_free))
+                logger.debug("[JOINT_KV] build_meta req=%s deferred (pool full, free=%d)", req_id,
+                             len(self._staging_free))
         else:
             # set any chunked prefill as partial, except the last chunk
             # only submit as new req when not partial
@@ -583,10 +583,10 @@ def request_finished(
             # kill every in-flight request). Fail just this one: advertise no
             # blocks so the decode records a clean KV-load failure for it.
             # Its slots (if later deferred-drained) are freed by the timeout.
-            logger.warning("[JOINT_KV] req=%s no staging slots at finish (need %d, free %d, total %d); "
-                           "failing this request only. Raise VLLM_HPU_NIXL_STAGING_SLOTS or lower load.",
-                           request.request_id, num_save_blocks, len(self._staging_free),
-                           self._staging_num_slots)
+            logger.warning(
+                "[JOINT_KV] req=%s no staging slots at finish (need %d, free %d, total %d); "
+                "failing this request only. Raise VLLM_HPU_NIXL_STAGING_SLOTS or lower load.", request.request_id,
+                num_save_blocks, len(self._staging_free), self._staging_num_slots)
             self._deferred_saves.pop(request.request_id, None)
             self._reqs_need_send.pop(request.request_id, None)
             self._reqs_not_processed.add(request.request_id)
@@ -863,8 +863,8 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     if envs.VLLM_HPU_NIXL_JOINT_KV and not self.postprocess_kv_caches_on_save:
         logger.warning("[JOINT_KV] VLLM_HPU_NIXL_JOINT_KV set but permute-on-save is "
                        "disabled; joint-KV staging will NOT be used.")
-    logger.info("[JOINT_KV] use_joint_kv_staging=%s (env=%s, postprocess_on_save=%s)",
-                self.use_joint_kv_staging, bool(envs.VLLM_HPU_NIXL_JOINT_KV), self.postprocess_kv_caches_on_save)
+    logger.info("[JOINT_KV] use_joint_kv_staging=%s (env=%s, postprocess_on_save=%s)", self.use_joint_kv_staging,
+                bool(envs.VLLM_HPU_NIXL_JOINT_KV), self.postprocess_kv_caches_on_save)
     # req_id -> list[int] staging slot ids assigned for that request.
     self._req_staging_slots: dict[ReqId, list[int]] = {}  # type: ignore[misc]
     # Free slot ids (populated in register_kv_caches once pool size is known).
@@ -917,21 +917,18 @@ def register_joint_kv_staging(self, kv_caches: dict[str, torch.Tensor]):
     except Exception:  # noqa: BLE001
         free_bytes = None
     if free_bytes is not None and pool_bytes > free_bytes:
-        raise RuntimeError(
-            f"[JOINT_KV] staging pool needs {pool_bytes / 1024**3:.1f} GiB "
-            f"({num_slots} slots x {joint_block_bytes * len(kv_caches) / 1024**2:.1f} MiB) "
-            f"but only {free_bytes / 1024**3:.1f} GiB is free after weights + KV cache. "
-            f"Reduce --max-num-seqs or --max-model-len, lower --gpu-memory-utilization to "
-            f"free device memory, or set VLLM_HPU_NIXL_STAGING_SLOTS to a smaller value "
-            f"(only safe if peak concurrent demand stays under it)."
-        )
+        raise RuntimeError(f"[JOINT_KV] staging pool needs {pool_bytes / 1024**3:.1f} GiB "
+                           f"({num_slots} slots x {joint_block_bytes * len(kv_caches) / 1024**2:.1f} MiB) "
+                           f"but only {free_bytes / 1024**3:.1f} GiB is free after weights + KV cache. "
+                           f"Reduce --max-num-seqs or --max-model-len, lower --gpu-memory-utilization to "
+                           f"free device memory, or set VLLM_HPU_NIXL_STAGING_SLOTS to a smaller value "
+                           f"(only safe if peak concurrent demand stays under it).")
 
     logger.info(
         "[JOINT_KV] Registering joint staging: layers=%d slots=%d "
         "joint_block_bytes=%d (K/V half=%d) dims[heads=%d block_size_on_save=%d head_size=%d] "
-        "dtype=%s est_mem=%.2f GiB",
-        len(kv_caches), num_slots, joint_block_bytes, joint_block_bytes // 2,
-        n_kv_heads, self.block_size_on_save, head_size, dtype,
+        "dtype=%s est_mem=%.2f GiB", len(kv_caches), num_slots, joint_block_bytes, joint_block_bytes // 2, n_kv_heads,
+        self.block_size_on_save, head_size, dtype,
         len(kv_caches) * num_slots * joint_block_bytes / (1024**3))
 
     caches_data = []
@@ -940,10 +937,11 @@ def register_joint_kv_staging(self, kv_caches: dict[str, torch.Tensor]):
     self.block_len_per_layer = list[int]()
     self.slot_size_per_layer = list[int]()
     block_len_per_layer_on_save = list[int]()
-    for layer_name in kv_caches.keys():
+    for layer_name in kv_caches:
         staging = torch.zeros(
             (num_slots, 2, n_kv_heads, self.block_size_on_save, head_size),
-            dtype=dtype, device=device,
+            dtype=dtype,
+            device=device,
         )
         self.kv_staging_buffers.append(staging)
         base_addr = staging.data_ptr()
@@ -966,8 +964,8 @@ def register_joint_kv_staging(self, kv_caches: dict[str, torch.Tensor]):
     self._free_staging_slots = list(range(num_slots))
 
     descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
-    logger.info("[JOINT_KV] registering %d joint regions, %d bytes each",
-                len(caches_data), caches_data[0][1] if caches_data else 0)
+    logger.info("[JOINT_KV] registering %d joint regions, %d bytes each", len(caches_data),
+                caches_data[0][1] if caches_data else 0)
     self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
     self._registered_descs.append(descs)
 
@@ -996,9 +994,8 @@ def register_joint_kv_staging(self, kv_caches: dict[str, torch.Tensor]):
     )
     logger.info(
         "[JOINT_KV] advertising metadata: regions(block_lens)=%d num_blocks=%d "
-        "block_size=%d layout=%s phys_per_logical=%d",
-        len(block_len_per_layer_on_save), num_blocks_on_save, self.block_size_on_save,
-        self.kv_cache_layout_on_save, self._physical_blocks_per_logical_kv_block)
+        "block_size=%d layout=%s phys_per_logical=%d", len(block_len_per_layer_on_save), num_blocks_on_save,
+        self.block_size_on_save, self.kv_cache_layout_on_save, self._physical_blocks_per_logical_kv_block)
     encoder = msgspec.msgpack.Encoder()
     self.xfer_handshake_metadata = NixlHandshakePayload(
         compatibility_hash=self.compat_hash,
@@ -1263,8 +1260,8 @@ def _save_kv_to_staging(self, logical_block_ids: list[int], slot_ids: list[int])
     V -> staging[slot, 1].
     """
     if not logical_block_ids or not slot_ids:
-        logger.warning("[JOINT_KV] save: empty logical_block_ids=%d slot_ids=%d; skip",
-                       len(logical_block_ids), len(slot_ids))
+        logger.warning("[JOINT_KV] save: empty logical_block_ids=%d slot_ids=%d; skip", len(logical_block_ids),
+                       len(slot_ids))
         return
     bs = self.block_size_on_save
     sample = list(self.device_kv_caches.values())[0]
@@ -1272,8 +1269,8 @@ def _save_kv_to_staging(self, logical_block_ids: list[int], slot_ids: list[int])
     blk_tok = int(sample.shape[1])  # tokens per device block (e.g. 128)
     ratio = max(1, blk_tok // bs)
     if not getattr(self, "_logged_save_shape", False):
-        logger.info("[JOINT_KV] save: device K ndim=%d shape=%s blk_tok=%d bs_save=%d ratio=%d",
-                    sample.dim(), tuple(sample.shape), blk_tok, bs, ratio)
+        logger.info("[JOINT_KV] save: device K ndim=%d shape=%s blk_tok=%d bs_save=%d ratio=%d", sample.dim(),
+                    tuple(sample.shape), blk_tok, bs, ratio)
         self._logged_save_shape = True
 
     # Expand each logical block into `ratio` (src_block, tok_offset) pairs, in
@@ -1309,8 +1306,9 @@ def _save_kv_to_staging(self, logical_block_ids: list[int], slot_ids: list[int])
         dst = slots.to(staging.device)
         staging[:, 0].index_copy_(0, dst, k_blk)
         staging[:, 1].index_copy_(0, dst, v_blk)
-    logger.debug("[JOINT_KV] save: wrote %d sub-blocks -> %d slots (%d logical * ratio %d, layers=%d) logical[:8]=%s slots[:8]=%s",
-                 n, n, len(logical_block_ids), ratio, len(self.device_kv_caches), logical_block_ids[:8], slot_ids[:8])
+    logger.debug(
+        "[JOINT_KV] save: wrote %d sub-blocks -> %d slots (%d logical * ratio %d, layers=%d) logical[:8]=%s slots[:8]=%s",
+        n, n, len(logical_block_ids), ratio, len(self.device_kv_caches), logical_block_ids[:8], slot_ids[:8])
 
 
 def kv_caches_postprocess(self, metadata: NixlConnectorMetadata):
