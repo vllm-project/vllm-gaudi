@@ -658,15 +658,23 @@ def _init_mamba_split_weights(model):
         if isinstance(module, HPUMambaMixer2) and not module._split_weights_ready:
             module._init_split_weights()
 
-
 def apply_model_specific_patches(model_runner):
     """The function applies model-specific monkey patches."""
     maybe_set_chunked_attention_layers(model_runner)
     patch_llama4_get_attn_scale(model_runner.model)
     _init_mamba_split_weights(model_runner.model)
     from vllm_gaudi.models.llama4 import (apply_hpu_llama4_post_load_patches, is_hpu_llama4_model)
-    model_runner._has_heterogeneous_layers = is_hpu_llama4_model(model_runner.model)
-    apply_hpu_llama4_post_load_patches(model_runner.model)
+    from vllm_gaudi.models.qwen3_next import apply_hpu_qwen3_residual_fix
+
+    is_llama4 = is_hpu_llama4_model(model_runner.model)
+    model_type = getattr(model_runner.vllm_config.model_config.hf_config, "model_type", "")
+    is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5_moe")
+
+    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe
+    if is_llama4:
+        apply_hpu_llama4_post_load_patches(model_runner.model)
+    if is_qwen_moe:
+        apply_hpu_qwen3_residual_fix(model_runner.model)
 
 
 def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num_scheduled_tokens,
@@ -5783,14 +5791,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Running validation warmup to trigger guard specializations...")
             saved_graphed = self.graphed_buckets.copy()
             self.graphed_buckets.clear()
+
+            # Re-run only the LARGEST seq_len buckets (all num_blocks variants).
+            # During initial warmup, max seq_len  is processed FIRST, creating
+            # recipes in early compilations. Later, smaller seq_lens cause guard
+            # failures → NEW compilations with symbolic guards that shadow the
+            # earlier ones at inference.
+            #
+            # By re-running max seq_len buckets at the END of warmup, we ensure
+            # the NEWEST dynamo compilations (which will be selected first at
+            # inference) have Synapse recipes for the max seq_len shapes.
             prompt_buckets = self.bucketing_manager.prompt_buckets
             if prompt_buckets:
-                validation_prompt_buckets = [prompt_buckets[0]]
-                if len(prompt_buckets) > 1:
-                    validation_prompt_buckets.append(prompt_buckets[-1])
-                self.warmup_graphs(validation_prompt_buckets, True, kv_caches)
+                max_seq_len = max(b[1] for b in prompt_buckets)
+                max_seq_buckets = [b for b in prompt_buckets if b[1] == max_seq_len]
+                logger.info(f"Validation warmup: {len(max_seq_buckets)} prompt buckets "
+                            f"(seq_len={max_seq_len})")
+                self.warmup_graphs(max_seq_buckets, True, kv_caches)
+
             if self.bucketing_manager.decode_buckets:
                 self.warmup_graphs([self.bucketing_manager.decode_buckets[0]], False, kv_caches)
+
             self.graphed_buckets = saved_graphed
             logger.info("Validation warmup complete.")
 
