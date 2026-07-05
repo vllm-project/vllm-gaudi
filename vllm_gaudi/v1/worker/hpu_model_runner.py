@@ -6269,6 +6269,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             kv_cache_spec = group.kv_cache_spec
                             break
                     assert kv_cache_spec is not None, f"No spec found for {layer_name}"
+                    # HS-7652: a UniformTypeKVCacheSpecs group reports the
+                    # whole-model per-block page size; compare each shared
+                    # tensor against its own layer spec instead.
+                    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                        kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
                     assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = \
                         kv_cache_tensor.size // kv_cache_spec.page_size_bytes

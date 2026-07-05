@@ -51,7 +51,7 @@ class HPUPagedAttention:
 
     @staticmethod
     def get_supported_head_sizes() -> list[int]:
-        return list(range(1, 257))
+        return list(range(1, 257)) + [512]  # HS-7652: allow Gemma4 global_head_dim=512
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:

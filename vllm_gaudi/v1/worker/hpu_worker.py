@@ -438,7 +438,9 @@ class HPUWorker(WorkerBase):
             forward_context[layer_name].kv_cache = None
         runner_kv_caches = []
         gc.collect()
-        available = cache_size_bytes - dummy_block_headroom
+        # HS-7652: keep bytes integral; float sizes propagate into
+        # KVCacheTensor.size and break torch.zeros shape math downstream.
+        available = int(cache_size_bytes - dummy_block_headroom)
 
         # For hybrid models (attention + recurrent layers), the GPU
         # backend shares a single raw buffer across spec types via
