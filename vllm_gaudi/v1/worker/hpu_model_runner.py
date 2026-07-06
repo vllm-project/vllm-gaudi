@@ -2378,11 +2378,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # keeps narrow()/shape checks in flat_pa valid and prevents OOB reads.
             kv_total_blocks = self._PAD_BLOCK_ID + 1
             if block_bucket_size > kv_total_blocks:
-                logger.warning(
-                    "block_bucket_size (%d) exceeds total KV blocks (%d); "
-                    "capping to prevent OOB after stash-restore. "
-                    "This is expected on a model swap with a smaller KV cache.",
-                    block_bucket_size, kv_total_blocks)
+                if not getattr(self, '_block_bucket_cap_warned', False):
+                    logger.warning(
+                        "block_bucket_size (%d) exceeds total KV blocks (%d); "
+                        "capping to prevent OOB after stash-restore. "
+                        "This is expected on a model swap with a smaller KV cache.",
+                        block_bucket_size, kv_total_blocks)
+                    self._block_bucket_cap_warned = True
                 block_bucket_size = kv_total_blocks
 
             indices: list[Any]
