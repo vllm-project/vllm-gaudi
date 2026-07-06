@@ -161,10 +161,6 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
     q_heads = query.size(1)
     kv_heads = key_cache.size(1)
 
-    # Same symbolic shape constraints as flat_pa — see comment there.
-    torch._check(block_list.size(0) == block_mapping.shape[0])
-    torch._check(block_mapping.shape[0] * block_size <= key_cache.shape[0])
-
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).unsqueeze(-2)
     n_blocks = query.shape[0]  # anchor for Dynamo: key/value must share this symbolic dim
     key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)), block_list)
@@ -223,19 +219,6 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
         k_scales_uf = k_scales.unflatten(0, (-1, block_size))
     if v_scales is not None:
         v_scales_uf = (v_scales[0].unflatten(0, (-1, block_size)), v_scales[1])
-
-    # Establish symbolic shape constraints for Dynamo so that the three
-    # independently-tracked symbolic variables:
-    #   s_bl  = block_list.size(0)           (= block_bucket_size for this batch)
-    #   s_bm  = block_mapping.shape[0]       (= block_bucket_size, from one_hot(block_groups))
-    #   s_kc//block_size                     (= total_kv_blocks from KV cache allocation)
-    # satisfy s_bl == s_bm <= s_kc//block_size.  Without these constraints Dynamo
-    # cannot prove narrow()'s bound (0 + s_bl <= s_kc//block_size) or the matmul
-    # broadcast (s_bm == s_bl) after a stash-restore recompilation.
-    # NOTE: the equality below is always True at runtime (both equal block_bucket_size).
-    # The inequality is also always True (batch blocks <= total KV blocks).
-    torch._check(block_list.size(0) == block_mapping.shape[0])
-    torch._check(block_mapping.shape[0] * block_size <= key_cache.shape[0])
 
     query_shape = (-1, q_heads, 1, head_size)
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).view(query_shape)
