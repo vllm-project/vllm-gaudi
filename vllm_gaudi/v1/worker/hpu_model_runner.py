@@ -5876,7 +5876,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    spec_name = layer_name
+                    if spec_name not in layer_kv_cache_spec.kv_cache_specs:
+                        # HS-7652: KV-sharing layers are appended to their
+                        # target layer's group but own no spec; use the
+                        # target layer's spec (same KV layout by definition).
+                        spec_name = self.shared_kv_cache_layers[layer_name]
+                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[spec_name]
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
