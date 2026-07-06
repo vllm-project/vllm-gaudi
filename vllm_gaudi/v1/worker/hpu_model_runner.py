@@ -2223,8 +2223,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     logger.warning(
                         "block_bucket_size (%d) exceeds total KV blocks (%d); "
                         "capping to prevent OOB after stash-restore. "
-                        "This is expected on a model swap with a smaller KV cache.",
-                        block_bucket_size, kv_total_blocks)
+                        "This is expected on a model swap with a smaller KV cache.", block_bucket_size, kv_total_blocks)
                     self._block_bucket_cap_warned = True
                 block_bucket_size = kv_total_blocks
 
