@@ -173,7 +173,7 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
 
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
-    block_bias = block_bias.view(key.size(0), 1, 1, -1)
+    block_bias = block_bias.unsqueeze(1).unsqueeze(2)
     if kv_heads != q_heads:
         block_bias = block_bias.unsqueeze(1)
         query = query.unflatten(1, (kv_heads, -1))
@@ -225,7 +225,7 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
                           **get_kv_fetch_extra_args(blocks=block_list, scales=k_scales_uf)).transpose(1, 2)
     value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)),
                               **get_kv_fetch_extra_args(blocks=block_list, scales=v_scales_uf)).transpose(1, 2)
-    block_bias = block_bias.view(key.size(0), 1, 1, -1)
+    block_bias = block_bias.unsqueeze(1).unsqueeze(2)
     sink = None
     if sinks is not None:
         sinks = sinks.reshape(sinks.shape[0], 1)
