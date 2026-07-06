@@ -162,6 +162,7 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
     kv_heads = key_cache.size(1)
 
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).unsqueeze(-2)
+    n_blocks = query.shape[0]  # anchor for Dynamo: key/value must share this symbolic dim
     key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)), block_list)
     if value_cache is not None:
         value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)), block_list)
@@ -171,9 +172,9 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
     else:
         assert False, "value_cache is None and kv_lora_rank is None"
 
-    key = key.transpose(1, 2)
-    value = value.transpose(1, 2)
-    block_bias = block_bias.unsqueeze(1).unsqueeze(2)
+    key = key.transpose(1, 2)[:n_blocks]
+    value = value.transpose(1, 2)[:n_blocks]
+    block_bias = block_bias[:n_blocks].unsqueeze(1).unsqueeze(2)
     if kv_heads != q_heads:
         block_bias = block_bias.unsqueeze(1)
         query = query.unflatten(1, (kv_heads, -1))
@@ -221,11 +222,12 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
 
     query_shape = (-1, q_heads, 1, head_size)
     query = batch2block(scale * query, block_mapping, batch2block_matmul_op).view(query_shape)
+    n_blocks = query.shape[0]  # anchor for Dynamo: key/value must share this symbolic dim
     key = keys_fetch_func(key_cache.unflatten(0, (-1, block_size)),
-                          **get_kv_fetch_extra_args(blocks=block_list, scales=k_scales_uf)).transpose(1, 2)
+                          **get_kv_fetch_extra_args(blocks=block_list, scales=k_scales_uf)).transpose(1, 2)[:n_blocks]
     value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)),
-                              **get_kv_fetch_extra_args(blocks=block_list, scales=v_scales_uf)).transpose(1, 2)
-    block_bias = block_bias.unsqueeze(1).unsqueeze(2)
+                              **get_kv_fetch_extra_args(blocks=block_list, scales=v_scales_uf)).transpose(1, 2)[:n_blocks]
+    block_bias = block_bias[:n_blocks].unsqueeze(1).unsqueeze(2)
     sink = None
     if sinks is not None:
         sinks = sinks.reshape(sinks.shape[0], 1)
