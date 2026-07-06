@@ -372,7 +372,6 @@ def hpu_causal_conv1d_update(
     if max_query_len not in (-1, None):  # Provided only for Triton helper parity
         raise NotImplementedError("'max_query_len' is not used in the reference implementation.")
 
-    activation = _normalize_activation(activation)
     dim = weight.size(0)
 
     flat_x, qsl, reshape_spec = _flatten_inputs_for_update(x, query_start_loc, dim)

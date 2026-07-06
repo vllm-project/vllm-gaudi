@@ -57,6 +57,7 @@ def register():
     # would re-enter the plugin loader while `vllm_gaudi` is only partially
     # initialized and `register` is not yet defined.
     from vllm_gaudi.platform import HpuPlatform
+
     HpuPlatform.set_torch_compile()
     # Monkey patch for LMCache
     # LMCache requires PT_HPU_GPU_MIGRATION=1
