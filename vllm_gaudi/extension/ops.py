@@ -820,6 +820,8 @@ def dequant_block_fp8_weight_naive(weight,
                                    do_unpad=False):
     if weight_scale is None:
         return weight
+    if weight_scale.device != weight.device:
+        weight_scale = weight_scale.to(weight.device)
     assert len(block_size) == 2
 
     weight_shape_len = len(weight.shape)
@@ -1132,7 +1134,8 @@ class MoeFP8Matmul(torch.nn.Module):
             )
         elif self.quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
             scale_dtype = self.scale_inv_fp8.dtype
-            return (self.weight.to(scale_dtype) * self.scale_inv_fp8).to(self.high_precision)
+            scale_inv_fp8 = self.scale_inv_fp8.to(self.weight.device)
+            return (self.weight.to(scale_dtype) * scale_inv_fp8).to(self.high_precision)
         else:
             raise NotImplementedError(f"Dequantize weights for {self.quant_method} strategy is not supported. \
                 Currently support block-wise and channel-wise strategy.")
