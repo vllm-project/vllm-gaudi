@@ -282,6 +282,24 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
         logger.info("Moved %d stray tensors to %s", moved, device)
 
 
+def _model_has_moe_experts(model: torch.nn.Module) -> bool:
+    """Return True if the model has any fused-MoE op with per-expert weight views.
+
+    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase``) whose
+    per-expert ``MoeMatmul.weight`` attributes are plain-tensor views that go
+    stale after ``model.to(device)`` and must be rebound. Dense models (e.g.
+    Llama-3.3-70B) have none, so the INC pre-stage ``model.to('hpu')`` + rebind
+    is pure overhead for them -- and worse, it eagerly materializes the full
+    (pre-quantization) weights on a single card, OOMing large dense models
+    before ``convert()`` can shrink them (GAUDISW-250139).
+    """
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
+    for module in model.modules():
+        if isinstance(getattr(module, "moe_op", None), VllmMixtureOfExpertsOpBase):
+            return True
+    return False
+
+
 def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
     """Re-derive MoeMatmul.weight slices from the parent layer's registered weights.
 
@@ -4697,7 +4715,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # INC's internal move is a no-op. (Regressed by upstream PR #41184
                 # moving the weights onto a RoutedExperts child, which changed the
                 # .to() traversal order.)
-                if not is_fake_hpu():
+                #
+                # Restrict this pre-stage to MoE models only. Dense models have no
+                # moe_op views to rebind, so the pre-stage move is pure overhead --
+                # and for a large dense model (e.g. Llama-3.3-70B FP8 on 1 card) it
+                # eagerly materializes the full pre-quantization weights on device
+                # BEFORE convert() can shrink them, OOMing on model.to('hpu')
+                # (GAUDISW-250139). Leaving dense models on host until the post-INC
+                # move restores the pre-#1590 behavior that convert() shrinks them
+                # first.
+                if not is_fake_hpu() and _model_has_moe_experts(self.model):
                     self.model = self.model.to("hpu")
                     _rebind_moe_expert_weights(self.model)
                     htorch.core.mark_step()
