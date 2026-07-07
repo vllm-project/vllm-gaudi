@@ -717,6 +717,19 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     # Per-layer joint staging tensors, indexed by layer registration order.
     self.kv_staging_buffers: list[torch.Tensor] = []  # type: ignore[misc]
     self.num_staging_slots = 0
+    # Worker-side free list of joint staging slots for the CONSUMER
+    # (GPU-prefill -> HPU-decode) recv path. Populated in
+    # register_joint_kv_staging. Slots are reserved in _read_blocks to
+    # receive remote joint blocks into, then freed after the post-receive
+    # transform (post_process_device_kv_on_receive) writes them into the
+    # device KV cache.
+    self._recv_free_slots: list[int] = []  # type: ignore[misc]
+    # Pending staging->device transforms, keyed by device (kernel) block id:
+    #   device_block_id -> list[(slot_id, tok_start)]
+    # A device block of block_size tokens holds ratio = block_size //
+    # block_size_on_save received sub-blocks; each sub-block came from one
+    # staging slot and lands at tokens [tok_start : tok_start + bs_save].
+    self._recv_pending: dict[int, list[tuple[int, int]]] = {}  # type: ignore[misc]
 
     # nixl_prepped_dlist_handle.
     self.src_xfer_handles_by_block_size: dict[int, int] = {}  # type: ignore[misc]
@@ -936,6 +949,11 @@ def register_joint_kv_staging(self, kv_caches: dict[str, torch.Tensor]):
     seen_base_addresses = []
     self.kv_staging_buffers = []
     self.block_len_per_layer = list[int]()
+    # Real per-layer staging stride (32768). Kept separate from
+    # block_len_per_layer, which is INFLATED to native (x block_size_ratio)
+    # so the upstream consumer SPLIT-region handshake assert passes. All real
+    # address/descriptor math must use staging_block_len_per_layer.
+    self.staging_block_len_per_layer = list[int]()
     self.slot_size_per_layer = list[int]()
     block_len_per_layer_on_save = list[int]()
     for layer_name in kv_caches:
@@ -950,7 +968,17 @@ def register_joint_kv_staging(self, kv_caches: dict[str, torch.Tensor]):
         self.device_id = max(staging.get_device(), 0)
         region_bytes = num_slots * joint_block_bytes
         caches_data.append((base_addr, region_bytes, self.device_id, ""))
-        self.block_len_per_layer.append(joint_block_bytes)
+        # CP1 handshake fix: the upstream consumer SPLIT-region validator
+        # checks remote_len == (local_len * remote_heads // local_heads)
+        # // block_size_ratio. With block_size_ratio = block_size //
+        # block_size_on_save (e.g. 128 // 16 = 8), local_len must be the
+        # NATIVE block bytes (joint_block_bytes * ratio) for the assert to
+        # reduce back to the remote joint block_len. The real staging stride
+        # (joint_block_bytes) is kept in staging_block_len_per_layer for
+        # descriptor/address math.
+        block_size_ratio = self.block_size // self.block_size_on_save
+        self.block_len_per_layer.append(joint_block_bytes * block_size_ratio)
+        self.staging_block_len_per_layer.append(joint_block_bytes)
         block_len_per_layer_on_save.append(joint_block_bytes)
         # slot_size = per-token bytes within one K (or V) half.
         self.slot_size_per_layer.append(joint_block_bytes // 2 // self.block_size_on_save)
@@ -963,6 +991,9 @@ def register_joint_kv_staging(self, kv_caches: dict[str, torch.Tensor]):
     self.num_layers = len(kv_caches.keys())
     self.dst_num_blocks[self.engine_id] = num_slots
     self._free_staging_slots = list(range(num_slots))
+    # Consumer recv slot free list (independent of the producer scheduler's
+    # allocator; this one lives on the worker for the read path).
+    self._recv_free_slots = list(range(num_slots))
 
     descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
     logger.info("[JOINT_KV] registering %d joint regions, %d bytes each", len(caches_data),
@@ -1212,6 +1243,40 @@ def register_local_xfer_handler(
     """
     block_size_ratio = self.block_size // block_size
     blocks_data = []
+    if getattr(self, "use_joint_kv_staging", False) and self.staging_block_len_per_layer:
+        # CP2 consumer path (GPU-prefill -> HPU-decode). The joint staging
+        # buffer is registered as `num_staging_slots` slots at
+        # `staging_block_len_per_layer` stride, mirroring the remote 1:1 (no
+        # block_size_ratio expansion). We build descriptors directly over the
+        # staging buffer, matching the remote's descriptor layout (see the
+        # vsplit branch below). Reusing the producer's ratio-expanded math
+        # here inflates num_blocks 8x and addresses past the buffer ->
+        # NIXL_ERR_NOT_FOUND.
+        num_slots = self.num_staging_slots
+        # Mirror the remote's descriptor layout. The GPU decode builds its
+        # remote descs with virtually_split_kv_in_blocks: when False (the
+        # common blocks-first joint case), it emits ONE joint desc per block
+        # of the full stride (K|V contiguous); when True, separate K/V halves.
+        # Our staging slot is [2,H,bs,D] = [K|V] contiguous, byte-compatible
+        # with the GPU joint block either way.
+        vsplit = self.transfer_topo.virtually_split_kv_in_blocks
+        for i, base_addr in enumerate(self.seen_base_addresses):
+            stride = self.staging_block_len_per_layer[i]
+            if vsplit:
+                kv_block_len = stride // 2  # K (or V) half
+                for slot_id in range(num_slots):
+                    blocks_data.append((base_addr + slot_id * stride, kv_block_len, self.device_id))
+                for slot_id in range(num_slots):
+                    blocks_data.append((base_addr + slot_id * stride + kv_block_len, kv_block_len, self.device_id))
+            else:
+                for slot_id in range(num_slots):
+                    blocks_data.append((base_addr + slot_id * stride, stride, self.device_id))
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
+        logger.info(
+            "[JOINT_KV] consumer local xfer handler: %d descs (%d slots x %s x %d regions), "
+            "stride=%d vsplit=%s", len(blocks_data), num_slots, "2 halves" if vsplit else "1 joint",
+            len(self.seen_base_addresses), self.staging_block_len_per_layer[0], vsplit)
+        return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
     for i, base_addr in enumerate(self.seen_base_addresses):
         # The new block_len is using prefill block_len;
         # and num_blocks is multiple with N
@@ -1435,6 +1500,113 @@ def _read_blocks(
     # Get remote engine info from transfer topology
     remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
     block_size_ratio = self.transfer_topo.block_size_ratio(remote_info.remote_block_size)
+
+    # ---- CP2 consumer path: GPU-prefill -> HPU-decode joint-KV staging ----
+    # The remote (GPU prefill) exposes `num_remote_blocks` joint blocks. We
+    # read them 1:1 into freshly reserved staging slots (NO get_mapped_blocks
+    # expansion, NO block_size_ratio: the staging buffer mirrors the remote at
+    # block_size_on_save granularity). Descriptor ids are built by hand to
+    # match the remote's layout (joint or K/V-split, see the vsplit branch)
+    # rather than via _get_block_descs_ids, which only addresses the K half.
+    # After the transfer completes, post_process_device_kv_on_receive
+    # transforms the staging slots into the device KV cache.
+    if getattr(self, "use_joint_kv_staging", False) and self.staging_block_len_per_layer:
+        if not local_block_ids:
+            # Full prefix cache hit: nothing to read, just notify P.
+            notif_id = f"{remote_request_id}:{self.world_size}".encode()
+            agent_name = self._remote_agents[dst_engine_id][remote_rank]
+            try:
+                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+            except Exception as e:  # noqa: BLE001
+                self._log_failure(failure_type="notification_failed",
+                                  msg="P blocks freed after timeout.",
+                                  req_id=request_id,
+                                  error=e,
+                                  dst_engine_id=dst_engine_id,
+                                  remote_rank=remote_rank,
+                                  remote_agent_name=agent_name)
+                self.xfer_stats.record_failed_notification()
+            return
+        # local_block_ids here are the DEVICE (kernel, block_size=128) block
+        # ids we must ultimately fill. Each holds `ratio` received sub-blocks.
+        ratio = self.block_size // self.block_size_on_save
+        n_recv = len(remote_block_ids)
+        # Reserve n_recv staging slots to receive into.
+        if len(self._recv_free_slots) < n_recv:
+            self._log_failure(failure_type="transfer_setup_failed",
+                              req_id=request_id,
+                              msg=f"joint recv pool exhausted: need {n_recv}, "
+                              f"have {len(self._recv_free_slots)}",
+                              dst_engine_id=dst_engine_id,
+                              remote_rank=remote_rank)
+            return
+        recv_slots = [self._recv_free_slots.pop() for _ in range(n_recv)]
+        # Record the staging-slot -> device-block/token mapping for the
+        # post-receive transform. Sub-block j (0..n_recv-1) belongs to device
+        # block local_block_ids[j // ratio] at token offset (j % ratio) * bs.
+        bs = self.block_size_on_save
+        for j, slot in enumerate(recv_slots):
+            dev_block = local_block_ids[j // ratio]
+            tok_start = (j % ratio) * bs
+            self._recv_pending.setdefault(dev_block, []).append((slot, tok_start))
+        # Build paired K+V descriptor ids. Local handle region stride is
+        # 2 * num_staging_slots (K slots then V slots); remote handle region
+        # stride is 2 * num_remote_blocks (K blocks then V blocks).
+        num_regions = len(self.seen_base_addresses)
+        Ns = self.num_staging_slots
+        Nb = self.dst_num_blocks[dst_engine_id]
+        vsplit = self.transfer_topo.virtually_split_kv_in_blocks
+        recv_arr = np.asarray(recv_slots, dtype=np.int64)
+        rem_arr = np.asarray(remote_block_ids, dtype=np.int64)
+        local_ids = []
+        remote_ids = []
+        if vsplit:
+            # Handles have 2 descs per slot/block: [K descs .. | V descs ..].
+            for i in range(num_regions):
+                lbase = i * 2 * Ns
+                rbase = i * 2 * Nb
+                local_ids.append(lbase + recv_arr)  # K
+                remote_ids.append(rbase + rem_arr)
+                local_ids.append(lbase + Ns + recv_arr)  # V
+                remote_ids.append(rbase + Nb + rem_arr)
+        else:
+            # One joint desc per slot/block (full K|V stride). This is our case.
+            for i in range(num_regions):
+                local_ids.append(i * Ns + recv_arr)
+                remote_ids.append(i * Nb + rem_arr)
+        local_block_descs_ids = np.concatenate(local_ids)
+        remote_block_descs_ids = np.concatenate(remote_ids)
+        assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+        notif_id = f"{remote_request_id}:{self.world_size}".encode()
+        try:
+            handle = self.nixl_wrapper.make_prepped_xfer("READ",
+                                                         local_xfer_side_handle,
+                                                         local_block_descs_ids,
+                                                         remote_xfer_side_handle,
+                                                         remote_block_descs_ids,
+                                                         notif_msg=notif_id)
+            self.nixl_wrapper.transfer(handle)
+            self._recving_transfers[request_id].append(handle)
+            logger.debug(
+                "[JOINT_KV] consumer read req=%s: %d recv slots, %d descs/side "
+                "(regions=%d) dev_blocks[:4]=%s", request_id, n_recv, len(local_block_descs_ids), num_regions,
+                local_block_ids[:4])
+        except Exception as e:  # noqa: BLE001
+            # Return the reserved slots and drop the pending mapping.
+            self._recv_free_slots.extend(recv_slots)
+            for j in range(n_recv):
+                self._recv_pending.pop(local_block_ids[j // ratio], None)
+            self._log_failure(failure_type="transfer_setup_failed",
+                              req_id=request_id,
+                              msg="Marking blocks as invalid",
+                              error=e,
+                              dst_engine_id=dst_engine_id,
+                              remote_rank=remote_rank)
+            self._invalid_block_ids.put(set(local_block_ids))
+            self._failed_recv_reqs.put(request_id)
+        return
+    # ---- end CP2 consumer path ----
+
     if block_size_ratio > 1:
         # NOTE:
         # get_mapped_blocks will always expand block_ids for n times.
@@ -1567,6 +1739,66 @@ def _read_blocks(
         self._failed_recv_reqs.put(request_id)
 
 
+def post_process_device_kv_on_receive(self, block_size_ratio: int, block_ids_list: list[list[int]]):
+    """CP3 (GPU-prefill -> HPU-decode): transform received joint staging slots
+    into the HPU device KV cache.
+
+    This is the inverse of _save_kv_to_staging. For each completed device
+    (kernel) block, _recv_pending holds the (staging_slot, tok_start) pairs
+    that were transferred into. We read staging[slot, 0]=K / [slot,1]=V, which
+    are HND [H, bs, D], permute back to NHD [bs, H, D], and write them into the
+    device K/V tensors at [device_block, tok_start:tok_start+bs].
+
+    For the non-joint (producer-legacy) path, defer to the upstream
+    block-size/layout receive post-processing.
+    """
+    if not getattr(self, "use_joint_kv_staging", False):
+        return _orig_post_process_device_kv_on_receive(self, block_size_ratio, block_ids_list)
+    if not self._recv_pending:
+        return
+    bs = self.block_size_on_save
+    # Flatten the block id groups the caller passes (kernel/device block ids).
+    flat_ids = []
+    for grp in block_ids_list:
+        flat_ids.extend(grp if isinstance(grp, (list, tuple)) else [grp])
+    # Build the (device_block, tok_start, slot) work list from pending map.
+    dev_blocks = []
+    tok_starts = []
+    slots = []
+    for dev_block in flat_ids:
+        pend = self._recv_pending.pop(dev_block, None)
+        if not pend:
+            continue
+        for slot, tok_start in pend:
+            dev_blocks.append(dev_block)
+            tok_starts.append(tok_start)
+            slots.append(slot)
+    if not slots:
+        return
+    n = len(slots)
+    db = torch.tensor(dev_blocks, dtype=torch.long)
+    off = torch.tensor(tok_starts, dtype=torch.long)
+    sl = torch.tensor(slots, dtype=torch.long)
+    tok_idx = off.view(-1, 1) + torch.arange(bs).view(1, -1)  # [n, bs]
+    for layer_i, (layer_name, cache_or_caches) in enumerate(self.device_kv_caches.items()):
+        k_cache, v_cache = cache_or_caches[0], cache_or_caches[1]  # [B, blk_tok, H, D]
+        staging = self.kv_staging_buffers[layer_i]  # [slots, 2, H, bs, D]
+        s_dev = sl.to(staging.device)
+        # HND [n, H, bs, D] -> NHD [n, bs, H, D]
+        k_blk = staging[:, 0].index_select(0, s_dev).permute(0, 2, 1, 3).contiguous()
+        v_blk = staging[:, 1].index_select(0, s_dev).permute(0, 2, 1, 3).contiguous()
+        db_dev = db.to(k_cache.device)
+        ti = tok_idx.to(k_cache.device)
+        # Scatter each [bs, H, D] sub-block into its device block/token slice.
+        for j in range(n):
+            k_cache[db_dev[j], ti[j]] = k_blk[j]
+            v_cache[db_dev[j], ti[j]] = v_blk[j]
+    # Free the staging slots now that KV is in the device cache.
+    self._recv_free_slots.extend(slots)
+    logger.debug("[JOINT_KV] recv-transform: %d sub-blocks -> device (blocks[:4]=%s) "
+                 "freed %d slots (free now=%d)", n, dev_blocks[:4], n, len(self._recv_free_slots))
+
+
 NixlConnector.wait_for_save = wait_for_save
 NixlConnectorScheduler.__init__ = NixlConnectorScheduler_init_
 NixlConnectorScheduler.update_state_after_alloc = update_state_after_alloc
@@ -1583,3 +1815,5 @@ NixlConnectorWorker.kv_caches_postprocess = kv_caches_postprocess
 NixlConnectorWorker.post_process_device_kv_on_save = post_process_device_kv_on_save
 NixlConnectorWorker._get_block_descs_ids = _get_block_descs_ids
 NixlConnectorWorker._read_blocks = _read_blocks
+_orig_post_process_device_kv_on_receive = NixlConnectorWorker.post_process_device_kv_on_receive
+NixlConnectorWorker.post_process_device_kv_on_receive = post_process_device_kv_on_receive
