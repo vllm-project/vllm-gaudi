@@ -291,7 +291,7 @@ def _model_has_moe_experts(model: torch.nn.Module) -> bool:
     Llama-3.3-70B) have none, so the INC pre-stage ``model.to('hpu')`` + rebind
     is pure overhead for them -- and worse, it eagerly materializes the full
     (pre-quantization) weights on a single card, OOMing large dense models
-    before ``convert()`` can shrink them (GAUDISW-250139).
+    before ``convert()`` can shrink them.
     """
     from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
     for module in model.modules():
@@ -4720,10 +4720,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # moe_op views to rebind, so the pre-stage move is pure overhead --
                 # and for a large dense model (e.g. Llama-3.3-70B FP8 on 1 card) it
                 # eagerly materializes the full pre-quantization weights on device
-                # BEFORE convert() can shrink them, OOMing on model.to('hpu')
-                # (GAUDISW-250139). Leaving dense models on host until the post-INC
-                # move restores the pre-#1590 behavior that convert() shrinks them
-                # first.
+                # BEFORE convert() can shrink them, OOMing on model.to('hpu').
+                # Leaving dense models on host until the post-INC move restores the
+                # pre-#1590 behavior that convert() shrinks them first.
                 if not is_fake_hpu() and _model_has_moe_experts(self.model):
                     self.model = self.model.to("hpu")
                     _rebind_moe_expert_weights(self.model)
