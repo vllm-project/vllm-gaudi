@@ -1,8 +1,10 @@
 import itertools
+from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
-from vllm_gaudi.extension.utils import align_and_pad
+from vllm_gaudi.extension.utils import VLLMKVCache, align_and_pad
 from vllm_gaudi.utils import getattr_nested, setattr_nested
 
 
@@ -184,3 +186,73 @@ class TestSetattrNested:
         root = _Root()
         with pytest.raises(AttributeError):
             setattr_nested(root, "no_such.attr.value", 1)
+
+
+# ---------------------------------------------------------------------------
+# VLLMKVCache.fetch_from_cache – contiguous-PA fast path regression tests
+# (Why: narrow() makes blocks.size(0) > cache.size(0)
+#  a hard error vllm_gaudi/extension/utils.py ln 91; these tests verify both the valid-input behaviour and the
+#  out-of-bounds failure mode, as well as the _fetch_by_id escape hatch.)
+# ---------------------------------------------------------------------------
+
+def _make_kv_cache(use_contiguous_pa: bool) -> VLLMKVCache:
+    cfg = MagicMock()
+    cfg.use_contiguous_pa = use_contiguous_pa
+    cfg.per_token_kv_scaling_support = False
+    with patch("vllm_gaudi.extension.utils.get_config", return_value=cfg):
+        return VLLMKVCache()
+
+
+def _make_cache(n_blocks: int, cols: int = 4) -> torch.Tensor:
+    """Return a (n_blocks, cols) float tensor where row i has value i."""
+    return torch.arange(n_blocks * cols, dtype=torch.float32).view(n_blocks, cols)
+
+
+class TestVLLMKVCacheFetchFromCache:
+    """Regression tests for the contiguous-PA fast path in
+    VLLMKVCache.fetch_from_cache introduced via narrow() (PR #1604).
+    """
+
+    @pytest.fixture
+    def kv_cache(self):
+        return _make_kv_cache(use_contiguous_pa=True)
+
+    def test_returns_correct_rows_valid_input(self, kv_cache):
+        """Fast path must return rows 0..n-1, identical to cache[:n]."""
+        cache = _make_cache(8)
+        blocks = torch.arange(5)
+        result = kv_cache.fetch_from_cache(cache, blocks)
+        assert result.shape == (5, 4)
+        assert torch.equal(result, cache[:5])
+
+    def test_boundary_n_equals_cache_size(self, kv_cache):
+        """blocks.size(0) == cache.size(0) is a valid boundary case."""
+        cache = _make_cache(6)
+        blocks = torch.arange(6)
+        result = kv_cache.fetch_from_cache(cache, blocks)
+        assert torch.equal(result, cache)
+
+    def test_oob_raises_when_blocks_exceeds_cache(self, kv_cache):
+        """blocks.size(0) > cache.size(0) must raise (narrow() contract).
+        In normal operation the bucket-size cap in hpu_model_runner.py prevents
+        this; if the cap is bypassed this test catches the regression."""
+        cache = _make_cache(5)
+        blocks = torch.arange(8)  # 8 > 5
+        with pytest.raises(Exception):
+            kv_cache.fetch_from_cache(cache, blocks)
+
+    def test_fetch_by_id_bypasses_fast_path(self, kv_cache):
+        """Setting _fetch_by_id routes to index_select for scattered IDs."""
+        kv_cache._fetch_by_id = True
+        cache = _make_cache(8)
+        blocks = torch.tensor([3, 1, 5])
+        result = kv_cache.fetch_from_cache(cache, blocks)
+        assert torch.equal(result, cache.index_select(0, blocks))
+
+    def test_non_contiguous_pa_uses_index_select(self):
+        """With use_contiguous_pa=False the cache is always gathered by ID."""
+        kv = _make_kv_cache(use_contiguous_pa=False)
+        cache = _make_cache(8)
+        blocks = torch.tensor([7, 2, 0])
+        result = kv.fetch_from_cache(cache, blocks)
+        assert torch.equal(result, cache.index_select(0, blocks))

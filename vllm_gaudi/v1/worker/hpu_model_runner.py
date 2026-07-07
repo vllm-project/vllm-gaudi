@@ -2219,11 +2219,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # keeps narrow()/shape checks in flat_pa valid and prevents OOB reads.
             kv_total_blocks = self._PAD_BLOCK_ID + 1
             if block_bucket_size > kv_total_blocks:
+                # Fail fast if actual requests need more blocks than are
+                # allocated.
+                if actual_blocks_needed > kv_total_blocks:
+                    raise RuntimeError(
+                        f"actual_blocks_needed ({actual_blocks_needed}) "
+                        f"exceeds total KV blocks ({kv_total_blocks}). "
+                        "The KV cache is under-provisioned for the current "
+                        "batch; cannot proceed safely after stash-restore.")
                 if not getattr(self, '_block_bucket_cap_warned', False):
                     logger.warning(
-                        "block_bucket_size (%d) exceeds total KV blocks (%d); "
-                        "capping to prevent OOB after stash-restore. "
-                        "This is expected on a model swap with a smaller KV cache.", block_bucket_size, kv_total_blocks)
+                        "block_bucket_size (%d) exceeds total KV blocks "
+                        "(%d); capping to prevent OOB after stash-restore. "
+                        "This is expected on a model swap with a smaller "
+                        "KV cache.",
+                        block_bucket_size, kv_total_blocks)
                     self._block_bucket_cap_warned = True
                 block_bucket_size = kv_total_blocks
 
