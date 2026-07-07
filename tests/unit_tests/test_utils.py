@@ -195,6 +195,7 @@ class TestSetattrNested:
 #  out-of-bounds failure mode, as well as the _fetch_by_id escape hatch.)
 # ---------------------------------------------------------------------------
 
+
 def _make_kv_cache(use_contiguous_pa: bool) -> VLLMKVCache:
     cfg = MagicMock()
     cfg.use_contiguous_pa = use_contiguous_pa
@@ -238,7 +239,7 @@ class TestVLLMKVCacheFetchFromCache:
         this; if the cap is bypassed this test catches the regression."""
         cache = _make_cache(5)
         blocks = torch.arange(8)  # 8 > 5
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             kv_cache.fetch_from_cache(cache, blocks)
 
     def test_fetch_by_id_bypasses_fast_path(self, kv_cache):
