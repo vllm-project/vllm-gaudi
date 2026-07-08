@@ -294,10 +294,8 @@ def _model_has_moe_experts(model: torch.nn.Module) -> bool:
     before ``convert()`` can shrink them.
     """
     from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
-    for module in model.modules():
-        if isinstance(getattr(module, "moe_op", None), VllmMixtureOfExpertsOpBase):
-            return True
-    return False
+    return any(
+        isinstance(getattr(module, "moe_op", None), VllmMixtureOfExpertsOpBase) for module in model.modules())
 
 
 def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
