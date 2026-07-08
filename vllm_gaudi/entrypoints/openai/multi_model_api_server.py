@@ -697,6 +697,11 @@ async def _run_multi_model_server_worker(
 async def _run_multi_model_server(args: Namespace) -> None:
     decorate_logs("APIServer")
 
+    # Patch args.model with the actual default model from the multi-model config
+    # so that setup_server logs the correct model name in the banner.
+    config = _load_multi_model_config(_resolve_multi_model_config_path())
+    args.model = config.model_configs[config.default_model].model
+
     listen_address, sock = setup_server(args)
     await _run_multi_model_server_worker(listen_address, sock, args)
 
