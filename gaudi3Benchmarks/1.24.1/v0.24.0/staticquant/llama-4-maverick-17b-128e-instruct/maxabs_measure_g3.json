@@ -1,0 +1,1 @@
+{"method": "HOOKS","mode": "MEASURE","observer": "maxabs","allowlist": {"types": [], "names":  []},"blocklist": {"types": [], "names":  []},"quantize_weight": false,"dump_stats_path": "/root/GAUDISW-249918/vllm-gaudi/calibration/llama4/llama-4-maverick-17b-128e-instruct/g3/inc_output","calibration_sample_interval": 1}
