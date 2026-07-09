@@ -1785,15 +1785,18 @@ def post_process_device_kv_on_receive(self, block_size_ratio: int, block_ids_lis
         k_cache, v_cache = cache_or_caches[0], cache_or_caches[1]  # [B, blk_tok, H, D]
         staging = self.kv_staging_buffers[layer_i]  # [slots, 2, H, bs, D]
         s_dev = sl.to(staging.device)
-        # HND [n, H, bs, D] -> NHD [n, bs, H, D]
-        k_blk = staging[:, 0].index_select(0, s_dev).permute(0, 2, 1, 3).contiguous()
-        v_blk = staging[:, 1].index_select(0, s_dev).permute(0, 2, 1, 3).contiguous()
-        db_dev = db.to(k_cache.device)
-        ti = tok_idx.to(k_cache.device)
-        # Scatter each [bs, H, D] sub-block into its device block/token slice.
-        for j in range(n):
-            k_cache[db_dev[j], ti[j]] = k_blk[j]
-            v_cache[db_dev[j], ti[j]] = v_blk[j]
+        num_heads, head_size = k_cache.shape[2], k_cache.shape[3]
+        # HND [n, H, bs, D] -> NHD [n, bs, H, D] -> [n*bs, H, D]
+        k_blk = staging[:, 0].index_select(0, s_dev).permute(0, 2, 1, 3).reshape(-1, num_heads, head_size)
+        v_blk = staging[:, 1].index_select(0, s_dev).permute(0, 2, 1, 3).reshape(-1, num_heads, head_size)
+        # Scatter all [bs, H, D] sub-blocks into their device block/token
+        # slices in one vectorized index_put_ per K/V. A per-sub-block Python
+        # loop here issues ~n*layers dynamic HPU ops and stalls the worker.
+        # Build paired (block, token) row indices for every scattered token.
+        blk_rows = db.view(-1, 1).expand(-1, bs).reshape(-1).to(k_cache.device)  # [n*bs]
+        tok_rows = tok_idx.reshape(-1).to(k_cache.device)  # [n*bs]
+        k_cache.index_put_((blk_rows, tok_rows), k_blk)
+        v_cache.index_put_((blk_rows, tok_rows), v_blk)
     # Free the staging slots now that KV is in the device cache.
     self._recv_free_slots.extend(slots)
     logger.debug("[JOINT_KV] recv-transform: %d sub-blocks -> device (blocks[:4]=%s) "
