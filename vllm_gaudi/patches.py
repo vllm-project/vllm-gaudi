@@ -37,9 +37,20 @@ Currently:
   any request with ``logprobs=true``.  We replace ``gather_logprobs`` with an
   identical implementation that omits the two ``mark_unbacked`` calls.  HPU
   handles dynamic batch shapes without this hint.
+
+* ``vllm.v1.core.block_pool.BlockPool.free_blocks`` — upstream PR #42656
+  ("Apply LRU policy only to proper cache entries") made ``free_blocks``
+  partition freed blocks into with-hash / without-hash lists and issue two
+  queue ops (``prepend_n`` + ``append_n``) on every engine step.  When prefix
+  caching is disabled every block's hash is ``None``, so the split is a no-op
+  that only adds per-step CPU overhead — a measurable decode-throughput loss
+  on small/low-batch models.  We restore a single-pass free for the
+  ``enable_caching=False`` case and delegate to the original implementation
+  when prefix caching is on.  Remove once fixed upstream.
 """
 
 import gc
+from typing import Callable, Optional
 
 import torch
 
@@ -228,7 +239,7 @@ def _patch_gather_logprobs() -> None:
 
     import vllm.v1.sample.sampler as _sampler_mod
 
-    if 'mark_unbacked' not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
+    if "mark_unbacked" not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
         return  # Not affected — older vLLM without PR #38933.
 
     _sampler_mod.Sampler.gather_logprobs = staticmethod(  # type: ignore[method-assign]
@@ -276,6 +287,51 @@ def _patch_cleanup_dist_env_and_memory() -> None:
     _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
 
 
+def _hpu_free_blocks(self, ordered_blocks) -> None:
+    """Single-pass ``BlockPool.free_blocks`` for ``enable_caching=False``.
+
+    Upstream vLLM PR #42656 rewrote ``free_blocks`` to partition freed blocks
+    into with-hash / without-hash lists and issue two queue ops
+    (``prepend_n`` + ``append_n``) on every engine step.  When prefix caching
+    is disabled, every block's hash is ``None``, so that split is a no-op that
+    only adds per-step CPU work; on short decode steps (small model / low
+    batch) it is a measurable fixed overhead (~3.5% output-token throughput on
+    llama-3.1-8B FP8, 1 card, 4096/1024, mc=8 — see GAUDISW-250180).  Free in
+    a single pass in that case; delegate to the original (upstream)
+    implementation when prefix caching is enabled so #42656's LRU ordering is
+    preserved.  Remove this patch once the fix lands upstream.
+    """
+    if self.enable_caching:
+        assert _ORIGINAL_FREE_BLOCKS is not None  # set by _patch_free_blocks before install
+        return _ORIGINAL_FREE_BLOCKS(self, ordered_blocks)
+
+    freed_blocks = []
+    for block in ordered_blocks:
+        block.ref_cnt -= 1
+        if block.ref_cnt == 0 and not block.is_null:
+            freed_blocks.append(block)
+    self.free_block_queue.append_n(freed_blocks)
+
+
+_ORIGINAL_FREE_BLOCKS: Optional[Callable] = None
+
+
+def _patch_free_blocks() -> None:
+    """Install the single-pass ``free_blocks`` fast path for APC-disabled runs.
+
+    Deferred to ``load_general_plugins`` time (same as the other patches) so
+    the ``vllm.v1.core`` import runs after platform initialisation.
+    Idempotent: only wraps the original ``free_blocks`` once.
+    """
+    global _ORIGINAL_FREE_BLOCKS
+    from vllm.v1.core.block_pool import BlockPool
+
+    if _ORIGINAL_FREE_BLOCKS is not None:
+        return  # already patched
+    _ORIGINAL_FREE_BLOCKS = BlockPool.free_blocks
+    BlockPool.free_blocks = _hpu_free_blocks
+
+
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
     # --- torch.accelerator.empty_cache ---
@@ -306,6 +362,7 @@ def apply() -> None:
         _patch_cleanup_dist_env_and_memory()
         _patch_batched_count_greater_than()
         _patch_gather_logprobs()
+        _patch_free_blocks()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
