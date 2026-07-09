@@ -18,7 +18,7 @@ Usage (two models, legacy):
   VLLM_ENABLE_V1_MULTIPROCESSING=0 \
   python tests/full_tests/sleep_mode_model_swap.py \
     --model-a meta-llama/Llama-3.1-8B-Instruct \
-    --model-b Qwen/Qwen3-0.6B
+    --model-b /mnt/weka/data/huggingface-models/qwen/Qwen3-0.6B
 
   # Three models with cycling:
   VLLM_ENABLE_V1_MULTIPROCESSING=0 \
