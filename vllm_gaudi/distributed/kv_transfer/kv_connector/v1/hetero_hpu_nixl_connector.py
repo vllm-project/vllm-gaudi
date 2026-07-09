@@ -1659,8 +1659,6 @@ def _read_blocks(
     # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
     # workers will issue xfers to parts of the P worker remote kv caches.
     # Get descs ids.
-    local_block_descs_ids: np.ndarray
-    remote_block_descs_ids: np.ndarray
     if not self.block_window_per_layer:
         # Default case: assume global attention
         remote_block_descs_ids = self._get_block_descs_ids(
@@ -1758,9 +1756,12 @@ def post_process_device_kv_on_receive(self, block_size_ratio: int, block_ids_lis
         return
     bs = self.block_size_on_save
     # Flatten the block id groups the caller passes (kernel/device block ids).
-    flat_ids = []
+    flat_ids: list[int] = []
     for grp in block_ids_list:
-        flat_ids.extend(grp if isinstance(grp, (list, tuple)) else [grp])
+        if isinstance(grp, (list, tuple)):
+            flat_ids.extend(grp)
+        else:
+            flat_ids.append(grp)
     # Build the (device_block, tok_start, slot) work list from pending map.
     dev_blocks = []
     tok_starts = []
