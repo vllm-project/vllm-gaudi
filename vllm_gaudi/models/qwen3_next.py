@@ -13,32 +13,38 @@ _orig_qwen3next_attention_forward = Qwen3NextAttention.forward
 # ====================================================================
 # Qwen3NextAttention.forward  (full-attention layers)
 # Patch any 3D layout (decode or bucketed prefill with BS > 1):
-#   hidden_states: [B, L, H],  output: [B, L, H_out]
+#   hidden_states: [B, L, H] -> returns [B, L, H_out]
+#
+# Return-based since upstream vLLM #46998 (300e33797f) dropped the
+# ``output`` in-place buffer; caller now does
+#   hidden_states = self.self_attn(hidden_states=..., positions=...)
 # ====================================================================
-def _hpu_qwen3next_attention_forward(self, positions, output, hidden_states):
+def _hpu_qwen3next_attention_forward(self, positions, hidden_states):
 
     # Patch any 3D layout (BS > 1):
-    #   Decode:  hidden_states [B, 1, H],  output [B, 1, H_out]
-    #   Prefill: hidden_states [B, L, H],  output [B, L, H_out]
+    #   Decode:  hidden_states [B, 1, H]
+    #   Prefill: hidden_states [B, L, H]
     #
     # Upstream forward assumes 2D (tokens, dim) for attn_output but
     # preserves 3D for gate when hidden_states is 3D, causing a shape
     # mismatch in `attn_output * gate`.  We flatten both to 2D.
-    is_3d = (hidden_states is not None and output is not None and hidden_states.dim() == 3 and output.dim() == 3)
+    is_3d = (hidden_states is not None and hidden_states.dim() == 3)
     if not is_3d:
-        return _orig_qwen3next_attention_forward(self, positions, output, hidden_states)
+        return _orig_qwen3next_attention_forward(self, positions, hidden_states)
+
+    orig_shape = hidden_states.shape
 
     qkv, _ = self.qkv_proj(hidden_states)
 
     gate = None
     if self.attn_output_gate:
         q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
-        orig_shape = q_gate.shape[:-1]
-        q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
+        gate_shape = q_gate.shape[:-1]
+        q_gate = q_gate.view(*gate_shape, self.num_heads, -1)
         q, gate = torch.chunk(q_gate, 2, dim=-1)
 
-        q = q.reshape(*orig_shape, -1)
-        gate = gate.reshape(*orig_shape, -1)
+        q = q.reshape(*gate_shape, -1)
+        gate = gate.reshape(*gate_shape, -1)
     else:
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -58,10 +64,9 @@ def _hpu_qwen3next_attention_forward(self, positions, output, hidden_states):
 
     proj_out, _ = self.o_proj(attn_output_2d)
 
-    # Output buffer may be [B, 1, H_out] in decode.
-    output_2d = output.view(-1, output.shape[-1])
-    proj_out_2d = proj_out.view(-1, proj_out.shape[-1])
-    output_2d[:proj_out_2d.shape[0]].copy_(proj_out_2d)
+    # Restore caller's original 3-D layout [B, L, H_out] so the residual
+    # add in the decoder layer stays shape-consistent.
+    return proj_out.view(*orig_shape[:-1], proj_out.shape[-1])
 
 
 # ====================================================================
