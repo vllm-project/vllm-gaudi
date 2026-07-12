@@ -2,6 +2,14 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.24.0
+
+This version is based on [vLLM 0.24.0](https://github.com/vllm-project/vllm/releases/tag/v0.24.0) and supports [Intel® Gaudi® Software v1.24.1](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.11.
+
+This release focuses on enabling the plugin on upstream vLLM 0.24.0, adapting the Intel® Gaudi® platform to the FusedMoE/MoERunner inversion, KV-connector and offloading refactors, the Mamba/GDN rewrite, and serving-tokenization changes. It adds Qwen3-Next architecture support, substantial FP8/INC quantization memory and stability improvements, a TPC-native depthwise `causal_conv1d` update path for hybrid models, single-card model swapping for hybrid SSM-Transformer models, and several security-hardening changes.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.24.0.md).
+
 ## 0.19.0
 
 This version is based on [vLLM 0.19.0](https://github.com/vllm-project/vllm/releases/tag/v0.19.0) and supports the latest [Intel® Gaudi® Software v1.24.0](https://docs.habana.ai/en/v1.24.0/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.10.
