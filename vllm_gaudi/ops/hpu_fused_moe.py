@@ -325,13 +325,13 @@ def patched_fused_moe_forward(
     fused output combination logic.
     """
     hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
-    # Upstream _maybe_pad_hidden_states returns a 2-tuple: the (possibly
-    # padded) hidden_states plus a single truncation size (orig_hidden_dims).
-    # Use this for both pre-transform and post-transform truncation.
-    hidden_states, orig_hidden_dims = self._maybe_pad_hidden_states(
-        shared_experts_input, hidden_states)
-    og_hidden_dim_pre_xform = orig_hidden_dims
-    og_hidden_dim_post_xform = orig_hidden_dims
+    # Upstream _maybe_pad_hidden_states returns a 3-tuple: the (possibly padded)
+    # hidden_states plus separate pre-transform and post-transform truncation
+    # sizes (either may be None). Mirror MoERunner.forward, which keeps them
+    # distinct — pre_xform strips fused_output before the routed-output
+    # transform, post_xform strips the final output after all-reduce.
+    hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
+        self._maybe_pad_hidden_states(shared_experts_input, hidden_states))
 
     if self.moe_config.dp_size == 1:
         # Bypass _forward_impl entirely for dp_size==1 to eliminate
@@ -341,10 +341,10 @@ def patched_fused_moe_forward(
         # would redundantly repeat.
         if self.moe_config.pcp_size > 1:
             raise RuntimeError("dp_size==1 fast path does not support pcp_size > 1")
-        # Note: upstream MoERunner._forward_impl calls layer.ensure_moe_quant_config_init()
-        # where layer is the FusedMoE layer. Since we're bypassing _forward_impl here
-        # and don't have access to the layer, we skip this init. The TODO in upstream
-        # says this can be removed after MK migration is complete anyway.
+        # Mirror MoERunner._forward_impl's pre-dispatch setup: the quant config
+        # is initialized on routed_experts (which the runner holds directly), so
+        # unlike the old FusedMoE-layer-based init we do NOT need the layer here.
+        self.routed_experts._ensure_moe_quant_config_init()
         self._maybe_sync_shared_experts_stream(shared_experts_input)
         # Apply the gate if the runner holds it (mirrors _forward_impl).
         if self.gate is not None:
@@ -353,16 +353,10 @@ def patched_fused_moe_forward(
                 router_logits = torch.nn.functional.linear(hidden_states, self._combined_gate_weight)
             else:
                 router_logits, _ = self.gate(hidden_states)
-        # Core MoERunner._apply_quant_method now takes the owning RoutedExperts
-        # layer as a required positional arg. The MoERunner doesn't store a direct
-        # reference to the layer, so we retrieve it from the layer registry using
-        # the layer_name. This matches how upstream's custom ops resolve the layer.
-        from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
-            get_layer_from_name,
-        )
-        _quant_layer = get_layer_from_name(self.layer_name)
+        # Core MoERunner._apply_quant_method takes no layer argument — it reads
+        # everything it needs off the runner (self.routed_experts / self.router).
+        # Call it exactly as upstream _forward_impl does.
         shared_output, fused_hidden = self._apply_quant_method(
-            _quant_layer,
             hidden_states=hidden_states,
             router_logits=router_logits,
             shared_experts_input=shared_experts_input,

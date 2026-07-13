@@ -1519,6 +1519,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(self.vllm_config)
             elif isinstance(attn_module, Attention):
                 if attn_module.attn_type == AttentionType.DECODER:
+                    # Normalize page_size_bytes across heterogeneous head_size layers
+                    # (e.g. Gemma4: sliding head_size=256, full head_size=512)
+                    max_head_size = max(
+                        m.head_size for m in forward_ctx.values()
+                        if isinstance(m, Attention)
+                        and m.attn_type == AttentionType.DECODER
+                        and getattr(m, 'kv_sharing_target_layer_name', None) is None
+                    )
+                    if attn_module.head_size < max_head_size:
+                        layer_block_size = block_size * (max_head_size // attn_module.head_size)
                     kv_cache_spec[layer_name] = FullAttentionSpec(block_size=block_size,
                                                                   num_kv_heads=attn_module.num_kv_heads,
                                                                   head_size=attn_module.head_size,
@@ -5924,7 +5934,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    if layer_name in layer_kv_cache_spec.kv_cache_specs:
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    elif layer_name in self.shared_kv_cache_layers:
+                        # Shared layer: use the target layer's spec
+                        target = self.shared_kv_cache_layers[layer_name]
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[target]
+                    else:
+                        raise KeyError(f"No KV cache spec for layer {layer_name}")
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
@@ -6428,7 +6445,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 layer_names.add(layer_name)
         # Set up cross-layer KV cache sharing
         if self.shared_kv_cache_layers:
-            logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
+            #logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
                 kv_caches[layer_name] = kv_caches[target_layer_name]
         assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
