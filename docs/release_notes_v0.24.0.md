@@ -4,25 +4,21 @@
 
 This release is based on [vLLM v0.24.0](https://github.com/vllm-project/vllm/releases/tag/v0.24.0) and supports [Intel® Gaudi® Software v1.24.1](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.11.
 
-The focus of this release is enabling the plugin on upstream vLLM v0.24.0, which required broad adaptation of the Intel® Gaudi® platform to the FusedMoE/MoERunner inversion, KV-connector and offloading refactors, the Mamba/GDN rewrite, and the serving-tokenization changes upstream. On top of the compatibility work, this version adds `Qwen3-Next` architecture support, substantial FP8/INC quantization memory and stability improvements, a TPC-native `causal_conv1d` update path for hybrid models, single-card model swapping for hybrid SSM-Transformer models, and several security-hardening changes.
-
----
-
 ## Highlights
 
-- **Platform upgrade to Intel® Gaudi® Software v1.24.1 and PyTorch 2.11.** Updated the supported Intel® Gaudi® software stack and PyTorch baseline for this release.
-- **Upstream vLLM v0.24.0 enablement.** Adapted the HPU platform to the upstream FusedMoE/MoERunner inversion (vLLM #41184), HPU scheduler and ngram-proposer updates, KV-connector and offloading-connector refactors, `ServingTokenization`, and the Mamba/GDN rewrite.
-- **`Qwen3-Next` model support.** Registered `Qwen3NextForCausalLM` in the Mamba-like architecture set and added Qwen3.6-35B CI coverage.
-- **FP8/INC quantization memory efficiency.** Freed dead INC-quantized FP8 MoE weight copies to roughly halve device memory, and resolved multiple FP8/INC calibration OOM and graph-compile regressions.
-- **TPC-native `causal_conv1d` update.** Switched hybrid/Mamba decode to TPC-native ops and removed the custom conv1d update kernel.
-- **Single-card model swap for hybrid models.** Extended online/single-process model swapping to hybrid SSM-Transformer models, including `granite-4.0-h-small`.
-- **Security hardening.** Added `SECURITY.md`, removed the outdated and insecure `decord` dependency, and isolated `HF_TOKEN` CI jobs behind an approved-workflow environment.
+- Upgraded platform compatibility to [Intel® Gaudi® Software v1.24.1](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html) and [PyTorch 2.11](https://github.com/pytorch/pytorch/releases#release-v2.11.0).
+- Enabled upstream [vLLM v0.24.0](https://github.com/vllm-project/vllm/releases#release-v0.24.0) by adapting the HPU platform to the FusedMoE/MoERunner inversion ([vLLM #41184](https://github.com/vllm-project/vllm/pull/41184)), HPU scheduler and ngram-proposer updates, KV-connector and offloading-connector refactors, `ServingTokenization`, and the Mamba/GDN rewrite.
+- Added [Qwen3-Next](https://huggingface.co/collections/Qwen/qwen3-next) model support by registering `Qwen3NextForCausalLM` in the Mamba-like architecture set and adding `Qwen3.6-35B` CI coverage.
+- Improved FP8/INC quantization memory efficiency by freeing dead INC-quantized FP8 MoE weight copies to roughly halve device memory and resolving multiple FP8/INC calibration OOM and graph-compile regressions.
+- Switched hybrid/Mamba decode to TPC-native `causal_conv1d` operations, removing the custom conv1d update kernel.
+- Extended single-card model swapping to hybrid SSM-Transformer models, including [granite-4.0-h-small](https://huggingface.co/ibm-granite/granite-4.0-h-small).
+- Strengthened project security by adding a [SECURITY.md](https://github.com/vllm-project/vllm-gaudi/blob/main/SECURITY.md) vulnerability disclosure policy, removing the outdated and insecure `decord` dependency, and isolating `HF_TOKEN` CI jobs behind an approved-workflow environment.
 
 ---
 
 ## New Model Support
 
-- Validated **Qwen3.5-35B-A3B** and **Qwen3.6-35B-A3B** (BF16, single-card Gaudi 3) with GSM8K accuracy coverage. ([#1554](https://github.com/vllm-project/vllm-gaudi/pull/1554), [#1443](https://github.com/vllm-project/vllm-gaudi/pull/1443), [#1434](https://github.com/vllm-project/vllm-gaudi/pull/1434))
+- Validated [Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) and [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (BF16, single-card Gaudi 3) with GSM8K accuracy coverage. ([#1554](https://github.com/vllm-project/vllm-gaudi/pull/1554), [#1443](https://github.com/vllm-project/vllm-gaudi/pull/1443), [#1434](https://github.com/vllm-project/vllm-gaudi/pull/1434))
 - Added `Qwen3-Next` architecture support via `Qwen3NextForCausalLM` in the Mamba-like architecture set. ([#1450](https://github.com/vllm-project/vllm-gaudi/pull/1450))
 - Added hybrid-model support for single-card model swapping. ([#1415](https://github.com/vllm-project/vllm-gaudi/pull/1415))
 
@@ -30,7 +26,7 @@ The focus of this release is enabling the plugin on upstream vLLM v0.24.0, which
 
 ## Performance
 
-- Switched to TPC-native ops for the `causal_conv1d` update. ([#1527](https://github.com/vllm-project/vllm-gaudi/pull/1527))
+- Switched to TPC-native operations for the `causal_conv1d` update. ([#1527](https://github.com/vllm-project/vllm-gaudi/pull/1527))
 - Removed the custom conv1d update TPC kernel in favor of the native path. ([#1585](https://github.com/vllm-project/vllm-gaudi/pull/1585))
 - Fixed a decode throughput regression introduced by upstream vLLM. ([#1609](https://github.com/vllm-project/vllm-gaudi/pull/1609))
 - Fixed decode bucket sparsity for long prompts. ([#1584](https://github.com/vllm-project/vllm-gaudi/pull/1584))
@@ -41,7 +37,7 @@ The focus of this release is enabling the plugin on upstream vLLM v0.24.0, which
 
 ---
 
-## Attention & KV Cache
+## Attention and KV Cache
 
 - Fixed contiguous PA wrong-rows on prefill context (perf-preserving). ([#1546](https://github.com/vllm-project/vllm-gaudi/pull/1546))
 - Fixed hetero HPU NIXL connector compatibility with upstream vLLM. ([#1534](https://github.com/vllm-project/vllm-gaudi/pull/1534))
@@ -85,7 +81,7 @@ The focus of this release is enabling the plugin on upstream vLLM v0.24.0, which
 
 ---
 
-## Serving & Infrastructure
+## Serving and Infrastructure
 
 - Capped `fastapi<0.137` to unbreak the Prometheus instrumentator. ([#1551](https://github.com/vllm-project/vllm-gaudi/pull/1551))
 - Pinned `transformers==5.9.0` temporarily for compatibility. ([#1530](https://github.com/vllm-project/vllm-gaudi/pull/1530))
@@ -115,16 +111,16 @@ The focus of this release is enabling the plugin on upstream vLLM v0.24.0, which
 
 ## Security
 
-- Added `SECURITY.md`. ([#1509](https://github.com/vllm-project/vllm-gaudi/pull/1509))
+- Added a [SECURITY.md](https://github.com/vllm-project/vllm-gaudi/blob/main/SECURITY.md) vulnerability disclosure policy. ([#1509](https://github.com/vllm-project/vllm-gaudi/pull/1509))
 - Removed the outdated and insecure `decord` dependency. ([#1520](https://github.com/vllm-project/vllm-gaudi/pull/1520))
-- Routed `HF_TOKEN`-using CI jobs through an approved-workflow environment. ([#1473](https://github.com/vllm-project/vllm-gaudi/pull/1473))
+- Routed `HF_TOKEN`using CI jobs through an approved-workflow environment. ([#1473](https://github.com/vllm-project/vllm-gaudi/pull/1473))
 - Added pre-merge approval for `execute_pre_merge`. ([#1471](https://github.com/vllm-project/vllm-gaudi/pull/1471))
 
 ---
 
-## Deprecation & Breaking Changes
+## Deprecation and Breaking Changes
 
-- Upgraded to **Intel® Gaudi® Software v1.24.1** and **PyTorch 2.11**, which requires users to update their Intel® Gaudi® software stack to v1.24.1. ([release requirement](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html))
+- Upgraded to Intel® Gaudi® Software v1.24.1 and PyTorch 2.11, which requires users to update their Intel® Gaudi® software stack to [v1.24.1](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html).
 - Removed `ray` and redundant `transformers` packages from the Gaudi requirements. ([#1445](https://github.com/vllm-project/vllm-gaudi/pull/1445))
 - Removed the `decord` dependency; environments relying on it must migrate to a supported decoder. ([#1520](https://github.com/vllm-project/vllm-gaudi/pull/1520))
 - Temporarily pinned `transformers==5.9.0`; expect this constraint to be relaxed in a later release. ([#1530](https://github.com/vllm-project/vllm-gaudi/pull/1530))
