@@ -6,7 +6,7 @@ ARG ARTIFACTORY_URL="vault.habana.ai"
 ARG SYNAPSE_VERSION=1.24.1
 # Use an exact revision (e.g. 695) or "latest" to auto-detect the newest available revision.
 # If you do not want metadata to show "latest", pass an exact SYNAPSE_REVISION.
-ARG SYNAPSE_REVISION=latest
+ARG SYNAPSE_REVISION=482
 ARG BASE_NAME=rhel9.6
 ARG OS_VERSION=9.6
 ARG OS_STRING=rhel96

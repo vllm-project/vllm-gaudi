@@ -10,7 +10,7 @@ The following table details the supported vLLM versions for Intel® Gaudi® 2 an
   <thead>
     <tr>
       <th rowspan="2">vLLM<br>version</th>
-      <th colspan="5">Intel Gaudi software version</th>
+      <th colspan="5">Intel® Gaudi® software version</th>
     </tr>
     <tr>
       <th>1.22.1</th>
