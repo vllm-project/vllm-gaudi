@@ -710,7 +710,7 @@ async def _run_multi_model_server_worker(
 async def _run_multi_model_server(args: Namespace) -> None:
     decorate_logs("APIServer")
 
-    listen_address, sock = setup_server(args)
+    listen_address, sock = setup_server(args, reuse_port=False)
     await _run_multi_model_server_worker(listen_address, sock, args)
 
 
