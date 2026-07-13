@@ -6,8 +6,8 @@ This release is based on [vLLM v0.24.0](https://github.com/vllm-project/vllm/rel
 
 ## Highlights
 
-- Upgraded platform compatibility to [Intel® Gaudi® Software v1.24.1](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html) and [PyTorch 2.11](https://github.com/pytorch/pytorch/releases#release-v2.11.0).
-- Enabled upstream [vLLM v0.24.0](https://github.com/vllm-project/vllm/releases#release-v0.24.0) by adapting the HPU platform to the FusedMoE/MoERunner inversion ([vLLM #41184](https://github.com/vllm-project/vllm/pull/41184)), HPU scheduler and ngram-proposer updates, KV-connector and offloading-connector refactors, `ServingTokenization`, and the Mamba/GDN rewrite.
+- Upgraded platform compatibility to [Intel® Gaudi® Software v1.24.1](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html) and [PyTorch 2.11](https://github.com/pytorch/pytorch/releases/tag/v2.11.0).
+- Enabled upstream [vLLM v0.24.0](https://github.com/vllm-project/vllm/releases/tag/v0.24.0) by adapting the HPU platform to the FusedMoE/MoERunner inversion ([vLLM #41184](https://github.com/vllm-project/vllm/pull/41184)), HPU scheduler and ngram-proposer updates, KV-connector and offloading-connector refactors, `ServingTokenization`, and the Mamba/GDN rewrite.
 - Added [Qwen3-Next](https://huggingface.co/collections/Qwen/qwen3-next) model support by registering `Qwen3NextForCausalLM` in the Mamba-like architecture set and adding `Qwen3.6-35B` CI coverage.
 - Improved FP8/INC quantization memory efficiency by freeing dead INC-quantized FP8 MoE weight copies to roughly halve device memory and resolving multiple FP8/INC calibration OOM and graph-compile regressions.
 - Switched hybrid/Mamba decode to TPC-native `causal_conv1d` operations, removing the custom conv1d update kernel.
