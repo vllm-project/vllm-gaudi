@@ -472,6 +472,15 @@ run_gsm8k_gemma4_26b_test() {
     echo "✅ Test with gemma-4-26B-A4B-it passed."
 }
 
+# GSM8K on gemma-4-E4B
+run_gsm8k_gemma4_e4b_test() {
+    echo "Testing GSM8K on gemma-4-E4B..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-E4B.yaml"
+    echo "Test with gemma-4-E4B passed."
+}
+
 # --- Spec decode tests ---
 # Tests below check if speculative decoding is matching accept rate specified as an argument.
 # If the accept rate is below the threshold, the test will fail. The same applies for accuracy rate.
