@@ -46,6 +46,12 @@ The following table details the supported vLLM versions for Intel® Gaudi® 2 an
       <td>0.19.0</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>❌</td>
     </tr>
     <tr>
+      <td>0.19.1</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>❌</td>
+    </tr>
+    <tr>
+      <td>0.21.0</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>❌</td>
+    </tr>
+    <tr>
       <td>0.24.0</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td>
     </tr>
   </tbody>

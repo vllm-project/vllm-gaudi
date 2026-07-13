@@ -113,7 +113,7 @@ This release is based on [vLLM v0.24.0](https://github.com/vllm-project/vllm/rel
 
 - Added a [SECURITY.md](https://github.com/vllm-project/vllm-gaudi/blob/main/SECURITY.md) vulnerability disclosure policy. ([#1509](https://github.com/vllm-project/vllm-gaudi/pull/1509))
 - Removed the outdated and insecure `decord` dependency. ([#1520](https://github.com/vllm-project/vllm-gaudi/pull/1520))
-- Routed `HF_TOKEN`using CI jobs through an approved-workflow environment. ([#1473](https://github.com/vllm-project/vllm-gaudi/pull/1473))
+- Routed `HF_TOKEN`-using CI jobs through an approved-workflow environment. ([#1473](https://github.com/vllm-project/vllm-gaudi/pull/1473))
 - Added pre-merge approval for `execute_pre_merge`. ([#1471](https://github.com/vllm-project/vllm-gaudi/pull/1471))
 
 ---
