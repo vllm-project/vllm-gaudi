@@ -1188,6 +1188,14 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         None: If the remapped name is not found in params_dict.
     """
 
+    # Already in vLLM's expected form. Upstream `base_config.get_cache_scale_mapper`
+    # (activated in vllm #44589) now pre-maps raw checkpoint scales to their
+    # `.attn.` form in `AutoWeightsLoader` before this OOT remap runs, so for
+    # regular attention the pre-mapped name already matches a param. Skip the
+    # regex remap, which would otherwise double-apply the `.attn` prefix.
+    if name in params_dict:
+        return name
+
     if name.endswith(".kv_scale"):
         logger.warning_once("DEPRECATED. Found kv_scale in the checkpoint. "
                             "This format is deprecated in favor of separate k_scale and "
@@ -1213,6 +1221,18 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         attn_str = "attn"
     # Define scale name mapping patterns in order of precedence
     scale_mapping_patterns = [
+        # Pre-mapped format (vllm #44589): upstream
+        # `base_config.get_cache_scale_mapper` already rewrites raw checkpoint
+        # `.self_attn.{q,k,v}_scale` -> `.self_attn.attn.{q,k,v}_scale` in
+        # `AutoWeightsLoader` before this OOT remap runs. On HPU the real MLA
+        # param lives under `mla_attn.mla_attn`, so redirect the pre-mapped
+        # `.attn.` form to `.{attn_str}.`. For regular attention the pre-mapped
+        # name is already a param and is short-circuited by the
+        # `if name in params_dict` guard above, so this never fires there.
+        (
+            r"\.self_attn\.attn\.([qkv])_scale$",
+            rf".self_attn.{attn_str}.\1_scale",
+        ),
         # LLMC format:  .self_attn.{q,k,v}_scale ->
         #   .attn.{attn_str}.{q,k,v}_scale
         (
@@ -1235,8 +1255,8 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
-        # Default format: .{k,v}_scale -> .attn.{k,v}_scale
-        (r"\.([kv])_scale$", r".attn.\1_scale"),
+        # Default format: .{q,k,v}_scale -> .attn.{q,k,v}_scale
+        (r"\.([qkv])_scale$", r".attn.\1_scale"),
     ]
 
     # Check if name ends with k_scale or v_scale
