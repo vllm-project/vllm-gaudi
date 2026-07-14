@@ -579,6 +579,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                            scales=v_scales,
                                            block_size=attn_metadata.block_size,
                                            is_prompt=attn_metadata.is_prompt)
+            elif attn_metadata.is_prompt and slot_mapping is not None:
+                # KV sharing (YOCO): the local key/value are intentionally
+                # un-normed/un-RoPE'd (see Gemma4Attention shared-layer path).
+                # Read the target layer's normalized+RoPE'd K/V back from the
+                # shared cache at these slots (it wrote them earlier this pass).
+                key = key_cache.index_select(0, slot_mapping).view(key.shape)
+                value = value_cache.index_select(0, slot_mapping).view(value.shape)
 
         if attn_metadata.is_prompt or seq_len > 1:
             # Prompt run.
