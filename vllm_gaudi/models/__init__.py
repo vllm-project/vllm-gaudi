@@ -56,3 +56,4 @@ def register_model():
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
     import vllm_gaudi.models.qwen3_next  # noqa: F401
     import vllm_gaudi.models.qwen3_5  # noqa: F401
+    import vllm_gaudi.models.kimi_k25_vit  # noqa: F401
