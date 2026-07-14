@@ -3,6 +3,7 @@
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlConnectorWorker
 from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm_gaudi.platform import logger
 import habana_frameworks.torch.utils.experimental as htexp
 
@@ -136,3 +137,72 @@ def _hpu_transfer_topo_post_init(self):
 
 
 TransferTopology.__post_init__ = _hpu_transfer_topo_post_init
+
+# ── HPU TransferTopology.get_transfer_cache_regions K/V-split override ──────── #
+# Upstream vLLM PR #44455 ("Pack K/V into the content dim across attention
+# backends") rewrote get_transfer_cache_regions to always return a single
+# packed region ([cache]) and dropped the old split_k_and_v / blocks-first
+# handling.  This assumes the GPU layout where K and V are interleaved inside
+# each block, so the registered tensor is blocks-first (shape[0] == num_blocks).
+#
+# HPU allocates K and V as two *separate* per-layer tensors, surfaced to NIXL
+# as a TensorTuple((K, V)) whose leading dim is the K/V split (2), not
+# num_blocks.  With the upstream single-region path, register_kv_caches sees
+# cache.shape == (2, num_blocks, block_size, num_kv_heads, head_size) and its
+# `cache.shape[0] != num_blocks` guard raises:
+#
+#   AssertionError: All kv cache tensors must have the same number of blocks;
+#   ... cache_shape=(2, <N>, ...) ... kv_cache_layout=HND
+#
+# crashing every NIXL PD-disaggregation run right after the connector logs
+# "setting KV cache layout to HND".
+#
+# Restore the pre-#44455 behaviour for HPU: register K and V as two separate
+# blocks-first regions so each registered tensor is blocks-first
+# (shape[0] == num_blocks) again.  Mirror upstream exactly for the Mamba and
+# hybrid-SSM branches (they are backend-agnostic and already blocks-first), and
+# only iterate the tuple for the regular attention path.  MLA layers surface a
+# single tensor (not a TensorTuple), so they naturally fall through to the
+# single-region return.
+
+
+def _hpu_get_transfer_cache_regions(self, cache, layer_spec):
+    """Return the NIXL memory regions for an HPU KV cache tensor.
+
+    HPU packs K and V as two separate per-layer tensors (a K/V-split
+    ``TensorTuple``) rather than a single blocks-first tensor, so this
+    override registers each K/V half as its own blocks-first region. This
+    reverses vLLM PR #44455's single-region packing, which would otherwise
+    make ``register_kv_caches`` see a leading K/V dim of 2 and fail its
+    ``cache.shape[0] == num_blocks`` contract.
+
+    Args:
+        cache: The per-layer KV cache tensor (or ``(conv, ssm)`` for Mamba,
+            or a K/V-split ``TensorTuple`` for regular attention).
+        layer_spec: The ``KVCacheSpec`` for this layer.
+
+    Returns:
+        The tensor(s) to register as NIXL memory regions.
+    """
+    if isinstance(layer_spec, MambaSpec):
+        # Register the whole shared conv/ssm tensor (mirror upstream).
+        conv, _ssm = cache
+        return [conv]
+
+    # Mirror upstream's hybrid-SSM blocks-first transpose.
+    if self.is_mamba and cache.shape[0] == 2:
+        return [cache.transpose(0, 1)]
+
+    # HPU regular attention: K and V surface with a leading K/V-split dim of 2,
+    # either as a TensorTuple((K, V)) (no host buffer) or as a single 5-D tensor
+    # (host-buffer path).  Register each half as its own blocks-first region so
+    # `shape[0] == num_blocks` holds again.  Indexing ([0]/[1]) yields the K and
+    # V halves for both the tuple and the tensor form.
+    if not self.is_mla and len(cache) == 2:
+        return [cache[0], cache[1]]
+
+    # MLA (single tensor) and any already-blocks-first layout: single region.
+    return [cache]
+
+
+TransferTopology.get_transfer_cache_regions = _hpu_get_transfer_cache_regions
