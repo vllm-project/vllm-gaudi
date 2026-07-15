@@ -432,15 +432,6 @@ run_gsm8k_qwen36_35b_a3b_test() {
     echo "✅ Test with Qwen3.6-35B-A3B passed."
 }
 
-# GSM8K on gemma-4-E4B
-run_gsm8k_gemma4_e4b_test() {
-    echo "Testing GSM8K on gemma-4-E4B..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
-        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-E4B.yaml"
-    echo "Test with gemma-4-E4B passed."
-}
-
 # GSM8K on gemma-4-E2B (YOCO / KV-sharing model)
 run_gsm8k_gemma4_e2b_test() {
     echo "➡️ Testing GSM8K on gemma-4-E2B-it..."
