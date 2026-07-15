@@ -41,7 +41,6 @@ except ValueError:
     logger.warning("Invalid MAX_EXPERTS_PER_SLICE value, using default -1")
     MAX_EXPERTS_PER_SLICE = -1
 
-
 # Map model activation-config strings to the activation names the HPU fused-MoE
 # op's MoeActivationMode_t enum accepts. The Gaudi gelu TPC kernel already uses
 # the tanh approximation (see tpc_kernels .../gelu_f16.c: UNROLLED_KERNEL(..,

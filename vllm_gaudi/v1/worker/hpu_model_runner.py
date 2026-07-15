@@ -6356,8 +6356,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             f"perfectly align with page_size_bytes ({kv_cache_spec.page_size_bytes:,} bytes). "
                             f"This is expected for heterogeneous models like Gemma4 with mixed "
                             f"attention types. Using {usable_size:,} bytes "
-                            f"({remainder:,} bytes unused, {waste_pct:.2f}% waste)."
-                        )
+                            f"({remainder:,} bytes unused, {waste_pct:.2f}% waste).")
                         # Use only the aligned portion of the tensor
                         kv_cache_tensor = replace(kv_cache_tensor, size=usable_size)
 
@@ -6375,11 +6374,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if num_blocks < kv_cache_config.num_blocks:
                         if remainder != 0:
                             # This is expected for heterogeneous models after alignment
-                            logger.warning(
-                                f"After alignment, num_blocks={num_blocks} is less than "
-                                f"kv_cache_config.num_blocks={kv_cache_config.num_blocks}. "
-                                f"This is expected for heterogeneous models like Gemma4."
-                            )
+                            logger.warning(f"After alignment, num_blocks={num_blocks} is less than "
+                                           f"kv_cache_config.num_blocks={kv_cache_config.num_blocks}. "
+                                           f"This is expected for heterogeneous models like Gemma4.")
                         else:
                             # Unexpected - still assert in this case
                             assert num_blocks >= kv_cache_config.num_blocks

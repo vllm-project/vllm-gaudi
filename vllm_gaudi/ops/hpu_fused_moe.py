@@ -32,7 +32,6 @@ from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
-
 # Map model activation names to the activation strings the Gaudi fused-MoE op's
 # MoeActivationMode_t enum accepts. The synapse MoE kernel enumerates "gelu" (and
 # silu/selu) but NOT "gelu_tanh"; the Gaudi gelu TPC kernel is itself the tanh
@@ -330,8 +329,8 @@ def patched_fused_moe_forward(
     # sizes (either may be None). Mirror MoERunner.forward, which keeps them
     # distinct — pre_xform strips fused_output before the routed-output
     # transform, post_xform strips the final output after all-reduce.
-    hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
-        self._maybe_pad_hidden_states(shared_experts_input, hidden_states))
+    hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (self._maybe_pad_hidden_states(
+        shared_experts_input, hidden_states))
 
     if self.moe_config.dp_size == 1:
         # Bypass _forward_impl entirely for dp_size==1 to eliminate

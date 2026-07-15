@@ -26,6 +26,8 @@ except ImportError:
     # so isinstance(layer, RoutedExperts) safely evaluates to False.
     class RoutedExperts:  # type: ignore[no-redef]
         pass
+
+
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 
 logger = init_logger(__name__)
