@@ -6352,11 +6352,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         usable_size = kv_cache_tensor.size - remainder
                         waste_pct = remainder * 100.0 / kv_cache_tensor.size
                         logger.warning(
-                            f"KV cache tensor size ({kv_cache_tensor.size:,} bytes) does not "
-                            f"perfectly align with page_size_bytes ({kv_cache_spec.page_size_bytes:,} bytes). "
-                            f"This is expected for heterogeneous models like Gemma4 with mixed "
-                            f"attention types. Using {usable_size:,} bytes "
-                            f"({remainder:,} bytes unused, {waste_pct:.2f}% waste).")
+                            "KV cache tensor size (%s bytes) does not "
+                            "perfectly align with page_size_bytes (%s bytes). "
+                            "This is expected for heterogeneous models like Gemma4 with mixed "
+                            "attention types. Using %s bytes "
+                            "(%s bytes unused, %.2f%% waste).", f"{kv_cache_tensor.size:,}",
+                            f"{kv_cache_spec.page_size_bytes:,}", f"{usable_size:,}", f"{remainder:,}", waste_pct)
                         # Use only the aligned portion of the tensor
                         kv_cache_tensor = replace(kv_cache_tensor, size=usable_size)
 
@@ -6374,9 +6375,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if num_blocks < kv_cache_config.num_blocks:
                         if remainder != 0:
                             # This is expected for heterogeneous models after alignment
-                            logger.warning(f"After alignment, num_blocks={num_blocks} is less than "
-                                           f"kv_cache_config.num_blocks={kv_cache_config.num_blocks}. "
-                                           f"This is expected for heterogeneous models like Gemma4.")
+                            logger.warning(
+                                "After alignment, num_blocks=%d is less than "
+                                "kv_cache_config.num_blocks=%d. "
+                                "This is expected for heterogeneous models like Gemma4.", num_blocks,
+                                kv_cache_config.num_blocks)
                         else:
                             # Unexpected - still assert in this case
                             assert num_blocks >= kv_cache_config.num_blocks
