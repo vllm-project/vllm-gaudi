@@ -435,10 +435,6 @@ def create_fused_moe_router(
     topk_group: int | None = None,
     scoring_func: str = "softmax",
     num_fused_shared_experts: int = 0,
-    # Fused shared-expert slot weight (upstream vLLM d039c171+). Accepted for
-    # signature parity with the upstream factory caller (layer.py passes it);
-    # the HPU routers below do not use the fused-shared-expert scaling path
-    # (num_fused_shared_experts defaults to 0), so the default 1.0 is a no-op.
     shared_expert_weight: float = 1.0,
     # grouped topk + fused topk bias parameters
     routed_scaling_factor: float = 1.0,
@@ -565,6 +561,8 @@ def create_fused_moe_router(
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
             hash_indices_table=hash_indices_table,
+            num_fused_shared_experts=num_fused_shared_experts,
+            shared_expert_weight=shared_expert_weight,
         )
 
     return FusedTopKRouter(

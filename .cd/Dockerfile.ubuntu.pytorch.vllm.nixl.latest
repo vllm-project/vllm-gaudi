@@ -3,9 +3,9 @@
 
 # Parameterize base image components
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.24.0
+ARG VERSION=1.24.1
 ARG BASE_NAME=ubuntu24.04
-ARG PT_VERSION=2.10.0
+ARG PT_VERSION=2.11.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
 ARG TORCH_TYPE_SUFFIX
@@ -67,7 +67,7 @@ RUN \
 # Install torchaudio (CPU wheel, matching PyTorch version in base image)
 RUN pip install --no-cache-dir --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
 
-# Workaround: Gaudi base image bundles HPU-patched PyTorch (e.g. 2.10.0a0+git...)
+# Workaround: Gaudi base image bundles HPU-patched PyTorch (e.g. 2.11.0a0+git...)
 # which doesn't satisfy torchvision/torchaudio's strict torch==X.Y.Z pin.
 # Relax the requirement in installed package metadata so pip check passes.
 RUN SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
