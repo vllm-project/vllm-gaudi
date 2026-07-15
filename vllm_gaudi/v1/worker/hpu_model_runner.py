@@ -1148,8 +1148,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
             for block_type in mamba_like)
 
+        # Models whose mamba layers get relabeled "linear_attention" by
+        # transformers>=5's remap_legacy_layer_types (config.get_text_config()
+        # normalizes legacy "mamba"/"attention" hybrid layer_types to
+        # "linear_attention"/"full_attention"), but which are plain mamba
+        # hybrids, not true GDN/linear-attention models. Left unguarded,
+        # get_num_layers_by_block_type(..., "linear_attention") matches these
+        # relabeled mamba layers, so num_gdn is misdetected as >0 below. That
+        # skips the block_size=528 alignment for Granite 4.0-H (see
+        # initialize_kv_cache) and re-triggers "not warmed-up" recompilations /
+        # non-deterministic tool-calling output.
+        _non_gdn_mamba_hybrid_model_types = ("granitemoehybrid", )
+
         self.num_gdn = 0
-        if self.num_mamba_like_layers > 0:
+        if (self.num_mamba_like_layers > 0
+                and self.model_config.hf_config.model_type not in _non_gdn_mamba_hybrid_model_types):
             # Auto-enable hybrid cache for GDN/mamba-like models.
             gdn_types = ["gdn_attention", "linear_attention"]
             self.num_gdn = sum(
