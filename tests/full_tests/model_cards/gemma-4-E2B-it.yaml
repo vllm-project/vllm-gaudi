@@ -1,0 +1,12 @@
+model_card:
+  model_name: "google/gemma-4-E2B-it"
+  tasks: gsm8k
+  num_fewshot: 5
+  trust_remote_code: true
+  limit: 256
+  max_model_len: 4096
+  add_bos_token: true
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.55
