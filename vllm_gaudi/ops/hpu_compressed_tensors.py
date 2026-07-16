@@ -53,6 +53,7 @@ from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfEx
                                       VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation, select_experts_from_routed
+from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_tensor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase, )
 import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
@@ -538,6 +539,25 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
+
+        if layer.moe_config.is_sequence_parallel:
+            # Sequence-parallel MoE without data parallelism (TP>1 + EP with the
+            # allgather_reducescatter backend => use_sequence_parallel_moe). The
+            # model block chunks tokens by tp_size before the experts and
+            # all-gathers afterwards, expecting `self.experts` to be
+            # token-neutral. Upstream MoERunner._maybe_combine (mirrored in
+            # patched_fused_moe_forward) reduce-scatters the expert output over
+            # the EP group whenever is_sequence_parallel is set, regardless of
+            # dp_size. The paired dispatch all-gather is set up via dispatch_fn
+            # only for dp_size > 1, so at dp_size == 1 the combine is unpaired
+            # and halves the token count -> the block's final reshape fails.
+            # All-gather x / topk over the EP group here to restore the
+            # dispatch/combine symmetry (dp_metadata is None at dp_size == 1, so
+            # dispatch_tensor allocates its own EP-sized output).
+            x = dispatch_tensor(x, None, is_sequence_parallel=True)
+            topk_ids = dispatch_tensor(topk_ids, None, is_sequence_parallel=True)
+            topk_weights = dispatch_tensor(topk_weights, None, is_sequence_parallel=True)
+
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
 
@@ -548,6 +568,8 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
             permuted_weights=True,
             activation=_normalize_moe_activation(layer.activation),
         )
+        if layer.moe_config.is_sequence_parallel:
+            return output.view(*(output.size(0), *input_shape[1:]))
         return output.view(*input_shape)
 
 
@@ -1188,6 +1210,14 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         None: If the remapped name is not found in params_dict.
     """
 
+    # Already in vLLM's expected form. Upstream `base_config.get_cache_scale_mapper`
+    # (activated in vllm #44589) now pre-maps raw checkpoint scales to their
+    # `.attn.` form in `AutoWeightsLoader` before this OOT remap runs, so for
+    # regular attention the pre-mapped name already matches a param. Skip the
+    # regex remap, which would otherwise double-apply the `.attn` prefix.
+    if name in params_dict:
+        return name
+
     if name.endswith(".kv_scale"):
         logger.warning_once("DEPRECATED. Found kv_scale in the checkpoint. "
                             "This format is deprecated in favor of separate k_scale and "
@@ -1213,6 +1243,18 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         attn_str = "attn"
     # Define scale name mapping patterns in order of precedence
     scale_mapping_patterns = [
+        # Pre-mapped format (vllm #44589): upstream
+        # `base_config.get_cache_scale_mapper` already rewrites raw checkpoint
+        # `.self_attn.{q,k,v}_scale` -> `.self_attn.attn.{q,k,v}_scale` in
+        # `AutoWeightsLoader` before this OOT remap runs. On HPU the real MLA
+        # param lives under `mla_attn.mla_attn`, so redirect the pre-mapped
+        # `.attn.` form to `.{attn_str}.`. For regular attention the pre-mapped
+        # name is already a param and is short-circuited by the
+        # `if name in params_dict` guard above, so this never fires there.
+        (
+            r"\.self_attn\.attn\.([qkv])_scale$",
+            rf".self_attn.{attn_str}.\1_scale",
+        ),
         # LLMC format:  .self_attn.{q,k,v}_scale ->
         #   .attn.{attn_str}.{q,k,v}_scale
         (
@@ -1235,8 +1277,8 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
-        # Default format: .{k,v}_scale -> .attn.{k,v}_scale
-        (r"\.([kv])_scale$", r".attn.\1_scale"),
+        # Default format: .{q,k,v}_scale -> .attn.{q,k,v}_scale
+        (r"\.([qkv])_scale$", r".attn.\1_scale"),
     ]
 
     # Check if name ends with k_scale or v_scale
