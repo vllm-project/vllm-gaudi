@@ -256,7 +256,7 @@ def shutdown(self) -> None:
 def CPUOffloadingWorker_init_(
     self,
     kv_caches: CanonicalKVCaches,
-    block_size_factor: int,
+    blocks_per_chunk: int,
     num_cpu_blocks: int,
     mmap_region=None,
 ):
@@ -269,7 +269,11 @@ def CPUOffloadingWorker_init_(
 
     Args:
         kv_caches: canonical GPU KV cache tensors to offload.
-        block_size_factor: ratio of CPU page size to GPU page size.
+        blocks_per_chunk: ratio of CPU page size to GPU page size. Renamed
+            from ``block_size_factor`` to match the upstream constructor
+            contract after vLLM PR #48150; the value is passed unchanged into
+            the HPU ``SingleDirectionOffloadingHandler`` as its
+            ``block_size_factor`` argument.
         num_cpu_blocks: number of CPU blocks to allocate.
         mmap_region: unused on HPU; accepted for upstream API parity.
     """
@@ -281,7 +285,7 @@ def CPUOffloadingWorker_init_(
     for kv_cache_tensor in kv_caches.tensors:
         gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
         gpu_tensor = kv_cache_tensor.tensor.view(torch.int8).view((-1, gpu_page_size_bytes))
-        cpu_page_size_bytes = gpu_page_size_bytes * block_size_factor
+        cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
         cpu_tensor = torch.zeros(
             (num_cpu_blocks, cpu_page_size_bytes),
             dtype=torch.int8,
@@ -295,7 +299,7 @@ def CPUOffloadingWorker_init_(
     self._store_handler = SingleDirectionOffloadingHandler(
         gpu_tensors=gpu_tensors,
         cpu_tensors=cpu_tensors,
-        block_size_factor=block_size_factor,
+        block_size_factor=blocks_per_chunk,
         kv_cache_groups_data_refs=kv_caches.group_data_refs,
         gpu_to_cpu=True,
     )
@@ -303,7 +307,7 @@ def CPUOffloadingWorker_init_(
     self._load_handler = SingleDirectionOffloadingHandler(
         gpu_tensors=gpu_tensors,
         cpu_tensors=cpu_tensors,
-        block_size_factor=block_size_factor,
+        block_size_factor=blocks_per_chunk,
         kv_cache_groups_data_refs=kv_caches.group_data_refs,
         gpu_to_cpu=False,
     )
