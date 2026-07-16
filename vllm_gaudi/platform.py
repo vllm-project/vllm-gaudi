@@ -12,6 +12,17 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.logger import logger as init_logger
 
+
+# Monkey-patch torch.accelerator.get_memory_info for HPU compatibility.
+# torch.accelerator.get_memory_info() is not implemented for HPU and raises
+# RuntimeError. We patch it to use torch.hpu.mem_get_info() instead.
+def _hpu_get_memory_info(device=None) -> tuple[int, int]:
+    """Get (free, total) memory in bytes for HPU."""
+    return torch.hpu.mem_get_info()
+
+
+torch.accelerator.get_memory_info = _hpu_get_memory_info
+
 if TYPE_CHECKING:
     from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm.config import ModelConfig, VllmConfig
