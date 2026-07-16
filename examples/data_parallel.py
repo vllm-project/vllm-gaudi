@@ -173,6 +173,21 @@ def main(
     # Give engines time to pause their processing loops before exiting.
     sleep(1)
 
+    # Explicitly shut down the engine before the driver process exits.
+    #
+    # On HPU the LLM/EngineCoreClient is kept alive past the end of main() by
+    # a live background monitor thread, so the weakref.finalize() that would
+    # send SIGTERM to the EngineCore processes never runs before
+    # multiprocessing's atexit handler joins those (non-daemon) processes.
+    # The EngineCore then sits idle in its input-queue busy loop forever and
+    # the join deadlocks, so each DP rank is force-killed after the 5-minute
+    # timeout. Shutting the engine down here guarantees the SIGTERM is
+    # delivered and the busy loop exits cleanly.
+    engine = getattr(llm, "llm_engine", None)
+    engine_core = getattr(engine, "engine_core", None)
+    if engine_core is not None and hasattr(engine_core, "shutdown"):
+        engine_core.shutdown()
+
 
 if __name__ == "__main__":
     args = parse_args()

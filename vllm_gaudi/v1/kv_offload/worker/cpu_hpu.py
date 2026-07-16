@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from collections.abc import Iterator
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
@@ -15,20 +14,14 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
-    GPULoadStoreSpec,
     LoadStoreSpec,
+    TransferResult,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import (
-    CpuGpuOffloadingHandlers,
+    CPUOffloadingWorker,
     SingleDirectionOffloadingHandler,
 )
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.worker.worker import (
-    OffloadingHandler,
-    TransferResult,
-    TransferSpec,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import OffloadingConnectorWorker
 
 logger = init_logger(__name__)
@@ -140,7 +133,6 @@ def SingleDirectionOffloadingHandler_init_(
             group_block_size_in_bytes += self.tensor_block_size_in_bytes[kv_cache_data_ref.tensor_idx]
         self.group_block_size_in_bytes.append(group_block_size_in_bytes)
 
-    self.transfer_type = ("GPU", "CPU") if self.gpu_to_cpu else ("CPU", "GPU")
     # job_id -> event
     self._transfer_events: dict[int, torch.Event] = {}  # type: ignore[misc]
     # queue of transfers (job_id, stream, event)
@@ -151,8 +143,7 @@ def SingleDirectionOffloadingHandler_init_(
     self._event_pool: list[torch.Event] = []  # type: ignore[misc]
 
 
-def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
-    src_spec, dst_spec = transfer_spec
+def transfer_async(self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec) -> bool:
     assert isinstance(src_spec, BlockIDsLoadStoreSpec)
     assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
 
@@ -178,8 +169,8 @@ def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
     src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
     stream = self._stream_pool.pop() if self._stream_pool else torch.hpu.Stream()
-    start_event = (self._event_pool.pop() if self._event_pool else torch.Event(enable_timing=True))
-    end_event = (self._event_pool.pop() if self._event_pool else torch.Event(enable_timing=True))
+    start_event = self._event_pool.pop() if self._event_pool else torch.Event(enable_timing=True)
+    end_event = self._event_pool.pop() if self._event_pool else torch.Event(enable_timing=True)
 
     if self.gpu_to_cpu:
         # wait for model computation to finish before offloading
@@ -235,7 +226,6 @@ def get_finished(self) -> list[TransferResult]:
             success=True,
             transfer_size=transfer.num_bytes,
             transfer_time=transfer_time,
-            transfer_type=self.transfer_type,
         )
         results.append(result)
         self._stream_pool.append(transfer.stream)
@@ -243,6 +233,13 @@ def get_finished(self) -> list[TransferResult]:
         self._event_pool.append(transfer.start_event)
         del self._transfer_events[transfer.job_id]
     return results
+
+
+def wait(self, job_ids: set[int]) -> None:
+    for job_id in job_ids:
+        event = self._transfer_events.get(job_id)
+        if event is not None:
+            event.synchronize()
 
 
 def shutdown(self) -> None:
@@ -256,12 +253,27 @@ def shutdown(self) -> None:
     self.dst_tensors.clear()
 
 
-def CpuGpuOffloadingHandlers_init_(
+def CPUOffloadingWorker_init_(
     self,
     kv_caches: CanonicalKVCaches,
     block_size_factor: int,
     num_cpu_blocks: int,
+    mmap_region=None,
 ):
+    """HPU CPUOffloadingWorker initializer.
+
+    Allocates CPU staging tensors and composes one store-direction and one
+    load-direction ``SingleDirectionOffloadingHandler`` exposed through the
+    explicit ``submit_store`` / ``submit_load`` API introduced upstream in
+    vLLM PR #45053.
+
+    Args:
+        kv_caches: canonical GPU KV cache tensors to offload.
+        block_size_factor: ratio of CPU page size to GPU page size.
+        num_cpu_blocks: number of CPU blocks to allocate.
+        mmap_region: unused on HPU; accepted for upstream API parity.
+    """
+    del mmap_region  # HPU offloading does not use a shared mmap region.
     pin_memory = is_pin_memory_available()
     logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
     gpu_tensors: list[torch.Tensor] = []
@@ -280,7 +292,7 @@ def CpuGpuOffloadingHandlers_init_(
         gpu_tensors.append(gpu_tensor)
         cpu_tensors.append(cpu_tensor)
 
-    self.gpu_to_cpu_handler = SingleDirectionOffloadingHandler(
+    self._store_handler = SingleDirectionOffloadingHandler(
         gpu_tensors=gpu_tensors,
         cpu_tensors=cpu_tensors,
         block_size_factor=block_size_factor,
@@ -288,7 +300,7 @@ def CpuGpuOffloadingHandlers_init_(
         gpu_to_cpu=True,
     )
 
-    self.cpu_to_gpu_handler = SingleDirectionOffloadingHandler(
+    self._load_handler = SingleDirectionOffloadingHandler(
         gpu_tensors=gpu_tensors,
         cpu_tensors=cpu_tensors,
         block_size_factor=block_size_factor,
@@ -297,28 +309,42 @@ def CpuGpuOffloadingHandlers_init_(
     )
 
 
-def get_handlers(
-    self,
-    kv_caches: CanonicalKVCaches,
-) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-    if not self._handlers:
-        self._handlers = CpuGpuOffloadingHandlers(
-            kv_caches=kv_caches,
-            block_size_factor=self.block_size_factor,
-            num_cpu_blocks=self.num_blocks,
-        )
-
-    assert self._handlers is not None
-    yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler
-    yield CPULoadStoreSpec, GPULoadStoreSpec, self._handlers.cpu_to_gpu_handler
+def submit_store(self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec) -> bool:
+    """Async GPU -> CPU transfer."""
+    return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
 
 
-CPUOffloadingSpec.get_handlers = get_handlers
+def submit_load(self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec) -> bool:
+    """Async CPU -> GPU transfer."""
+    return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
+
+
+def worker_get_finished(self) -> list[TransferResult]:
+    return self._store_handler.get_finished() + self._load_handler.get_finished()
+
+
+def worker_wait(self, job_ids: set[int]) -> None:
+    self._store_handler.wait(job_ids)
+    self._load_handler.wait(job_ids)
+
+
+def worker_shutdown(self) -> None:
+    self._store_handler.shutdown()
+    self._load_handler.shutdown()
+
+
 SingleDirectionOffloadingHandler.__init__ = SingleDirectionOffloadingHandler_init_
 SingleDirectionOffloadingHandler.transfer_async = transfer_async
 SingleDirectionOffloadingHandler.get_finished = get_finished
+SingleDirectionOffloadingHandler.wait = wait
 SingleDirectionOffloadingHandler.shutdown = shutdown
-CpuGpuOffloadingHandlers.__init__ = CpuGpuOffloadingHandlers_init_
+
+CPUOffloadingWorker.__init__ = CPUOffloadingWorker_init_
+CPUOffloadingWorker.submit_store = submit_store
+CPUOffloadingWorker.submit_load = submit_load
+CPUOffloadingWorker.get_finished = worker_get_finished
+CPUOffloadingWorker.wait = worker_wait
+CPUOffloadingWorker.shutdown = worker_shutdown
 
 
 def register_kv_caches(
@@ -360,7 +386,7 @@ def register_kv_caches(
                 # because HPU may have extra padding blocks in storage.
                 per_tensor_page_size = t[0].numel() * t.element_size()
                 # Reshape to (num_blocks, page_size_bytes) as int8
-                canonical = (t.contiguous().view(torch.int8).reshape(num_blocks, per_tensor_page_size))
+                canonical = t.contiguous().view(torch.int8).reshape(num_blocks, per_tensor_page_size)
                 block_tensors_for_layer.append(canonical)
 
             tensors_per_block[layer_name] = tuple(block_tensors_for_layer)
@@ -401,7 +427,32 @@ def register_kv_caches(
         group_data_refs=group_data_refs,
     )
 
-    self._register_handlers(canonical_kv_caches)
+    self._init_worker(canonical_kv_caches)
 
 
 OffloadingConnectorWorker.register_kv_caches = register_kv_caches
+
+
+def _hpu_get_worker(self, kv_caches: CanonicalKVCaches):
+    """HPU ``CPUOffloadingSpec.get_worker`` without the CUDA/XPU platform guard.
+
+    Upstream ``get_worker`` gates the CPU KV-offload entry point on
+    ``current_platform.is_cuda_alike() or is_xpu()``, which raises on HPU. The
+    HPU offloading path is implemented and validated via the
+    ``CPUOffloadingWorker`` overrides in this module, so this mirrors upstream
+    minus that guard, staying a thin wrapper over ``create_worker``.
+
+    Args:
+        kv_caches: canonicalized GPU KV caches to offload.
+
+    Returns:
+        The cached ``OffloadingWorker`` for this spec.
+    """
+    if not self._worker:
+        self._worker = self.create_worker(kv_caches)
+
+    assert self._worker is not None
+    return self._worker
+
+
+CPUOffloadingSpec.get_worker = _hpu_get_worker

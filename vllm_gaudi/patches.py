@@ -259,6 +259,124 @@ def _patch_batched_count_greater_than() -> None:
     _sampler_mod.batched_count_greater_than = _hpu_batched_count_greater_than
 
 
+_GRANITE_LEGACY_LAYER_ALIASES = {
+    "full_attention": "attention",
+    "linear_attention": "mamba",
+}
+
+
+def _patch_granite_hybrid_layer_types() -> None:
+    """Accept transformers>=5 remapped hybrid layer-type names for GraniteMoeHybrid.
+
+    transformers>=5 rewrites the legacy hybrid ``layer_types`` values on config
+    load ("attention" -> "full_attention", "mamba" -> "linear_attention"; see
+    ``remap_legacy_layer_types`` in transformers ``configuration_utils.py``).
+    Hub checkpoints still store the legacy names, so the rename happens in
+    memory. vLLM's ``ALL_DECODER_LAYER_TYPES`` in ``granitemoehybrid.py`` only
+    keys the legacy names, so the remapped values raise
+    ``KeyError: 'linear_attention'`` at ``get_layer`` during model construction
+    (before any HPU kernel runs).
+
+    Guarded so this is a no-op once the value is already keyed (e.g. upstream
+    vLLM PR #47634 merged, or the module shape changed).
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/47634
+    """
+    import vllm.model_executor.models.granitemoehybrid as _granite_mod
+
+    layer_types = getattr(_granite_mod, "ALL_DECODER_LAYER_TYPES", None)
+    if not isinstance(layer_types, dict):
+        return  # Module shape changed — nothing to patch.
+    if "linear_attention" in layer_types or "full_attention" in layer_types:
+        return  # Already handles the remapped names (e.g. PR #47634 merged).
+    if "attention" not in layer_types or "mamba" not in layer_types:
+        return  # Legacy keys absent — not the shape this patch targets.
+
+    layer_types["full_attention"] = layer_types["attention"]
+    layer_types["linear_attention"] = layer_types["mamba"]
+
+
+def _hpu_get_num_layers_by_block_type(self, parallel_config, block_type="attention"):
+    """HPU-safe replacement for ``ModelConfig.get_num_layers_by_block_type``.
+
+    Identical to the upstream implementation, but normalizes both sides of the
+    ``layers_block_type`` comparison so either naming convention matches. Under
+    transformers>=5 ``layers_block_type`` aliases the remapped ``layer_types``
+    ("attention" -> "full_attention", "mamba" -> "linear_attention"), while the
+    HPU model runner queries with the legacy names ("attention", "mamba"). Left
+    unpatched, the counts collapse to zero and the hybrid KV-cache setup breaks.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/47634
+    """
+    attn_block_type = block_type == "attention"
+    is_transformer = not self.is_hybrid and not self.has_noops and not self.is_attention_free
+    start, end = self.get_layers_start_end_indices(parallel_config)
+
+    if is_transformer:
+        return end - start if attn_block_type else 0
+    elif self.is_attention_free:
+        return 0 if attn_block_type else end - start
+    elif self.has_noops:
+        block_configs = self.hf_config.block_configs
+        return sum(not bc.attention.no_op for bc in block_configs[start:end])
+    else:
+        # Hybrid model Jamba
+        layers_block_type_value = getattr(self.hf_text_config, "layers_block_type", None)
+        if layers_block_type_value is not None:
+            if self.model_arch_config.text_model_type == "zamba2":
+                if attn_block_type:
+                    return sum(t == "hybrid" for t in layers_block_type_value[start:end])
+                else:
+                    return self.get_num_layers(parallel_config)
+            aliases = _GRANITE_LEGACY_LAYER_ALIASES
+            normalized_block_type = aliases.get(block_type, block_type)
+            return sum(aliases.get(t, t) == normalized_block_type for t in layers_block_type_value[start:end])
+
+        # Hybrid model Minimax
+        attn_type_list = getattr(self.hf_config, "attn_type_list", None)
+        if attn_type_list:
+            return sum(t == 1 for t in attn_type_list[start:end])
+
+        # Hybrid model Qwen3Next Qwen3.5 Series
+        layer_types_value = getattr(self.hf_text_config, "layer_types", None)
+        if layer_types_value is not None:
+            if block_type == "attention":
+                return sum(t == "full_attention" for t in layer_types_value[start:end])
+            elif block_type == "linear_attention":
+                return sum(t == "linear_attention" for t in layer_types_value[start:end])
+            else:
+                return sum(t == block_type for t in layer_types_value[start:end])
+
+        if layers_block_type_value is None and attn_type_list is None and layer_types_value is None:
+            raise ValueError("The model is an hybrid without a layers_block_type or an "
+                             "attn_type_list, or a layer_types in the hf_config, "
+                             f"cannot determine the num of {block_type} layers")
+        raise AssertionError(f"Unsupported block type: {block_type}")
+
+
+def _patch_get_num_layers_by_block_type() -> None:
+    """Install the HPU-safe ``get_num_layers_by_block_type`` replacement.
+
+    Guarded by ``inspect.getsource`` so this is a no-op once upstream vLLM
+    normalizes the ``layers_block_type`` comparison itself (PR #47634).
+    """
+    import inspect
+
+    from vllm.config import ModelConfig
+
+    try:
+        source = inspect.getsource(ModelConfig.get_num_layers_by_block_type)
+    except (OSError, TypeError):
+        return  # Source unavailable — leave upstream in place.
+
+    if "get_num_layers_by_block_type" not in source or "layers_block_type" not in source:
+        return  # Method shape changed — do not risk an incompatible override.
+    if "_GRANITE_LEGACY_LAYER_ALIASES" in source or "normalized_block_type" in source:
+        return  # Already normalizes (e.g. PR #47634 merged).
+
+    ModelConfig.get_num_layers_by_block_type = _hpu_get_num_layers_by_block_type
+
+
 def _patch_cleanup_dist_env_and_memory() -> None:
     """Install the HPU-safe ``cleanup_dist_env_and_memory`` replacement.
 
@@ -305,6 +423,8 @@ def apply() -> None:
         _patch_cleanup_dist_env_and_memory()
         _patch_batched_count_greater_than()
         _patch_gather_logprobs()
+        _patch_granite_hybrid_layer_types()
+        _patch_get_num_layers_by_block_type()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 

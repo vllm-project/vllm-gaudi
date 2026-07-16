@@ -28,8 +28,9 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.server_utils import get_uvicorn_log_config
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.entrypoints.serve.utils.api_utils import cli_env_setup, process_lora_modules
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -498,10 +499,15 @@ async def _init_multi_model_state(
     frontend_settings = _resolve_frontend_settings(args, model_frontend_overrides, active_model_name)
     resolved_chat_template = load_chat_template(frontend_settings.chat_template)
 
-    state.openai_serving_render = OpenAIServingRender(
+    # Upstream vllm#44285 split OpenAIServingRender into a thin entrypoint
+    # (ServingRender) plus an OnlineRenderer that owns the chat-template, tool
+    # and reasoning configuration. Mirror that construction here so the
+    # multi-model server matches the engine-backed api_server path. vllm#44512
+    # (scale-out consolidation) then dropped the derenderer arg from
+    # ServingRender.__init__; derender now lives in a separate ServingDerender.
+    render_kwargs = dict(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
-        model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -512,10 +518,17 @@ async def _init_multi_model_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
+    state.online_renderer = OnlineRenderer(**render_kwargs)
+
+    state.openai_serving_render = ServingRender(
+        state.openai_serving_models,
+        state.online_renderer,
+        request_logger=request_logger,
+    )
 
     state.serving_tokenization = ServingTokenization(
         state.openai_serving_models,
-        state.openai_serving_render,
+        state.online_renderer,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -697,7 +710,7 @@ async def _run_multi_model_server_worker(
 async def _run_multi_model_server(args: Namespace) -> None:
     decorate_logs("APIServer")
 
-    listen_address, sock = setup_server(args)
+    listen_address, sock = setup_server(args, reuse_port=False)
     await _run_multi_model_server_worker(listen_address, sock, args)
 
 
