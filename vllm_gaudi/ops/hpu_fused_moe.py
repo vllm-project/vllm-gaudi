@@ -216,6 +216,23 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
             topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
             topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.moe_config.is_sequence_parallel)
+        elif layer.moe_config.is_sequence_parallel:
+            # Sequence-parallel MoE without data parallelism (TP>1 + EP with the
+            # allgather_reducescatter backend => use_sequence_parallel_moe). The
+            # model block chunks tokens by tp_size before the experts and
+            # all-gathers afterwards, expecting `self.experts` to be
+            # token-neutral. Upstream MoERunner._maybe_combine (mirrored in
+            # patched_fused_moe_forward) reduce-scatters the expert output over
+            # the EP group whenever is_sequence_parallel is set, regardless of
+            # dp_size. The paired dispatch all-gather is set up via dispatch_fn
+            # only for dp_size > 1, so at dp_size == 1 the combine is unpaired
+            # and halves the token count -> the block's final reshape fails.
+            # All-gather x / topk over the EP group here to restore the
+            # dispatch/combine symmetry (dp_metadata is None at dp_size == 1, so
+            # dispatch_tensor allocates its own EP-sized output).
+            x = dispatch_tensor(x, None, is_sequence_parallel=True)
+            topk_ids = dispatch_tensor(topk_ids, None, is_sequence_parallel=True)
+            topk_weights = dispatch_tensor(topk_weights, None, is_sequence_parallel=True)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
@@ -227,7 +244,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=_normalize_moe_activation(layer.activation),
         )
-        if layer.moe_config.dp_size > 1:
+        if layer.moe_config.dp_size > 1 or layer.moe_config.is_sequence_parallel:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
             return output.view(*input_shape)
@@ -273,18 +290,31 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
             topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
             topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.moe_config.is_sequence_parallel)
+        elif layer.moe_config.is_sequence_parallel:
+            # See apply_monolithic: at dp_size == 1 with sequence-parallel MoE
+            # (TP>1 + EP), MoERunner._maybe_combine reduce-scatters the expert
+            # output over the EP group but no paired dispatch all-gather runs
+            # (dispatch_fn is wired only for dp_size > 1). Restore symmetry by
+            # all-gathering the inputs over the EP group so the combine leaves
+            # the token count unchanged for the block's post-experts reshape.
+            x = dispatch_tensor(x, None, is_sequence_parallel=True)
+            topk_ids = dispatch_tensor(topk_ids, None, is_sequence_parallel=True)
+            topk_weights = dispatch_tensor(topk_weights, None, is_sequence_parallel=True)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
         if self.model_type in ["gpt_oss"]:
-            return layer.moe_op(
+            gpt_oss_out = layer.moe_op(
                 x,
                 topk_ids.to(torch.int64),
                 topk_weights.to(x.dtype),
                 permuted_weights=True,
                 activation=_normalize_moe_activation(layer.activation),
-            ).view(*input_shape)
+            )
+            if layer.moe_config.dp_size > 1 or layer.moe_config.is_sequence_parallel:
+                return gpt_oss_out.view(*(gpt_oss_out.size(0), *input_shape[1:]))
+            return gpt_oss_out.view(*input_shape)
 
         output = layer.moe_op(
             x,
@@ -293,7 +323,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             permuted_weights=True,
             activation=_normalize_moe_activation(layer.activation),
         )
-        if layer.moe_config.dp_size > 1:
+        if layer.moe_config.dp_size > 1 or layer.moe_config.is_sequence_parallel:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
             return output.view(*input_shape)
