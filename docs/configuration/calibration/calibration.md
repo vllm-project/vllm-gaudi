@@ -32,6 +32,8 @@ The calibration procedure works with any dataset that contains the `system_promp
 
 For the [DeepSeek-R1](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) series models, which contain 256 experts, provide a diverse and sufficiently large sample set to ensure that all experts are properly activated during calibration. Through testing, we observed that using [NeelNanda/pile-10k](https://huggingface.co/datasets/NeelNanda/pile-10k) and selecting 512 samples, each with at least 1,024 tokens, provides effective calibration coverage.
 
+> **Important (MoE models calibrated with expert parallelism).** When you calibrate a Mixture-of-Experts model with `-u` (expert parallelism) on more than one card, each rank only measures its **EP-local** experts (for example, 16 of 128 experts per rank for Llama-4 Maverick on TP8/EP8). These per-rank measurements must be unified so that every expert has its own scale, otherwise the non-local experts fall back to coarse quantization at serve time and FP8 accuracy drops. The unify step runs only when a target rank is given, so pass **both `-u` and `-r`** to `calibrate_model.sh` (for example `-r 1` to unify onto a single card), then use `step-6-expand-measurements.py` to expand to the deployment card count. **Passing `-u` with `TP>1` but without `-r` skips unification** and leaves only the EP-local experts measured. (Small-expert models such as Mixtral are not affected.) See the [MoE recommendations](calibration_multi_node.md#recommendations-for-advanced-usage-for-moe-models) for the full unify-and-expand procedure.
+
 ## Calibration Procedures
 
 Refer to the following chapters to follow the calibration procedure for your setup:
