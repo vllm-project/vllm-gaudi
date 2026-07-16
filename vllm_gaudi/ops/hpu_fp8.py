@@ -253,6 +253,17 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
             topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
             topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, is_sequence_parallel)
+        elif is_sequence_parallel:
+            # See HPUCompressedTensorsW8A8Fp8MoEMethod.apply_monolithic: at
+            # dp_size == 1 with sequence-parallel MoE (TP>1 + EP),
+            # MoERunner._maybe_combine reduce-scatters the expert output over the
+            # EP group but no paired dispatch all-gather runs (dispatch_fn is
+            # wired only for dp_size > 1). Restore symmetry by all-gathering the
+            # inputs over the EP group so the combine leaves the token count
+            # unchanged for the block's post-experts reshape.
+            x = dispatch_tensor(x, None, is_sequence_parallel=True)
+            topk_ids = dispatch_tensor(topk_ids, None, is_sequence_parallel=True)
+            topk_weights = dispatch_tensor(topk_weights, None, is_sequence_parallel=True)
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])

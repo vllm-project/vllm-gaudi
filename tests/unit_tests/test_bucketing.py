@@ -352,8 +352,9 @@ _REAL_BUGGY_MAX_DECODE_BLOCKS = 183808  # min(91964//128*256, 3593*256//4)
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
 def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
     """Verify decode bucket config matches expected values for real scenario.
-    With non-contiguous PA: block config should be
-    [1, 256, ceil(91964/128)*256, ceil(log2(that))+1]
+    With non-contiguous PA: block config limit includes extra buckets
+    when max_decode_blocks > max_blocks*3 to maintain bucket density
+    at high block counts (longprompt density fix).
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
@@ -366,6 +367,11 @@ def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
 
     expected_max = math.ceil(_REAL_MAX_MODEL_LEN / _REAL_BLOCK_SIZE) * _REAL_MAX_NUM_SEQS
     expected_limit = math.ceil(math.log2(expected_max)) + 1
+    # Account for extra buckets added when max_decode_blocks exceeds
+    # bounded_max (longprompt density compensation)
+    bounded_max = _REAL_MAX_BLOCKS * 3
+    if expected_max > bounded_max:
+        expected_limit += math.ceil(math.log2(expected_max / bounded_max)) + 1
     assert block_cfg[0] == 1, f"block min: expected 1, got {block_cfg[0]}"
     assert block_cfg[1] == _REAL_MAX_NUM_SEQS, (f"block step: expected {_REAL_MAX_NUM_SEQS}, got {block_cfg[1]}")
     assert block_cfg[2] == expected_max, (f"block max: expected {expected_max}, got {block_cfg[2]}")

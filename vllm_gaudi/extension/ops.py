@@ -953,17 +953,27 @@ def gaudi_weight_wrapper(weight_loader):
 
     def wrapper(*args, **kwargs):
         if get_config().scale_adjustment:
-            # args[0] is parameter, args[1] is loaded_weight
+            # loaded_weight may be passed positionally (args[1]) or as a
+            # keyword. Upstream FusedMoE (vllm#47197) now calls
+            # param.weight_loader(param=..., loaded_weight=..., ...) with
+            # keyword-only args, so probe both.
             # weights will be always in fp8, but scales will be in fp32,
             # so we can detect it by dtype
-            loaded_weight = args[1]
+            in_kwargs = "loaded_weight" in kwargs
+            if in_kwargs:
+                loaded_weight = kwargs["loaded_weight"]
+            else:
+                loaded_weight = args[1]
             if loaded_weight.dtype == torch.float8_e4m3fn:
                 loaded_weight = (loaded_weight.float() * 0.5).to(torch.float8_e4m3fn)
             else:
                 loaded_weight = (loaded_weight.data * 2.0)
-            args = (args[0], loaded_weight) + args[2:]
+            if in_kwargs:
+                kwargs["loaded_weight"] = loaded_weight
+            else:
+                args = (args[0], loaded_weight) + args[2:]
 
-        weight_loader(*args, **kwargs)
+        return weight_loader(*args, **kwargs)
 
     return wrapper
 
