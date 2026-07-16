@@ -11,13 +11,12 @@ This document provides security guidance for deploying and operating the vLLM Ha
 
 The vLLM Hardware Plugin for Intel® Gaudi® is a hardware plugin that runs on top of the [vLLM serving engine](https://docs.vllm.ai/). It shares the same architecture, deployment model, and threat surface as upstream vLLM.
 
-!!! important
-    **Whatever applies to vLLM applies to the vLLM Hardware Plugin for Intel® Gaudi® as well.** Before deploying this project, read and follow the upstream vLLM security documentation:
+**Whatever applies to vLLM applies to the vLLM Hardware Plugin for Intel® Gaudi® as well.** Before deploying this project, read and follow the upstream vLLM security documentation:
 
-    - [vLLM Security Guide](https://docs.vllm.ai/en/latest/usage/security.html) — security assumptions, deployment recommendations, and hardening advice.
-    - [vLLM Security Policy (`SECURITY.md`)](https://github.com/vllm-project/vllm/blob/main/SECURITY.md) — vulnerability severity model and coordinated disclosure process.
+- [vLLM Security Guide](https://docs.vllm.ai/en/latest/usage/security.html) — security assumptions, deployment recommendations, and hardening advice.
+- [vLLM Security Policy (`SECURITY.md`)](https://github.com/vllm-project/vllm/blob/main/SECURITY.md) — vulnerability severity model and coordinated disclosure process.
 
-    The recommendations on those pages — network isolation between nodes, running behind a reverse proxy, restricting endpoint exposure, avoiding development mode in production, and loading models and adapters only from trusted sources — apply directly to Intel® Gaudi® deployments.
+The recommendations on those pages — network isolation between nodes, running behind a reverse proxy, restricting endpoint exposure, avoiding development mode in production, and loading models and adapters only from trusted sources — apply directly to Intel® Gaudi® deployments.
 
 ## General deployment recommendations
 
