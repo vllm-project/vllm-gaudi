@@ -5868,8 +5868,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # to avoid GC errors. In torch.compile mode, run it inside
         # for faster recipe-only compilation.
         use_torch_compile = (not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager)
-        if self.supports_mm_inputs and not use_torch_compile:
+        # VLLM_SKIP_MM_WARMUP: when set, skip ONLY the multimodal-graph warmup
+        # while still running prompt+decode warmup. Useful for models whose
+        # vision tower fails to compile on HPU (e.g. when an upstream module
+        # uses a torch._inductor path without an 'hpu' backend), and when the
+        # user is running the model text-only and does not need the vision
+        # path. Differs from VLLM_SKIP_WARMUP, which disables all warmup.
+        skip_mm_warmup = os.environ.get('VLLM_SKIP_MM_WARMUP', '0').lower() in ('1', 'true')
+        if self.supports_mm_inputs and not use_torch_compile and not skip_mm_warmup:
             self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
+        elif self.supports_mm_inputs and not use_torch_compile and skip_mm_warmup:
+            logger.info("Skipping multimodal warmup graphs because VLLM_SKIP_MM_WARMUP is set.")
 
         compile_only_mode_context = functools.partial(bc.env_setting, "PT_COMPILE_ONLY_MODE", True)
         can_use_compile_only_mode = True
@@ -5883,8 +5892,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            'Warmup time will be negatively impacted. '
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context() if can_use_compile_only_mode else contextlib.nullcontext():
-            if self.supports_mm_inputs and use_torch_compile:
+            if self.supports_mm_inputs and use_torch_compile and not skip_mm_warmup:
                 self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
+            elif self.supports_mm_inputs and use_torch_compile and skip_mm_warmup:
+                logger.info("Skipping multimodal warmup graphs because VLLM_SKIP_MM_WARMUP is set.")
 
             if not self.model_config.enforce_eager and not self.is_pooling_model:
                 assert self.mem_margin is not None, \
