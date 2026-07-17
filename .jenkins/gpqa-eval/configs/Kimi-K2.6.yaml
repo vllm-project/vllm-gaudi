@@ -21,8 +21,7 @@ tasks:
 limit: 16
 tensor_parallel_size: 8
 enable_expert_parallel: true
-max_model_len: 16384
-dtype: "bfloat16"
+max_model_len: 131072
 trust_remote_code: true
 thinking: false
 gen_kwargs: "temperature=0.0,max_gen_toks=8192"
