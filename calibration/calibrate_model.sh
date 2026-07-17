@@ -22,7 +22,7 @@ usage() {
     echo "  -l    - limit number of samples in calibration dataset"
     echo "  -t    - tensor parallel size to run at (default: 1); NOTE: if t > 8 then we need a multi-node setup"
     echo "  -r    - rank of unified measurements, it should be smaller than original rank number and should be a factor of the original rank number"
-    echo "  -u    - unify measurement results based on expert parallelism rules (default: False), expert parallelism unification rule is unique, card 1 expert measurement will be extended to card 0 if unified to x from 2x cards number"
+    echo "  -u    - measure/quantize with expert parallelism and unify results based on expert-parallelism rules (default: False); the unification rule is unique, card 1 expert measurement will be extended to card 0 if unified to x from 2x cards number. NOTE: the unify step runs only when -r is also given; with TP>1 and -u but no -r the per-rank measurements are NOT unified and cover only each rank's EP-local experts, which degrades FP8 accuracy for many-expert MoE models (e.g. Llama-4 Maverick, DeepSeek)"
     echo "  -e    - set this flag to enable enforce_eager execution"
     echo
 }
@@ -138,6 +138,27 @@ if [[ -z "$MODEL_PATH" && -z "$FP8_DIR" && -z "$DATASET_PATH_OR_NAME" ]]; then
     echo "Model stub, source dataset path and output path for fp8 measurements must be provided."
     usage
     exit 1
+fi
+
+# With -u, measure/quantize (steps 2/4) run with expert parallelism, so on
+# TP>1 each rank only measures its EP-LOCAL experts (e.g. 16 of 128 per rank
+# for Llama-4 Maverick on TP8). The unify step (step 5) then merges these
+# per-rank sets back into the full global expert set - but it runs only when a
+# target rank is given via -r. Passing -u with TP>1 but WITHOUT -r leaves the
+# per-rank measurements un-unified: for models whose experts are split across
+# ranks, the resulting scales cover only the local experts, and the rest fall
+# back to coarse quantization at serve time -> FP8 accuracy loss. Warn so this
+# is caught early. (Small-expert models like Mixtral are unaffected.)
+if [[ -n "$USE_EP" && -z "$RANK" && $TP_SIZE -gt 1 ]]; then
+    echo "WARNING: -u is set with tensor-parallel size $TP_SIZE but -r is not." >&2
+    echo "         Steps 2/4 measure experts with expert parallelism (per-rank," >&2
+    echo "         EP-local experts only), and the unify step that merges them into" >&2
+    echo "         the full expert set runs only when -r is given. Without -r the" >&2
+    echo "         measurements may cover only each rank's local experts, which" >&2
+    echo "         degrades FP8 accuracy for models with many experts (e.g. Llama-4" >&2
+    echo "         Maverick, DeepSeek). Re-run with -r (e.g. -r 1 to unify onto a" >&2
+    echo "         single card), then use step-6-expand-measurements.py to expand to" >&2
+    echo "         the target card count. See the calibration docs (MoE section)." >&2
 fi
 
 # Store the provided MODEL_PATH name in a variable
