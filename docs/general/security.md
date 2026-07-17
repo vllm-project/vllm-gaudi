@@ -7,16 +7,22 @@ title: Security
 
 This document provides security guidance for deploying and operating the vLLM Hardware Plugin for Intel® Gaudi®.
 
-## Follow the upstream vLLM security guidance
+## Upstream vLLM security guidance
 
 The vLLM Hardware Plugin for Intel® Gaudi® is a hardware plugin that runs on top of the [vLLM serving engine](https://docs.vllm.ai/). It shares the same architecture, deployment model, and threat surface as upstream vLLM.
 
-**Whatever applies to vLLM applies to the vLLM Hardware Plugin for Intel® Gaudi® as well.** Before deploying this project, read and follow the upstream vLLM security documentation:
+The vLLM Hardware Plugin for Intel® Gaudi® follows the same security assumptions as vLLM. Before deploying this project, read and follow the upstream vLLM security documentation:
 
-- [vLLM Security Guide](https://docs.vllm.ai/en/latest/usage/security.html) - security assumptions, deployment recommendations, and hardening advice.
-- [vLLM Security Policy (`SECURITY.md`)](https://github.com/vllm-project/vllm/blob/main/SECURITY.md) - vulnerability severity model and coordinated disclosure process.
+- [vLLM Security Guide](https://docs.vllm.ai/en/latest/usage/security.html): Security assumptions, deployment recommendations, and hardening advice
+- [vLLM Security Policy (`SECURITY.md`)](https://github.com/vllm-project/vllm/blob/main/SECURITY.md): Vulnerability severity model and coordinated disclosure process
 
-The recommendations on those pages - network isolation between nodes, running behind a reverse proxy, restricting endpoint exposure, avoiding development mode in production, and loading models and adapters only from trusted sources - apply directly to Intel® Gaudi® deployments.
+These recommendations apply directly to Intel® Gaudi® deployments. In particular:
+
+- Network isolation between nodes
+- Running behind a reverse proxy
+- Restricting endpoint exposure
+- Avoiding development mode in production
+- Loading models and adapters only from trusted sources
 
 ## General deployment recommendations
 
@@ -30,7 +36,7 @@ The following advice complements the upstream guidance and is worth reviewing be
 
 - **Never enable development mode in production.** Do not set `VLLM_SERVER_DEV_MODE=1` on a production deployment, as it exposes additional debug endpoints.
 
-- **Protect secrets.** Keep tokens (for example `HF_TOKEN`) and other credentials out of source control and out of container images. Provide them through environment variables or a secrets manager, and scope them to the minimum required access.
+- **Protect secrets.** Keep tokens, such as `HF_TOKEN`, and other credentials out of source control and out of container images. Provide them through environment variables or a secrets manager, and scope them to the minimum required access.
 
 - **Keep dependencies up to date.** Track upstream vLLM and Intel® Gaudi® software releases and apply security fixes promptly.
 
