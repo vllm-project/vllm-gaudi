@@ -26,8 +26,7 @@ import torch.nn.functional as F
 import vllm.model_executor.models.kimi_k25_vit as _vit
 
 
-def apply_rope(xq: torch.Tensor, xk: torch.Tensor,
-               freqs_cis: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def apply_rope(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Real-valued replacement for ``kimi_k25_vit.apply_rope``.
 
     ``freqs_cis`` is the real ``(..., head_dim/2, 2)`` (cos, sin) tensor produced
@@ -94,8 +93,8 @@ def get_rope_shape(org, interpolation_mode, shape):
     default Inductor backend, which has no 'hpu' device (``KeyError: 'hpu'``).
     It is a small ``F.interpolate`` on the pos-emb grid, so eager costs nothing.
     """
-    return (F.interpolate(org.permute(
-        (2, 0, 1)).unsqueeze(0), size=shape, mode=interpolation_mode).squeeze(0).permute((1, 2, 0)).flatten(end_dim=1))
+    return (F.interpolate(org.permute((2, 0, 1)).unsqueeze(0), size=shape, mode=interpolation_mode).squeeze(0).permute(
+        (1, 2, 0)).flatten(end_dim=1))
 
 
 # Swap the complex-dtype / Inductor-compiled callables in the upstream module so

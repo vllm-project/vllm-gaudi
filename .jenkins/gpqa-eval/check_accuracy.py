@@ -25,20 +25,17 @@ def find_results_file(results_dir):
     files = glob.glob(pattern, recursive=True)
     if not files:
         # Some lm-eval versions write results.json directly.
-        files = glob.glob(os.path.join(results_dir, "**", "*.json"),
-                          recursive=True)
+        files = glob.glob(os.path.join(results_dir, "**", "*.json"), recursive=True)
     if not files:
-        raise FileNotFoundError(
-            f"No lm-eval results JSON found under {results_dir}")
+        raise FileNotFoundError(f"No lm-eval results JSON found under {results_dir}")
     return max(files, key=os.path.getmtime)
 
 
 def extract_metric(task_results, metric):
     if metric in task_results:
         return float(task_results[metric])
-    raise KeyError(
-        f"Metric {metric!r} not found. Available: "
-        f"{[k for k in task_results if not k.endswith('_stderr,')]}")
+    raise KeyError(f"Metric {metric!r} not found. Available: "
+                   f"{[k for k in task_results if not k.endswith('_stderr,')]}")
 
 
 def main():
@@ -53,9 +50,8 @@ def main():
         data = json.load(f)
     task_results = data.get("results", {}).get(task)
     if task_results is None:
-        raise KeyError(
-            f"Task {task!r} not present in results ({results_file}). "
-            f"Available: {list(data.get('results', {}).keys())}")
+        raise KeyError(f"Task {task!r} not present in results ({results_file}). "
+                       f"Available: {list(data.get('results', {}).keys())}")
 
     print(f"[check_accuracy] file={results_file}")
 
