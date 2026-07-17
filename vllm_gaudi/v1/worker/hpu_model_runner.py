@@ -1404,7 +1404,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_cudagraph_capture_size = self.vllm_config.compilation_config.max_cudagraph_capture_size
         if self.max_cudagraph_capture_size is None:
-            self.max_cudagraph_capture_size = self.max_num_batched_tokens
+            self.max_cudagraph_capture_size = max(self.max_num_batched_tokens, 16384)
         self.use_prefix_caching = (self.vllm_config.cache_config.enable_prefix_caching)
         self.bucketing_manager = HPUBucketingManager()
         max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill \
@@ -4821,9 +4821,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             num_blocks = attn_metadata.num_blocks()
             total_tokens = (batch_size * seq_len + num_blocks * attn_metadata.block_size)
             if total_tokens > self.max_cudagraph_capture_size:
-                logger.debug_once(f"Skipping HPU graph capture for prompt with [bs, query, num_blocks] = "
-                                  f"[{batch_size}, {seq_len}, {num_blocks}] due to total token count "
-                                  f"{total_tokens} exceeding the threshold of {self.max_cudagraph_capture_size}.")
+                logger.info_once(f"Skipping HPU graph capture for prompt with [bs, query, num_blocks] = "
+                                 f"[{batch_size}, {seq_len}, {num_blocks}] due to total token count "
+                                 f"{total_tokens} exceeding the threshold of {self.max_cudagraph_capture_size}.")
                 return False
         return True
 
