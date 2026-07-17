@@ -107,6 +107,11 @@ stages:
           cd .jenkins/vision && 
           VLLM_WEIGHT_LOAD_FORCE_SYNC=1 
           bash run-tests.sh -c configs/models-llama4-scout.txt -t 2
+      - name: gpqa_kimi_k26_g3_tp8
+        flavor: g3.l
+        command: >-
+          cd .jenkins/gpqa-eval &&
+          bash run-tests.sh -c configs/Kimi-K2.6.yaml
       - name: gsm8k_qwen35_g3_tp1
         flavor: g3
         command: >-
