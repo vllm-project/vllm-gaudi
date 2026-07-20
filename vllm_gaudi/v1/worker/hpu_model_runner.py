@@ -282,6 +282,116 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
         logger.info("Moved %d stray tensors to %s", moved, device)
 
 
+def _rebind_moe_op_weights_to_device(model: torch.nn.Module, device: str) -> None:
+    """Rebind ``moe_op`` expert-weight views onto the moved on-device Parameters.
+
+    ``nn.Module.to(device)`` moves only registered Parameters/buffers, so after
+    INC's ``model.to('hpu')`` the ``w13_weight`` / ``w2_weight`` Parameters live
+    on device while the ``moe_op`` per-expert ``MoeMatmul.weight`` attributes
+    (plain-attribute *views* built during ``process_weights_after_loading``) and
+    the ``_cached_w*_views`` tuples still point at the old host storage.
+
+    If left alone, ``_move_remaining_tensors_to_device`` materializes each stale
+    view as a *fresh* device allocation — one copy for the per-expert weights
+    and another for the cached-view tuple — producing two extra full copies of
+    every expert weight that starve the KV cache. (Upstream PR #41184 moved the
+    weights onto a ``RoutedExperts`` child, changing the ``.to()`` traversal
+    order so these views are no longer rebound automatically.)
+
+    Re-slice each per-expert weight from the moved Parameter so it becomes a
+    device view (single storage) and drop the stale caches so ``forward``
+    rebuilds them lazily from the on-device weights. Only stale (off-device)
+    views are rebound, so the FP8 convert path — where ``moe_op`` holds genuine
+    freshly registered quantized Parameters — is left untouched.
+    """
+    target_type = torch.device(device).type
+    rebound_ops = 0
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if moe_op is None:
+            continue
+        touched = False
+        for param_name, list_name in (("w13_weight", "w13_list"), ("w2_weight", "w2_list")):
+            param = getattr(module, param_name, None)
+            weight_list = getattr(moe_op, list_name, None)
+            if not isinstance(param, torch.Tensor) or weight_list is None:
+                continue
+            if param.device.type != target_type:
+                continue
+            if param.dim() == 0 or param.shape[0] != len(weight_list):
+                continue
+            for expert_id, item in enumerate(weight_list):
+                w = getattr(item, "weight", None)
+                # Only rebind stale host-side views; on-device quantized
+                # Parameters (FP8 convert path) are left as-is.
+                if isinstance(w, torch.Tensor) and w.device.type != target_type:
+                    item.weight = param.data[expert_id]
+                    touched = True
+        if touched:
+            # Drop stale cached view tuples so forward() rebuilds them as views
+            # of the rebound on-device weights instead of them being copied.
+            for cache_attr in ("_cached_w13_views", "_cached_w2_views", "_cached_w13_bias_views",
+                               "_cached_w2_bias_views"):
+                if hasattr(moe_op, cache_attr):
+                    setattr(moe_op, cache_attr, None)
+            rebound_ops += 1
+    if rebound_ops:
+        logger.info("Rebound MoE expert weights to on-device views on %d ops", rebound_ops)
+
+
+def _detach_moe_op_weights_to_independent(model: torch.nn.Module, device: str) -> None:
+    """Give each ``moe_op`` expert weight independent storage before FP8 convert.
+
+    After upstream PR #41184 every local expert lives inside a single contiguous
+    ``w13_weight`` / ``w2_weight`` Parameter and the ``moe_op`` per-expert
+    ``MoeMatmul.weight`` attributes are *slices* into it. A slice keeps the whole
+    parent storage alive, so during INC's ``convert`` the full bf16 parent cannot
+    be released as experts are quantized — bf16 (full) and the growing fp8 copies
+    coexist and OOM on large EP models (e.g. Llama-4 Maverick TP8/EP8).
+
+    Restore the pre-#41184 layout: replace each slice with an independent clone
+    and drop the contiguous parent. INC then frees each bf16 expert as soon as it
+    produces its fp8 replacement (incremental, never full bf16 + full fp8). Work
+    one layer at a time and free the parent immediately so the transient overhead
+    is bounded to a single layer rather than a second full model copy.
+    """
+    target_type = torch.device(device).type
+    detached_ops = 0
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if moe_op is None:
+            continue
+        touched = False
+        for param_name, list_name in (("w13_weight", "w13_list"), ("w2_weight", "w2_list")):
+            param = getattr(module, param_name, None)
+            weight_list = getattr(moe_op, list_name, None)
+            if not isinstance(param, torch.Tensor) or weight_list is None:
+                continue
+            if param.device.type != target_type:
+                continue
+            if param.dim() == 0 or param.shape[0] != len(weight_list):
+                continue
+            for expert_id, item in enumerate(weight_list):
+                w = getattr(item, "weight", None)
+                if isinstance(w, torch.Tensor):
+                    # Clone breaks the slice->parent storage link so the parent
+                    # can be freed; the clone owns its own storage.
+                    item.weight = param.data[expert_id].clone()
+                    touched = True
+            # Drop the contiguous parent; with every slice now independent its
+            # storage refcount hits zero and the bf16 block is released.
+            param.data = torch.empty(0, dtype=param.dtype, device=param.device)
+        if touched:
+            for cache_attr in ("_cached_w13_views", "_cached_w2_views", "_cached_w13_bias_views",
+                               "_cached_w2_bias_views"):
+                if hasattr(moe_op, cache_attr):
+                    setattr(moe_op, cache_attr, None)
+            detached_ops += 1
+            htorch.core.mark_step()
+    if detached_ops:
+        logger.info("Detached MoE expert weights to independent storage on %d ops", detached_ops)
+
+
 def _dedup_moe_op_weights(model: torch.nn.Module) -> None:
     """Release the dead duplicate device copy of MoE expert weights after INC.
 
@@ -4528,11 +4638,33 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 config = FP8Config.from_json_file(os.getenv("QUANT_CONFIG", ""))
                 disable_mark_scales_as_const = os.getenv("VLLM_DISABLE_MARK_SCALES_AS_CONST", "false") in ("1", "true")
                 self._inc_preprocess()
+                # Pre-stage weights on HPU with single-copy MoE expert views BEFORE
+                # INC patching. Both prepare() (measure) and convert() (quantize)
+                # end by calling model.to('hpu') on the whole model; if the plugin's
+                # moe_op per-expert views are still stale host tensors at that point,
+                # that move materializes a *second* on-device copy of every expert
+                # weight and OOMs on large EP models (e.g. Llama-4 Maverick TP8/EP8,
+                # ~2x per-card weights > HBM). Moving here first and rebinding the
+                # moe_op views onto the on-device Parameters keeps a single copy, so
+                # INC's internal move is a no-op. (Regressed by upstream PR #41184
+                # moving the weights onto a RoutedExperts child, which changed the
+                # .to() traversal order.)
+                if not is_fake_hpu():
+                    self.model = self.model.to("hpu")
+                    _rebind_moe_op_weights_to_device(self.model, "hpu")
+                    htorch.core.mark_step()
                 if config.measure:
                     assert self.parallel_config.data_parallel_size == 1, \
                         "Data parallelism is not supported during the calibration stage."
                     self.model = prepare(self.model, config)
                 elif config.quantize:
+                    # Break the contiguous bf16 expert parent into independent
+                    # per-expert tensors so INC frees each bf16 expert as it emits
+                    # the fp8 copy; otherwise the full bf16 parent stays resident
+                    # (slices pin it) alongside the growing fp8 weights and OOMs.
+                    if not is_fake_hpu():
+                        _detach_moe_op_weights_to_independent(self.model, "hpu")
+                        htorch.core.mark_step()
                     self.model = convert(self.model, config)
                 else:
                     raise ValueError("Unknown quantization config mode,"
@@ -4540,6 +4672,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._sync_shared_moe_gates()
                 if not is_fake_hpu():
                     self.model = self.model.to("hpu")
+                    _rebind_moe_op_weights_to_device(self.model, "hpu")
                     _move_remaining_tensors_to_device(self.model, "hpu")
                     _dedup_moe_op_weights(self.model)
                     htorch.core.mark_step()
