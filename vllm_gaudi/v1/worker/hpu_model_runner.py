@@ -1268,11 +1268,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # skips the block_size=528 alignment for Granite 4.0-H (see
         # initialize_kv_cache) and re-triggers "not warmed-up" recompilations /
         # non-deterministic tool-calling output.
-        _non_gdn_mamba_hybrid_model_types = ("granitemoehybrid", )
-
         self.num_gdn = 0
-        if (self.num_mamba_like_layers > 0
-                and self.model_config.hf_config.model_type not in _non_gdn_mamba_hybrid_model_types):
+        if (self.num_mamba_like_layers > 0 and self.model_config.hf_config.model_type != "granitemoehybrid"):
             # Auto-enable hybrid cache for GDN/mamba-like models.
             gdn_types = ["gdn_attention", "linear_attention"]
             self.num_gdn = sum(
