@@ -12,7 +12,7 @@ import os
 import time
 from contextlib import suppress
 from tqdm import tqdm
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypeAlias, Union, cast)
 if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
@@ -6479,9 +6479,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # usable number of blocks rather than asserting perfect alignment.
                     remainder = kv_cache_tensor.size % kv_cache_spec.page_size_bytes
                     if remainder != 0:
-                        from vllm.logger import init_logger
-                        from dataclasses import replace
-                        logger = init_logger(__name__)
                         usable_size = kv_cache_tensor.size - remainder
                         waste_pct = remainder * 100.0 / kv_cache_tensor.size
                         logger.warning(
@@ -6568,6 +6565,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 layer_names.add(layer_name)
         # Set up cross-layer KV cache sharing
         if self.shared_kv_cache_layers:
+            logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
                 kv_caches[layer_name] = kv_caches[target_layer_name]
         assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"

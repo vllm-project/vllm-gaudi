@@ -10,6 +10,17 @@ from vllm import envs
 
 from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.extension.logger import logger as init_logger
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+else:
+    ModelConfig = None
+    VllmConfig = None
+
+logger = init_logger()
 
 
 # Monkey-patch torch.accelerator.get_memory_info for HPU compatibility.
@@ -21,18 +32,6 @@ def _hpu_get_memory_info(device=None) -> tuple[int, int]:
 
 
 torch.accelerator.get_memory_info = _hpu_get_memory_info
-
-if TYPE_CHECKING:
-    from vllm.v1.attention.selector import AttentionSelectorConfig
-    from vllm.config import ModelConfig, VllmConfig
-    from vllm.v1.attention.backends.registry import AttentionBackendEnum
-else:
-    ModelConfig = None
-    VllmConfig = None
-
-from vllm_gaudi.extension.logger import logger as init_logger
-
-logger = init_logger()
 
 QWEN3_5_HYBRID_ARCHS = frozenset({
     "Qwen3_5ForConditionalGeneration",
