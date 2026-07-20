@@ -626,6 +626,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             _set_fetch_by_id(self.k_cache, True)
             _set_fetch_by_id(self.v_cache, True)
 
+            if self.sliding_window and hasattr(attn_metadata, 'window_block_list') \
+                    and attn_metadata.window_block_list is not None:
+                block_list = attn_metadata.window_block_list
             common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size,
                                                      k_scales, v_scales)
 
