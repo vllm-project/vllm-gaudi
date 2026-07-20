@@ -1,7 +1,8 @@
 #!/bin/bash
 # Orchestrates the GPQA online eval for CI, driven by a declarative config
-# (see configs/Kimi-K2.6.yaml), matching the .jenkins/lm-eval-harness
-# convention of `run-tests.sh -c configs/<Model>.yaml`:
+# (see configs/Kimi-K2.6.yaml). Invoked from the discoverable test
+# run_gpqa_kimi_k26_test in tests/full_tests/ci_e2e_discoverable_tests.sh via
+# `run-tests.sh -c configs/<Model>.yaml`:
 #   1. launch the vLLM OpenAI server in the background
 #   2. wait for it to become healthy
 #   3. run lm-eval-harness as a local-chat-completions client

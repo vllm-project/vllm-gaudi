@@ -14,7 +14,7 @@ export VMODEL
 # repo-root lm_eval_server.sh is launched with.
 export HF_HOME=${HF_HOME:-/software/data/pytorch/huggingface}
 export PT_HPU_LAZY_MODE=${PT_HPU_LAZY_MODE:-0}
-export VLLM_SKIP_WARMUP=${VLLM_SKIP_WARMUP:-false}
+export VLLM_SKIP_WARMUP=${VLLM_SKIP_WARMUP:-true}
 export HPU_FUSED_MOE=${HPU_FUSED_MOE:-1}
 
 # Optional args gated by config.
