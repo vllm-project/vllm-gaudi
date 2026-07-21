@@ -39,14 +39,11 @@ layers (which ``vllm_gaudi`` overrides with HPU kernels via ``register_oot``):
   ``common`` modules (``minimax_m3_vision`` / ``minimax_m3_mm``), which import
   only HPU-safe vLLM code.
 
-Sparse ("MSA") attention layers currently run as *dense* causal attention on
-HPU -- a mathematical superset of the top-k block selection that runs on the
-existing HPU paged-attention stack. The lightning indexer + block-sparse attend
-math is ported in ``minimax_m3_sparse`` and can be enabled eagerly with
-``VLLM_MINIMAX_M3_SPARSE=1``; full paged-KV integration is the remaining step.
+MiniMax-M3's MSA ("sparse") attention layers currently run as full *dense*
+causal attention on the existing HPU paged-attention stack; exact block-sparse
+top-k parity is future work and is intentionally not implemented here.
 """
 
-import os
 from collections.abc import Iterable
 
 import torch
@@ -75,22 +72,8 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_gaudi.models.minimax_m3_mm import (MiniMaxM3VLDummyInputsBuilder, MiniMaxM3VLMultiModalProcessor,
                                              MiniMaxM3VLProcessingInfo)
-from vllm_gaudi.models.minimax_m3_sparse import (GemmaRMSNorm, MiniMaxM3LightningIndexer, swiglu_oai)
+from vllm_gaudi.models.minimax_m3_sparse import (GemmaRMSNorm, swiglu_oai)
 from vllm_gaudi.models.minimax_m3_vision import MiniMaxVLVisionModel
-
-# Opt-in eager MSA sparse path. Default (0) runs dense causal attention on the
-# HPU paged-attention stack, which is the validated bring-up path.
-_USE_EAGER_SPARSE = os.environ.get("VLLM_MINIMAX_M3_SPARSE", "0") == "1"
-
-
-def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
-    cfg = getattr(config, "sparse_attention_config", None)
-    if not cfg:
-        return set()
-    freq = cfg.get("sparse_attention_freq")
-    if freq is None:
-        return set()
-    return {i for i, f in enumerate(freq) if f != 0}
 
 
 def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
@@ -228,17 +211,13 @@ class HpuMiniMaxM3MoE(nn.Module):
 class HpuMiniMaxM3Attention(nn.Module):
     """Attention with per-head Gemma QK-norm and partial RoPE.
 
-    Handles both the dense-attention layers and the "sparse" (MSA) layers. On
-    HPU the sparse layers run dense causal attention by default; the optional
-    eager MSA path (``VLLM_MINIMAX_M3_SPARSE=1``) builds the index projections
-    and uses the ported lightning indexer + block-sparse attend.
+    Handles both the dense-attention layers and the "sparse" (MSA) layers; on
+    HPU both run as full dense causal attention on the paged-attention stack.
     """
 
     def __init__(
         self,
         config: PretrainedConfig,
-        layer_id: int,
-        is_sparse_layer: bool,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         cache_config: CacheConfig | None = None,
@@ -301,24 +280,9 @@ class HpuMiniMaxM3Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        # MSA "sparse" layers run as dense causal attention on HPU by default
-        # (a superset of the top-k block selection). The ported lightning
-        # indexer + block-sparse attend live in ``minimax_m3_sparse`` and are
-        # validated standalone; wiring them into the HPU paged KV-cache backend
-        # is the remaining productionization step, so the index projections are
-        # intentionally not built here (their checkpoint weights are skipped in
-        # ``load_weights``).
-        self.is_sparse_layer = is_sparse_layer
-        if is_sparse_layer and _USE_EAGER_SPARSE:
-            sparse_cfg = config.sparse_attention_config
-            self.indexer = MiniMaxM3LightningIndexer(
-                scale=sparse_cfg["sparse_index_dim"]**-0.5,
-                topk_blocks=sparse_cfg["sparse_topk_blocks"],
-                sparse_block_size=sparse_cfg["sparse_block_size"],
-                init_blocks=sparse_cfg.get("sparse_init_block", 0),
-                local_blocks=sparse_cfg.get("sparse_local_block", 1),
-                score_type=sparse_cfg.get("sparse_score_type", "max"),
-            )
+        # MSA "sparse" layers run as full dense causal attention on HPU, so the
+        # index projections are intentionally not built here (their checkpoint
+        # weights are unmodeled and skipped in ``load_weights``).
 
     def _apply_qk_norm(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # Per-head Gemma QK-norm. Reshape only the last dim into (heads,
@@ -365,11 +329,8 @@ class HpuMiniMaxM3DecoderLayer(nn.Module):
         layer_id = int(prefix.split(sep=".")[-1])
         self.layer_id = layer_id
 
-        is_sparse = layer_id in _sparse_attention_layer_ids(config)
         self.self_attn = HpuMiniMaxM3Attention(
             config=config,
-            layer_id=layer_id,
-            is_sparse_layer=is_sparse,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             cache_config=cache_config,
@@ -557,8 +518,8 @@ class HpuMiniMaxM3Model(nn.Module):
                     name = remapped
                     if is_pp_missing_parameter(name, self):
                         continue
-                    # Unmodeled weights on HPU (e.g. the sparse index_{q,k}_proj
-                    # branch when the eager MSA path is disabled) are skipped.
+                    # Unmodeled weights on HPU (e.g. the MSA index_{q,k}_proj
+                    # branch, since sparse layers run dense here) are skipped.
                     if name not in params_dict:
                         continue
                     param = params_dict[name]
