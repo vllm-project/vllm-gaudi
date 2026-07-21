@@ -1,7 +1,44 @@
 import torch
+from torch import nn
+from vllm.distributed import (get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.multimodal import NestedTensors
 from vllm.model_executor.models import utils
 from vllm.model_executor.models.utils import (_embedding_count_expression, _flatten_embeddings)
+
+
+# Chunk x along the num_tokens axis for sequence parallelism, HPU variant.
+#
+# Upstream `vllm.model_executor.models.utils.sequence_parallel_chunk` wraps the
+# identical pad/narrow/clone in an opaque `torch.ops.vllm.sequence_parallel_chunk_impl`
+# custom op. That wrapper exists only to hide a Dynamo symbolic-shape guard that
+# fires on CUDA when the chunk can be length-0; these HPU configs compile with
+# static shapes, so the guard is not a concern here.
+#
+# The opaque op has no HPU graph-compiler lowering, so under
+# `fullgraph=True` + `PT_HPU_USE_EAGER_FALLBACK=0` the partitioner drops the
+# node to eager placement, which trips
+# `AssertionError: Eager fallbacks found: {EagerFallback(node='sequence_parallel_chunk_impl', ...)}`.
+# Inlining the plain-ATen equivalent keeps every node lowerable, avoiding the
+# eager fallback entirely.
+def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+
+    # all_gather needs the sequence length to be divisible by tp_size
+    seq_len = x.size(0)
+    remainder = seq_len % tp_size
+    if remainder != 0:
+        pad_len = tp_size - remainder
+        y = nn.functional.pad(x, (0, 0, 0, pad_len))
+    else:
+        y = x
+
+    chunk = y.shape[0] // tp_size
+    start = tp_rank * chunk
+    out = torch.narrow(y, 0, start, chunk)
+    # narrow() returns a view; clone when it aliases the input (no-pad case)
+    # so callers that all_gather the result operate on contiguous storage.
+    return out.clone() if y is x else out
 
 
 # TODO: Replaced masked_scatter with torch.where to avoid HPU performance issues
