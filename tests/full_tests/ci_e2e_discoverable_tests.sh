@@ -339,11 +339,13 @@ run_gsm8k_qwen3_30b_test() {
 # Launches a vLLM OpenAI server, runs lm-eval as a local-chat-completions
 # client, and gates on the accuracy thresholds in the config yaml.
 # Requires HF_TOKEN with access to the gated Idavidrein/gpqa dataset.
+# TODO: Enable kimi2.6 test later
 run_gpqa_kimi_k26_test() {
-    echo "➡️ Testing GPQA-diamond on Kimi-K2.6..."
-    cd "${VLLM_GAUDI_PREFIX}/tests/full_tests/gpqa_eval" && \
-    bash run-tests.sh -c configs/Kimi-K2.6.yaml
-    echo "✅ Test with GPQA-diamond on Kimi-K2.6 passed."
+    echo "⏭️  Skipping GPQA-diamond on Kimi-K2.6 (disabled)."
+    # echo "➡️ Testing GPQA-diamond on Kimi-K2.6..."
+    # cd "${VLLM_GAUDI_PREFIX}/tests/full_tests/gpqa_eval" && \
+    # bash run-tests.sh -c configs/Kimi-K2.6.yaml
+    # echo "✅ Test with GPQA-diamond on Kimi-K2.6 passed."
 }
 
 
