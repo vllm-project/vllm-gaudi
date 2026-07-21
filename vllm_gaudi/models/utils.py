@@ -29,7 +29,8 @@ def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
     remainder = seq_len % tp_size
     if remainder != 0:
         pad_len = tp_size - remainder
-        y = nn.functional.pad(x, (0, 0, 0, pad_len))
+        pad = (0, 0) * (x.dim() - 1) + (0, pad_len)
+        y = nn.functional.pad(x, pad)
     else:
         y = x
 
