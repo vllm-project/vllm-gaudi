@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.model_executor.models.registry import ModelRegistry
 
 
@@ -34,11 +32,6 @@ def register_model():
     from vllm_gaudi.models.minimax_m2 import HpuMiniMaxM2ForCausalLM  # noqa: F401
     ModelRegistry.register_model("MiniMaxM2ForCausalLM", "vllm_gaudi.models.minimax_m2:HpuMiniMaxM2ForCausalLM")
 
-    # MiniMax-M3: registered by dotted path so the heavy model/vision modules
-    # (and their transitive imports) load lazily at model-load time rather than
-    # at plugin registration. These overrides shadow the upstream
-    # ``vllm.models.minimax_m3`` package, whose hardware-isolated ``__init__``
-    # selects the NVIDIA branch and crashes on HPU.
     ModelRegistry.register_model("MiniMaxM3SparseForCausalLM",
                                  "vllm_gaudi.models.minimax_m3:HpuMiniMaxM3SparseForCausalLM")
     ModelRegistry.register_model("MiniMaxM3SparseForConditionalGeneration",
