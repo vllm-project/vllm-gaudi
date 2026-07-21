@@ -15,7 +15,7 @@ from tests.unit_tests.kv_offload.utils import (
     create_vllm_config,
 )
 from vllm import SamplingParams
-from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
+from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -51,6 +51,7 @@ from vllm.v1.kv_offload.base import (
     TransferResult,
     make_offload_key,
 )
+from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.structured_output import StructuredOutputManager
 
 
@@ -119,8 +120,8 @@ class MockOffloadingWorker(OffloadingWorker):
 
 class MockOffloadingSpec(OffloadingSpec):
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config, kv_cache_config)
+    def __init__(self, config: OffloadingConfig):
+        super().__init__(config)
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
@@ -236,8 +237,8 @@ class RequestRunner:
 
         assert len(self.connector_scheduler.config.kv_group_configs) == 1
         kv_group_config = self.connector_scheduler.config.kv_group_configs[0]
-        assert kv_group_config.gpu_block_size == gpu_block_size
-        assert kv_group_config.offloaded_block_size == offloaded_block_size
+        assert kv_group_config.tokens_per_block == gpu_block_size
+        assert kv_group_config.tokens_per_chunk == offloaded_block_size
 
         # extract OffloadingSpec of worker_connector
         connector_worker = self.worker_connector.connector_worker
