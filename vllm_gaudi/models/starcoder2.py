@@ -68,6 +68,7 @@ from vllm.sequence import IntermediateTensors
 
 
 class Starcoder2Attention(nn.Module):
+
     def __init__(
         self,
         config: Starcoder2Config,
@@ -146,6 +147,7 @@ class Starcoder2Attention(nn.Module):
 
 
 class Starcoder2MLP(nn.Module):
+
     def __init__(
         self,
         config: Starcoder2Config,
@@ -177,6 +179,7 @@ class Starcoder2MLP(nn.Module):
 
 
 class Starcoder2DecoderLayer(nn.Module):
+
     def __init__(
         self,
         config: Starcoder2Config,
@@ -192,13 +195,9 @@ class Starcoder2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.mlp = Starcoder2MLP(
-            config, quant_config=quant_config, prefix=f"{prefix}.mlp"
-        )
+        self.mlp = Starcoder2MLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
-        self.post_attention_layernorm = nn.LayerNorm(
-            config.hidden_size, eps=config.norm_epsilon
-        )
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
 
     def forward(
         self,
@@ -225,6 +224,7 @@ class Starcoder2DecoderLayer(nn.Module):
 
 @support_torch_compile
 class Starcoder2Model(nn.Module):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -243,15 +243,12 @@ class Starcoder2Model(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Starcoder2DecoderLayer(
-                config, cache_config, quant_config=quant_config, prefix=prefix
-            ),
+            lambda prefix: Starcoder2DecoderLayer(config, cache_config, quant_config=quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size
-        )
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                                                       config.hidden_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -313,14 +310,13 @@ class Starcoder2Model(nn.Module):
 
 
 class Starcoder2ForCausalLM(nn.Module, SupportsPP):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.model = Starcoder2Model(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+        self.model = Starcoder2Model(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         self.vocab_size = config.vocab_size
 
         if config.tie_word_embeddings:
@@ -333,9 +329,7 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
                 prefix=f"{prefix}.lm_head",
             )
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
+        self.make_empty_intermediate_tensors = (self.model.make_empty_intermediate_tensors)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -347,9 +341,7 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
+        hidden_states = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -364,8 +356,6 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
             self,
             # Models trained using ColossalAI may include these tensors in
             # the checkpoint. Skip them.
-            skip_prefixes=(
-                ["lm_head.weight"] if self.config.tie_word_embeddings else None
-            ),
+            skip_prefixes=(["lm_head.weight"] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)

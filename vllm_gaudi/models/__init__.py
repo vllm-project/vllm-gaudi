@@ -57,10 +57,8 @@ def register_model():
     # backend, which does not trace cleanly under HPU warmup/bucketing. Register
     # the vendored native implementations so these architectures keep working on
     # Gaudi (e.g. StarCoder, granite-*-code).
-    ModelRegistry.register_model("GPTBigCodeForCausalLM",
-                                 "vllm_gaudi.models.gpt_bigcode:GPTBigCodeForCausalLM")
-    ModelRegistry.register_model("Starcoder2ForCausalLM",
-                                 "vllm_gaudi.models.starcoder2:Starcoder2ForCausalLM")
+    ModelRegistry.register_model("GPTBigCodeForCausalLM", "vllm_gaudi.models.gpt_bigcode:GPTBigCodeForCausalLM")
+    ModelRegistry.register_model("Starcoder2ForCausalLM", "vllm_gaudi.models.starcoder2:Starcoder2ForCausalLM")
 
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
     import vllm_gaudi.models.qwen3_next  # noqa: F401
