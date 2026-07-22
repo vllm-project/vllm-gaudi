@@ -768,6 +768,7 @@ def _init_mamba_split_weights(model):
         if isinstance(module, HPUMambaMixer2) and not module._split_weights_ready:
             module._init_split_weights()
 
+
 def apply_model_specific_patches(model_runner):
     """The function applies model-specific monkey patches."""
     maybe_set_chunked_attention_layers(model_runner)
@@ -5938,8 +5939,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if prompt_buckets:
                 max_seq_len = max(b[1] for b in prompt_buckets)
                 max_seq_buckets = [b for b in prompt_buckets if b[1] == max_seq_len]
-                logger.info(f"Validation warmup: {len(max_seq_buckets)} prompt buckets "
-                            f"(seq_len={max_seq_len})")
+                logger.info("Validation warmup: %s prompt buckets (seq_len=%s)", len(max_seq_buckets), max_seq_len)
                 self.warmup_graphs(max_seq_buckets, True, kv_caches)
 
             if self.bucketing_manager.decode_buckets:
