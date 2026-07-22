@@ -230,9 +230,17 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
 
-        if not layer.use_grouped_topk:
-            topk_ids = topk_ids.to(torch.int64)
-            topk_weights = topk_weights.to(x.dtype)
+        # The HPU mixture_of_experts kernel (including the chunked
+        # weighted_sum_reduction_bf16 reduction) compiles for int64 routing
+        # tables and bf16 (x.dtype) router weights. The grouped-topk /
+        # custom-routing helper returns int32 ids and float32 weights; the
+        # regular-topk branch above already normalized them, but the grouped
+        # path was previously left unconverted -> the bf16 reduction kernel
+        # received float32 router_weights and failed to compile
+        # (GLUE_INCOMPATIBLE_DATA_TYPE). Normalize for every routing path so the
+        # kernel graph receives dtype-consistent inputs.
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
 
         if layer.moe_config.dp_size > 1:
             dp_metadata = get_hpu_dp_metadata()

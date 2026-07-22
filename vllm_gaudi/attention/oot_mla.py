@@ -9,6 +9,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.model_executor.utils import replace_parameter
 from vllm_gaudi.extension.utils import VLLMKVCache
 from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache)
 from vllm_gaudi.attention.backends.hpu_attn import HPUMLAMetadata
@@ -60,7 +61,14 @@ class HPUMLAAttention(MLAAttention):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        q_dcp_replicated: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # `q_dcp_replicated` was added to the base MLAAttention.forward signature
+        # by vllm#45964 (DCP query replication for MLA decode). Decode-context
+        # parallelism is not enabled on HPU, so the inherited wrapper forward
+        # always passes this as None; accept and ignore it to keep the HPU path
+        # behaviourally identical to pre-#45964.
+        del q_dcp_replicated
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
 
@@ -203,8 +211,12 @@ class HPUMLAAttention(MLAAttention):
         else:
             # Non-FP8 kv_b_proj: use upstream logic as before.
             MLAAttention.process_weights_after_loading(self, act_dtype)
-            self.W_UV = self.W_UV.contiguous()
-            self.W_UK_T = self.W_UK_T.contiguous()
+            # Since vllm#48251 base registers W_UV/W_UK_T as nn.Parameter (via
+            # replace_parameter), so a plain tensor reassignment raises
+            # TypeError. Route the contiguous() update through replace_parameter
+            # to preserve the registration.
+            replace_parameter(self, "W_UV", self.W_UV.contiguous())
+            replace_parameter(self, "W_UK_T", self.W_UK_T.contiguous())
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
@@ -263,6 +275,13 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.is_sparse = mla_modules.is_sparse
 
         self.skip_topk = skip_topk
+        # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
+        # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
+        # we do not override forward) reads and forwards to mla_attn. Because we
+        # bypass super().__init__(), replicate the upstream assignment. DCP is
+        # not enabled on HPU, so `qrep_active` is absent and this stays False.
+        q_proj_layer = self.q_b_proj if self.q_lora_rank is not None else self.q_proj
+        self.dcp_q_replicate = getattr(q_proj_layer, "qrep_active", False)
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
