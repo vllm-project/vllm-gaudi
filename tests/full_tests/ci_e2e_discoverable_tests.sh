@@ -335,6 +335,19 @@ run_gsm8k_qwen3_30b_test() {
     echo "✅ Test with QWEN3-30B-A3B passed."
 }
 
+# GPQA-diamond online eval on Kimi-K2.6 (TP=8, expert parallel).
+# Launches a vLLM OpenAI server, runs lm-eval as a local-chat-completions
+# client, and gates on the accuracy thresholds in the config yaml.
+# Requires HF_TOKEN with access to the gated Idavidrein/gpqa dataset.
+# TODO: Enable kimi2.6 test later
+run_gpqa_kimi_k26_test() {
+    echo "⏭️  Skipping GPQA-diamond on Kimi-K2.6 (disabled)."
+    # echo "➡️ Testing GPQA-diamond on Kimi-K2.6..."
+    # cd "${VLLM_GAUDI_PREFIX}/tests/full_tests/gpqa_eval" && \
+    # bash run-tests.sh -c configs/Kimi-K2.6.yaml
+    # echo "✅ Test with GPQA-diamond on Kimi-K2.6 passed."
+}
+
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only (baseline, no fsdpa_slicing)
 # Requires: pip install 'lm_eval[longbench]'
@@ -608,6 +621,7 @@ launch_all_tests() {
     run_gsm8k_granite_async_test
     run_gsm8k_deepseek_test
     run_gsm8k_qwen3_30b_test
+    run_gpqa_kimi_k26_test
     run_longbench_qwen3_30b_fp8_static_test
     run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test
     run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test
