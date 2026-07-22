@@ -784,6 +784,34 @@ def _init_mamba_split_weights(model):
             module._init_split_weights()
 
 
+def _mark_independent_packed_state(tensor: torch.Tensor) -> None:
+    """GAUDISW-248216: tag a compact-GDN state tensor as logically independent.
+
+    Compact mode packs many per-layer GDN states into one shared allocation, so
+    they all report the same ``storage().data_ptr()``. The Synapse bridge keys
+    its duplicate/alias bookkeeping on that storage base and would mis-bind the
+    siblings (first-wins), corrupting decode output. Setting this flag on the
+    tensor's backend meta tells the bridge to keep these tensors apart. The
+    bridge only honours it when ``PT_HPU_GDN_COMPACT_INDEPENDENT_TENSORS=1``, so
+    this tag is inert on stacks that predate the bridge-side change.
+
+    Best-effort: silently no-ops if the running bridge lacks the binding.
+    """
+    try:
+        from habana_frameworks.torch import _core_C
+    except Exception:
+        return
+    try:
+        try:
+            meta = _core_C.get_new_tensor_extra_meta(tensor)
+        except RuntimeError:
+            meta = _core_C.get_tensor_extra_meta(tensor)
+        if meta is not None:
+            meta.is_independent_packed_state = True
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Failed to mark independent packed GDN state: %s", type(e).__name__)
+
+
 def apply_model_specific_patches(model_runner):
     """The function applies model-specific monkey patches."""
     maybe_set_chunked_attention_layers(model_runner)
@@ -6343,6 +6371,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                             target_shape = (compact_total, *shape)
                             tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
+                            # GAUDISW-248216: compact mode packs every GDN layer's
+                            # per-request state into ONE shared allocation, so many
+                            # logically-independent state tensors report the same
+                            # storage().data_ptr(). The Synapse bridge keys its
+                            # duplicate/alias bookkeeping on that storage base and
+                            # would mis-bind the siblings. Flag each compact state
+                            # tensor as independent so the bridge keeps them apart.
+                            _mark_independent_packed_state(tensor)
                             state_tensors.append(tensor)
                         logger.debug("GDN compact tensor: %d slots (max_reqs=%d * groups=%d + 2) vs baseline %d",
                                      compact_total, gdn_max_reqs, self._num_gdn_groups, num_blocks + 1)
