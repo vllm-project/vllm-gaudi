@@ -47,7 +47,10 @@ Currently:
   the pre-split tuple directly (restoring the pre-#44456 contract).
 """
 
+from __future__ import annotations
+
 import gc
+import inspect
 from collections.abc import Callable
 
 import torch
@@ -237,7 +240,7 @@ def _patch_gather_logprobs() -> None:
 
     import vllm.v1.sample.sampler as _sampler_mod
 
-    if 'mark_unbacked' not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
+    if "mark_unbacked" not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
         return  # Not affected — older vLLM without PR #38933.
 
     _sampler_mod.Sampler.gather_logprobs = staticmethod(_hpu_gather_logprobs)
@@ -333,7 +336,10 @@ def _hpu_mamba_bind_kv_cache(self, kv_cache) -> None:
         self.kv_cache = tuple(kv_cache)
         return
     # Fallback: raw packed page — defer to the upstream unpacking behavior.
-    assert _MambaBase_bind_kv_cache_original is not None, "MambaBase.bind_kv_cache patch not installed"
+    # An explicit check (not ``assert``) so ``python -O`` cannot strip it and
+    # leave a confusing ``TypeError: 'NoneType' object is not callable`` below.
+    if _MambaBase_bind_kv_cache_original is None:
+        raise RuntimeError("MambaBase.bind_kv_cache patch not installed: original method unavailable")
     _MambaBase_bind_kv_cache_original(self, kv_cache)
 
 
@@ -343,21 +349,46 @@ _MambaBase_bind_kv_cache_original: Callable[..., None] | None = None
 def _patch_mamba_bind_kv_cache() -> None:
     """Install the HPU-safe ``MambaBase.bind_kv_cache`` replacement.
 
-    Guarded so this is a no-op if upstream drops the ``squeeze``-based
-    unpacking (the method signature/body changing back to a direct
-    assignment). Deferred to ``load_general_plugins`` time so the
-    ``vllm.model_executor`` import chain runs after the platform is ready.
+    Guarded so this is a no-op unless the target actually exists and still
+    uses the ``squeeze``-based unpacking introduced by PR #44456:
+
+    * If ``vllm.model_executor.layers.mamba.abstract.MambaBase`` cannot be
+      imported or has no ``bind_kv_cache`` attribute (import-path or API
+      change), skip silently — nothing to patch.
+    * If the upstream method no longer calls ``.squeeze(`` (upstream reverted
+      to a direct assignment), skip — the AttributeError this patch works
+      around can no longer occur, and overwriting would only risk masking a
+      future upstream change.
+
+    Deferred to ``load_general_plugins`` time so the ``vllm.model_executor``
+    import chain runs after the platform is ready.
 
     Upstream ref: https://github.com/vllm-project/vllm/pull/44456
     """
     global _MambaBase_bind_kv_cache_original
 
-    from vllm.model_executor.layers.mamba.abstract import MambaBase
+    try:
+        from vllm.model_executor.layers.mamba.abstract import MambaBase
+    except ImportError:
+        return  # Import path changed/removed upstream — nothing to patch.
 
-    if MambaBase.bind_kv_cache is _hpu_mamba_bind_kv_cache:
-        return  # Already installed (idempotent across processes).
+    upstream = getattr(MambaBase, "bind_kv_cache", None)
+    if upstream is None:
+        return  # Method dropped upstream — nothing to patch.
 
-    _MambaBase_bind_kv_cache_original = MambaBase.bind_kv_cache
+    if upstream is _hpu_mamba_bind_kv_cache:
+        return  # Already installed (idempotent within this process).
+
+    # Only patch when the upstream body still does the squeeze-based unpacking
+    # that trips on HPU's pre-split tuple; otherwise leave upstream untouched.
+    try:
+        source = inspect.getsource(upstream)
+    except (OSError, TypeError):
+        source = ""  # Builtin/C or source unavailable — assume it needs the patch.
+    if source and ".squeeze(" not in source:
+        return  # Upstream no longer squeezes — the tuple crash cannot occur.
+
+    _MambaBase_bind_kv_cache_original = upstream
     MambaBase.bind_kv_cache = _hpu_mamba_bind_kv_cache
 
 
