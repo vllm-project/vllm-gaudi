@@ -37,6 +37,14 @@ Currently:
   any request with ``logprobs=true``.  We replace ``gather_logprobs`` with an
   identical implementation that omits the two ``mark_unbacked`` calls.  HPU
   handles dynamic batch shapes without this hint.
+
+* ``vllm.model_executor.layers.mamba.abstract.MambaBase.bind_kv_cache`` —
+  upstream PR #44456 unpacks a single packed int8 page via
+  ``kv_cache.squeeze(dim=(1, 2))``.  The HPU runner allocates a separate
+  tensor per Mamba state and hands the layer a ready-made tuple, so the
+  upstream method raises ``AttributeError: 'tuple' object has no attribute
+  'squeeze'`` at EngineCore init.  We replace it with a variant that assigns
+  the pre-split tuple directly (restoring the pre-#44456 contract).
 """
 
 import gc
@@ -296,6 +304,62 @@ def _patch_granite_hybrid_layer_types() -> None:
     layer_types["linear_attention"] = layer_types["mamba"]
 
 
+def _hpu_mamba_bind_kv_cache(self, kv_cache) -> None:
+    """HPU-safe replacement for ``MambaBase.bind_kv_cache``.
+
+    Upstream vLLM PR #44456 ("[3/N][KV-Cache Layout Refactor] Standardize
+    Mamba cache") replaced the old direct assignment
+    (``forward_context[layer_name].kv_cache = kv_cache`` in
+    ``vllm.v1.worker.utils.bind_kv_cache``) with a per-layer
+    ``MambaBase.bind_kv_cache`` that unpacks a single packed ``[B, 1, 1, C]``
+    int8 page view via ``kv_cache.squeeze(dim=(1, 2))``.
+
+    The HPU worker and model runner never pack the Mamba state into one int8
+    page: they allocate a separate tensor per state (conv/ssm, plus optional
+    scales) and hand the layer a ready-made tuple. Feeding that tuple to the
+    upstream method raises ``AttributeError: 'tuple' object has no attribute
+    'squeeze'`` at EngineCore init (crashes ``run_granite_4_h_load_generate_test``
+    for ibm-granite/granite-4.0-h-small).
+
+    Restore the pre-#44456 contract: when the runner already delivers the
+    pre-split per-state tuple, assign it directly. Only fall back to the
+    upstream int8-page unpacking when handed a raw ``torch.Tensor`` (defensive,
+    for any non-HPU allocation path that may reach this method).
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/44456
+    """
+    if isinstance(kv_cache, (tuple, list)):
+        self.kv_cache = tuple(kv_cache)
+        return
+    # Fallback: raw packed page — defer to the upstream unpacking behavior.
+    _MambaBase_bind_kv_cache_original(self, kv_cache)
+
+
+_MambaBase_bind_kv_cache_original = None
+
+
+def _patch_mamba_bind_kv_cache() -> None:
+    """Install the HPU-safe ``MambaBase.bind_kv_cache`` replacement.
+
+    Guarded so this is a no-op if upstream drops the ``squeeze``-based
+    unpacking (the method signature/body changing back to a direct
+    assignment). Deferred to ``load_general_plugins`` time so the
+    ``vllm.model_executor`` import chain runs after the platform is ready.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/44456
+    """
+    global _MambaBase_bind_kv_cache_original
+
+    from vllm.model_executor.layers.mamba.abstract import MambaBase
+
+    if getattr(MambaBase.bind_kv_cache, "_hpu_patched", False):
+        return  # Already installed (idempotent across processes).
+
+    _MambaBase_bind_kv_cache_original = MambaBase.bind_kv_cache
+    _hpu_mamba_bind_kv_cache._hpu_patched = True
+    MambaBase.bind_kv_cache = _hpu_mamba_bind_kv_cache
+
+
 def _hpu_get_num_layers_by_block_type(self, parallel_config, block_type="attention"):
     """HPU-safe replacement for ``ModelConfig.get_num_layers_by_block_type``.
 
@@ -466,6 +530,7 @@ def apply() -> None:
         _patch_granite_hybrid_layer_types()
         _patch_get_num_layers_by_block_type()
         _patch_use_sequence_parallel_moe()
+        _patch_mamba_bind_kv_cache()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
