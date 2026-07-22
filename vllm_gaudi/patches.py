@@ -48,6 +48,7 @@ Currently:
 """
 
 import gc
+from collections.abc import Callable
 
 import torch
 
@@ -332,10 +333,11 @@ def _hpu_mamba_bind_kv_cache(self, kv_cache) -> None:
         self.kv_cache = tuple(kv_cache)
         return
     # Fallback: raw packed page — defer to the upstream unpacking behavior.
+    assert _MambaBase_bind_kv_cache_original is not None, "MambaBase.bind_kv_cache patch not installed"
     _MambaBase_bind_kv_cache_original(self, kv_cache)
 
 
-_MambaBase_bind_kv_cache_original = None
+_MambaBase_bind_kv_cache_original: Callable[..., None] | None = None
 
 
 def _patch_mamba_bind_kv_cache() -> None:
@@ -352,11 +354,10 @@ def _patch_mamba_bind_kv_cache() -> None:
 
     from vllm.model_executor.layers.mamba.abstract import MambaBase
 
-    if getattr(MambaBase.bind_kv_cache, "_hpu_patched", False):
+    if MambaBase.bind_kv_cache is _hpu_mamba_bind_kv_cache:
         return  # Already installed (idempotent across processes).
 
     _MambaBase_bind_kv_cache_original = MambaBase.bind_kv_cache
-    _hpu_mamba_bind_kv_cache._hpu_patched = True
     MambaBase.bind_kv_cache = _hpu_mamba_bind_kv_cache
 
 
