@@ -377,6 +377,46 @@ def _patch_get_num_layers_by_block_type() -> None:
     ModelConfig.get_num_layers_by_block_type = _hpu_get_num_layers_by_block_type
 
 
+def _patch_use_sequence_parallel_moe() -> None:
+    """Restore the ``data_parallel_size > 1`` guard on ``use_sequence_parallel_moe``.
+
+    vllm PR #48036 removed ``and self.data_parallel_size > 1`` from
+    ``ParallelConfig.use_sequence_parallel_moe`` to enable SP-MoE for DSv3.2 +
+    MTP on a single node. On HPU that flips SP-MoE on for plain EP + TP>1 +
+    DP==1 setups (e.g. Kimi-K2.6 / DeepSeek MLA), whose reduce_scatter /
+    sequence_parallel_chunk reshaping the HPU MLA rotary and RMSNorm ops cannot
+    yet handle, crashing the forward pass. Until those ops support the SP-MoE
+    layout, re-add the DP>1 guard so single-node EP behaves as before.
+
+    Guarded by ``inspect.getsource`` so this becomes a no-op if upstream
+    restores the guard or the property's shape changes.
+    """
+    import inspect
+
+    from vllm.config.parallel import ParallelConfig
+
+    prop = ParallelConfig.__dict__.get("use_sequence_parallel_moe")
+    if not isinstance(prop, property) or prop.fget is None:
+        return  # Not a property anymore — do not risk an incompatible override.
+
+    try:
+        source = inspect.getsource(prop.fget)
+    except (OSError, TypeError):
+        return  # Source unavailable — leave upstream in place.
+
+    if "use_sequence_parallel_moe" not in source or "enable_expert_parallel" not in source:
+        return  # Shape changed — do not risk an incompatible override.
+    if "data_parallel_size" in source:
+        return  # Guard already present (upstream restored it) — no-op.
+
+    _original_fget = prop.fget
+
+    def _hpu_use_sequence_parallel_moe(self) -> bool:
+        return _original_fget(self) and self.data_parallel_size > 1
+
+    ParallelConfig.use_sequence_parallel_moe = property(_hpu_use_sequence_parallel_moe)
+
+
 def _patch_cleanup_dist_env_and_memory() -> None:
     """Install the HPU-safe ``cleanup_dist_env_and_memory`` replacement.
 
@@ -425,6 +465,7 @@ def apply() -> None:
         _patch_gather_logprobs()
         _patch_granite_hybrid_layer_types()
         _patch_get_num_layers_by_block_type()
+        _patch_use_sequence_parallel_moe()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
