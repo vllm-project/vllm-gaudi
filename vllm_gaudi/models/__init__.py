@@ -31,6 +31,11 @@ def register_model():
 
     from vllm_gaudi.models.minimax_m2 import HpuMiniMaxM2ForCausalLM  # noqa: F401
     ModelRegistry.register_model("MiniMaxM2ForCausalLM", "vllm_gaudi.models.minimax_m2:HpuMiniMaxM2ForCausalLM")
+
+    ModelRegistry.register_model("MiniMaxM3SparseForCausalLM",
+                                 "vllm_gaudi.models.minimax_m3:HpuMiniMaxM3SparseForCausalLM")
+    ModelRegistry.register_model("MiniMaxM3SparseForConditionalGeneration",
+                                 "vllm_gaudi.models.minimax_m3:HpuMiniMaxM3SparseForConditionalGeneration")
     from vllm_gaudi.models.pixtral import HPUPixtralForConditionalGeneration  # noqa: F401
     ModelRegistry.register_model("PixtralForConditionalGeneration",
                                  "vllm_gaudi.models.pixtral:HPUPixtralForConditionalGeneration")
