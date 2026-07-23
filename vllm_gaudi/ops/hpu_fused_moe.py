@@ -163,6 +163,143 @@ def _unfused_swigluoai_moe(
     return out_tiles[0] if len(out_tiles) == 1 else torch.cat(out_tiles, dim=0)
 
 
+# --- Decode-time expert gather (bandwidth reduction) -------------------------
+# The dense pass above reads EVERY local expert's weights for every token
+# (E_local expert-weight reads) even though each token routes to only top_k
+# experts. At small token counts (single-stream / low-concurrency decode) the
+# number of DISTINCT local experts the batch touches is at most ``tokens * K``,
+# which can be far below E_local. This path gathers only those experts' weights
+# via ``index_select`` so only ``G = min(E_local, tokens * K)`` experts stream
+# from HBM instead of E_local -- up to ``E_local / G`` fewer expert-weight
+# bytes/token, the dominant single-stream decode cost.
+#
+# Static shapes (HPU graph-compiler requirement): ``G`` is a function of the
+# static (bucketed) token count, so every shape is fixed per warmup bucket and
+# the decode-bucket graphs compile once during warmup (no per-step recompile).
+# Because the number of distinct hit experts is provably ``<= tokens * K <= G``,
+# every routed expert is always included -- no token is ever dropped and there
+# is NO data-dependent overflow branch. Gathering ids sorted ascending makes the
+# per-token expert accumulation order identical to the dense index-order pass
+# (padding experts contribute exactly +0.0), so the result is numerically
+# identical to ``_unfused_swigluoai_moe`` (bit-exact; validated).
+#
+# Gated OFF by default (VLLM_MINIMAX_M3_MOE_DECODE_GATHER=1 to enable), so this
+# patch is a no-op until the flag is set -- existing behavior is unchanged.
+_MOE_DECODE_GATHER = os.environ.get(
+    "VLLM_MINIMAX_M3_MOE_DECODE_GATHER", "0") == "1"
+# Only gather when the batch is at most this many tokens (bounds gather to the
+# low-concurrency decode regime where it wins; above it the dense pass is used).
+_MOE_GATHER_MAX_TOKENS = int(
+    os.environ.get("VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS", "16"))
+
+
+def _gather_swigluoai_moe(
+    layer,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    *,
+    alpha: float,
+    beta: float,
+    limit: float | None,
+) -> torch.Tensor:
+    """Expert-gather SwiGLU-OAI MLP: compute only the routed experts.
+
+    Numerically identical to :func:`_unfused_swigluoai_moe` (same per-rank,
+    pre-all-reduce partial; same fp32 SwiGLU-OAI math and expert accumulation
+    order) but reads only ``G = min(E_local, tokens * K)`` expert weights from
+    HBM instead of all ``E_local``. See the module comment above for the
+    static-shape / no-drop / bit-exactness argument.
+    """
+    w13 = layer.w13_weight  # [E_local, 2*I, H]
+    w2 = layer.w2_weight    # [E_local, H, I]
+    experts_min = int(layer.moe_config.ep_rank * layer.local_num_experts)
+
+    e_local = w13.shape[0]
+    d = w13.shape[1] // 2
+    hidden = x.shape[-1]
+    tokens = x.shape[0]
+    k = topk_ids.shape[-1]
+
+    # Static gathered-expert count (>= number of distinct hit experts).
+    g = min(e_local, tokens * k)
+
+    # Per-(token, local-expert) combine weight, identical to the dense pass.
+    local_ids = topk_ids - experts_min                        # [T, K]
+    in_range = (local_ids >= 0) & (local_ids < e_local)
+    safe_ids = torch.where(in_range, local_ids, torch.zeros_like(local_ids))
+    gate_w = x.new_zeros(tokens, e_local, dtype=torch.float32)
+    gate_w.scatter_add_(
+        1,
+        safe_ids,
+        torch.where(in_range, topk_weights, torch.zeros_like(topk_weights)).to(torch.float32),
+    )
+
+    # Pick the G local experts to compute (sorted ascending so the per-token
+    # accumulation order matches the dense index-order pass -> bit-exact).
+    hit = (gate_w > 0).to(torch.float32).sum(0)               # [E_local]
+    gather_ids = torch.topk(hit, g, sorted=False).indices     # [G]
+    gather_ids, _ = torch.sort(gather_ids)                    # ascending ids
+
+    w13_g = w13.index_select(0, gather_ids)                   # [G, 2I, H]
+    w2_g = w2.index_select(0, gather_ids)                     # [G, H, I]
+    gate_wg = gate_w.index_select(1, gather_ids)              # [T, G]
+
+    # Expert MLP over the gathered experts (static shapes, no host sync).
+    xe = x.unsqueeze(0).expand(g, tokens, hidden)             # [G, T, H]
+    h = torch.bmm(xe, w13_g.transpose(1, 2))                  # [G, T, 2I]
+    gg = h[..., :d].float()
+    uu = h[..., d:].float()
+    if limit is not None:
+        gg = gg.clamp(max=limit)
+        uu = uu.clamp(min=-limit, max=limit)
+    act = (gg * torch.sigmoid(alpha * gg) * (uu + beta)).to(x.dtype)  # [G, T, I]
+    y = torch.bmm(act, w2_g.transpose(1, 2))                  # [G, T, H] partial
+
+    # Match the dense pass's accumulation EXACTLY so the result is bit-identical:
+    # _unfused_swigluoai_moe sums experts within each 32-expert index chunk in
+    # fp32, rounds that partial to bf16, then accumulates across chunks in bf16.
+    # Reproduce the same chunk grouping + rounding here (gathered experts are
+    # grouped by their original index // chunk; experts absent from a chunk
+    # contribute exact +0.0, which never perturbs an fp sum).
+    cont = y.float() * gate_wg.t().unsqueeze(-1)              # [G, T, H] fp32
+    chunk = 32
+    chunk_of = torch.div(gather_ids, chunk, rounding_mode="floor")  # [G]
+    acc = x.new_zeros(tokens, hidden)                         # [T, H] bf16
+    n_chunks = (e_local + chunk - 1) // chunk
+    for c in range(n_chunks):
+        m = (chunk_of == c).to(cont.dtype)                   # [G]
+        acc = acc + (cont * m[:, None, None]).sum(0).to(x.dtype)
+    return acc
+
+
+def _swigluoai_moe(
+    layer,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    *,
+    alpha: float,
+    beta: float,
+    limit: float | None,
+) -> torch.Tensor:
+    """Dispatch SwiGLU-OAI experts: gather only routed experts at small token
+    counts (low-concurrency decode), else the dense pass. Both return the
+    identical per-rank partial; the split is purely a bandwidth optimization.
+    """
+    tokens = x.shape[0]
+    k = topk_ids.shape[-1]
+    e_local = layer.w13_weight.shape[0]
+    if (_MOE_DECODE_GATHER and tokens <= _MOE_GATHER_MAX_TOKENS
+            and tokens * k < e_local):
+        return _gather_swigluoai_moe(
+            layer, x, topk_ids, topk_weights,
+            alpha=alpha, beta=beta, limit=limit)
+    return _unfused_swigluoai_moe(
+        layer, x, topk_ids, topk_weights,
+        alpha=alpha, beta=beta, limit=limit)
+
+
 def model_has_quant_config() -> bool:
     """Whether the active model runs with a MoE quantization config.
 
@@ -363,8 +500,9 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         activation = _normalize_moe_activation(layer.activation)
         if activation == _SWIGLU_OAI_ACTIVATION:
-            # Habana fused MoE lacks SwiGLU-OAI; compute the experts unfused.
-            output = _unfused_swigluoai_moe(
+            # Habana fused MoE lacks SwiGLU-OAI; compute the experts unfused
+            # (dense), or gather-only routed experts at low-conc decode.
+            output = _swigluoai_moe(
                 layer,
                 x,
                 topk_ids,
@@ -455,8 +593,9 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         activation = _normalize_moe_activation(layer.activation)
         if activation == _SWIGLU_OAI_ACTIVATION:
-            # Habana fused MoE lacks SwiGLU-OAI; compute the experts unfused.
-            output = _unfused_swigluoai_moe(
+            # Habana fused MoE lacks SwiGLU-OAI; compute the experts unfused
+            # (dense), or gather-only routed experts at low-conc decode.
+            output = _swigluoai_moe(
                 layer,
                 x,
                 topk_ids,
