@@ -1,0 +1,28 @@
+# GPQA-diamond online eval for Kimi-K2.6 (DeepSeek-MLA MoE).
+#
+# Unlike the offline gsm8k configs under .jenkins/lm-eval-harness/configs (which
+# run `lm_eval --model vllm` in-process), Kimi-K2.6 needs the OpenAI *server*
+# path so the chat template is applied with thinking disabled. This config is
+# therefore consumed by .jenkins/gpqa-eval/run-tests.sh, which launches the
+# server, runs lm_eval as a local-chat-completions client, and checks the
+# metrics below. Field names mirror the harness convention where they overlap.
+#
+# Thresholds are gated just below a measured baseline of
+# flexible-extract=0.8125 / strict-match=0.0625 over 16 samples
+# (granularity 1/16 = 0.0625).
+model_name: "/software/data/pytorch/huggingface/hub/models--moonshotai--Kimi-K2.6/snapshots/7eb5002f6aadc958aed6a9177b7ed26bb94011bb/"
+tasks:
+- name: "gpqa_diamond_cot_zeroshot"
+  metrics:
+  - name: "exact_match,flexible-extract"
+    value: 0.81
+  - name: "exact_match,strict-match"
+    value: 0.06
+limit: 16
+tensor_parallel_size: 8
+enable_expert_parallel: true
+max_model_len: 131072
+trust_remote_code: true
+thinking: false
+gen_kwargs: "temperature=0.0,max_gen_toks=8192"
+num_concurrent: 8

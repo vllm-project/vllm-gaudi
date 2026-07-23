@@ -51,7 +51,11 @@ class HPUPagedAttention:
 
     @staticmethod
     def get_supported_head_sizes() -> list[int]:
-        return list(range(1, 257))
+        # FusedSDPA / flat_pa on HPU accepts head dims well beyond the
+        # historical 256 paged-KV software ceiling. Models with large or
+        # asymmetric per-layer head_dim (e.g. gemma-4 global layers use
+        # head_dim=512) must be allowed through this PyTorch attention path.
+        return list(range(1, 577))
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:

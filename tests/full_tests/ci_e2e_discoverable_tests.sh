@@ -335,6 +335,19 @@ run_gsm8k_qwen3_30b_test() {
     echo "✅ Test with QWEN3-30B-A3B passed."
 }
 
+# GPQA-diamond online eval on Kimi-K2.6 (TP=8, expert parallel).
+# Launches a vLLM OpenAI server, runs lm-eval as a local-chat-completions
+# client, and gates on the accuracy thresholds in the config yaml.
+# Requires HF_TOKEN with access to the gated Idavidrein/gpqa dataset.
+# TODO: Enable kimi2.6 test later
+run_gpqa_kimi_k26_test() {
+    echo "⏭️  Skipping GPQA-diamond on Kimi-K2.6 (disabled)."
+    # echo "➡️ Testing GPQA-diamond on Kimi-K2.6..."
+    # cd "${VLLM_GAUDI_PREFIX}/tests/full_tests/gpqa_eval" && \
+    # bash run-tests.sh -c configs/Kimi-K2.6.yaml
+    # echo "✅ Test with GPQA-diamond on Kimi-K2.6 passed."
+}
+
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only (baseline, no fsdpa_slicing)
 # Requires: pip install 'lm_eval[longbench]'
@@ -432,6 +445,32 @@ run_gsm8k_qwen36_35b_a3b_test() {
     echo "✅ Test with Qwen3.6-35B-A3B passed."
 }
 
+# GSM8K on gemma-4-E2B (YOCO / KV-sharing model)
+run_gsm8k_gemma4_e2b_test() {
+    echo "➡️ Testing GSM8K on gemma-4-E2B-it..."
+    VLLM_SKIP_WARMUP=True \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-E2B-it.yaml"
+    echo "✅ Test with gemma-4-E2B-it passed."
+}
+
+# GSM8K on gemma-4-31B
+run_gsm8k_gemma4_31b_test() {
+    echo "➡️ Testing GSM8K on gemma-4-31B-it..."
+    TP_SIZE=2 VLLM_SKIP_WARMUP=True \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-31B-it.yaml"
+    echo "✅ Test with gemma-4-31B-it passed."
+}
+
+# GSM8K on gemma-4-26B-A4B (MoE)
+run_gsm8k_gemma4_26b_test() {
+    echo "➡️ Testing GSM8K on gemma-4-26B-A4B-it..."
+    TP_SIZE=2 VLLM_SKIP_WARMUP=True \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-26B-A4B-it.yaml"
+    echo "✅ Test with gemma-4-26B-A4B-it passed."
+}
 
 # --- Spec decode tests ---
 # Tests below check if speculative decoding is matching accept rate specified as an argument.
@@ -582,6 +621,7 @@ launch_all_tests() {
     run_gsm8k_granite_async_test
     run_gsm8k_deepseek_test
     run_gsm8k_qwen3_30b_test
+    run_gpqa_kimi_k26_test
     run_longbench_qwen3_30b_fp8_static_test
     run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test
     run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test
