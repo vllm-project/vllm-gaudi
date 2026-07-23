@@ -58,6 +58,14 @@ def register_model():
     from vllm_gaudi.models.deepseek_ocr import HpuDeepseekOCRForCausalLM  # noqa: F401
     ModelRegistry.register_model("DeepseekOCRForCausalLM", "vllm_gaudi.models.deepseek_ocr:HpuDeepseekOCRForCausalLM")
 
+    # Upstream vLLM migrated GPTBigCode/Starcoder2 to the Transformers modeling
+    # backend, which does not trace cleanly under HPU warmup/bucketing. Register
+    # the vendored native implementations so these architectures keep working on
+    # Gaudi (e.g. StarCoder, granite-*-code).
+    ModelRegistry.register_model("GPTBigCodeForCausalLM", "vllm_gaudi.models.gpt_bigcode:GPTBigCodeForCausalLM")
+    ModelRegistry.register_model("Starcoder2ForCausalLM", "vllm_gaudi.models.starcoder2:Starcoder2ForCausalLM")
+
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
     import vllm_gaudi.models.qwen3_next  # noqa: F401
     import vllm_gaudi.models.qwen3_5  # noqa: F401
+    import vllm_gaudi.models.kimi_k25_vit  # noqa: F401
