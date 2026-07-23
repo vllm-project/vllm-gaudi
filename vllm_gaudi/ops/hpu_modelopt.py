@@ -17,7 +17,17 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization import modelopt
 from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
 from torch.nn.parameter import Parameter
-from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+try:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+except ImportError:
+    # Optional/moved upstream symbol (see PR #41184). When absent, the
+    # RoutedExperts (FusedMoE) branch in get_quant_method is simply
+    # unreachable; use a sentinel that no layer will ever be an instance of
+    # so isinstance(layer, RoutedExperts) safely evaluates to False.
+    class RoutedExperts:  # type: ignore[no-redef]
+        pass
+
+
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 
 logger = init_logger(__name__)
