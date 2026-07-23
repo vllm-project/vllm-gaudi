@@ -236,7 +236,6 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
-
         output = layer.moe_op(
             x,
             topk_ids,
