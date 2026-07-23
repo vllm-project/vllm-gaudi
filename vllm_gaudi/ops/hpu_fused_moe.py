@@ -183,10 +183,9 @@ def _unfused_swigluoai_moe(
 # (padding experts contribute exactly +0.0), so the result is numerically
 # identical to ``_unfused_swigluoai_moe`` (bit-exact; validated).
 #
-# Gated OFF by default (VLLM_MINIMAX_M3_MOE_DECODE_GATHER=1 to enable), so this
-# patch is a no-op until the flag is set -- existing behavior is unchanged.
-_MOE_DECODE_GATHER = os.environ.get(
-    "VLLM_MINIMAX_M3_MOE_DECODE_GATHER", "0") == "1"
+# Enabled by default for MiniMax-M3 low-concurrency decode. Set
+# VLLM_MINIMAX_M3_MOE_DECODE_GATHER=0 to use the dense expert pass instead.
+_MOE_DECODE_GATHER = os.environ.get("VLLM_MINIMAX_M3_MOE_DECODE_GATHER", "1") == "1"
 # Only gather when the batch is at most this many tokens (bounds gather to the
 # low-concurrency decode regime where it wins; above it the dense pass is used).
 _MOE_GATHER_MAX_TOKENS = int(
