@@ -32,9 +32,24 @@ from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
+# Map model activation names to the activation strings the Gaudi fused-MoE op's
+# MoeActivationMode_t enum accepts. The synapse MoE kernel enumerates "gelu" (and
+# silu/selu) but NOT "gelu_tanh"; the Gaudi gelu TPC kernel is itself the tanh
+# approximation (tpc_kernels .../gelu_f16.c uses tanh_f16), so HF's
+# gelu_pytorch_tanh / gelu_tanh map to the op's "gelu" (the ~1e-3 exact-vs-tanh
+# difference does not affect inference). Without this, Gemma4's MoE aborts at
+# warmup_graphs with: Activation "gelu_tanh" not found among MoeActivationMode_t.
+_MOE_ACTIVATION_ALIASES = {
+    "gelu_tanh": "gelu",
+    "gelu_pytorch_tanh": "gelu",
+    "gelu_new": "gelu",
+    "quick_gelu": "gelu",
+}
+
 
 def _normalize_moe_activation(activation):
-    return activation.value if isinstance(activation, Enum) else activation
+    act = activation.value if isinstance(activation, Enum) else activation
+    return _MOE_ACTIVATION_ALIASES.get(act, act)
 
 
 def model_has_quant_config() -> bool:
@@ -339,12 +354,13 @@ def patched_fused_moe_forward(
     fused output combination logic.
     """
     hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
-    # Upstream _maybe_pad_hidden_states now returns a 3-tuple: the (possibly
-    # padded) hidden_states plus two truncation sizes. og_hidden_dim_pre_xform
-    # trims fused_output before the routed-output transform (latent MoE);
-    # og_hidden_dim_post_xform strips kernel padding after the final all-reduce.
-    hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = self._maybe_pad_hidden_states(
-        shared_experts_input, hidden_states)
+    # Upstream _maybe_pad_hidden_states returns a 3-tuple: the (possibly padded)
+    # hidden_states plus separate pre-transform and post-transform truncation
+    # sizes (either may be None). Mirror MoERunner.forward, which keeps them
+    # distinct — pre_xform strips fused_output before the routed-output
+    # transform, post_xform strips the final output after all-reduce.
+    hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (self._maybe_pad_hidden_states(
+        shared_experts_input, hidden_states))
 
     if self.moe_config.dp_size == 1:
         # Bypass _forward_impl entirely for dp_size==1 to eliminate
@@ -354,8 +370,9 @@ def patched_fused_moe_forward(
         # would redundantly repeat.
         if self.moe_config.pcp_size > 1:
             raise RuntimeError("dp_size==1 fast path does not support pcp_size > 1")
-        # Mirrors upstream MoERunner._forward_impl; the quant config init can be
-        # dropped once upstream completes its Modular Kernel (MK) migration.
+        # Mirror MoERunner._forward_impl's pre-dispatch setup: the quant config
+        # is initialized on routed_experts (which the runner holds directly), so
+        # unlike the old FusedMoE-layer-based init we do NOT need the layer here.
         self.routed_experts._ensure_moe_quant_config_init()
         self._maybe_sync_shared_experts_stream(shared_experts_input)
         # Apply the gate if the runner holds it (mirrors _forward_impl).
@@ -365,6 +382,9 @@ def patched_fused_moe_forward(
                 router_logits = torch.nn.functional.linear(hidden_states, self._combined_gate_weight)
             else:
                 router_logits, _ = self.gate(hidden_states)
+        # Core MoERunner._apply_quant_method takes no layer argument — it reads
+        # everything it needs off the runner (self.routed_experts / self.router).
+        # Call it exactly as upstream _forward_impl does.
         shared_output, fused_hidden = self._apply_quant_method(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -438,6 +458,7 @@ def create_fused_moe_router(
     top_k: int,
     global_num_experts: int,
     renormalize: bool = True,
+    indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     # grouped topk parameters
     use_grouped_topk: bool = False,
     num_expert_group: int | None = None,
