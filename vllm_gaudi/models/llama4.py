@@ -6,82 +6,34 @@ Llama4 has 48 decoder layers with heterogeneous configurations:
   - RoPE layers: has rotary_emb, no temperature tuning, ChunkedLocalAttention
 
 This module provides:
-  1. HpuLlama4Model — overrides forward() to initialize residual as zeros
-     instead of None, eliminating torch._dynamo type guard.
-  2. HpuLlama4ForCausalLM — registered via ModelRegistry, applies branch-free
-     attention patches and attention type unification in __init__.
-  3. Branch-free attention patching — boolean buffer masks + torch.where
+  1. HpuLlama4ForCausalLM — registered via ModelRegistry, applies Llama4-
+     specific attention patches and attention type unification in __init__.
+  2. Branch-free attention patching — boolean buffer masks + torch.where
      eliminate Python if/else guards on nope/rotary_emb/temperature_tuning.
-  4. Attention type unification — swaps ChunkedLocalAttention → Attention
+  3. Attention type unification — swaps ChunkedLocalAttention → Attention
      to eliminate torch._dynamo type guards across layers.
 """
 
 import types
-from itertools import islice
 
 import habana_frameworks.torch as htorch
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.models.llama4 import (
     Llama4ForCausalLM as UpstreamLlama4ForCausalLM,
-    Llama4Model as UpstreamLlama4Model,
 )
 from vllm.model_executor.models.mllama4 import (
     Llama4ForConditionalGeneration as UpstreamLlama4ForConditionalGeneration, )
-from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
-
-
-class HpuLlama4Model(UpstreamLlama4Model):
-    """Llama4Model with residual initialized as zeros instead of None.
-
-    The upstream LlamaModel.forward() sets ``residual = None`` for the first
-    rank, which creates a torch._dynamo type guard (None vs Tensor) that
-    causes recompilation between layer 0 and layers 1-47. Initializing
-    residual as ``torch.zeros_like(hidden_states)`` eliminates this guard.
-    """
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None,
-        inputs_embeds: torch.Tensor | None = None,
-        **extra_layer_kwargs,
-    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        if get_pp_group().is_first_rank:
-            hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
-            residual = torch.zeros_like(hidden_states)
-        else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
-
-        aux_hidden_states = []
-        for idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
-            if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual, **extra_layer_kwargs)
-
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
-
-        hidden_states, _ = self.norm(hidden_states, residual)
-
-        if len(aux_hidden_states) > 0:
-            return hidden_states, aux_hidden_states
-        return hidden_states
 
 
 class HpuLlama4ForCausalLM(UpstreamLlama4ForCausalLM):
     """HPU-optimized Llama4ForCausalLM registered via ModelRegistry.
 
-    Applies branch-free attention patches, attention type unification,
-    and swaps the inner model class to HpuLlama4Model for residual fix.
+    Applies branch-free attention patches and attention type unification.
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -92,13 +44,12 @@ class HpuLlama4ForCausalLM(UpstreamLlama4ForCausalLM):
 def _apply_hpu_llama4_init_patches(model_root: nn.Module) -> None:
     """Shared init-time patches for both CausalLM and ConditionalGeneration.
 
-    Swaps the inner model class for the residual=zeros fix and applies
-    attention type unification in compile mode.
+    Applies attention type unification in compile mode.
+    The residual=zeros warmup workaround is installed by the global MoE
+    warmup patch in HpuModelAdapter.
     _unify_feed_forward_types is deferred to post-load via
     apply_hpu_llama4_post_load_patches() to avoid breaking weight loading.
     """
-    model_root.__class__ = HpuLlama4Model
-
     if not htorch.utils.internal.is_lazy():
         layers = getattr(model_root, "layers", [])
         # NOTE: _apply_branch_free_attention is SKIPPED.
