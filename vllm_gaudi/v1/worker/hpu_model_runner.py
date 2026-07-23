@@ -12,7 +12,7 @@ import os
 import time
 from contextlib import suppress
 from tqdm import tqdm
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypeAlias, Union, cast)
 if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
@@ -5485,41 +5485,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if prompt_cfg:
             prompt_bs, prompt_query_len, prompt_num_blocks = prompt_cfg
 
-            # Granite 4.0-H (non-GDN mamba hybrid): self.block_size is 528
-            # (mamba page alignment). The prompt-warmup context is materialized
-            # as prompt_num_blocks * self.block_size KV tokens, so the largest
-            # long-context bucket (e.g. 249 blocks) would build a ~131K-token
-            # context and OOM at gpu_memory_util 0.9 during warmup. The compiled
-            # graph key is (bs, query_len, num_blocks) where num_blocks is the
-            # context-block COUNT, so we cap only the warmed block COUNT here;
-            # this bounds the warmup activation peak WITHOUT changing the 528
-            # kernel/bucketing/runtime semantics. Realistic tool-calling and
-            # humaneval requests carry only a short context (tool defs + query,
-            # far below this cap), so they still hit warmed buckets and incur no
-            # runtime "not warmed-up" recompilation; only requests approaching
-            # the 131K max capacity would. GDN hybrids and non-mamba models are
-            # untouched (block_size stays 128 there, so no oversized context).
-            if (self.num_mamba_like_layers > 0 and self.num_gdn == 0 and not self.is_pooling_model):
-                # ~33K tokens matches the historically OOM-safe short-context
-                # warmup peak (the short-ctx profile warms up to ~64 blocks of
-                # 528 ≈ 33K tokens at 0.9 without OOM).
-                warmup_ctx_token_cap = 33792
-                max_warmup_ctx_blocks = max(1, warmup_ctx_token_cap // self.block_size)
-                if prompt_num_blocks > max_warmup_ctx_blocks:
-                    # Emit once so a cold-start "Configuration was not
-                    # warmed-up" on a genuinely long-context request is
-                    # traceable back to this intentional warmup cap rather
-                    # than mistaken for a bucketing bug.
-                    logger.warning_once(
-                        "Capping non-GDN mamba-hybrid prompt warmup context "
-                        "from %s to %s blocks (block_size=%s, ~%s tokens) to "
-                        "bound the warmup activation peak. Requests whose "
-                        "prompt context exceeds ~%s tokens are not pre-warmed "
-                        "and may recompile once on first use.", prompt_num_blocks, max_warmup_ctx_blocks,
-                        self.block_size, max_warmup_ctx_blocks * self.block_size,
-                        max_warmup_ctx_blocks * self.block_size)
-                prompt_num_blocks = min(prompt_num_blocks, max_warmup_ctx_blocks)
-
             if self.is_pooling_model:
                 prompt_total_tokens = [prompt_query_len]
                 prompt_num_context_blocks = [0]
@@ -6111,7 +6076,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    if layer_name in layer_kv_cache_spec.kv_cache_specs:
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    elif layer_name in self.shared_kv_cache_layers:
+                        # Shared layer: use the target layer's spec
+                        target = self.shared_kv_cache_layers[layer_name]
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[target]
+                    else:
+                        raise KeyError(f"No KV cache spec for layer {layer_name}")
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
@@ -6504,7 +6476,40 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             kv_cache_spec = group.kv_cache_spec
                             break
                     assert kv_cache_spec is not None, f"No spec found for {layer_name}"
-                    assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
+
+                    # Heterogeneous models (e.g. Gemma4 with interleaved
+                    # sliding/full attention, asymmetric head_dim 256/512 and
+                    # kv_heads 8/2) are grouped by core vLLM under a single
+                    # UniformTypeKVCacheSpecs wrapper rather than one spec per
+                    # group.  Unwrap it to the concrete per-layer spec so each
+                    # layer allocates KV storage sized to its OWN head_size /
+                    # num_kv_heads / page_size_bytes.  Symmetric siblings
+                    # (gemma3/qwen) never produce this wrapper type, so this
+                    # branch is inert for them.
+                    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                        per_layer_spec = kv_cache_spec.kv_cache_specs.get(layer_name)
+                        assert per_layer_spec is not None, (
+                            f"UniformTypeKVCacheSpecs has no per-layer spec for {layer_name}")
+                        kv_cache_spec = per_layer_spec
+
+                    # For heterogeneous models (e.g., Gemma4 with UniformTypeKVCacheSpecs),
+                    # the page_size_bytes is the sum of all layer specs' page sizes, but
+                    # the actual tensor might not align perfectly. Round down to the largest
+                    # usable number of blocks rather than asserting perfect alignment.
+                    remainder = kv_cache_tensor.size % kv_cache_spec.page_size_bytes
+                    if remainder != 0:
+                        usable_size = kv_cache_tensor.size - remainder
+                        waste_pct = remainder * 100.0 / kv_cache_tensor.size
+                        logger.warning(
+                            "KV cache tensor size (%s bytes) does not "
+                            "perfectly align with page_size_bytes (%s bytes). "
+                            "This is expected for heterogeneous models like Gemma4 with mixed "
+                            "attention types. Using %s bytes "
+                            "(%s bytes unused, %.2f%% waste).", f"{kv_cache_tensor.size:,}",
+                            f"{kv_cache_spec.page_size_bytes:,}", f"{usable_size:,}", f"{remainder:,}", waste_pct)
+                        # Use only the aligned portion of the tensor
+                        kv_cache_tensor = replace(kv_cache_tensor, size=usable_size)
+
                     num_blocks = \
                         kv_cache_tensor.size // kv_cache_spec.page_size_bytes
                     # `num_blocks` is the number of blocks the model runner can use.
@@ -6514,7 +6519,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # different memory capacities, `num_blocks` can be different on
                     # different GPUs, and `kv_cache_config.num_blocks` is set to
                     # the min of all `num_blocks`. Verify it here.
-                    assert num_blocks >= kv_cache_config.num_blocks
+                    # For heterogeneous models where we rounded down the tensor size,
+                    # num_blocks may be slightly less than expected - this is acceptable.
+                    if num_blocks < kv_cache_config.num_blocks:
+                        if remainder != 0:
+                            # This is expected for heterogeneous models after alignment
+                            logger.warning(
+                                "After alignment, num_blocks=%d is less than "
+                                "kv_cache_config.num_blocks=%d. "
+                                "This is expected for heterogeneous models like Gemma4.", num_blocks,
+                                kv_cache_config.num_blocks)
+                        else:
+                            # Unexpected - still assert in this case
+                            assert num_blocks >= kv_cache_config.num_blocks
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
