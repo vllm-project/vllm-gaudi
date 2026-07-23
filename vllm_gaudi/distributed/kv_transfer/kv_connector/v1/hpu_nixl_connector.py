@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
+import inspect
+import io
+import textwrap
+import tokenize
+
 import msgspec
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlBaseConnectorWorker, NixlConnectorWorker
@@ -181,6 +187,99 @@ TransferTopology.__post_init__ = _hpu_transfer_topo_post_init
 # as two separate blocks-first regions (halving ``physical_page_size`` per
 # region) so ``shape[0] == num_blocks`` holds again.  Mamba / hybrid-SSM / MLA
 # layers keep the upstream single-region path.
+#
+# ── DRIFT HAZARD ─────────────────────────────────────────────────────────── #
+# ``_hpu_register_kv_caches`` below is a VERBATIM COPY of
+# ``NixlBaseConnectorWorker.register_kv_caches`` @ vllm 61c9ef98
+# (base_worker.py:1024), with only three logic deviations (the ``cache_list``
+# expansion, the ``physical_page_size //= len(cache_list)`` line, and the inner
+# ``for cache in cache_list`` loop). Unlike the ``inspect.getsource`` guards in
+# ``patches.py``, a raw copy has no way to notice when upstream reworks the
+# descriptor math on the next vllm bump: the copy would silently keep computing
+# the OLD region sizes / block lengths and hand NIXL wrong descriptors WITHOUT
+# crashing. ``_warn_if_upstream_register_drifted`` (invoked at install time)
+# compares a version-stable canonical token digest of the live upstream method
+# against the baseline captured at the pin and logs a loud re-sync warning on
+# mismatch. It deliberately WARNS rather than raises: this module is imported
+# for every HPU worker at ``register_ops`` time (not just PD runs), so a hard
+# failure would break unrelated attention/Mamba workloads on any upstream
+# reflow. Re-sync procedure on warning: re-copy the upstream body, re-apply the
+# three deviations, and refresh ``_UPSTREAM_REGISTER_KV_CACHES_BASELINE``.
+
+# Canonical token digest of NixlBaseConnectorWorker.register_kv_caches @
+# vllm 61c9ef98 (comments/docstring/whitespace stripped — see
+# _canonical_source_digest). Refresh this whenever the copy below is re-synced
+# to a newer vllm pin.
+_UPSTREAM_REGISTER_KV_CACHES_BASELINE = "c28bbb0667f915b805af79c39178ffb7c312f8291c90c9318afb5e1a83625176"
+
+
+def _canonical_source_digest(src: str) -> str:
+    """Return a version-stable SHA-256 over the *semantic* tokens of ``src``.
+
+    Drops comments, the leading docstring, and every layout token (newlines,
+    indentation), keeping only the ordered token *strings*. This makes the
+    digest insensitive to pure reformatting (black vs yapf, line wrapping) so
+    only a genuine logic change in upstream trips the drift warning. Stable
+    across CPython 3.10–3.12 for code without version-specific syntax.
+
+    Args:
+        src: Source text of a single function definition.
+
+    Returns:
+        Hex SHA-256 digest of the canonical token stream.
+    """
+    dedented = textwrap.dedent(src)
+    values: list[str] = []
+    depth = 0
+    def_colon_seen = False
+    doc_dropped = False
+    for tok in tokenize.generate_tokens(io.StringIO(dedented).readline):
+        tok_type, tok_str = tok.type, tok.string
+        if tok_type in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT,
+                        tokenize.ENCODING, tokenize.ENDMARKER):
+            continue
+        if tok_type == tokenize.OP and tok_str in "([{":
+            depth += 1
+        elif tok_type == tokenize.OP and tok_str in ")]}":
+            depth -= 1
+        elif tok_type == tokenize.OP and tok_str == ":" and depth == 0 and not def_colon_seen:
+            # Colon that closes the ``def ...():`` header — the body starts next.
+            def_colon_seen = True
+            values.append(tok_str)
+            continue
+        if def_colon_seen and not doc_dropped and tok_type == tokenize.STRING:
+            doc_dropped = True  # Drop the function docstring.
+            continue
+        values.append(tok_str)
+    return hashlib.sha256(" ".join(values).encode()).hexdigest()
+
+
+def _warn_if_upstream_register_drifted() -> None:
+    """Warn (never raise) when upstream ``register_kv_caches`` has drifted.
+
+    ``_hpu_register_kv_caches`` is a verbatim copy of the upstream method at the
+    pinned vLLM SHA. If a later vllm bump reworks the upstream descriptor math,
+    the copy silently keeps the old logic and would feed NIXL stale descriptors
+    without crashing. Compare a canonical token digest of the live upstream
+    method against the captured baseline and log a loud re-sync warning on
+    mismatch. Best-effort: any failure to introspect upstream is swallowed so a
+    diagnostic aid never breaks plugin registration.
+    """
+    try:
+        upstream = inspect.unwrap(NixlBaseConnectorWorker.register_kv_caches)
+        if upstream is _hpu_register_kv_caches:
+            return  # Already patched in this process — nothing to compare.
+        live_digest = _canonical_source_digest(inspect.getsource(upstream))
+    except (OSError, TypeError, tokenize.TokenError, IndentationError, RecursionError):
+        return  # Source unavailable (C/builtin) or unparseable — skip silently.
+    if live_digest != _UPSTREAM_REGISTER_KV_CACHES_BASELINE:
+        logger.warning(
+            "[HPU] NixlBaseConnectorWorker.register_kv_caches has drifted from the vllm 61c9ef98 "
+            "baseline that vllm_gaudi's _hpu_register_kv_caches was copied from "
+            "(live token digest %s != baseline %s). The HPU K/V-split override may now compute "
+            "stale NIXL descriptors. Re-sync _hpu_register_kv_caches to the current upstream body, "
+            "re-apply the three HPU deviations, and refresh "
+            "_UPSTREAM_REGISTER_KV_CACHES_BASELINE.", live_digest, _UPSTREAM_REGISTER_KV_CACHES_BASELINE)
 
 
 def _hpu_transfer_cache_regions(transfer_topo, cache, layer_spec):
@@ -227,12 +326,15 @@ def _hpu_transfer_cache_regions(transfer_topo, cache, layer_spec):
 def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
     """Register HPU KV caches in NIXL, restoring the pre-#44456 K/V split.
 
-    Faithful re-implementation of
-    ``NixlBaseConnectorWorker.register_kv_caches`` at the pinned vLLM SHA, with
-    the sole HPU deviation that each per-layer cache is expanded via
-    :func:`_hpu_transfer_cache_regions` so K and V register as two separate
-    blocks-first regions instead of the single packed region the upstream
-    inlined loop assumes.
+    VERBATIM COPY of ``NixlBaseConnectorWorker.register_kv_caches`` at vllm
+    61c9ef98 (base_worker.py:1024), with exactly three logic deviations: the
+    per-layer cache is expanded via :func:`_hpu_transfer_cache_regions` into a
+    ``cache_list`` so K and V register as two separate blocks-first regions
+    instead of the single packed region the upstream inlined loop assumes;
+    ``physical_page_size`` is divided by ``len(cache_list)``; and the region
+    bookkeeping runs in an inner ``for cache in cache_list`` loop. Everything
+    else mirrors upstream. See the DRIFT HAZARD note above — re-sync on the
+    ``_warn_if_upstream_register_drifted`` warning.
 
     Args:
         kv_caches: Mapping of layer name to its device KV cache tensor.
@@ -406,6 +508,11 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         agent_metadata_bytes=encoder.encode(agent_metadata),
     )
 
+
+# Warn if upstream's register_kv_caches drifted from the copied baseline BEFORE
+# we overwrite it — afterwards the attribute points at our copy and the digest
+# comparison is meaningless.
+_warn_if_upstream_register_drifted()
 
 # Patch the base worker so both the pull worker (NixlConnectorWorker, which
 # inherits register_kv_caches unchanged) and the push worker (which calls

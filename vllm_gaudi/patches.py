@@ -47,11 +47,8 @@ Currently:
   the pre-split tuple directly (restoring the pre-#44456 contract).
 """
 
-from __future__ import annotations
-
 import gc
 import inspect
-from collections.abc import Callable
 
 import torch
 
@@ -318,32 +315,30 @@ def _hpu_mamba_bind_kv_cache(self, kv_cache) -> None:
     ``MambaBase.bind_kv_cache`` that unpacks a single packed ``[B, 1, 1, C]``
     int8 page view via ``kv_cache.squeeze(dim=(1, 2))``.
 
-    The HPU worker and model runner never pack the Mamba state into one int8
-    page: they allocate a separate tensor per state (conv/ssm, plus optional
-    scales) and hand the layer a ready-made tuple. Feeding that tuple to the
-    upstream method raises ``AttributeError: 'tuple' object has no attribute
-    'squeeze'`` at EngineCore init (crashes ``run_granite_4_h_load_generate_test``
-    for ibm-granite/granite-4.0-h-small).
+    The HPU model runner never packs the Mamba state into one int8 page:
+    ``HPUModelRunner.initialize_kv_cache`` allocates a separate tensor per
+    state (conv/ssm) and always stores a ``tuple``/``list`` in the ``kv_caches``
+    dict for every MambaSpec layer (see the standard, hybrid and
+    naive-cache-sharing branches — each ends in ``kv_caches[...] = tuple(...)``
+    or ``= state_tensors``). ``bind_kv_cache`` therefore only ever receives that
+    pre-split sequence on HPU; the upstream ``.squeeze`` path would raise
+    ``AttributeError: 'tuple' object has no attribute 'squeeze'`` at EngineCore
+    init (crashes ``run_granite_4_h_load_generate_test`` for
+    ibm-granite/granite-4.0-h-small).
 
-    Restore the pre-#44456 contract: when the runner already delivers the
-    pre-split per-state tuple, assign it directly. Only fall back to the
-    upstream int8-page unpacking when handed a raw ``torch.Tensor`` (defensive,
-    for any non-HPU allocation path that may reach this method).
+    Restore the pre-#44456 contract by assigning the pre-split sequence
+    directly. This patch is HPU-only (installed from the HPU plugin), so the
+    single-int8-page allocation never reaches it; ``tuple(kv_cache)`` would
+    silently iterate a raw tensor's leading dim, so guard the contract instead
+    of coercing.
 
     Upstream ref: https://github.com/vllm-project/vllm/pull/44456
     """
-    if isinstance(kv_cache, (tuple, list)):
-        self.kv_cache = tuple(kv_cache)
-        return
-    # Fallback: raw packed page — defer to the upstream unpacking behavior.
-    # An explicit check (not ``assert``) so ``python -O`` cannot strip it and
-    # leave a confusing ``TypeError: 'NoneType' object is not callable`` below.
-    if _MambaBase_bind_kv_cache_original is None:
-        raise RuntimeError("MambaBase.bind_kv_cache patch not installed: original method unavailable")
-    _MambaBase_bind_kv_cache_original(self, kv_cache)
-
-
-_MambaBase_bind_kv_cache_original: Callable[..., None] | None = None
+    assert isinstance(
+        kv_cache,
+        (tuple,
+         list)), (f"HPU MambaBase.bind_kv_cache expects a pre-split conv/ssm sequence, got {type(kv_cache).__name__}")
+    self.kv_cache = tuple(kv_cache)
 
 
 def _patch_mamba_bind_kv_cache() -> None:
@@ -365,8 +360,6 @@ def _patch_mamba_bind_kv_cache() -> None:
 
     Upstream ref: https://github.com/vllm-project/vllm/pull/44456
     """
-    global _MambaBase_bind_kv_cache_original
-
     try:
         from vllm.model_executor.layers.mamba.abstract import MambaBase
     except ImportError:
@@ -388,7 +381,6 @@ def _patch_mamba_bind_kv_cache() -> None:
     if source and ".squeeze(" not in source:
         return  # Upstream no longer squeezes — the tuple crash cannot occur.
 
-    _MambaBase_bind_kv_cache_original = upstream
     MambaBase.bind_kv_cache = _hpu_mamba_bind_kv_cache
 
 
