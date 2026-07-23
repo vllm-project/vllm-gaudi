@@ -7,9 +7,8 @@ from vllm.model_executor.models.qwen3_next import (
     Qwen3NextModel as UpstreamQwen3NextModel,
     Qwen3NextSparseMoeBlock,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
-
+from vllm_gaudi.models.utils import sequence_parallel_chunk
 
 class HpuQwen3NextModel(UpstreamQwen3NextModel):
     """Qwen3NextModel with residual initialized as zeros instead of None.
