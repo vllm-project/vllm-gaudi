@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_HPU_NIXL_JOINT_KV: bool = False
     VLLM_HPU_NIXL_STAGING_SLOTS: int = 0
+    VLLM_MINIMAX_M3_MOE_TOKEN_TILE: int = 512
+    VLLM_MINIMAX_M3_MOE_DECODE_GATHER: bool = True
+    VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS: int = 16
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -70,6 +73,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # value if you are certain peak concurrent transfer demand stays under it.
     "VLLM_HPU_NIXL_STAGING_SLOTS":
     lambda: int(os.environ.get("VLLM_HPU_NIXL_STAGING_SLOTS", "0")),
+
+    # MiniMax-M3 SwiGLU-OAI expert execution tuning.
+    "VLLM_MINIMAX_M3_MOE_TOKEN_TILE":
+    lambda: int(os.environ.get("VLLM_MINIMAX_M3_MOE_TOKEN_TILE", "512")),
+    "VLLM_MINIMAX_M3_MOE_DECODE_GATHER":
+    lambda: os.environ.get("VLLM_MINIMAX_M3_MOE_DECODE_GATHER", "1").lower() in ("1", "true"),
+    "VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS":
+    lambda: int(os.environ.get("VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS", "16")),
 }
 
 # end-env-vars-definition
