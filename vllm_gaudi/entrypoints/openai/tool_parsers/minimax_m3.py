@@ -84,9 +84,7 @@ ELEMENT_END_START = NS + "</"
 MIXED_TEXT_FIELD = "$text"
 
 _WS = " \t\r\n"
-_INVOKE_NAME_RE = re.compile(
-    r"""name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
-)
+_INVOKE_NAME_RE = re.compile(r"""name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
 
 # Sentinel for "schema-aware conversion failed, use fallback".
 _FAIL = object()
@@ -126,7 +124,7 @@ class _Cur:
         j = self.s.find(marker, self.i)
         if j == -1:
             raise _ParseError(f"marker {marker!r} not found")
-        val = self.s[self.i : j]
+        val = self.s[self.i:j]
         self.i = j
         return val
 
@@ -153,7 +151,7 @@ def _norm(schema) -> tuple | None:
                 return _one_of(types)
         return _object_from(schema)
     if "enum" in schema:
-        return ("string",)
+        return ("string", )
     if "items" in schema:
         return _array_from(schema)
     if "properties" in schema or "additionalProperties" in schema:
@@ -165,15 +163,7 @@ def _norm_type_value(type_value, schema) -> tuple | None:
     if isinstance(type_value, str):
         return _from_type_name(type_value, schema)
     if isinstance(type_value, list):
-        types = [
-            t
-            for t in (
-                _from_type_name(k, schema)
-                for k in type_value
-                if isinstance(k, str)
-            )
-            if t is not None
-        ]
+        types = [t for t in (_from_type_name(k, schema) for k in type_value if isinstance(k, str)) if t is not None]
         return _one_of(types) if types else None
     return None
 
@@ -181,29 +171,24 @@ def _norm_type_value(type_value, schema) -> tuple | None:
 def _from_type_name(kind: str, schema) -> tuple | None:
     k = kind.strip().lower()
     if k in ("string", "str", "text", "varchar", "char", "enum"):
-        return ("string",)
+        return ("string", )
     if k in ("integer", "int"):
-        return ("integer",)
+        return ("integer", )
     if k in ("number", "float", "double"):
-        return ("number",)
+        return ("number", )
     if k in ("boolean", "bool", "binary"):
-        return ("boolean",)
+        return ("boolean", )
     if k in ("object", "dict", "map"):
         return _object_from(schema)
     if k in ("array", "arr", "list", "sequence"):
         return _array_from(schema)
     if k == "null":
-        return ("null",)
-    if (
-        k.startswith("int")
-        or k.startswith("uint")
-        or k.startswith("long")
-        or k.startswith("short")
-        or k.startswith("unsigned")
-    ):
-        return ("integer",)
+        return ("null", )
+    if (k.startswith("int") or k.startswith("uint") or k.startswith("long") or k.startswith("short")
+            or k.startswith("unsigned")):
+        return ("integer", )
     if k.startswith("num") or k.startswith("float"):
-        return ("number",)
+        return ("number", )
     if k.startswith("dict"):
         return _object_from(schema)
     if k.startswith("list"):
@@ -448,7 +433,7 @@ def _hold_partial(text: str, marker: str) -> int:
     n = len(text)
     max_hold = min(len(marker) - 1, n)
     for hold in range(max_hold, 0, -1):
-        if marker.startswith(text[n - hold :]):
+        if marker.startswith(text[n - hold:]):
             return n - hold
     return n
 
@@ -480,7 +465,7 @@ def _scan_open_invoke_body(body_raw: str, props: dict):
             gt = body_raw.find(">", cur.i + len(ELEMENT_START))
             if gt == -1:
                 break  # open tag itself still streaming
-            name = body_raw[cur.i + len(ELEMENT_START) : gt]
+            name = body_raw[cur.i + len(ELEMENT_START):gt]
             if not name.strip() or name.startswith("/"):
                 break
             save = cur.i
@@ -492,8 +477,8 @@ def _scan_open_invoke_body(body_raw: str, props: dict):
                 # Only stream a trailing param when the schema says it is a
                 # string and the value seen so far is plain text (no nested
                 # markers), so the final coerced value equals the streamed one.
-                if props.get(nm) == ("string",):
-                    rest = body_raw[gt + 1 :]
+                if props.get(nm) == ("string", ):
+                    rest = body_raw[gt + 1:]
                     cut = _hold_partial(rest, NS)
                     if NS not in rest[:cut]:
                         open_param = (nm, rest[:cut])
@@ -583,14 +568,14 @@ class MinimaxM3PyToolParser(ToolParser):
         header_end = inv_block.find(">", len(INVOKE_START))
         if header_end == -1:
             raise _ParseError("invoke header not closed")
-        header = inv_block[len(INVOKE_START) : header_end]
+        header = inv_block[len(INVOKE_START):header_end]
         m = _INVOKE_NAME_RE.search(header)
         if not m:
             raise _ParseError("invoke name not found")
         name = (m.group(1) or m.group(2) or m.group(3) or "").strip()
         if not name:
             raise _ParseError("empty invoke name")
-        body = inv_block[header_end + 1 : len(inv_block) - len(INVOKE_END)]
+        body = inv_block[header_end + 1:len(inv_block) - len(INVOKE_END)]
         params = _parse_invoke_params(body)
         props = self._tool_props(name, request)
         args: dict = {}
@@ -600,9 +585,7 @@ class MinimaxM3PyToolParser(ToolParser):
         return ToolCall(
             id=make_tool_call_id(),
             type="function",
-            function=FunctionCall(
-                name=name, arguments=json.dumps(args, ensure_ascii=False)
-            ),
+            function=FunctionCall(name=name, arguments=json.dumps(args, ensure_ascii=False)),
         )
 
     def _parse_block(self, text: str, start: int, request) -> list[ToolCall]:
@@ -620,7 +603,7 @@ class MinimaxM3PyToolParser(ToolParser):
             inv_end = text.find(INVOKE_END, cur.i)
             if inv_end == -1:
                 break  # truncated invoke -> keep completed calls
-            inv_block = text[cur.i : inv_end + len(INVOKE_END)]
+            inv_block = text[cur.i:inv_end + len(INVOKE_END)]
             cur.i = inv_end + len(INVOKE_END)
             try:
                 calls.append(self._parse_one_invoke(inv_block, request))
@@ -629,9 +612,7 @@ class MinimaxM3PyToolParser(ToolParser):
         return calls
 
     # ---- non-streaming ----------------------------------------------------- #
-    def extract_tool_calls(
-        self, model_output: str, request
-    ) -> ExtractedToolCallInformation:
+    def extract_tool_calls(self, model_output: str, request) -> ExtractedToolCallInformation:
         try:
             if not model_output or TOOL_CALL_START not in model_output:
                 return ExtractedToolCallInformation(
@@ -643,26 +624,24 @@ class MinimaxM3PyToolParser(ToolParser):
             content = model_output[:start].strip() or None
             calls = self._parse_block(model_output, start, request)
             if not calls:
-                # Best-effort: never leak raw tool-call XML as content.
+                # Preserve the generated output when no valid call can be
+                # recovered. Returning only the prefix would silently discard
+                # malformed or truncated tool-call text.
                 return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=content
+                    tools_called=False,
+                    tool_calls=[],
+                    content=model_output,
                 )
-            return ExtractedToolCallInformation(
-                tools_called=True, tool_calls=calls, content=content
-            )
+            return ExtractedToolCallInformation(tools_called=True, tool_calls=calls, content=content)
         except Exception:
-            logger.exception(
-                "MiniMax-M3 tool parse failed; degrading to plain content"
-            )
-            return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=model_output or None
-            )
+            logger.exception("MiniMax-M3 tool parse failed; degrading to plain content")
+            return ExtractedToolCallInformation(tools_called=False, tool_calls=[], content=model_output or None)
 
     # ---- streaming --------------------------------------------------------- #
     def _ensure_stream_state(self) -> None:
         if not hasattr(self, "_m3_pos"):
             self._m3_pos = 0
-            self._m3_mode = "text"  # text -> tool -> done
+            self._m3_mode = "text"  # text -> tool -> done/fallback
             self._m3_index = 0
             self._open: dict | None = None
         # These are provided by the real vLLM ToolParser base __init__, but we
@@ -685,16 +664,10 @@ class MinimaxM3PyToolParser(ToolParser):
             return ""
         index = len(self.prev_tool_call_arr) - 1
         args = self.prev_tool_call_arr[index].get("arguments", {})
-        expected = args if isinstance(args, str) else json.dumps(
-            args, ensure_ascii=False
-        )
-        actual = (
-            self.streamed_args_for_tool[index]
-            if index < len(self.streamed_args_for_tool)
-            else ""
-        )
+        expected = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)
+        actual = (self.streamed_args_for_tool[index] if index < len(self.streamed_args_for_tool) else "")
         if expected.startswith(actual):
-            return expected[len(actual) :]
+            return expected[len(actual):]
         return ""
 
     def _safe_text_end(self, text: str, pos: int) -> int:
@@ -703,7 +676,7 @@ class MinimaxM3PyToolParser(ToolParser):
         n = len(text)
         max_hold = min(len(TOOL_CALL_START) - 1, n - pos)
         for hold in range(max_hold, 0, -1):
-            if TOOL_CALL_START.startswith(text[n - hold :]):
+            if TOOL_CALL_START.startswith(text[n - hold:]):
                 return n - hold
         return n
 
@@ -711,11 +684,8 @@ class MinimaxM3PyToolParser(ToolParser):
         tool_deltas.append(
             DeltaToolCall(
                 index=index,
-                function=DeltaFunctionCall(arguments=diff).model_dump(
-                    exclude_none=True
-                ),
-            )
-        )
+                function=DeltaFunctionCall(arguments=diff).model_dump(exclude_none=True),
+            ))
 
     def extract_tool_calls_streaming(
         self,
@@ -727,8 +697,15 @@ class MinimaxM3PyToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request,
     ) -> DeltaMessage | None:
+        fallback_pos = getattr(self, "_m3_pos", len(previous_text))
         try:
             self._ensure_stream_state()
+            fallback_pos = self._m3_pos
+
+            if self._m3_mode == "fallback":
+                fallback = current_text[self._m3_pos:]
+                self._m3_pos = len(current_text)
+                return DeltaMessage(content=fallback) if fallback else None
 
             if self._m3_mode == "done":
                 return None
@@ -742,13 +719,11 @@ class MinimaxM3PyToolParser(ToolParser):
                 if start == -1:
                     safe_end = self._safe_text_end(current_text, self._m3_pos)
                     if safe_end > self._m3_pos:
-                        content_out = current_text[self._m3_pos : safe_end]
+                        content_out = current_text[self._m3_pos:safe_end]
                         self._m3_pos = safe_end
-                    return (
-                        DeltaMessage(content=content_out) if content_out else None
-                    )
+                    return (DeltaMessage(content=content_out) if content_out else None)
                 if start > self._m3_pos:
-                    content_out = current_text[self._m3_pos : start]
+                    content_out = current_text[self._m3_pos:start]
                 self._m3_pos = start + len(TOOL_CALL_START)
                 self._m3_mode = "tool"
 
@@ -764,20 +739,12 @@ class MinimaxM3PyToolParser(ToolParser):
                             break
                         if inv_pos == -1:
                             break  # nothing to open yet
-                        header_end = current_text.find(
-                            ">", inv_pos + len(INVOKE_START)
-                        )
+                        header_end = current_text.find(">", inv_pos + len(INVOKE_START))
                         if header_end == -1:
                             break  # invoke header still streaming
-                        header = current_text[
-                            inv_pos + len(INVOKE_START) : header_end
-                        ]
+                        header = current_text[inv_pos + len(INVOKE_START):header_end]
                         m = _INVOKE_NAME_RE.search(header)
-                        name = (
-                            (m.group(1) or m.group(2) or m.group(3) or "").strip()
-                            if m
-                            else ""
-                        )
+                        name = ((m.group(1) or m.group(2) or m.group(3) or "").strip() if m else "")
                         if not name:
                             # Malformed header: skip this invoke if it closes,
                             # else wait. Avoids emitting a nameless tool call.
@@ -794,9 +761,7 @@ class MinimaxM3PyToolParser(ToolParser):
                             "body_start": header_end + 1,
                             "emitted": "",
                         }
-                        self.prev_tool_call_arr.append(
-                            {"name": name, "arguments": {}}
-                        )
+                        self.prev_tool_call_arr.append({"name": name, "arguments": {}})
                         self.streamed_args_for_tool.append("")
                         self.current_tool_id = self._m3_index
                         # Emit the NAME immediately -- the core anti-stall fix.
@@ -805,11 +770,8 @@ class MinimaxM3PyToolParser(ToolParser):
                                 index=self._m3_index,
                                 id=tc_id,
                                 type="function",
-                                function=DeltaFunctionCall(
-                                    name=name, arguments=""
-                                ).model_dump(exclude_none=True),
-                            )
-                        )
+                                function=DeltaFunctionCall(name=name, arguments="").model_dump(exclude_none=True),
+                            ))
 
                     op = self._open
                     idx = op["index"]
@@ -818,25 +780,16 @@ class MinimaxM3PyToolParser(ToolParser):
 
                     if inv_end != -1:
                         # Invoke complete: emit authoritative final arguments.
-                        body = current_text[op["body_start"] : inv_end]
+                        body = current_text[op["body_start"]:inv_end]
                         try:
                             params = _parse_invoke_params(body)
-                            closed_full = [
-                                (pn, _convert(props.get(pn), pin))
-                                for pn, pin in params
-                            ]
-                            full_json, full_d = _build_partial_args(
-                                closed_full, None
-                            )
+                            closed_full = [(pn, _convert(props.get(pn), pin)) for pn, pin in params]
+                            full_json, full_d = _build_partial_args(closed_full, None)
                             full_json += "}"
                         except _ParseError:
                             full_json, full_d = self._close_partial(op)
-                        if full_json.startswith(op["emitted"]) and len(
-                            full_json
-                        ) > len(op["emitted"]):
-                            self._emit_args(
-                                tool_deltas, idx, full_json[len(op["emitted"]) :]
-                            )
+                        if full_json.startswith(op["emitted"]) and len(full_json) > len(op["emitted"]):
+                            self._emit_args(tool_deltas, idx, full_json[len(op["emitted"]):])
                         self.prev_tool_call_arr[idx]["arguments"] = full_d
                         self.streamed_args_for_tool[idx] = full_json
                         self._m3_pos = inv_end + len(INVOKE_END)
@@ -845,16 +798,12 @@ class MinimaxM3PyToolParser(ToolParser):
                         continue  # look for the next invoke / block end
 
                     # Invoke still streaming: emit any newly-parseable prefix.
-                    body_raw = current_text[op["body_start"] :]
+                    body_raw = current_text[op["body_start"]:]
                     closed, open_param = _scan_open_invoke_body(body_raw, props)
                     target, d = _build_partial_args(closed, open_param)
                     op["open_string"] = open_param is not None
-                    if target.startswith(op["emitted"]) and len(target) > len(
-                        op["emitted"]
-                    ):
-                        self._emit_args(
-                            tool_deltas, idx, target[len(op["emitted"]) :]
-                        )
+                    if target.startswith(op["emitted"]) and len(target) > len(op["emitted"]):
+                        self._emit_args(tool_deltas, idx, target[len(op["emitted"]):])
                         op["emitted"] = target
                         self.streamed_args_for_tool[idx] = target
                     # Keep the fully-closed dict so finalize_generation() can
@@ -870,10 +819,14 @@ class MinimaxM3PyToolParser(ToolParser):
                 return DeltaMessage(content=content_out)
             return None
         except Exception:
-            logger.exception(
-                "MiniMax-M3 streaming parse failed; suppressing delta"
-            )
-            return None
+            logger.exception("MiniMax-M3 streaming parse failed; emitting remaining text")
+            # No deltas accumulated during this call have been returned yet.
+            # Emit the unconsumed cumulative-text suffix as plain content so an
+            # unexpected parser error cannot silently stall the client.
+            fallback = current_text[fallback_pos:]
+            self._m3_pos = len(current_text)
+            self._m3_mode = "fallback"
+            return DeltaMessage(content=fallback) if fallback else None
 
     def _close_partial(self, op: dict) -> tuple[str, dict]:
         """Best-effort close of the emitted args prefix into valid JSON, used
@@ -890,6 +843,4 @@ class MinimaxM3PyToolParser(ToolParser):
         return full_json, full_d
 
 
-ToolParserManager.register_module(
-    name="minimax_m3_py", module=MinimaxM3PyToolParser
-)
+ToolParserManager.register_module(name="minimax_m3_py", module=MinimaxM3PyToolParser)

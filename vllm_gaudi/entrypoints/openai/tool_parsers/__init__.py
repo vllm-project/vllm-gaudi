@@ -8,7 +8,6 @@ selected with ``--tool-call-parser <name>`` without a ``--tool-parser-plugin``.
 """
 
 from vllm_gaudi.entrypoints.openai.tool_parsers.minimax_m3 import (
-    MinimaxM3PyToolParser,
-)
+    MinimaxM3PyToolParser, )
 
 __all__ = ["MinimaxM3PyToolParser"]
