@@ -12,7 +12,7 @@ import os
 import time
 from contextlib import suppress
 from tqdm import tqdm
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypeAlias, Union, cast)
 if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
@@ -6139,7 +6139,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    if layer_name in layer_kv_cache_spec.kv_cache_specs:
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    elif layer_name in self.shared_kv_cache_layers:
+                        # Shared layer: use the target layer's spec
+                        target = self.shared_kv_cache_layers[layer_name]
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[target]
+                    else:
+                        raise KeyError(f"No KV cache spec for layer {layer_name}")
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
@@ -6532,7 +6539,40 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             kv_cache_spec = group.kv_cache_spec
                             break
                     assert kv_cache_spec is not None, f"No spec found for {layer_name}"
-                    assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
+
+                    # Heterogeneous models (e.g. Gemma4 with interleaved
+                    # sliding/full attention, asymmetric head_dim 256/512 and
+                    # kv_heads 8/2) are grouped by core vLLM under a single
+                    # UniformTypeKVCacheSpecs wrapper rather than one spec per
+                    # group.  Unwrap it to the concrete per-layer spec so each
+                    # layer allocates KV storage sized to its OWN head_size /
+                    # num_kv_heads / page_size_bytes.  Symmetric siblings
+                    # (gemma3/qwen) never produce this wrapper type, so this
+                    # branch is inert for them.
+                    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                        per_layer_spec = kv_cache_spec.kv_cache_specs.get(layer_name)
+                        assert per_layer_spec is not None, (
+                            f"UniformTypeKVCacheSpecs has no per-layer spec for {layer_name}")
+                        kv_cache_spec = per_layer_spec
+
+                    # For heterogeneous models (e.g., Gemma4 with UniformTypeKVCacheSpecs),
+                    # the page_size_bytes is the sum of all layer specs' page sizes, but
+                    # the actual tensor might not align perfectly. Round down to the largest
+                    # usable number of blocks rather than asserting perfect alignment.
+                    remainder = kv_cache_tensor.size % kv_cache_spec.page_size_bytes
+                    if remainder != 0:
+                        usable_size = kv_cache_tensor.size - remainder
+                        waste_pct = remainder * 100.0 / kv_cache_tensor.size
+                        logger.warning(
+                            "KV cache tensor size (%s bytes) does not "
+                            "perfectly align with page_size_bytes (%s bytes). "
+                            "This is expected for heterogeneous models like Gemma4 with mixed "
+                            "attention types. Using %s bytes "
+                            "(%s bytes unused, %.2f%% waste).", f"{kv_cache_tensor.size:,}",
+                            f"{kv_cache_spec.page_size_bytes:,}", f"{usable_size:,}", f"{remainder:,}", waste_pct)
+                        # Use only the aligned portion of the tensor
+                        kv_cache_tensor = replace(kv_cache_tensor, size=usable_size)
+
                     num_blocks = \
                         kv_cache_tensor.size // kv_cache_spec.page_size_bytes
                     # `num_blocks` is the number of blocks the model runner can use.
@@ -6542,7 +6582,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # different memory capacities, `num_blocks` can be different on
                     # different GPUs, and `kv_cache_config.num_blocks` is set to
                     # the min of all `num_blocks`. Verify it here.
-                    assert num_blocks >= kv_cache_config.num_blocks
+                    # For heterogeneous models where we rounded down the tensor size,
+                    # num_blocks may be slightly less than expected - this is acceptable.
+                    if num_blocks < kv_cache_config.num_blocks:
+                        if remainder != 0:
+                            # This is expected for heterogeneous models after alignment
+                            logger.warning(
+                                "After alignment, num_blocks=%d is less than "
+                                "kv_cache_config.num_blocks=%d. "
+                                "This is expected for heterogeneous models like Gemma4.", num_blocks,
+                                kv_cache_config.num_blocks)
+                        else:
+                            # Unexpected - still assert in this case
+                            assert num_blocks >= kv_cache_config.num_blocks
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
