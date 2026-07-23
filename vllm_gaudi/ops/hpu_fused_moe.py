@@ -52,6 +52,117 @@ def _normalize_moe_activation(activation):
     return _MOE_ACTIVATION_ALIASES.get(act, act)
 
 
+# Activation string used by MiniMax-M3 experts. The Habana fused-MoE kernel
+# (torch.ops.hpu.mixture_of_experts) only supports silu/gelu, so this
+# activation is computed unfused in PyTorch instead (see _unfused_swigluoai_moe).
+_SWIGLU_OAI_ACTIVATION = "swigluoai_uninterleave"
+
+# The unfused SwiGLU-OAI dense expert pass materializes [E_local, T, 2*I]
+# intermediates. For large prompt buckets (T up to the max batched-token bucket)
+# a single such graph exceeds the Synapse compiler's limits and fails to compile
+# with ``synStatus 26 [Generic failure]``. Tiling the token dimension bounds the
+# size of every fused graph/op while keeping the math and per-tile shapes static,
+# which the HPU graph compiler requires. Tunable via env for large-prompt tuning.
+_SWIGLU_OAI_TOKEN_TILE = int(os.environ.get("VLLM_MINIMAX_M3_MOE_TOKEN_TILE", "512"))
+
+
+def _unfused_swigluoai_moe(
+    layer,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    *,
+    alpha: float,
+    beta: float,
+    limit: float | None,
+) -> torch.Tensor:
+    """Unfused expert MLP with SwiGLU-OAI activation for MiniMax-M3 on HPU.
+
+    Replaces a single ``moe_op(x, topk_ids, topk_weights, activation=...)`` fused
+    call for the ``swigluoai_uninterleave`` activation (unsupported by the Habana
+    MoE kernel). Returns the same per-rank (pre-all-reduce) partial as the fused
+    op, so the surrounding MoERunner reduction/combine pipeline is unchanged.
+
+    A dense pass is used (every token through every local expert, masked by the
+    routing weight) to keep static shapes, which the HPU graph compiler requires
+    -- data-dependent gather/indexing would produce dynamic shapes. It is
+    vectorized as a sync-free expert-chunked ``bmm`` over the stacked expert
+    weights rather than a per-expert Python loop: the loop issues one matmul per
+    expert and serializes the HPU graph (~0.3-1.4 tok/s), while the chunked
+    ``bmm`` batches experts with static shapes (~11 tok/s). The SwiGLU-OAI
+    activation is computed in fp32 for accuracy (matches
+    ``minimax_m3_sparse.swiglu_oai``).
+
+    Args:
+        layer: the ``FusedMoE``/``RoutedExperts`` layer. Reads the stacked
+            per-rank expert weights ``layer.w13_weight`` [E_local, 2*I, H] and
+            ``layer.w2_weight`` [E_local, H, I] (the same tensors that seed
+            ``moe_op.w13_list``) and ``layer.moe_config.ep_rank`` /
+            ``layer.local_num_experts`` for this rank's expert-id offset.
+        x: [T, H] flattened activations.
+        topk_ids: [T, K] selected (global) expert ids.
+        topk_weights: [T, K] routing weights.
+    """
+    w13 = layer.w13_weight  # [E_local, 2*I, H]
+    w2 = layer.w2_weight  # [E_local, H, I]
+    # First global expert id owned by this (EP) rank; matches the experts_min
+    # that process_weights_after_loading passes to VllmMixtureOfExpertsOp.
+    experts_min = int(layer.moe_config.ep_rank * layer.local_num_experts)
+
+    e_local = w13.shape[0]
+    d = w13.shape[1] // 2
+    hidden = x.shape[-1]
+    tokens = x.shape[0]
+
+    # Per-(token, local-expert) combine weight, computed sync-free via scatter
+    # (no host sync, unlike an ``== expert_id`` comparison inside a Python loop).
+    local_ids = topk_ids - experts_min  # [T, K]
+    in_range = (local_ids >= 0) & (local_ids < e_local)
+    safe_ids = torch.where(in_range, local_ids, torch.zeros_like(local_ids))
+    gate_w = x.new_zeros(tokens, e_local, dtype=torch.float32)
+    gate_w.scatter_add_(
+        1,
+        safe_ids,
+        torch.where(in_range, topk_weights, torch.zeros_like(topk_weights)).to(torch.float32),
+    )
+
+    # Dense experts via expert-chunked bmm (static shapes, no host sync). Only
+    # this rank's local experts contribute; cross-rank combine happens outside.
+    # The token dimension is tiled so no single fused graph materializes the full
+    # [E_local, T, 2*I] intermediate (which overflows the Synapse compiler and
+    # fails with synStatus 26 for large prompt buckets); per-tile shapes stay
+    # static and tiles are concatenated back into the original [T, H] output.
+    chunk = 32
+    token_tile = _SWIGLU_OAI_TOKEN_TILE
+    if token_tile <= 0 or token_tile >= tokens:
+        token_tile = tokens
+    out_tiles = []
+    for tstart in range(0, tokens, token_tile):
+        tend = min(tstart + token_tile, tokens)
+        xt = x[tstart:tend]  # [t, H]
+        t = xt.shape[0]
+        acc = torch.zeros_like(xt)  # [t, H]
+        for start in range(0, e_local, chunk):
+            end = min(start + chunk, e_local)
+            c = end - start
+            w13c = w13[start:end].transpose(1, 2)  # [c, H, 2I]
+            w2c = w2[start:end].transpose(1, 2)  # [c, I, H]
+            xe = xt.unsqueeze(0).expand(c, t, hidden)  # [c, t, H]
+            h = torch.bmm(xe, w13c)  # [c, t, 2I]
+            # SwiGLU-OAI in fp32 for accuracy: gate=first half, up=second half.
+            g = h[..., :d].float()
+            u = h[..., d:].float()
+            if limit is not None:
+                g = g.clamp(max=limit)
+                u = u.clamp(min=-limit, max=limit)
+            act = (g * torch.sigmoid(alpha * g) * (u + beta)).to(x.dtype)  # [c, t, I]
+            y = torch.bmm(act, w2c)  # [c, t, H] per-rank partial
+            gate_wc = gate_w[tstart:tend, start:end].t().unsqueeze(-1)  # [c, t, 1]
+            acc = acc + (y.float() * gate_wc).sum(0).to(x.dtype)
+        out_tiles.append(acc)
+    return out_tiles[0] if len(out_tiles) == 1 else torch.cat(out_tiles, dim=0)
+
+
 def model_has_quant_config() -> bool:
     """Whether the active model runs with a MoE quantization config.
 
@@ -126,6 +237,19 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if (vllm_config is not None and vllm_config.model_config is not None
                 and vllm_config.model_config.hf_config is not None):
             self.model_type = vllm_config.model_config.hf_config.model_type
+
+        # SwiGLU-OAI activation params (MiniMax-M3). Cached here (config context
+        # active) and read on the forward hot path when the fused kernel cannot
+        # provide the activation. Falls back to the MiniMax-M3 defaults.
+        tc = None
+        if vllm_config is not None and vllm_config.model_config is not None:
+            tc = getattr(vllm_config.model_config, "hf_text_config", None)
+            if tc is None:
+                tc = vllm_config.model_config.hf_config
+        self.swiglu_alpha = float(getattr(tc, "swiglu_alpha", 1.702))
+        self.swiglu_beta = float(getattr(tc, "swiglu_beta", 1.0))
+        _limit = getattr(tc, "swiglu_limit", 7.0)
+        self.swiglu_limit = None if _limit is None else float(_limit)
 
     def _select_monolithic(self) -> Callable:
         """Overriding base method"""
@@ -237,13 +361,26 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
-        output = layer.moe_op(
-            x,
-            topk_ids,
-            topk_weights,
-            permuted_weights=True,
-            activation=_normalize_moe_activation(layer.activation),
-        )
+        activation = _normalize_moe_activation(layer.activation)
+        if activation == _SWIGLU_OAI_ACTIVATION:
+            # Habana fused MoE lacks SwiGLU-OAI; compute the experts unfused.
+            output = _unfused_swigluoai_moe(
+                layer,
+                x,
+                topk_ids,
+                topk_weights,
+                alpha=self.swiglu_alpha,
+                beta=self.swiglu_beta,
+                limit=self.swiglu_limit,
+            )
+        else:
+            output = layer.moe_op(
+                x,
+                topk_ids,
+                topk_weights,
+                permuted_weights=True,
+                activation=activation,
+            )
         if layer.moe_config.dp_size > 1 or layer.moe_config.is_sequence_parallel:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
@@ -316,13 +453,26 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 return gpt_oss_out.view(*(gpt_oss_out.size(0), *input_shape[1:]))
             return gpt_oss_out.view(*input_shape)
 
-        output = layer.moe_op(
-            x,
-            topk_ids,
-            topk_weights,
-            permuted_weights=True,
-            activation=_normalize_moe_activation(layer.activation),
-        )
+        activation = _normalize_moe_activation(layer.activation)
+        if activation == _SWIGLU_OAI_ACTIVATION:
+            # Habana fused MoE lacks SwiGLU-OAI; compute the experts unfused.
+            output = _unfused_swigluoai_moe(
+                layer,
+                x,
+                topk_ids,
+                topk_weights,
+                alpha=self.swiglu_alpha,
+                beta=self.swiglu_beta,
+                limit=self.swiglu_limit,
+            )
+        else:
+            output = layer.moe_op(
+                x,
+                topk_ids,
+                topk_weights,
+                permuted_weights=True,
+                activation=activation,
+            )
         if layer.moe_config.dp_size > 1 or layer.moe_config.is_sequence_parallel:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
