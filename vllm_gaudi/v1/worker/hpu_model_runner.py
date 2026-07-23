@@ -330,7 +330,7 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
             if hasattr(moe_op, "_cache_weight_lists"):
                 moe_op._cache_weight_lists()
 
-               
+
 def _model_has_moe_experts(model: torch.nn.Module) -> bool:
     """Return True if the model has any fused-MoE op with per-expert weight views.
 
