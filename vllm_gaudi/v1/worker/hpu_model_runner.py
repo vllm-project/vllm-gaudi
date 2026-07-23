@@ -2881,7 +2881,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # context_blocks' batch-wide target_blocks shape.
         if self.interleaved_sliding_window and target_blocks > 0:
             window_context_blocks = align_and_pad(window_context_blocks_raw, (target_bs, sliding_block_size),
-                                                   itertools.repeat(-1))
+                                                  itertools.repeat(-1))
             window_context_blocks_t = async_h2d_copy(window_context_blocks, dtype=torch.int32).flatten()
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=query_lens,
@@ -7210,8 +7210,7 @@ class HPUAttentionMetadataProcessor:
             window_block_list = getattr(attn_metadata, 'window_block_list', None)
             block_list_for_mask = window_block_list if window_block_list is not None \
                 else attn_metadata.block_list
-            max_context_len = (block_list_for_mask.size(-1) // batch_size
-                           if block_list_for_mask is not None else 0)
+            max_context_len = (block_list_for_mask.size(-1) // batch_size if block_list_for_mask is not None else 0)
             block_size = getattr(prefill_metadata, "block_size", self.block_size)
             max_context_len = max_context_len * block_size
 
@@ -7223,13 +7222,13 @@ class HPUAttentionMetadataProcessor:
                 invalid_lens_t = context_lens_trimmed - window_size + torch.arange(seq_len, device=device) - 1
                 past_indices = torch.arange(max_context_len, device=device)
                 past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                            (past_indices.unsqueeze(0) < context_lens_trimmed.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+                             (past_indices.unsqueeze(0) < context_lens_trimmed.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
             else:
                 # Full block list: use absolute coordinate frame with window lower bound
                 invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
                 past_indices = torch.arange(max_context_len, device=device)
                 past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                            (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+                             (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
 
             # Create boolean sliding window mask
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
