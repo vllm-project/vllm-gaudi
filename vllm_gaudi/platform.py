@@ -168,8 +168,19 @@ class HpuPlatform(Platform):
         # size (block_size * per-token KV bytes).  Without this the upstream
         # unify_kv_cache_spec_page_size() fails because the two page sizes
         # are not divisible.
-        if (cache_config and cache_config.block_size is not None and vllm_config.model_config is not None
-                and vllm_config.model_config.is_hybrid and cache_config.mamba_page_size_padded is not None):
+        #
+        # Exception: granitemoehybrid models skip this rescaling here because
+        # update_block_size_for_backend() computes the correct block_size
+        # (528 or 768 tokens) and re-aligns mamba_page_size_padded to that
+        # larger attention page.  If we rescaled here with block_size=128 we
+        # would corrupt the value already set by update_block_size_for_backend
+        # (e.g. 2162688 → 2621440) on every subsequent check_and_update_config
+        # call (config deserialization, reconfigure path, etc.).
+        _is_granitemoehybrid = (vllm_config.model_config is not None and getattr(
+            getattr(vllm_config.model_config, "hf_config", None), "model_type", None) == "granitemoehybrid")
+        if (not _is_granitemoehybrid and cache_config and cache_config.block_size is not None
+                and vllm_config.model_config is not None and vllm_config.model_config.is_hybrid
+                and cache_config.mamba_page_size_padded is not None):
             # Recompute mamba_page_size_padded so it is a multiple of
             # the HPU attention page size.
             from vllm.utils.torch_utils import get_dtype_size
@@ -320,12 +331,31 @@ class HpuPlatform(Platform):
                     mamba_page_size,
                     cache_config.enable_prefix_caching,
                 )
-            if not cache_config.user_specified_block_size:
-                cache_config.user_specified_block_size = True
-                super().update_block_size_for_backend(vllm_config)
-                cache_config.user_specified_block_size = False
-            else:
-                super().update_block_size_for_backend(vllm_config)
+                # Re-align mamba_page_size_padded to the final HPU block size.
+                # check_and_update_config aligns mamba_page_size_padded to
+                # the HPU default block_size=128, but update_block_size_for_backend
+                # then changes block_size to attn_block_size (e.g. 528).
+                new_attn_page = attn_1tok * attn_block_size
+                if new_attn_page > 0:
+                    old_padded = getattr(cache_config, "mamba_page_size_padded", None)
+                    new_padded = cdiv(mamba_page_size, new_attn_page) * new_attn_page
+                    if old_padded != new_padded:
+                        cache_config.mamba_page_size_padded = new_padded
+                        logger.info(
+                            "Re-aligned mamba_page_size_padded from %s to %d "
+                            "to match granitemoehybrid block_size=%d "
+                            "(new_attn_page=%d).",
+                            old_padded,
+                            new_padded,
+                            attn_block_size,
+                            new_attn_page,
+                        )
+            # Set user_specified_block_size=True permanently so that
+            # check_and_update_config (which runs again on every
+            # VllmConfig.__post_init__, including pickle deserialization in
+            # MultiprocExecutor IPC) will not reset block_size.
+            cache_config.user_specified_block_size = True
+            super().update_block_size_for_backend(vllm_config)
         else:
             super().update_block_size_for_backend(vllm_config)
 

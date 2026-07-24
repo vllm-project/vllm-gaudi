@@ -282,6 +282,55 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
         logger.info("Moved %d stray tensors to %s", moved, device)
 
 
+def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
+    """Re-derive MoeMatmul.weight slices from the parent layer's registered weights.
+
+    MoeMatmul.weight is a plain tensor attribute (set via set_weight()) that
+    holds a view/slice of the parent FusedMoE layer's w13_weight / w2_weight
+    registered parameters.  After model.to(device), the registered params are
+    on the new device but MoeMatmul.weight still points to the OLD device's
+    storage, making it stale.  If the stray scan runs before rebinding, it
+    would move these stale views independently, creating duplicate copies of
+    the expert weights on the target device.
+
+    Call this AFTER model.to(device) and BEFORE
+    _move_remaining_tensors_to_device so that the stray scan finds all
+    MoeMatmul.weight tensors already on the correct device and skips them.
+    """
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if not isinstance(moe_op, VllmMixtureOfExpertsOpBase):
+            continue
+        n = moe_op.num_experts
+        w13_weight = getattr(module, "w13_weight", None)
+        w2_weight = getattr(module, "w2_weight", None)
+        # Rebind per-expert weight views only when the parent contiguous
+        # parameter is intact (non-empty, shape[0] matches expert count).
+        # After _dedup_moe_op_weights() the param is emptied to
+        # torch.empty(0, ...) and the real weights live as registered
+        # Parameters inside moe_op (FP8 convert path); model.to() moves
+        # those correctly so only the cache refresh below is needed.
+        if (w13_weight is not None and w2_weight is not None and w13_weight.dim() > 0 and w13_weight.shape[0] == n
+                and w2_weight.dim() > 0 and w2_weight.shape[0] == n):
+            for i in range(n):
+                moe_op.w13_list[i].set_weight(w13_weight[i])
+                moe_op.w2_list[i].set_weight(w2_weight[i])
+            w13_bias = getattr(module, "w13_bias", None)
+            w2_bias = getattr(module, "w2_bias", None)
+            if w13_bias is not None and w2_bias is not None:
+                for i in range(n):
+                    if hasattr(moe_op.w13_list[i], "set_bias"):
+                        moe_op.w13_list[i].set_bias(w13_bias[i])
+                    if hasattr(moe_op.w2_list[i], "set_bias"):
+                        moe_op.w2_list[i].set_bias(w2_bias[i])
+            # Rebuild cache only when we rebound the plain-attr views, because
+            # model.to() → _apply() left the cache pointing at the old device's
+            # storage.
+            if hasattr(moe_op, "_cache_weight_lists"):
+                moe_op._cache_weight_lists()
+
+
 def _model_has_moe_experts(model: torch.nn.Module) -> bool:
     """Return True if the model has any fused-MoE op with per-expert weight views.
 
@@ -4704,7 +4753,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._sync_shared_moe_gates()
                 if not is_fake_hpu():
                     self.model = self.model.to("hpu")
-                    _rebind_moe_op_weights_to_device(self.model, "hpu")
+                    _rebind_moe_expert_weights(self.model)
                     _move_remaining_tensors_to_device(self.model, "hpu")
                     _dedup_moe_op_weights(self.model)
                     htorch.core.mark_step()
