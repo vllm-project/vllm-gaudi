@@ -4,7 +4,7 @@ model_card:
   num_fewshot: 5
   trust_remote_code: true
   limit: 256
-  max_model_len: 131072
+  max_model_len: 262144
   add_bos_token: true
 
 metrics:
