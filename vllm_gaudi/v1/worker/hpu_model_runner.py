@@ -5761,25 +5761,37 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Get width/height from config if available for warmup_lists
         warmup_lists = []
 
-        if not is_batch_based and mm_config:
-            # Try to get dimensions from enabled modality config
-            for modality in ["image", "video"]:
-                if modality == "image" and not is_image_warmup:
-                    continue
-                if modality == "video" and not is_video_warmup:
-                    continue
-                mm_options = mm_config.limit_per_prompt.get(modality)
-                if mm_options:
-                    width = getattr(mm_options, 'width', None)
-                    height = getattr(mm_options, 'height', None)
-                    if width is not None and height is not None:
-                        warmup_lists.append((width, height))
-                        break
+        # Explicit warmup resolutions (VLLM_MULTIMODAL_RESOLUTIONS) take
+        # precedence for non-batch models: warm up exactly these raw WxH and
+        # skip the aspect-ratio shapes guessed from the patch-count buckets.
+        # The raw WxH flow through the model's processor (smart_resize /
+        # navit_resize / ...), so the compiled grid matches real requests at
+        # the same WxH. Feed raw pixels here; never a pre-divided grid.
+        explicit_resolutions = getattr(vision_bucket_manager, 'multimodal_resolutions', [])
 
-        if not is_batch_based and len(buckets) > 0:
-            patch_size = int(self.get_patch_size_from_model())
-            warmup_lists = warmup_lists + \
-                vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
+        if not is_batch_based and explicit_resolutions:
+            warmup_lists = list(explicit_resolutions)
+            logger.info("Using explicit multimodal warmup resolutions (WxH): %s", warmup_lists)
+        else:
+            if not is_batch_based and mm_config:
+                # Try to get dimensions from enabled modality config
+                for modality in ["image", "video"]:
+                    if modality == "image" and not is_image_warmup:
+                        continue
+                    if modality == "video" and not is_video_warmup:
+                        continue
+                    mm_options = mm_config.limit_per_prompt.get(modality)
+                    if mm_options:
+                        width = getattr(mm_options, 'width', None)
+                        height = getattr(mm_options, 'height', None)
+                        if width is not None and height is not None:
+                            warmup_lists.append((width, height))
+                            break
+
+            if not is_batch_based and len(buckets) > 0:
+                patch_size = int(self.get_patch_size_from_model())
+                warmup_lists = warmup_lists + \
+                    vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:

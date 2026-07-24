@@ -83,6 +83,29 @@ class HPUVisionBucketManager:
                 multimodal_buckets = [int(x) for x in envvar.split(',')]
             self.multimodal_buckets = self._process_buckets(multimodal_buckets)
 
+        # Optional explicit warmup resolutions (raw pixel WxH), e.g.
+        # VLLM_MULTIMODAL_RESOLUTIONS="1024x768,768x1024". When set for a
+        # non-batch (native-resolution) model, warmup uses exactly these
+        # resolutions instead of the aspect-ratio shapes derived from the
+        # patch-count buckets. The raw WxH are fed through the model's own
+        # processor (smart_resize / navit_resize / ...), so the compiled
+        # grid matches what real requests at the same WxH produce.
+        self.multimodal_resolutions = self._parse_resolutions(os.environ.get('VLLM_MULTIMODAL_RESOLUTIONS', ""))
+
+    @staticmethod
+    def _parse_resolutions(envvar):
+        """Parse "WxH,WxH,..." into a list of (width, height) int pairs."""
+        if not envvar:
+            return []
+        resolutions = []
+        for item in envvar.split(','):
+            item = item.strip()
+            if not item:
+                continue
+            w, h = item.lower().split('x')
+            resolutions.append((int(w), int(h)))
+        return resolutions
+
     def _get_multimodal_config(self, model_name):
         """Get configuration for model"""
         model_name_lower = model_name.lower()
