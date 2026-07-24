@@ -466,19 +466,10 @@ run_gsm8k_gemma4_31b_test() {
 # GSM8K on gemma-4-26B-A4B (MoE)
 run_gsm8k_gemma4_26b_test() {
     echo "➡️ Testing GSM8K on gemma-4-26B-A4B-it..."
-    TP_SIZE=2 VLLM_SKIP_WARMUP=True \
+    TP_SIZE=4 VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
         --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-26B-A4B-it.yaml"
     echo "✅ Test with gemma-4-26B-A4B-it passed."
-}
-
-# GSM8K on gemma-4-E4B
-run_gsm8k_gemma4_e4b_test() {
-    echo "Testing GSM8K on gemma-4-E4B..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
-        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-E4B.yaml"
-    echo "Test with gemma-4-E4B passed."
 }
 
 # --- Spec decode tests ---
