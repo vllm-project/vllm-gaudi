@@ -7249,16 +7249,8 @@ class HPUAttentionMetadataProcessor:
             max_context_len = max_context_len * block_size
 
             if window_block_list is not None:
-                # Trimmed coordinate frame: the gathered KV is the last
-                # `sliding_block_size` context BLOCKS, not the last
-                # `max_context_len` tokens. The frame therefore starts at the
-                # block-rounded base `round_up(ctx_len, block_size) - max_context_len`,
-                # which differs from `ctx_len - max_context_len` by the partial-last-block
-                # padding when ctx_len is not a multiple of block_size. Anchoring on the
-                # raw token count (the old `clamp(ctx_len, max=max_context_len)`) shifts
-                # every context token by that offset -- dropping in-window tokens and
-                # exposing unwritten padding slots. Anchor on the block-rounded base so
-                # index i in the frame maps to the correct absolute context token.
+                # Re-anchor ctx_len to the block-aligned gather frame so a
+                # non-block-aligned ctx_len doesn't misalign the sliding-window mask.
                 round_up_ctx = ((context_lens_t + block_size - 1) // block_size) * block_size
                 frame_base = torch.clamp(round_up_ctx - max_context_len, min=0)
                 context_lens_trimmed = context_lens_t - frame_base
