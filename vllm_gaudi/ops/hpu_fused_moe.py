@@ -65,6 +65,18 @@ _SWIGLU_OAI_ACTIVATION = "swigluoai_uninterleave"
 # which the HPU graph compiler requires. Tunable via env for large-prompt tuning.
 _SWIGLU_OAI_TOKEN_TILE = int(os.environ.get("VLLM_MINIMAX_M3_MOE_TOKEN_TILE", "512"))
 
+# Non-gated activations (``is_act_and_mul=False``). Their w13 is a single
+# up-projection of size I (not a 2*I gate+up split), and the elementwise
+# activation is applied directly: y = w2(act(w1 x)). The Habana fused-MoE kernel
+# is gated-only, so these are computed unfused (see _unfused_no_mul_moe). The
+# key is the MoEActivation ``.value`` (e.g. "relu2_no_mul" for Nemotron-H).
+_NO_MUL_ACTIVATIONS = {
+    "silu_no_mul": lambda h: torch.nn.functional.silu(h),
+    "gelu_no_mul": lambda h: torch.nn.functional.gelu(h),
+    "gelu_tanh_no_mul": lambda h: torch.nn.functional.gelu(h, approximate="tanh"),
+    "relu2_no_mul": lambda h: torch.square(torch.nn.functional.relu(h)),
+}
+
 
 def _unfused_swigluoai_moe(
     layer,
@@ -156,6 +168,87 @@ def _unfused_swigluoai_moe(
                 g = g.clamp(max=limit)
                 u = u.clamp(min=-limit, max=limit)
             act = (g * torch.sigmoid(alpha * g) * (u + beta)).to(x.dtype)  # [c, t, I]
+            y = torch.bmm(act, w2c)  # [c, t, H] per-rank partial
+            gate_wc = gate_w[tstart:tend, start:end].t().unsqueeze(-1)  # [c, t, 1]
+            acc = acc + (y.float() * gate_wc).sum(0).to(x.dtype)
+        out_tiles.append(acc)
+    return out_tiles[0] if len(out_tiles) == 1 else torch.cat(out_tiles, dim=0)
+
+
+def _unfused_no_mul_moe(
+    layer,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    act_fn: Callable[[torch.Tensor], torch.Tensor],
+) -> torch.Tensor:
+    """Unfused expert MLP for non-gated (``is_act_and_mul=False``) MoE on HPU.
+
+    The Habana fused-MoE kernel (``torch.ops.hpu.mixture_of_experts``) only
+    implements the gated pattern ``act(gate) * up`` over a ``2*I`` w13
+    projection. Non-gated models (e.g. Nemotron-H, which uses squared-ReLU) have
+    a single ``I``-wide w13 up-projection with the activation applied directly:
+    ``y = w2(act(w1 x))``. This computes that unfused, mirroring
+    ``_unfused_swigluoai_moe``: a dense, sync-free, expert-chunked + token-tiled
+    ``bmm`` pass with static shapes for the HPU graph compiler, returning the
+    same per-rank (pre-all-reduce) partial the fused op would.
+
+    Args:
+        layer: the ``FusedMoE``/``RoutedExperts`` layer. Reads the stacked
+            per-rank expert weights ``layer.w13_weight`` [E_local, I, H] and
+            ``layer.w2_weight`` [E_local, H, I] and ``layer.moe_config.ep_rank`` /
+            ``layer.local_num_experts`` for this rank's expert-id offset.
+        x: [T, H] flattened activations.
+        topk_ids: [T, K] selected (global) expert ids.
+        topk_weights: [T, K] routing weights.
+        act_fn: elementwise activation applied to the w13 projection (fp32).
+    """
+    w13 = layer.w13_weight  # [E_local, I, H]
+    w2 = layer.w2_weight  # [E_local, H, I]
+    # First global expert id owned by this (EP) rank; matches experts_min in
+    # process_weights_after_loading.
+    experts_min = int(layer.moe_config.ep_rank * layer.local_num_experts)
+
+    e_local = w13.shape[0]
+    hidden = x.shape[-1]
+    tokens = x.shape[0]
+
+    # Per-(token, local-expert) combine weight, computed sync-free via scatter
+    # (no host sync). Mirrors _unfused_swigluoai_moe.
+    local_ids = topk_ids - experts_min  # [T, K]
+    in_range = (local_ids >= 0) & (local_ids < e_local)
+    safe_ids = torch.where(in_range, local_ids, torch.zeros_like(local_ids))
+    gate_w = x.new_zeros(tokens, e_local, dtype=torch.float32)
+    gate_w.scatter_add_(
+        1,
+        safe_ids,
+        torch.where(in_range, topk_weights, torch.zeros_like(topk_weights)).to(torch.float32),
+    )
+
+    # Dense experts via expert-chunked bmm (static shapes, no host sync); the
+    # token dimension is tiled so no single fused graph materializes the full
+    # [E_local, T, I] intermediate (which overflows the Synapse compiler for
+    # large prompt buckets). Per-tile shapes stay static.
+    chunk = 32
+    token_tile = _SWIGLU_OAI_TOKEN_TILE
+    if token_tile <= 0 or token_tile >= tokens:
+        token_tile = tokens
+    out_tiles = []
+    for tstart in range(0, tokens, token_tile):
+        tend = min(tstart + token_tile, tokens)
+        xt = x[tstart:tend]  # [t, H]
+        t = xt.shape[0]
+        acc = torch.zeros_like(xt)  # [t, H]
+        for start in range(0, e_local, chunk):
+            end = min(start + chunk, e_local)
+            c = end - start
+            w13c = w13[start:end].transpose(1, 2)  # [c, H, I]
+            w2c = w2[start:end].transpose(1, 2)  # [c, I, H]
+            xe = xt.unsqueeze(0).expand(c, t, hidden)  # [c, t, H]
+            h = torch.bmm(xe, w13c)  # [c, t, I]
+            # Non-gated activation in fp32 for accuracy (matches the fp32
+            # combine below), then cast back before the down-projection.
+            act = act_fn(h.float()).to(x.dtype)  # [c, t, I]
             y = torch.bmm(act, w2c)  # [c, t, H] per-rank partial
             gate_wc = gate_w[tstart:tend, start:end].t().unsqueeze(-1)  # [c, t, 1]
             acc = acc + (y.float() * gate_wc).sum(0).to(x.dtype)
@@ -373,6 +466,16 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 beta=self.swiglu_beta,
                 limit=self.swiglu_limit,
             )
+        elif activation in _NO_MUL_ACTIVATIONS:
+            # Non-gated (is_act_and_mul=False) experts; the fused kernel is
+            # gated-only, so compute y = w2(act(w1 x)) unfused.
+            output = _unfused_no_mul_moe(
+                layer,
+                x,
+                topk_ids,
+                topk_weights,
+                _NO_MUL_ACTIVATIONS[activation],
+            )
         else:
             output = layer.moe_op(
                 x,
@@ -464,6 +567,16 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 alpha=self.swiglu_alpha,
                 beta=self.swiglu_beta,
                 limit=self.swiglu_limit,
+            )
+        elif activation in _NO_MUL_ACTIVATIONS:
+            # Non-gated (is_act_and_mul=False) experts; the fused kernel is
+            # gated-only, so compute y = w2(act(w1 x)) unfused.
+            output = _unfused_no_mul_moe(
+                layer,
+                x,
+                topk_ids,
+                topk_weights,
+                _NO_MUL_ACTIVATIONS[activation],
             )
         else:
             output = layer.moe_op(
@@ -781,3 +894,27 @@ MoERunnerBase.forward = _patched_default_moe_runner_forward
 vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = get_compressed_expert_map
 vllm.model_executor.layers.fused_moe.router.router_factory.create_fused_moe_router = create_fused_moe_router
 vllm.model_executor.layers.fused_moe.layer.create_fused_moe_router = create_fused_moe_router
+
+# Enable non-gated (is_act_and_mul=False) MoE on HPU.
+#
+# vLLM's FusedMoEConfig.__post_init__ raises NotImplementedError for non-gated
+# activations on any platform that is not CUDA/XPU/ROCm. HPU now serves them via
+# the unfused expert path in HPUUnquantizedFusedMoEMethod (see
+# _unfused_no_mul_moe), so relax that guard: run the original __post_init__ and
+# swallow only that specific error. The guard is the final statement of
+# __post_init__, so all other configuration has already completed by the time it
+# fires -- catching it leaves a fully-initialized config.
+from vllm.model_executor.layers.fused_moe import config as _vllm_moe_config  # noqa: E402
+
+_orig_moe_config_post_init = _vllm_moe_config.FusedMoEConfig.__post_init__
+
+
+def _patched_moe_config_post_init(self):
+    try:
+        _orig_moe_config_post_init(self)
+    except NotImplementedError as exc:
+        if "is_act_and_mul=False" not in str(exc):
+            raise
+
+
+_vllm_moe_config.FusedMoEConfig.__post_init__ = _patched_moe_config_post_init

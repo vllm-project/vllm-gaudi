@@ -261,6 +261,18 @@ class HpuPlatform(Platform):
         vllm_config.scheduler_config.async_scheduling = \
             vllm_config.scheduler_config.async_scheduling and vllm_config.speculative_config is None
 
+        # Async scheduling + pipeline parallelism is unsupported on HPU: in that
+        # mode the scheduler omits new_token_ids and relies on a device-side
+        # prev_sampled_token_ids broadcast from the last stage to the first,
+        # which the HPU runner's PP path does not implement (it consumes
+        # scheduler-provided new_token_ids). Disable async scheduling under PP
+        # so the scheduler ships the sampled tokens back to earlier stages.
+        if vllm_config.scheduler_config.async_scheduling \
+                and vllm_config.parallel_config.pipeline_parallel_size > 1:
+            logger.warning("[HPU] Async scheduling is not supported with pipeline parallelism; "
+                           "disabling async scheduling.")
+            vllm_config.scheduler_config.async_scheduling = False
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
 
