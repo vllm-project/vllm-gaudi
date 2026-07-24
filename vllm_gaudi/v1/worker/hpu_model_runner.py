@@ -2624,8 +2624,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_context_blocks = [len(b) for b in context_blocks]
         context_groups = [[i] * b for i, b in enumerate(num_context_blocks)]
         # Slice each request's own trailing window BEFORE batch padding is applied.
-        if self.interleaved_sliding_window:
-            sliding_block_size = self.sliding_window // self.attn_block_size
+        # The prefill window trim is new on this branch and was only validated for
+        # gemma-4. Gate it to gemma-4 so the other interleaved-SW models that reach
+        # this path (gemma3, gpt_oss) keep their pre-branch full-block_list prefill:
+        # leaving window_context_blocks_raw unbuilt yields window_block_list=None,
+        # which makes _set_attn_bias_for_sliding_window fall back to the
+        # absolute-frame (untrimmed) mask branch -- the original, model-agnostic
+        # behavior.
+        if self.interleaved_sliding_window and self._get_model_type() == "gemma4":
+            # Keep one extra block: a `sliding_window`-token window that ends at an
+            # arbitrary (non-block-aligned) context boundary straddles
+            # `sliding_window // block_size + 1` blocks, so the earliest in-window
+            # token lives in the block just before the last `window // block_size`
+            # blocks. Dropping it would silently mask real in-window tokens for
+            # chunked prefill with a non-block-aligned context_len.
+            sliding_block_size = self.sliding_window // self.attn_block_size + 1
             window_context_blocks_raw = [blocks[-sliding_block_size:] for blocks in context_blocks]
         # Bucketing uses self.block_size so that file-based buckets
         # (generated at the original block_size) continue to match.
@@ -2888,7 +2901,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # request's real last-window blocks. Pad it to (target_bs, sliding_block_size)
         # -- a fixed-width bucket independent of target_blocks -- rather than reusing
         # context_blocks' batch-wide target_blocks shape.
-        if self.interleaved_sliding_window and target_blocks > 0:
+        if self.interleaved_sliding_window and self._get_model_type() == "gemma4" and target_blocks > 0:
             window_context_blocks = align_and_pad(window_context_blocks_raw, (target_bs, sliding_block_size),
                                                   itertools.repeat(-1))
             window_context_blocks_t = async_h2d_copy(window_context_blocks, dtype=torch.int32).flatten()
@@ -7236,10 +7249,19 @@ class HPUAttentionMetadataProcessor:
             max_context_len = max_context_len * block_size
 
             if window_block_list is not None:
-                # Trimmed coordinate frame: gathered KV is the last `max_context_len`
-                # context tokens, so re-anchor context_lens_t to that frame before
-                # applying the same per-query-token window shift as the untrimmed path.
-                context_lens_trimmed = torch.clamp(context_lens_t, max=max_context_len)
+                # Trimmed coordinate frame: the gathered KV is the last
+                # `sliding_block_size` context BLOCKS, not the last
+                # `max_context_len` tokens. The frame therefore starts at the
+                # block-rounded base `round_up(ctx_len, block_size) - max_context_len`,
+                # which differs from `ctx_len - max_context_len` by the partial-last-block
+                # padding when ctx_len is not a multiple of block_size. Anchoring on the
+                # raw token count (the old `clamp(ctx_len, max=max_context_len)`) shifts
+                # every context token by that offset -- dropping in-window tokens and
+                # exposing unwritten padding slots. Anchor on the block-rounded base so
+                # index i in the frame maps to the correct absolute context token.
+                round_up_ctx = ((context_lens_t + block_size - 1) // block_size) * block_size
+                frame_base = torch.clamp(round_up_ctx - max_context_len, min=0)
+                context_lens_trimmed = context_lens_t - frame_base
                 invalid_lens_t = context_lens_trimmed - window_size + torch.arange(seq_len, device=device) - 1
                 past_indices = torch.arange(max_context_len, device=device)
                 past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
