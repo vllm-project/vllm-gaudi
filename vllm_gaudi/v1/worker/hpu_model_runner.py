@@ -2623,20 +2623,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks: list = [blocks[:num] for blocks, num in zip(contents.blocks, num_context_blocks)]
         num_context_blocks = [len(b) for b in context_blocks]
         context_groups = [[i] * b for i, b in enumerate(num_context_blocks)]
-        # Slice each request's own trailing window BEFORE batch padding is applied.
-        # The prefill window trim is new on this branch and was only validated for
-        # gemma-4. Gate it to gemma-4 so the other interleaved-SW models that reach
-        # this path (gemma3, gpt_oss) keep their pre-branch full-block_list prefill:
-        # leaving window_context_blocks_raw unbuilt yields window_block_list=None,
-        # which makes _set_attn_bias_for_sliding_window fall back to the
-        # absolute-frame (untrimmed) mask branch -- the original, model-agnostic
-        # behavior.
         if self.interleaved_sliding_window and self._get_model_type() == "gemma4":
             # Keep one extra block: a `sliding_window`-token window that ends at an
             # arbitrary (non-block-aligned) context boundary straddles
-            # `sliding_window // block_size + 1` blocks, so the earliest in-window
-            # token lives in the block just before the last `window // block_size`
-            # blocks. Dropping it would silently mask real in-window tokens for
+            # `sliding_window // block_size + 1` blocks.
+            # Dropping it would silently mask real in-window tokens for
             # chunked prefill with a non-block-aligned context_len.
             sliding_block_size = self.sliding_window // self.attn_block_size + 1
             window_context_blocks_raw = [blocks[-sliding_block_size:] for blocks in context_blocks]
