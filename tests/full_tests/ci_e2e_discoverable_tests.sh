@@ -457,7 +457,7 @@ run_gsm8k_gemma4_e4b_test() {
 # GSM8K on gemma-4-31B
 run_gsm8k_gemma4_31b_test() {
     echo "➡️ Testing GSM8K on gemma-4-31B-it..."
-    TP_SIZE=2 VLLM_SKIP_WARMUP=True \
+    TP_SIZE=4 VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
         --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-31B-it.yaml"
     echo "✅ Test with gemma-4-31B-it passed."
