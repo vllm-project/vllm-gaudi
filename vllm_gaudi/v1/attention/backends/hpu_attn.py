@@ -64,6 +64,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     blocks_caching_range: Optional[torch.Tensor] = None
     mamba_chunks_to_block_mapping: Optional[torch.Tensor] = None
     seqlens_offsets_for_blocks: Optional[torch.Tensor] = None
+    window_block_list: Optional[torch.Tensor] = None
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
@@ -90,7 +91,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               padding_mask_flat=None,
                               blocks_caching_range=None,
                               mamba_chunks_to_block_mapping=None,
-                              seqlens_offsets_for_blocks=None):
+                              seqlens_offsets_for_blocks=None,
+                              window_block_list=None):
         return cls(is_prompt=True,
                    block_list=block_list,
                    block_mapping=None,
@@ -113,7 +115,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    padding_mask_flat=padding_mask_flat,
                    blocks_caching_range=blocks_caching_range,
                    mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
-                   seqlens_offsets_for_blocks=seqlens_offsets_for_blocks)
+                   seqlens_offsets_for_blocks=seqlens_offsets_for_blocks,
+                   window_block_list=window_block_list)
 
     @classmethod
     def make_decode_metadata(cls,

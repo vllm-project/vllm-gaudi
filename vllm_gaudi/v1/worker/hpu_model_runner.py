@@ -2614,6 +2614,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks: list = [blocks[:num] for blocks, num in zip(contents.blocks, num_context_blocks)]
         num_context_blocks = [len(b) for b in context_blocks]
         context_groups = [[i] * b for i, b in enumerate(num_context_blocks)]
+        # Slice each request's own trailing window BEFORE batch padding is applied.
+        if self.interleaved_sliding_window:
+            sliding_block_size = self.sliding_window // self.attn_block_size
+            window_context_blocks_raw = [blocks[-sliding_block_size:] for blocks in context_blocks]
         # Bucketing uses self.block_size so that file-based buckets
         # (generated at the original block_size) continue to match.
         bucketing_ctx_blocks = [round_up(ctx_len, self.block_size) // self.block_size for ctx_len in context_lens]
@@ -2868,7 +2872,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_lens = async_h2d_copy(context_lens, dtype=torch.int32)
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
-
+        window_context_blocks_t = None
+        # Only keep the last window_size // block_size context blocks per sequence.
+        # window_context_blocks_raw was sliced from the UNPADDED per-request block
+        # lists (before align_and_pad appended -1 sentinels), so it holds each
+        # request's real last-window blocks. Pad it to (target_bs, sliding_block_size)
+        # -- a fixed-width bucket independent of target_blocks -- rather than reusing
+        # context_blocks' batch-wide target_blocks shape.
+        if self.interleaved_sliding_window and target_blocks > 0:
+            window_context_blocks = align_and_pad(window_context_blocks_raw, (target_bs, sliding_block_size),
+                                                  itertools.repeat(-1))
+            window_context_blocks_t = async_h2d_copy(window_context_blocks, dtype=torch.int32).flatten()
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=query_lens,
             context_lens_tensor=context_lens,
@@ -2885,7 +2899,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             padding_mask_flat=padding_mask_flat,
             blocks_caching_range=blocks_caching_range,
             mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
-            seqlens_offsets_for_blocks=seqlens_offsets_for_blocks)
+            seqlens_offsets_for_blocks=seqlens_offsets_for_blocks,
+            window_block_list=window_context_blocks_t)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -6563,7 +6578,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 layer_names.add(layer_name)
         # Set up cross-layer KV cache sharing
         if self.shared_kv_cache_layers:
-            logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
+            #logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
                 kv_caches[layer_name] = kv_caches[target_layer_name]
         assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
@@ -7192,15 +7207,28 @@ class HPUAttentionMetadataProcessor:
             context_lens_t = prefill_metadata.context_lens_tensor
             assert context_lens_t is not None, "context_lens_tensor is required to build attn_bias"
 
-            block_list = attn_metadata.block_list
-            max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
+            window_block_list = getattr(attn_metadata, 'window_block_list', None)
+            block_list_for_mask = window_block_list if window_block_list is not None \
+                else attn_metadata.block_list
+            max_context_len = (block_list_for_mask.size(-1) // batch_size if block_list_for_mask is not None else 0)
             block_size = getattr(prefill_metadata, "block_size", self.block_size)
             max_context_len = max_context_len * block_size
 
-            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-            past_indices = torch.arange(max_context_len, device=device)
-            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+            if window_block_list is not None:
+                # Trimmed coordinate frame: gathered KV is the last `max_context_len`
+                # context tokens, so re-anchor context_lens_t to that frame before
+                # applying the same per-query-token window shift as the untrimmed path.
+                context_lens_trimmed = torch.clamp(context_lens_t, max=max_context_len)
+                invalid_lens_t = context_lens_trimmed - window_size + torch.arange(seq_len, device=device) - 1
+                past_indices = torch.arange(max_context_len, device=device)
+                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices.unsqueeze(0) < context_lens_trimmed.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+            else:
+                # Full block list: use absolute coordinate frame with window lower bound
+                invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
+                past_indices = torch.arange(max_context_len, device=device)
+                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
 
             # Create boolean sliding window mask
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
