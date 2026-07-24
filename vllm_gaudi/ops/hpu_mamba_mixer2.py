@@ -42,6 +42,7 @@ from vllm_gaudi.ops.granite_causal_conv1d import (
 )
 from vllm_gaudi.ops.ssd_combined import hpu_mamba_chunk_scan_combined_varlen
 from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
+from vllm_gaudi.extension.runtime import get_config
 
 
 # Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.Mixer2RMSNormGated
@@ -313,6 +314,14 @@ class HPUMambaMixer2(MambaMixer2):
 
         # 5. Final linear projection
         output, _ = self.out_proj(hidden_states_varlen)
+
+        # flatten_input models (e.g. nemotron_h) keep the whole model in the
+        # flattened [num_tokens, hidden] layout, so the surrounding layers
+        # (MoE/MLP) expect a 2D tensor. out_proj already produces that shape,
+        # so return it as-is. Non-flatten mamba models run in the [batch, seq,
+        # hidden] layout and need the leading dims restored below.
+        if get_config().flatten_input:
+            return output
 
         if get_forward_context().attn_metadata.is_prompt:
             output = output.view(1, output.shape[0], output.shape[1])

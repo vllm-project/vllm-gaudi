@@ -88,6 +88,7 @@ from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cach
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 from vllm.distributed.parallel_state import get_pp_group, get_dp_group
+from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
@@ -716,7 +717,7 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
 
     mamba_like_arch = [
         "GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration",
-        "Qwen3NextForCausalLM"
+        "Qwen3NextForCausalLM", "NemotronHForCausalLM"
     ]
     if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):
         return
@@ -742,13 +743,23 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
             # Extract layer index from name (e.g., "model.layers.5.mixer" -> 5)
             if not any(pattern in layer_name for pattern in mamba_like_layer):
                 continue
-            parts = layer_name.split('.')
-            layer_idx = int(parts[-2])  # "model.layers.5.mixer" -> 5
-
             # Access the actual layer
             if '.mixer' in layer_name:
+                # Only the mamba state cache registers under a name ending in
+                # ".mixer". Nemotron-H nests attention under the same attribute
+                # ("model.layers.N.mixer.attn"), which must be skipped here (it
+                # would also break the int(parts[-2]) index parsing).
+                if not layer_name.endswith('.mixer'):
+                    continue
+                layer_idx = int(layer_name.split('.')[-2])  # "...layers.5.mixer" -> 5
                 layer = model.model.layers[layer_idx]
-                layer.mamba.cache_group_idx = group_idx
+                # The Mamba block is exposed as ".mamba" (Granite) or ".mixer"
+                # (Nemotron-H) depending on the model.
+                mamba_mixer = getattr(layer, 'mamba', None)
+                if mamba_mixer is None:
+                    mamba_mixer = getattr(layer, 'mixer', None)
+                if mamba_mixer is not None:
+                    mamba_mixer.cache_group_idx = group_idx
             elif 'linear_attn' in layer_name:
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
                 if layer is not None and hasattr(layer, "linear_attn"):
@@ -3484,6 +3495,41 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not seen and not warmup_mode:
             logger.warning("Configuration: %s was not warmed-up!", cfg)
 
+    def _pp_recv_intermediate_tensors(self, token_ids, warmup_mode):
+        """Obtain the previous pipeline stage's activations for one forward.
+
+        Returns ``None`` on the first PP stage (it embeds the input ids
+        itself). On later stages it returns an ``IntermediateTensors`` holding
+        ``hidden_states``/``residual`` -- received from the previous stage
+        during real execution, or freshly zeroed during warmup (so we never
+        block on a peer that may not be in lockstep). The zeroed tensors are
+        shaped ``[num_tokens, hidden]`` to match the flattened token layout the
+        HPU model forward expects; ``make_empty_intermediate_tensors`` yields
+        the correct dict keys for the specific model.
+        """
+        if get_pp_group().is_first_rank:
+            return None
+        if warmup_mode:
+            # Build zeroed activations locally so warmup never blocks on a peer
+            # stage. make_empty_intermediate_tensors gives us the right dict
+            # keys, hidden size and dtype; we reshape to match the layout the
+            # HPU forward actually produces. Flatten-input models (e.g.
+            # Nemotron-H) operate on a flat [num_tokens, hidden] tensor;
+            # everything else keeps the [batch, seq, hidden] layout of token_ids.
+            # flatten_input lives on the config, not the runner.
+            real_model = self.model.model if isinstance(self.model, HpuModelAdapter) else self.model
+            empty = real_model.make_empty_intermediate_tensors(
+                batch_size=1,
+                dtype=self.dtype,
+                device=self.device,
+            )
+            lead_shape = (token_ids.numel(), ) if get_config().flatten_input else tuple(token_ids.shape)
+            return IntermediateTensors({
+                key: torch.zeros((*lead_shape, tensor.shape[-1]), dtype=tensor.dtype, device=tensor.device)
+                for key, tensor in empty.tensors.items()
+            })
+        return IntermediateTensors(get_pp_group().recv_tensor_dict())
+
     def _execute_model_generic(self,
                                token_ids,
                                position_ids,
@@ -3510,6 +3556,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.model_has_chunked_attention:
             additional_kwargs.update({"model_has_chunked_attention": True})
         trimmed_attn_metadata = trim_attn_metadata(attn_metadata)
+        # Pipeline parallelism: non-first stages consume the hidden_states /
+        # residual produced by the previous stage. Each sub-batch forward
+        # (decode batch and every prefill chunk) recvs its own tensors; the
+        # ordering is deterministic and identical on every PP rank because all
+        # ranks iterate the same scheduler_output, so the sends and recvs line
+        # up one-to-one. During warmup we cannot rely on the peer stage being
+        # in lockstep, so we feed zeroed tensors of the matching shape instead
+        # of blocking on a recv (the compiled forward graph is identical either
+        # way -- the recv op lives outside the captured model region).
+        intermediate_tensors = self._pp_recv_intermediate_tensors(token_ids, warmup_mode)
         if self.is_driver_worker:
             model_event_name = ("model_forward_"
                                 f"bs{batch_size}_"
@@ -3526,7 +3582,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                inputs_embeds=inputs_embeds,
                                                model_mm_kwargs=model_mm_kwargs,
                                                lora_mask=lora_mask,
+                                               intermediate_tensors=intermediate_tensors,
                                                **additional_kwargs)
+        # Pipeline parallelism: non-last stages produce IntermediateTensors
+        # (hidden_states + residual) rather than final hidden states. Forward
+        # them to the next stage and return early -- there are no logits to
+        # compute or sample on this rank.
+        if not get_pp_group().is_last_rank:
+            if not warmup_mode:
+                get_pp_group().send_tensor_dict(hidden_states.tensors)
+            return None, None, None, None
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
         if self.use_aux_hidden_state_outputs:
@@ -4306,14 +4371,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # Collect prefill hidden states for prompt logprobs.
                 # req_id is a list of request IDs in this prefill batch.
                 for i, rid in enumerate(req_id):
-                    if rid in self.input_batch.num_prompt_logprobs:
+                    # On non-last PP stages non_flattened_hidden_states is None
+                    # (only the final stage produces real hidden states).
+                    if get_pp_group().is_last_rank and rid in self.input_batch.num_prompt_logprobs:
                         prefill_hidden_states_for_logprobs[rid] = \
                             non_flattened_hidden_states[i]
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
+                # Non-last PP stages produced no logits (the forward returned
+                # None after forwarding activations downstream); nothing to
+                # sample here.
+                if not get_pp_group().is_last_rank:
+                    pass
                 # Skip separate sampling for structured output
-                if self.use_structured_output:
+                elif self.use_structured_output:
                     logits_prompt.append(logits_device)
                     prefill_sampled_requests.extend(logits_requests)
                 else:
@@ -4383,7 +4455,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
-            if self.use_structured_output:
+            # Non-last PP stages produced no logits (the forward returned None
+            # after forwarding activations downstream); nothing to sample here.
+            if not get_pp_group().is_last_rank:
+                pass
+            elif self.use_structured_output:
                 logits_decode.append(logits_device[:num_decodes])
                 decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
             else:
@@ -4453,6 +4529,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                        None,
                                                                        warmup_mode=warmup_mode)
             htorch.core.mark_step()
+
+        # Non-last PP stages have run all their forward passes and forwarded
+        # the activations to the next stage; they sample nothing and produce no
+        # ModelRunnerOutput (the final stage returns the real output). This
+        # mirrors the existing PP-non-final early return above.
+        if not get_pp_group().is_last_rank:
+            return None  # noqa
 
         if self.use_structured_output:
             # Scheduler places cached before prompt
@@ -6253,7 +6336,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if isinstance(spec, MambaSpec) and \
                             spec.mamba_type in _GDN_MAMBA_TYPES:
                         continue
-                    # Standard Mamba2 or unknown spec — needs raw buffer
+                    if isinstance(spec, MambaSpec) and len(set(spec.dtypes)) > 1:
+                        # Mixed-dtype standard Mamba2 (e.g. Nemotron-H: bf16
+                        # conv_state + float32 ssm_state) gets its own
+                        # contiguous tensors below, not as_strided views of the
+                        # shared raw buffer — aot_autograd rejects in-place
+                        # mutation of differently-typed views of one input.
+                        continue
+                    # Standard Mamba2 (uniform dtype) or unknown spec — needs
+                    # raw buffer for the as_strided interleaved layout.
                     return True
                 return False
 
@@ -6342,10 +6433,31 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             for shared_layer in kv_cache_tensor.shared_by:
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
+                    elif isinstance(kv_cache_spec, MambaSpec) and \
+                            len(set(kv_cache_spec.dtypes)) > 1:
+                        # Mixed-dtype standard Mamba2 (e.g. Nemotron-H: bf16
+                        # conv_state + float32 ssm_state). as_strided views of a
+                        # single raw buffer would alias one storage with two
+                        # dtypes; aot_autograd cannot compile the decode graph
+                        # then ("input mutations on views with different
+                        # dtypes"). Allocate separate contiguous tensors, like
+                        # the GDN path above, so each state is its own input.
+                        if isinstance(kv_caches.get(layer_name), tuple):
+                            continue
+                        state_tensors = []
+                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                            target_shape = (num_blocks + 1, *shape)
+                            state_tensors.append(torch.zeros(target_shape, dtype=dtype, device=self.device))
+                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                            if layer_name not in kv_cache_tensor.shared_by:
+                                continue
+                            for shared_layer in kv_cache_tensor.shared_by:
+                                kv_caches[shared_layer] = tuple(state_tensors)
+                            break
                     elif isinstance(kv_cache_spec, MambaSpec):
-                        # Standard Mamba2 and other MambaSpec types: use the
-                        # original as_strided interleaved layout from the raw
-                        # shared buffer.
+                        # Standard Mamba2 with uniform dtype: use the original
+                        # as_strided interleaved layout from the raw shared
+                        # buffer (same-dtype view mutations compile fine).
                         raw = kv_caches[layer_name]
                         offset = 0
                         state_tensors = []
