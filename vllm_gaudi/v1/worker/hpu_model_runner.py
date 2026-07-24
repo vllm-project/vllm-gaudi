@@ -5711,46 +5711,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         per-dimension clamp in DummyInputsBuilder._get_dummy_images.
 
         Mirrors get_dummy_processor_inputs (dummy_text + parse_mm_data +
-        ProcessorInputs) but supplies our own solid images sized to the
-        requested raw WxH. If the raw resolution exceeds the model's pixel
-        budget it is scaled down preserving aspect ratio, matching how the
-        model's own resize handles an oversized real image; this keeps the
-        warmed grid identical to what real traffic at that resolution yields.
+        ProcessorInputs) but supplies our own solid image at the requested raw
+        WxH. The upstream builder clamps width and height *independently*
+        against the model's max-feature size, distorting the aspect ratio so
+        the warmed grid stops matching real traffic. Feeding the raw image
+        straight through processor.apply lets the model's own resize
+        (smart_resize / navit_resize / ...) pick exactly the same grid it
+        would for a real image of that resolution -- including scaling an
+        oversized image down -- so warmup and serving grids are identical by
+        construction.
         """
         from PIL import Image
         from vllm.multimodal.processing.inputs import ProcessorInputs
 
-        w, h = self._fit_resolution_to_pixel_budget(processor, width, height)
-        images = [Image.new("RGB", (w, h), color=255)] * count
+        images = [Image.new("RGB", (width, height), color=255)] * count
 
         dummy_builder = processor.dummy_inputs
         dummy_text = dummy_builder.get_dummy_text({modality: count})
-        mm_data = {modality: images}
-        mm_data_items = processor.info.parse_mm_data(mm_data, validate=False)
+        mm_data_items = processor.info.parse_mm_data({modality: images}, validate=False)
 
         return ProcessorInputs(
             prompt=dummy_text,
             mm_data_items=mm_data_items,
             tokenization_kwargs={"truncation": False},
         )
-
-    @staticmethod
-    def _fit_resolution_to_pixel_budget(processor, width, height):
-        """Scale (width, height) down preserving aspect ratio so it fits the
-        image processor's max-pixel budget (longest_edge). No-op if unknown or
-        already within budget."""
-        max_pixels = None
-        image_processor = getattr(processor.info.get_hf_processor(), 'image_processor', None)
-        size = getattr(image_processor, 'size', None) if image_processor is not None else None
-        if isinstance(size, dict):
-            max_pixels = size.get('longest_edge')
-        elif size is not None:
-            max_pixels = getattr(size, 'longest_edge', None)
-
-        if not max_pixels or width * height <= max_pixels:
-            return width, height
-        scale = (max_pixels / (width * height))**0.5
-        return max(1, int(width * scale)), max(1, int(height * scale))
 
     def _get_mm_warmup_processor(self):
         if self._mm_warmup_processor is None:
