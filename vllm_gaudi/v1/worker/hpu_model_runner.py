@@ -715,12 +715,15 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
         model = model.model
 
     mamba_like_arch = [
-        "GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration",
-        "Qwen3NextForCausalLM"
+        "GraniteMoeHybridForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3NextForCausalLM",
+        "NemotronHForCausalLM",
+        "NemotronHPuzzleForCausalLM",
     ]
     if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):
         return
-    mamba_like_layer = ['.mixer', '.linear_attn']
 
     def _get_decoder_layer_by_idx(model_obj, idx: int):
         # Qwen3.5 multimodal path: model.language_model.model.layers
@@ -735,21 +738,31 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 return layers[idx]
         return None
 
+    def _get_layer_idx_from_name(layer_name: str) -> int:
+        parts = layer_name.split(".")
+        return int(parts[parts.index("layers") + 1])
+
     # Iterate through all KV cache groups
     for group_idx, kv_group in enumerate(kv_cache_config.kv_cache_groups):
         # kv_group.layer_names contains strings like "model.layers.5.mixer"
         for layer_name in kv_group.layer_names:
-            # Extract layer index from name (e.g., "model.layers.5.mixer" -> 5)
-            if not any(pattern in layer_name for pattern in mamba_like_layer):
+            # Extract layer index from names like "model.layers.5.mixer" -> 5.
+            # Full-attention layers may be named "model.layers.5.mixer.attn";
+            # those are not Mamba groups and must be ignored here.
+            is_mixer_layer = layer_name.endswith(".mixer")
+            is_linear_attn_layer = ".linear_attn" in layer_name
+            if not is_mixer_layer and not is_linear_attn_layer:
                 continue
-            parts = layer_name.split('.')
-            layer_idx = int(parts[-2])  # "model.layers.5.mixer" -> 5
+            layer_idx = _get_layer_idx_from_name(layer_name)
 
             # Access the actual layer
-            if '.mixer' in layer_name:
-                layer = model.model.layers[layer_idx]
-                layer.mamba.cache_group_idx = group_idx
-            elif 'linear_attn' in layer_name:
+            if is_mixer_layer:
+                layer = _get_decoder_layer_by_idx(model, layer_idx)
+                if layer is not None:
+                    mamba_module = getattr(layer, "mamba", None) or getattr(layer, "mixer", None)
+                    if mamba_module is not None:
+                        mamba_module.cache_group_idx = group_idx
+            elif is_linear_attn_layer:
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
                 if layer is not None and hasattr(layer, "linear_attn"):
                     layer.linear_attn.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
@@ -795,8 +808,14 @@ def apply_model_specific_patches(model_runner):
     is_llama4 = is_hpu_llama4_model(model_runner.model)
     model_type = getattr(model_runner.vllm_config.model_config.hf_config, "model_type", "")
     is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5_moe")
+    architectures = set(getattr(model_runner.model.config, "architectures", []) or [])
+    is_nemotron_h = model_type == "nemotron_h" or bool(
+        architectures.intersection({
+            "NemotronHForCausalLM",
+            "NemotronHPuzzleForCausalLM",
+        }))
 
-    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe
+    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe or is_nemotron_h
     if is_llama4:
         apply_hpu_llama4_post_load_patches(model_runner.model)
     if is_qwen_moe:
