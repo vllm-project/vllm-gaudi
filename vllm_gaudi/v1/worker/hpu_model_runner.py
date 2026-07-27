@@ -5624,10 +5624,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return prompt_cfg, decode_cfg
 
     def get_patch_size_from_model(self):
-        """Get patch_size from the loaded vision model."""
-        # For Qwen2.5-VL and similar models
-        if hasattr(self.model.model, 'visual'):
-            return self.model.model.visual.patch_size
+        """Get patch_size from the loaded vision model.
+
+        Different vision models expose the tower at different attribute names
+        and nesting depths, so probe the known layouts:
+          * Qwen2.5-VL and similar: ``model.model.visual.patch_size``
+          * Kimi-K2.5/K2.6 (MoonViT): ``vision_tower.patch_size``
+        Falls back to 1 only when no known vision tower is found.
+        """
+        model = self.get_model()
+        candidates = [
+            getattr(getattr(model, 'model', None), 'visual', None),
+            getattr(model, 'visual', None),
+            getattr(model, 'vision_tower', None),
+        ]
+        for vision_model in candidates:
+            patch_size = getattr(vision_model, 'patch_size', None)
+            if patch_size is not None:
+                # Some towers store patch_size as a (h, w) tuple/list.
+                if isinstance(patch_size, (tuple, list)):
+                    return int(patch_size[0])
+                return int(patch_size)
         return 1
 
     def _get_dummy_mm_inputs_with_options(
