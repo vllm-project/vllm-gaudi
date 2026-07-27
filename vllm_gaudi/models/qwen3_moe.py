@@ -8,8 +8,9 @@ from vllm.model_executor.models.qwen3_moe import (
     Qwen3MoeModel as UpstreamQwen3MoeModel,
     Qwen3MoeSparseMoeBlock as UpstreamQwen3MoeSparseMoeBlock,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
+
+from vllm_gaudi.models.utils import sequence_parallel_chunk
 
 
 class HpuQwen3MoeSparseMoeBlock(UpstreamQwen3MoeSparseMoeBlock):
