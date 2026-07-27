@@ -35,9 +35,10 @@ Leave `VLLM_EXPONENTIAL_BUCKETING` unset when using `VLLM_BUCKETING_STRATEGY`. T
 
 To enter developer mode use `VLLM_DEVELOPER_MODE`:
 
-| Parameter name     | Description              | Default value |
-| ------------------ | ------------------------ | ------------- |
-| `VLLM_SKIP_WARMUP` | Skips the warm-up phase. | `false`       |
+| Parameter name        | Description                                                                                                                                                                                                                                  | Default value |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `VLLM_SKIP_WARMUP`    | Skips the warm-up phase.                                                                                                                                                                                                                     | `false`       |
+| `VLLM_SKIP_MM_WARMUP` | Skips ONLY the multimodal-graph warm-up while still running prompt/decode warm-up. Useful for multimodal models whose vision tower fails to compile on HPU when the user is running text-only and does not need the vision path.             | `false`       |
 
 ## Additional Parameters
 
