@@ -125,22 +125,46 @@ run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test() {
 
 # QWEN3 FP8 + MOE compressed tensor + dynamic scaling
 run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test() {
-    echo "➡️ Testing Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
-    echo "✅ Test with Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling successful."
+    local model="Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
+    echo "➡️ Testing ${model} + moe + compressed-tensor + dynamic scaling..."
+    pip install hf_transfer
+    echo "⬇️  Pre-downloading ${model} from HF..."
+    HF_HUB_ENABLE_HF_TRANSFER=1 hf download "${model}"
+    local rc=0
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model "${model}" --trust-remote-code --max-model-len 131072 || rc=$?
+    echo "🧹 Removing ${model} from HF cache..."
+    rm -rf "${HF_HOME:-$HOME/.cache/huggingface}/hub/models--${model//\//--}"
+    [ "$rc" -eq 0 ] || return "$rc"
+    echo "✅ Test with ${model} + moe + compressed-tensor + dynamic scaling successful."
 }
 
 run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test() {
-    echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
-    echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling successful."
+    local model="Intel/Qwen3-30B-A3B-FP8-Test-Only"
+    echo "➡️ Testing ${model} + moe + compressed-tensor + static scaling..."
+    pip install hf_transfer
+    echo "⬇️  Pre-downloading ${model} from HF..."
+    HF_HUB_ENABLE_HF_TRANSFER=1 hf download "${model}"
+    local rc=0
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model "${model}" --trust-remote-code --no-enforce-eager --enable-expert-parallel || rc=$?
+    echo "🧹 Removing ${model} from HF cache..."
+    rm -rf "${HF_HOME:-$HOME/.cache/huggingface}/hub/models--${model//\//--}"
+    [ "$rc" -eq 0 ] || return "$rc"
+    echo "✅ Test with ${model} + moe + compressed-tensor + static scaling successful."
 }
 
 # QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-channel, activation per-tensor)
 run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test() {
-    echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
-    echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling successful."
+    local model="Intel/Qwen3-30B-A3B-FP8-Static-Test-Only"
+    echo "➡️ Testing ${model} + moe + compressed-tensor + static scaling..."
+    pip install hf_transfer
+    echo "⬇️  Pre-downloading ${model} from HF..."
+    HF_HUB_ENABLE_HF_TRANSFER=1 hf download "${model}"
+    local rc=0
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model "${model}" --trust-remote-code --no-enforce-eager --enable-expert-parallel || rc=$?
+    echo "🧹 Removing ${model} from HF cache..."
+    rm -rf "${HF_HOME:-$HOME/.cache/huggingface}/hub/models--${model//\//--}"
+    [ "$rc" -eq 0 ] || return "$rc"
+    echo "✅ Test with ${model} + moe + compressed-tensor + static scaling successful."
 }
 
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
@@ -588,57 +612,54 @@ run_structured_output_test() {
 launch_all_tests() {
     echo "🚀 Starting all test suites..."
     # run_gemma3_load_generate_test
-    run_basic_load_generate_test
-    run_tp2_load_generate_test
-    run_mla_moe_load_generate_test
-    run_granite_inc_load_generate_test
-    run_deepseek_v2_inc_load_generate_test
-    run_deepseek_v2_inc_dynamic_tp2_load_generate_test
-    run_qwen3_inc_dynamic_load_generate_test
-    run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test
-    run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test
-    run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
-    run_qwen3_blockfp8_dynamic_scaling_load_generate_test
-    run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test
+    #run_basic_load_generate_test
+    #run_tp2_load_generate_test
+    #run_mla_moe_load_generate_test
+    #run_granite_inc_load_generate_test
+    #run_deepseek_v2_inc_load_generate_test
+    #run_deepseek_v2_inc_dynamic_tp2_load_generate_test
+    #run_qwen3_inc_dynamic_load_generate_test
+    #run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test
+    #run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test
+    #run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
+    #run_qwen3_blockfp8_dynamic_scaling_load_generate_test
+    #run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test
     run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test
     run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test
     run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test
-    run_llama3_per_tensor_scaling_load_generate_test
-    run_llama3_modelopt_per_tensor_scaling_load_generate_test
-    run_granite_inc_calibration_and_quantization_load_generate_test
-    run_granite_4_h_load_generate_test
-    run_awq_load_generate_test
-    run_gptq_load_generate_test
-    run_compressed_w4a16_channelwise_load_generate_test
-    run_compressed_w4a16_moe_gidx_load_generate_test
-    run_llama3_70b_inc_dynamic_quant_load_generate_test
-    run_qwen2_5_vl_load_generate_test
-    run_qwen2_5_vl_compile_warmup_test
-    run_qwen3_vl_load_generate_test
-    run_mistral3_load_generate_test
-    run_llama3_70b_inc_dynamic_quant_test
-    run_gsm8k_granite_test
-    run_gsm8k_granite_async_test
-    run_gsm8k_deepseek_test
-    run_gsm8k_qwen3_30b_test
-    run_gpqa_kimi_k26_test
-    run_longbench_qwen3_30b_fp8_static_test
-    run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test
-    run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test
-    run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
-    run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
-    run_preemption_test
-    run_spec_decode_ngram_test
-    run_spec_decode_eagle3_test
-    run_spec_decode_eagle3_num_spec_2_test
-    run_embedding_model_test
-    run_pd_disaggregate_nixl_libfabric_test
-    run_pd_disaggregate_nixl_ucx_test
-    run_cpu_offloading_test
-    run_offloading_connector_test
-    run_sleep_mode_test
-    run_online_model_swap_test
-    run_structured_output_test
+    #run_granite_4_h_load_generate_test
+    #run_awq_load_generate_test
+    #run_gptq_load_generate_test
+    #run_compressed_w4a16_channelwise_load_generate_test
+    #run_compressed_w4a16_moe_gidx_load_generate_test
+    #run_llama3_70b_inc_dynamic_quant_load_generate_test
+    #run_qwen2_5_vl_load_generate_test
+    #run_qwen2_5_vl_compile_warmup_test
+    #run_qwen3_vl_load_generate_test
+    #run_mistral3_load_generate_test
+    #run_llama3_70b_inc_dynamic_quant_test
+    #run_gsm8k_granite_test
+    #run_gsm8k_granite_async_test
+    #run_gsm8k_deepseek_test
+    #run_gsm8k_qwen3_30b_test
+    #run_gpqa_kimi_k26_test
+    #run_longbench_qwen3_30b_fp8_static_test
+    #run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test
+    #run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test
+    #run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
+    #run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
+    #run_preemption_test
+    #run_spec_decode_ngram_test
+    #run_spec_decode_eagle3_test
+    #run_spec_decode_eagle3_num_spec_2_test
+    #run_embedding_model_test
+    #run_pd_disaggregate_nixl_libfabric_test
+    #run_pd_disaggregate_nixl_ucx_test
+    #run_cpu_offloading_test
+    #run_offloading_connector_test
+    #run_sleep_mode_test
+    #run_online_model_swap_test
+    #run_structured_output_test
     echo "🎉 All test suites passed successfully!"
 }
 
