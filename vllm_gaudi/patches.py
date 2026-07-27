@@ -583,8 +583,11 @@ def _patch_free_blocks() -> None:
     _ORIGINAL_FREE_BLOCKS = BlockPool.free_blocks
     BlockPool.free_blocks = _hpu_free_blocks
 
+
 # Global cache for FusedSDPA operator to avoid recreation overhead
 _CACHED_FSDPA_OP = None
+
+
 def _hpu_sdpa_attention_forward(
     module: torch.nn.Module,
     query: torch.Tensor,
@@ -607,16 +610,12 @@ def _hpu_sdpa_attention_forward(
     The FusedSDPA operator is cached globally to avoid recreation overhead
     on each call, which would otherwise cause significant slowdown.
     """
-    from transformers.integrations.sdpa_attention import (
-        repeat_kv, use_gqa_in_sdpa, create_position_bias_mask,
-        _is_torch_npu_available, logger
-    )
+    from transformers.integrations.sdpa_attention import (repeat_kv, use_gqa_in_sdpa, create_position_bias_mask,
+                                                          _is_torch_npu_available, logger)
 
     if kwargs.get("output_attentions", False):
-        logger.warning_once(
-            "`sdpa` attention does not support `output_attentions=True`."
-            " Please set your attention to `eager` if you want any of these features."
-        )
+        logger.warning_once("`sdpa` attention does not support `output_attentions=True`."
+                            " Please set your attention to `eager` if you want any of these features.")
     sdpa_kwargs = {}
     if hasattr(module, "num_key_value_groups") and module.num_key_value_groups > 1:
         if not use_gqa_in_sdpa(attention_mask, key, value):
@@ -634,9 +633,8 @@ def _hpu_sdpa_attention_forward(
     if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
         is_causal = is_causal.item()
 
-    if _is_torch_npu_available:
-        if attention_mask is not None and attention_mask.dtype != torch.bool:
-            attention_mask = torch.logical_not(attention_mask.bool()).to(query.device)
+    if _is_torch_npu_available and attention_mask is not None and attention_mask.dtype != torch.bool:
+        attention_mask = torch.logical_not(attention_mask.bool()).to(query.device)
 
     if is_causal and attention_mask is None and q_length > 1 and kv_length > q_length:
         key = key[:, :, :q_length, :]
@@ -670,7 +668,9 @@ def _hpu_sdpa_attention_forward(
 
         softmax_mode = "fp32" if _config.fp32_softmax else "fast"
         attn_output = _CACHED_FSDPA_OP(
-            query, key, value,
+            query,
+            key,
+            value,
             attention_mask,
             dropout_p=dropout,
             is_causal=is_causal,
@@ -714,6 +714,7 @@ def _patch_sdpa_attention_forward() -> None:
             ALL_ATTENTION_FUNCTIONS["sdpa"] = _hpu_sdpa_attention_forward
     except ImportError:
         pass  # transformers version without this module
+
 
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
