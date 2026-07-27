@@ -144,35 +144,72 @@ run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test() {
 }
 
 # Run the three Qwen3-30B MoE FP8 load/generate tests in parallel, one HPU card each.
-# Each model fits on a single card, so this overlaps the ~model-load time instead of
-# paying it three times sequentially. set -e does not catch failures in backgrounded
-# jobs, so exit codes are collected explicitly and per-test logs are printed at the end.
+# Each model fits on a single card, so this overlaps model-load time instead of paying
+# it three times sequentially.
+#
+# IMPORTANT: the inner functions must honor an externally-set HABANA_VISIBLE_DEVICES
+# (they use ${HABANA_VISIBLE_DEVICES:-all}); otherwise every instance would grab all
+# cards and the processes would deadlock on device acquisition (the original hang).
+#
+# Card selection: when HABANA_VISIBLE_DEVICES is unset/"all" the visible cards are
+# discovered via hl-smi; a fixed 0/1/2 mapping is never assumed. If fewer than three
+# cards are visible the tests run sequentially on whatever is present.
+#
+# set -e does not catch failures in backgrounded jobs, so each child's exit code is
+# waited on explicitly. Each job runs in a subshell with `set -o pipefail` and pipes
+# through `tee`, so output streams live to the console (visible in CI) while also being
+# captured to a per-test log, and `wait` observes the test's exit code rather than tee's.
 run_qwen3_moe_fp8_parallel() {
-    echo "🚀 Running 3 Qwen3-30B MoE FP8 load/generate tests in parallel (1 card each)..."
-    local pids=() names=() rc=0
+    local fns=(
+        run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test
+        run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test
+        run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test
+    )
+    local names=(dynamic static_per_tensor static)
 
-    HABANA_VISIBLE_DEVICES=0 run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test \
-        >qwen3_moe_dynamic.log 2>&1 &
-    pids+=($!); names+=("dynamic")
+    local visible="${HABANA_VISIBLE_DEVICES:-all}"
+    if [[ "$visible" == "all" ]]; then
+        if command -v hl-smi >/dev/null 2>&1; then
+            visible=$(hl-smi -Q index -f csv,noheader | tr -d ' ' | paste -sd, -)
+        fi
+        visible="${visible:-0,1,2}"
+    fi
+    local cards=()
+    IFS=',' read -r -a cards <<< "$visible"
 
-    HABANA_VISIBLE_DEVICES=1 run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test \
-        >qwen3_moe_static_per_tensor.log 2>&1 &
-    pids+=($!); names+=("static_per_tensor")
+    local rc=0 i
+    if [[ "${#cards[@]}" -lt "${#fns[@]}" ]]; then
+        echo "⚠️  Only ${#cards[@]} HPU card(s) visible (${visible}); running Qwen3-30B MoE FP8 tests sequentially."
+        for i in "${!fns[@]}"; do
+            HABANA_VISIBLE_DEVICES="${cards[$((i % ${#cards[@]}))]}" "${fns[$i]}" || rc=1
+        done
+        return "$rc"
+    fi
 
-    HABANA_VISIBLE_DEVICES=2 run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test \
-        >qwen3_moe_static.log 2>&1 &
-    pids+=($!); names+=("static")
+    echo "🚀 Running ${#fns[@]} Qwen3-30B MoE FP8 tests in parallel on cards ${cards[0]},${cards[1]},${cards[2]}..."
+    local pids=()
+    for i in "${!fns[@]}"; do
+        ( set -o pipefail
+          HABANA_VISIBLE_DEVICES="${cards[$i]}" "${fns[$i]}" 2>&1 | tee "qwen3_moe_${names[$i]}.log" ) &
+        pids+=($!)
+    done
 
     for i in "${!pids[@]}"; do
-        if ! wait "${pids[$i]}"; then
-            echo "❌ Qwen3-30B MoE FP8 [${names[$i]}] FAILED"; rc=1
-        else
+        if wait "${pids[$i]}"; then
             echo "✅ Qwen3-30B MoE FP8 [${names[$i]}] passed"
+        else
+            echo "❌ Qwen3-30B MoE FP8 [${names[$i]}] FAILED"; rc=1
         fi
     done
-    echo "----- Qwen3-30B MoE FP8 parallel logs -----"
-    cat qwen3_moe_dynamic.log qwen3_moe_static_per_tensor.log qwen3_moe_static.log
-    return $rc
+
+    if (( rc != 0 )); then
+        echo "----- Qwen3-30B MoE FP8 parallel logs (failure) -----"
+        for i in "${!names[@]}"; do
+            echo "----- ${names[$i]} -----"
+            cat "qwen3_moe_${names[$i]}.log"
+        done
+    fi
+    return "$rc"
 }
 
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
