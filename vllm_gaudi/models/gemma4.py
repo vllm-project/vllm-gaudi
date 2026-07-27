@@ -20,11 +20,9 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.models.gemma4 import (
-    Gemma4Model as UpstreamGemma4Model,
-)
+    Gemma4Model as UpstreamGemma4Model, )
 from vllm.model_executor.models.gemma4_mm import (
-    Gemma4ForConditionalGeneration as UpstreamGemma4ForConditionalGeneration,
-)
+    Gemma4ForConditionalGeneration as UpstreamGemma4ForConditionalGeneration, )
 from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -68,16 +66,12 @@ class HpuGemma4Model(UpstreamGemma4Model):
                 hidden_states = inputs_embeds
                 # When called from multimodal wrapper, raw PLE embeddings
                 # are pre-computed and passed explicitly
-                per_layer_inputs = self.project_per_layer_inputs(
-                    hidden_states, per_layer_inputs
-                )
+                per_layer_inputs = self.project_per_layer_inputs(hidden_states, per_layer_inputs)
             else:
                 hidden_states = self.embed_input_ids(input_ids)
                 # Compute per-layer inputs for PLE
                 per_layer_embeds = self.get_per_layer_inputs(input_ids)
-                per_layer_inputs = self.project_per_layer_inputs(
-                    hidden_states, per_layer_embeds
-                )
+                per_layer_inputs = self.project_per_layer_inputs(hidden_states, per_layer_embeds)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -88,15 +82,12 @@ class HpuGemma4Model(UpstreamGemma4Model):
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
 
         # Run decoder layers with dynamic PLE indexing
-        for layer_idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
-        ):
+        for layer_idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
             if per_layer_inputs is not None:
                 # Use pre-registered layer_idx_tensor buffer for dynamic indexing
                 # Buffer is registered in _apply_hpu_gemma4_patches before any forward
-                layer_per_input = torch.index_select(
-                    per_layer_inputs, 1, layer.layer_idx_tensor
-                ).squeeze(1)  # (num_tokens, per_layer_dim)
+                layer_per_input = torch.index_select(per_layer_inputs, 1,
+                                                     layer.layer_idx_tensor).squeeze(1)  # (num_tokens, per_layer_dim)
             else:
                 layer_per_input = None
 
@@ -107,9 +98,7 @@ class HpuGemma4Model(UpstreamGemma4Model):
                 per_layer_input=layer_per_input,
                 **kwargs,
             )
-            self._maybe_add_hidden_state(
-                aux_hidden_states, layer_idx + 1, hidden_states, residual
-            )
+            self._maybe_add_hidden_state(aux_hidden_states, layer_idx + 1, hidden_states, residual)
 
         # Not last rank: return intermediate tensors
         if not get_pp_group().is_last_rank:
@@ -151,9 +140,7 @@ def _hpu_run_decoder_layers(
     for idx, layer in enumerate(decoder_layers):
         if per_layer_inputs is not None:
             # Use pre-registered layer_idx_tensor buffer for dynamic indexing
-            layer_per_input = torch.index_select(
-                per_layer_inputs, 1, layer.layer_idx_tensor
-            ).squeeze(1)
+            layer_per_input = torch.index_select(per_layer_inputs, 1, layer.layer_idx_tensor).squeeze(1)
         else:
             layer_per_input = None
         hidden_states, residual = layer(
@@ -187,16 +174,11 @@ def _apply_hpu_gemma4_patches(language_model: nn.Module) -> None:
                 torch.tensor([layer_idx], dtype=torch.long),
                 persistent=False,
             )
-        logger.info(
-            f"HPU Gemma4: Registered layer_idx_tensor buffers on "
-            f"{len(model.layers)} decoder layers"
-        )
 
     # Patch _run_decoder_layers for fast-prefill path (self_decoder/cross_decoder)
     from vllm.model_executor.models import gemma4 as upstream_gemma4_module
     upstream_gemma4_module._run_decoder_layers = _hpu_run_decoder_layers
     upstream_gemma4_module.__dict__["_run_decoder_layers"] = _hpu_run_decoder_layers
-    logger.info("HPU Gemma4: Patched _run_decoder_layers for fast-prefill path")
 
 
 class HpuGemma4ForConditionalGeneration(UpstreamGemma4ForConditionalGeneration):
@@ -208,4 +190,3 @@ class HpuGemma4ForConditionalGeneration(UpstreamGemma4ForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         _apply_hpu_gemma4_patches(self.language_model)
-        logger.info("HPU Gemma4: HpuGemma4ForConditionalGeneration initialized with PLE fix")
