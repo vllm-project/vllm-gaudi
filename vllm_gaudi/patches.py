@@ -38,6 +38,14 @@ Currently:
   identical implementation that omits the two ``mark_unbacked`` calls.  HPU
   handles dynamic batch shapes without this hint.
 
+* ``vllm.model_executor.layers.mamba.abstract.MambaBase.bind_kv_cache`` —
+  upstream PR #44456 unpacks a single packed int8 page via
+  ``kv_cache.squeeze(dim=(1, 2))``.  The HPU runner allocates a separate
+  tensor per Mamba state and hands the layer a ready-made tuple, so the
+  upstream method raises ``AttributeError: 'tuple' object has no attribute
+  'squeeze'`` at EngineCore init.  We replace it with a variant that assigns
+  the pre-split tuple directly (restoring the pre-#44456 contract).
+
 * ``vllm.v1.core.block_pool.BlockPool.free_blocks`` — upstream PR #42656
   ("Apply LRU policy only to proper cache entries") made ``free_blocks``
   partition freed blocks into with-hash / without-hash lists and issue two
@@ -50,6 +58,7 @@ Currently:
 """
 
 import gc
+import inspect
 from typing import Callable, Optional
 
 import torch
@@ -307,6 +316,85 @@ def _patch_granite_hybrid_layer_types() -> None:
     layer_types["linear_attention"] = layer_types["mamba"]
 
 
+def _hpu_mamba_bind_kv_cache(self, kv_cache) -> None:
+    """HPU-safe replacement for ``MambaBase.bind_kv_cache``.
+
+    Upstream vLLM PR #44456 ("[3/N][KV-Cache Layout Refactor] Standardize
+    Mamba cache") replaced the old direct assignment
+    (``forward_context[layer_name].kv_cache = kv_cache`` in
+    ``vllm.v1.worker.utils.bind_kv_cache``) with a per-layer
+    ``MambaBase.bind_kv_cache`` that unpacks a single packed ``[B, 1, 1, C]``
+    int8 page view via ``kv_cache.squeeze(dim=(1, 2))``.
+
+    The HPU model runner never packs the Mamba state into one int8 page:
+    ``HPUModelRunner.initialize_kv_cache`` allocates a separate tensor per
+    state (conv/ssm) and always stores a ``tuple``/``list`` in the ``kv_caches``
+    dict for every MambaSpec layer (see the standard, hybrid and
+    naive-cache-sharing branches — each ends in ``kv_caches[...] = tuple(...)``
+    or ``= state_tensors``). ``bind_kv_cache`` therefore only ever receives that
+    pre-split sequence on HPU; the upstream ``.squeeze`` path would raise
+    ``AttributeError: 'tuple' object has no attribute 'squeeze'`` at EngineCore
+    init (crashes ``run_granite_4_h_load_generate_test`` for
+    ibm-granite/granite-4.0-h-small).
+
+    Restore the pre-#44456 contract by assigning the pre-split sequence
+    directly. This patch is HPU-only (installed from the HPU plugin), so the
+    single-int8-page allocation never reaches it; ``tuple(kv_cache)`` would
+    silently iterate a raw tensor's leading dim, so guard the contract instead
+    of coercing.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/44456
+    """
+    assert isinstance(
+        kv_cache,
+        (tuple,
+         list)), (f"HPU MambaBase.bind_kv_cache expects a pre-split conv/ssm sequence, got {type(kv_cache).__name__}")
+    self.kv_cache = tuple(kv_cache)
+
+
+def _patch_mamba_bind_kv_cache() -> None:
+    """Install the HPU-safe ``MambaBase.bind_kv_cache`` replacement.
+
+    Guarded so this is a no-op unless the target actually exists and still
+    uses the ``squeeze``-based unpacking introduced by PR #44456:
+
+    * If ``vllm.model_executor.layers.mamba.abstract.MambaBase`` cannot be
+      imported or has no ``bind_kv_cache`` attribute (import-path or API
+      change), skip silently — nothing to patch.
+    * If the upstream method no longer calls ``.squeeze(`` (upstream reverted
+      to a direct assignment), skip — the AttributeError this patch works
+      around can no longer occur, and overwriting would only risk masking a
+      future upstream change.
+
+    Deferred to ``load_general_plugins`` time so the ``vllm.model_executor``
+    import chain runs after the platform is ready.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/44456
+    """
+    try:
+        from vllm.model_executor.layers.mamba.abstract import MambaBase
+    except ImportError:
+        return  # Import path changed/removed upstream — nothing to patch.
+
+    upstream = getattr(MambaBase, "bind_kv_cache", None)
+    if upstream is None:
+        return  # Method dropped upstream — nothing to patch.
+
+    if upstream is _hpu_mamba_bind_kv_cache:
+        return  # Already installed (idempotent within this process).
+
+    # Only patch when the upstream body still does the squeeze-based unpacking
+    # that trips on HPU's pre-split tuple; otherwise leave upstream untouched.
+    try:
+        source = inspect.getsource(upstream)
+    except (OSError, TypeError):
+        source = ""  # Builtin/C or source unavailable — assume it needs the patch.
+    if source and ".squeeze(" not in source:
+        return  # Upstream no longer squeezes — the tuple crash cannot occur.
+
+    MambaBase.bind_kv_cache = _hpu_mamba_bind_kv_cache
+
+
 def _hpu_get_num_layers_by_block_type(self, parallel_config, block_type="attention"):
     """HPU-safe replacement for ``ModelConfig.get_num_layers_by_block_type``.
 
@@ -522,6 +610,7 @@ def apply() -> None:
         _patch_granite_hybrid_layer_types()
         _patch_get_num_layers_by_block_type()
         _patch_use_sequence_parallel_moe()
+        _patch_mamba_bind_kv_cache()
         _patch_free_blocks()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
