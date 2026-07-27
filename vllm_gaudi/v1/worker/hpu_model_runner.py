@@ -5660,11 +5660,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Use the registry's API with custom mm_options
         if mm_options is not None:
             processor = self._get_mm_warmup_processor()
-            processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
-                seq_len=self.model_config_copy.max_model_len,
-                mm_counts={modality: count},
-                mm_options=mm_options,
-            )
+            if modality == 'image':
+                # Build the dummy image at the requested raw WxH directly and
+                # run it through the model's own processor. The upstream
+                # DummyInputsBuilder._get_dummy_images clamps width/height
+                # independently against the model's max-feature size, which
+                # distorts the aspect ratio (e.g. 1770x1180 -> 1120x1180 ->
+                # wrong grid) so the warmed grid no longer matches what a real
+                # image of that resolution produces at serving time. Feeding a
+                # raw image straight through processor.apply lets the model's
+                # resize (smart_resize / navit_resize / ...) pick the exact
+                # same grid as real traffic, guaranteeing a warmup cache hit.
+                processor_inputs = self._build_raw_image_processor_inputs(
+                    processor, modality, count, width, height)
+            else:
+                processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                    seq_len=self.model_config_copy.max_model_len,
+                    mm_counts={modality: count},
+                    mm_options=mm_options,
+                )
             from vllm.multimodal.processing import TimingContext
             dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
         else:
@@ -5676,6 +5690,36 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             )
 
         return dummy_mm_inputs
+
+    def _build_raw_image_processor_inputs(self, processor, modality, count, width, height):
+        """Build ProcessorInputs from raw WxH images, bypassing the upstream
+        per-dimension clamp in DummyInputsBuilder._get_dummy_images.
+
+        Mirrors get_dummy_processor_inputs (dummy_text + parse_mm_data +
+        ProcessorInputs) but supplies our own solid image at the requested raw
+        WxH. The upstream builder clamps width and height *independently*
+        against the model's max-feature size, distorting the aspect ratio so
+        the warmed grid stops matching real traffic. Feeding the raw image
+        straight through processor.apply lets the model's own resize
+        (smart_resize / navit_resize / ...) pick exactly the same grid it
+        would for a real image of that resolution -- including scaling an
+        oversized image down -- so warmup and serving grids are identical by
+        construction.
+        """
+        from PIL import Image
+        from vllm.multimodal.processing.inputs import ProcessorInputs
+
+        images = [Image.new("RGB", (width, height), color=255)] * count
+
+        dummy_builder = processor.dummy_inputs
+        dummy_text = dummy_builder.get_dummy_text({modality: count})
+        mm_data_items = processor.info.parse_mm_data({modality: images}, validate=False)
+
+        return ProcessorInputs(
+            prompt=dummy_text,
+            mm_data_items=mm_data_items,
+            tokenization_kwargs={"truncation": False},
+        )
 
     def _get_mm_warmup_processor(self):
         if self._mm_warmup_processor is None:
@@ -5746,22 +5790,40 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Get width/height from config if available for warmup_lists
         warmup_lists = []
 
-        if not is_batch_based and mm_config:
-            # Try to get dimensions from enabled modality config
-            for modality in ["image", "video"]:
-                if modality == "image" and not is_image_warmup:
-                    continue
-                if modality == "video" and not is_video_warmup:
-                    continue
-                mm_options = mm_config.limit_per_prompt.get(modality)
-                if mm_options:
-                    width = getattr(mm_options, 'width', None)
-                    height = getattr(mm_options, 'height', None)
-                    if width is not None and height is not None:
-                        warmup_lists.append((width, height))
-                        break
+        # Collect explicit warmup resolutions (raw pixel WxH) from both
+        # sources and union them:
+        #   - VLLM_MULTIMODAL_RESOLUTIONS="1024x768,768x1024" (multi-res)
+        #   - limit_mm_per_prompt.<modality>.{width,height}    (single res)
+        # These raw WxH flow through the model's processor (smart_resize /
+        # navit_resize / ...), so the compiled grid matches real requests at
+        # the same WxH. Feed raw pixels here; never a pre-divided grid.
+        # When any explicit resolution is present for a non-batch model, warm
+        # up exactly those and skip the aspect-ratio shapes guessed from the
+        # patch-count buckets.
+        explicit_resolutions = []
+        if not is_batch_based:
+            explicit_resolutions.extend(getattr(vision_bucket_manager, 'multimodal_resolutions', []))
 
-        if not is_batch_based and len(buckets) > 0:
+            if mm_config:
+                # Try to get dimensions from enabled modality config
+                for modality in ["image", "video"]:
+                    if modality == "image" and not is_image_warmup:
+                        continue
+                    if modality == "video" and not is_video_warmup:
+                        continue
+                    mm_options = mm_config.limit_per_prompt.get(modality)
+                    if mm_options:
+                        width = getattr(mm_options, 'width', None)
+                        height = getattr(mm_options, 'height', None)
+                        if width is not None and height is not None:
+                            explicit_resolutions.append((width, height))
+                            break
+
+        if not is_batch_based and explicit_resolutions:
+            # Dedupe while preserving order.
+            warmup_lists = list(dict.fromkeys(explicit_resolutions))
+            logger.info("Using explicit multimodal warmup resolutions (WxH): %s", warmup_lists)
+        elif not is_batch_based and len(buckets) > 0:
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
