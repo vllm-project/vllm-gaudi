@@ -5816,7 +5816,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # When any explicit resolution is present for a non-batch model, warm
         # up exactly those and skip the aspect-ratio shapes guessed from the
         # patch-count buckets.
-        explicit_resolutions = []
+        explicit_resolutions: list[tuple[int, int]] = []
         if not is_batch_based:
             explicit_resolutions.extend(getattr(vision_bucket_manager, 'multimodal_resolutions', []))
 
