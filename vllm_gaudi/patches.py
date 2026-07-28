@@ -38,6 +38,25 @@ Currently:
   identical implementation that omits the two ``mark_unbacked`` calls.  HPU
   handles dynamic batch shapes without this hint.
 
+* ``vllm.distributed.device_communicators.shm_broadcast.check_shm_free_space``
+  — upstream PR #48879 ("Fail fast when /dev/shm is too small for the shm ring
+  buffer") added a pre-allocation guard that compares the ring buffer's *full
+  nominal* size (default ``24 MiB x 10 = 240 MiB`` per ``MessageQueue``) against
+  the free space on ``/dev/shm`` and raises ``RuntimeError: Insufficient space
+  in /dev/shm`` when it does not fit. HPU CI containers expose the Docker
+  default 64 MiB ``/dev/shm``, where the pre-#48879 code path worked fine: the
+  segment is created with ``SharedMemory(create=True, size=...)`` (an
+  ``ftruncate`` on tmpfs, which allocates pages lazily on write), and the TP2 /
+  DP / multi-proc EngineCore workers only ever touch a small fraction of the
+  nominal ring. The new eager check aborts EngineCore start-up before any page
+  is touched, breaking every shared-memory-broadcast config
+  (``run_data_parallel_test``, ``run_tp2_load_generate_test``,
+  ``run_deepseek_v2_inc_dynamic_tp2_load_generate_test``,
+  ``run_gsm8k_qwen3_30b_test``). Restore the pre-#48879 behaviour on HPU by
+  replacing the guard with a no-op so the lazy tmpfs allocation proceeds.
+
+  Upstream ref: https://github.com/vllm-project/vllm/pull/48879
+
 * ``vllm.v1.core.block_pool.BlockPool.free_blocks`` — upstream PR #42656
   ("Apply LRU policy only to proper cache entries") made ``free_blocks``
   partition freed blocks into with-hash / without-hash lists and issue two
@@ -451,6 +470,72 @@ def _patch_cleanup_dist_env_and_memory() -> None:
     _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
 
 
+def _hpu_check_shm_free_space(required_bytes: int, shm_path: str = "/dev/shm") -> None:
+    """No-op replacement for ``shm_broadcast.check_shm_free_space``.
+
+    Upstream vLLM PR #48879 added an eager guard that rejects creating the shm
+    ring buffer when its *nominal* size (default 240 MiB per ``MessageQueue``)
+    exceeds the free space on ``/dev/shm``. HPU CI containers expose the Docker
+    default 64 MiB ``/dev/shm``, on which the pre-#48879 path worked: the
+    segment is backed by tmpfs and only the pages actually written are
+    allocated, and the broadcast workers touch a small fraction of the ring.
+    The guard aborts EngineCore start-up before any page is touched, so restore
+    the prior behaviour by skipping the check on HPU.
+
+    Args:
+        required_bytes: Nominal size of the shared-memory segment (ignored).
+        shm_path: Mount point backing POSIX shared memory (ignored).
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/48879
+    """
+    return None
+
+
+def _patch_check_shm_free_space() -> None:
+    """Neutralize the eager ``/dev/shm`` size guard added by vLLM PR #48879.
+
+    ``ShmRingBuffer.__init__`` calls ``check_shm_free_space`` by bare name, so
+    replacing the module-level attribute intercepts every ring-buffer creation.
+
+    Guarded so this is a no-op unless the target actually exists and still
+    raises on an oversized nominal request:
+
+    * If the module or the ``check_shm_free_space`` attribute is absent
+      (import-path or API change, or a pre-#48879 vLLM), skip silently.
+    * If the source no longer raises ``RuntimeError`` (upstream softened the
+      guard, e.g. sizing the ring to the available space instead), skip — the
+      startup crash this patch works around can no longer occur.
+
+    Deferred to ``load_general_plugins`` time so the
+    ``vllm.distributed.device_communicators`` import chain runs after platform
+    initialisation.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/48879
+    """
+    try:
+        import vllm.distributed.device_communicators.shm_broadcast as _shm_mod
+    except ImportError:
+        return  # Import path changed/removed upstream — nothing to patch.
+
+    upstream = getattr(_shm_mod, "check_shm_free_space", None)
+    if upstream is None:
+        return  # Guard absent (pre-#48879 or renamed) — nothing to patch.
+
+    if upstream is _hpu_check_shm_free_space:
+        return  # Already installed (idempotent within this process).
+
+    import inspect
+
+    try:
+        source = inspect.getsource(upstream)
+    except (OSError, TypeError):
+        source = ""  # Source unavailable — assume it still needs the patch.
+    if source and "raise RuntimeError" not in source:
+        return  # Upstream no longer fails fast — the startup crash cannot occur.
+
+    _shm_mod.check_shm_free_space = _hpu_check_shm_free_space
+
+
 def _hpu_free_blocks(self, ordered_blocks) -> None:
     """Single-pass ``BlockPool.free_blocks`` for ``enable_caching=False``.
 
@@ -661,6 +746,7 @@ def apply() -> None:
         _patch_granite_hybrid_layer_types()
         _patch_get_num_layers_by_block_type()
         _patch_use_sequence_parallel_moe()
+        _patch_check_shm_free_space()
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
 
