@@ -124,85 +124,23 @@ run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test() {
 }
 
 # QWEN3 FP8 + MOE compressed tensor + dynamic scaling
-_run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test() {
+run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test() {
     echo "➡️ Testing Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all} VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
     echo "✅ Test with Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling successful."
 }
 
-_run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test() {
+run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test() {
     echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all} VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
     echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling successful."
 }
 
 # QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-channel, activation per-tensor)
-_run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test() {
+run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test() {
     echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all} VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
     echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling successful."
-}
-
-# Run the three Qwen3-30B MoE FP8 load/generate tests in parallel, one HPU card each.
-# Each model fits on a single card, so this overlaps model-load time instead of paying
-# it three times sequentially.
-#
-# IMPORTANT: the inner functions must honor an externally-set HABANA_VISIBLE_DEVICES
-# (they use ${HABANA_VISIBLE_DEVICES:-all}); otherwise every instance would grab all
-# cards and the processes would deadlock on device acquisition (the original hang).
-#
-# Card selection: when HABANA_VISIBLE_DEVICES is unset/"all" the visible cards are
-# discovered via hl-smi; a fixed 0/1/2 mapping is never assumed. If fewer than three
-# cards are visible the tests run sequentially on whatever is present.
-#
-# set -e does not catch failures in backgrounded jobs, so each child's exit code is
-# waited on explicitly. Each job's output is redirected to a per-test log; after the
-# wait loop every log is printed sequentially so the output is grouped and readable
-# instead of interleaved across the parallel jobs.
-run_qwen3_moe_fp8_parallel() {
-    local fns=(
-        _run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test
-        _run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test
-        _run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test
-    )
-    local names=(dynamic static_per_tensor static)
-
-    local visible="${HABANA_VISIBLE_DEVICES:-all}"
-    if [[ "$visible" == "all" ]]; then
-        if command -v hl-smi >/dev/null 2>&1; then
-            visible=$(hl-smi -Q index -f csv,noheader | tr -d ' ' | paste -sd, -)
-        fi
-        visible="${visible:-0,1,2}"
-    fi
-    local cards=()
-    IFS=',' read -r -a cards <<< "$visible"
-
-    local rc=0 i
-    if [[ "${#cards[@]}" -lt "${#fns[@]}" ]]; then
-        echo "⚠️  Only ${#cards[@]} HPU card(s) visible (${visible}); running Qwen3-30B MoE FP8 tests sequentially."
-        for i in "${!fns[@]}"; do
-            HABANA_VISIBLE_DEVICES="${cards[$((i % ${#cards[@]}))]}" "${fns[$i]}" || rc=1
-        done
-        return "$rc"
-    fi
-
-    echo "🚀 Running ${#fns[@]} Qwen3-30B MoE FP8 tests in parallel on cards ${cards[0]},${cards[1]},${cards[2]}..."
-    local pids=()
-    for i in "${!fns[@]}"; do
-        HABANA_VISIBLE_DEVICES="${cards[$i]}" "${fns[$i]}" > "qwen3_moe_${names[$i]}.log" 2>&1 &
-        pids+=($!)
-    done
-
-    for i in "${!pids[@]}"; do
-        if wait "${pids[$i]}"; then
-            echo "✅ Qwen3-30B MoE FP8 [${names[$i]}] passed"
-        else
-            echo "❌ Qwen3-30B MoE FP8 [${names[$i]}] FAILED"; rc=1
-        fi
-        echo "----- Qwen3-30B MoE FP8 [${names[$i]}] log -----"
-        cat "qwen3_moe_${names[$i]}.log"
-    done
-    return "$rc"
 }
 
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
@@ -753,7 +691,9 @@ launch_all_tests() {
     run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
     run_qwen3_blockfp8_dynamic_scaling_load_generate_test
     run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test
-    run_qwen3_moe_fp8_parallel
+    run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test
+    run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test
+    run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test
     run_llama3_per_tensor_scaling_load_generate_test
     run_llama3_modelopt_per_tensor_scaling_load_generate_test
     run_granite_inc_calibration_and_quantization_load_generate_test
