@@ -570,7 +570,7 @@ def _hpu_sdpa_attention_forward(
         except Exception:
             pass
 
-    if _use_hpu_fsdpa:
+    if _use_hpu_fsdpa and _config is not None:
         global _CACHED_FSDPA_OP
         if _CACHED_FSDPA_OP is None:
             from vllm_gaudi.extension.utils import ModuleFusedSDPA
