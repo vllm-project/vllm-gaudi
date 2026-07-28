@@ -2,7 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlConnectorWorker
-from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    TransferTopology,
+    kv_postprocess_blksize_and_layout_on_receive,
+    kv_postprocess_blksize_on_receive,
+    kv_postprocess_layout_on_receive,
+)
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm_gaudi.platform import logger
 import habana_frameworks.torch.utils.experimental as htexp
@@ -206,3 +211,118 @@ def _hpu_get_transfer_cache_regions(self, cache, layer_spec):
 
 
 TransferTopology.get_transfer_cache_regions = _hpu_get_transfer_cache_regions
+
+# ── HPU TransferTopology layout-property restore ────────────────────────────── #
+# Upstream #44455 deleted two layout properties along with the blocks-first
+# handling above.  The hetero connector still reads both, so every hetero
+# (VLLM_HPU_HETERO_KV_LAYOUT=true) run dies at startup with:
+#
+#   AttributeError: 'TransferTopology' object has no attribute 'split_k_and_v'
+#   AttributeError: 'TransferTopology' object has no attribute
+#                   'is_kv_layout_blocks_first'
+#
+# They describe two mutually exclusive layouts, so restore both together:
+#
+#   * is_kv_layout_blocks_first -- joint K/V packed inside each block, with
+#     num_blocks leading (the FlashInfer/GPU 5-D layout).  Upstream computed
+#     this as `is_mamba or (len(kv_cache_shape) == 5 and shape[0] == 1)`.
+#     HPU's get_kv_cache_shape() returns the 3-D
+#     (num_blocks * block_size, num_kv_heads, head_size) -- neither 5-D nor
+#     blocks-first -- and the hetero path hardcodes is_mamba=False, so this is
+#     always False here.  Keeping the upstream expression (rather than a bare
+#     `False`) means a future HPU backend that does adopt a 5-D blocks-first
+#     cache starts reporting True on its own.
+#
+#   * split_k_and_v -- K and V registered as two separate regions.  HPU
+#     surfaces regular attention layers as a TensorTuple((K, V)) (see
+#     HPUModelRunner.get_kv_caches_4D), so callers must iterate the pair
+#     instead of treating the entry as one packed tensor.  True except for MLA
+#     (single fused latent tensor) and cross-layer blocks (per-layer K/V
+#     interleaving, where a flat pair-split does not separate K from V).
+#
+# Kept here rather than in the hetero module so both HPU connectors see them --
+# hpu_nixl_connector is always imported first (vllm_gaudi/__init__.py).
+
+
+def _hpu_is_kv_layout_blocks_first(self) -> bool:
+    """Whether K/V are packed jointly per block with num_blocks leading."""
+    if self.is_mamba:
+        return True
+    attn_backend = self.attn_backends[0]
+    _MOCK_BLOCK_SIZE = 16
+    kv_cache_shape = attn_backend.get_kv_cache_shape(
+        num_blocks=1,
+        block_size=_MOCK_BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=1,
+    )
+    return len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+
+
+def _hpu_split_k_and_v(self) -> bool:
+    """Whether K and V are registered as two separate regions on HPU."""
+    return not (self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first)
+
+
+TransferTopology.is_kv_layout_blocks_first = property(_hpu_is_kv_layout_blocks_first)
+TransferTopology.split_k_and_v = property(_hpu_split_k_and_v)
+
+# ── HPU post_process_device_kv_on_receive K/V-split restore ─────────────────── #
+# Same root cause as the two properties above.  Before #44455, this method
+# iterated the K/V pair:
+#
+#     cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+#     for cache in cache_list: ...
+#
+# #44455 assumed one packed tensor per layer and dropped the loop, calling the
+# kv_postprocess_* helpers on the entry directly.  On HPU each entry is a
+# TensorTuple((K, V)) (HPUModelRunner.get_kv_caches_4D), so the first helper
+# call dies on the D side right after the transfer completes:
+#
+#   AttributeError: 'TensorTuple' object has no attribute 'index_select'
+#
+# Restore the pre-#44455 loop.  Everything else -- the ratio assert, which of
+# the three kv_postprocess_* helpers runs, and the per-group indices -- mirrors
+# current upstream, so packed-layout backends still take the single-cache path.
+
+
+def _hpu_post_process_device_kv_on_receive(self, block_size_ratio: int, block_ids_list: list[list[int]]) -> None:
+    """Transform received KV blocks into the local block size / layout on HPU.
+
+    Args:
+        block_size_ratio: local block size / remote block size (>= 1).
+        block_ids_list: per-KV-cache-group lists of local (kernel) block ids
+            that were just received into.
+    """
+    if len(self.device_kv_caches) == 0:
+        return
+    assert block_size_ratio >= 1, "Only nP < nD supported currently."
+    assert self.transfer_topo is not None
+    if self.enable_permute_local_kv and block_size_ratio > 1:
+        logger.debug(
+            "Post-processing device kv cache on receive by converting block_size with %sx bigger "
+            "and permuting layout from HND to NHD.", block_size_ratio)
+    elif self.enable_permute_local_kv:
+        logger.debug("Post-processing device kv cache on receive by permuting layout from HND to NHD.")
+    else:
+        logger.debug("Post-processing device kv cache on receive by converting block_size with %sx bigger.",
+                     block_size_ratio)
+
+    split_k_and_v = self.transfer_topo.split_k_and_v
+
+    for block_ids in block_ids_list:
+        indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
+        for cache_or_caches in self.device_kv_caches.values():
+            # HPU surfaces regular attention as a (K, V) pair; iterate it so the
+            # helpers below always receive a real 4-D blocks-first tensor.
+            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+            for cache in cache_list:
+                if self.enable_permute_local_kv and block_size_ratio > 1:
+                    kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio)
+                elif self.enable_permute_local_kv:
+                    kv_postprocess_layout_on_receive(cache, indices)
+                else:
+                    kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio)
+
+
+NixlConnectorWorker.post_process_device_kv_on_receive = _hpu_post_process_device_kv_on_receive
