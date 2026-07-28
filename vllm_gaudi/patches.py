@@ -470,7 +470,7 @@ def _patch_cleanup_dist_env_and_memory() -> None:
     _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
 
 
-def _hpu_check_shm_free_space(required_bytes: int, shm_path: str = "/dev/shm") -> None:
+def _hpu_check_shm_free_space(*args, **kwargs) -> None:
     """No-op replacement for ``shm_broadcast.check_shm_free_space``.
 
     Upstream vLLM PR #48879 added an eager guard that rejects creating the shm
@@ -482,9 +482,10 @@ def _hpu_check_shm_free_space(required_bytes: int, shm_path: str = "/dev/shm") -
     The guard aborts EngineCore start-up before any page is touched, so restore
     the prior behaviour by skipping the check on HPU.
 
-    Args:
-        required_bytes: Nominal size of the shared-memory segment (ignored).
-        shm_path: Mount point backing POSIX shared memory (ignored).
+    Accepts ``*args, **kwargs`` rather than mirroring the upstream signature so
+    that a future signature change (an added positional/keyword parameter) does
+    not raise ``TypeError`` at the (single, bare-name) call site in
+    ``ShmRingBuffer.__init__``. All arguments are ignored.
 
     Upstream ref: https://github.com/vllm-project/vllm/pull/48879
     """
@@ -497,14 +498,16 @@ def _patch_check_shm_free_space() -> None:
     ``ShmRingBuffer.__init__`` calls ``check_shm_free_space`` by bare name, so
     replacing the module-level attribute intercepts every ring-buffer creation.
 
-    Guarded so this is a no-op unless the target actually exists and still
-    raises on an oversized nominal request:
-
-    * If the module or the ``check_shm_free_space`` attribute is absent
-      (import-path or API change, or a pre-#48879 vLLM), skip silently.
-    * If the source no longer raises ``RuntimeError`` (upstream softened the
-      guard, e.g. sizing the ring to the available space instead), skip — the
-      startup crash this patch works around can no longer occur.
+    We always override the symbol when it exists, rather than inspecting its
+    source to confirm it still raises: the no-op is harmless even if upstream
+    later softens the guard to size-to-fit (nothing would have raised anyway),
+    whereas a source-string heuristic is brittle — upstream could keep failing
+    fast while raising a different exception type, wrapping the logic in a
+    helper, or rewording the message, any of which would silently stop the
+    patch from applying and reintroduce the ``Insufficient space in /dev/shm``
+    startup crash on HPU. The attribute-presence check below still self-retires
+    the patch if upstream removes or renames the function (e.g. lands a proper
+    fix).
 
     Deferred to ``load_general_plugins`` time so the
     ``vllm.distributed.device_communicators`` import chain runs after platform
@@ -523,15 +526,6 @@ def _patch_check_shm_free_space() -> None:
 
     if upstream is _hpu_check_shm_free_space:
         return  # Already installed (idempotent within this process).
-
-    import inspect
-
-    try:
-        source = inspect.getsource(upstream)
-    except (OSError, TypeError):
-        source = ""  # Source unavailable — assume it still needs the patch.
-    if source and "raise RuntimeError" not in source:
-        return  # Upstream no longer fails fast — the startup crash cannot occur.
 
     _shm_mod.check_shm_free_space = _hpu_check_shm_free_space
 
