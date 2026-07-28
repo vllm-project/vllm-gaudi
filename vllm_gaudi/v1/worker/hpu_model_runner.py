@@ -91,7 +91,6 @@ from vllm.distributed.parallel_state import get_pp_group, get_dp_group
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.transformers_utils.config import is_interleaved
 from vllm.v1.worker.utils import (AttentionGroup, prepare_kernel_block_sizes, sanity_check_mm_encoder_outputs)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -131,6 +130,27 @@ from vllm_gaudi.extension.logger import logger as init_logger
 from vllm.model_executor.models.bert import _encode_token_type_ids
 
 logger = init_logger()
+
+
+def is_interleaved(config: Any) -> bool:
+    """Detect if the model with this config uses interleaved attention.
+
+    Restores the helper removed from ``vllm.transformers_utils.config`` by
+    upstream vLLM PR #49803 (commit ``26d725c334``), which inlined the check
+    at its former call sites. vllm-gaudi still relies on it in three places.
+
+    Args:
+        config: A ``PretrainedConfig`` (or any config exposing
+            ``get_text_config``).
+
+    Returns:
+        True if the text config declares more than one distinct layer type.
+    """
+    text_config = config.get_text_config()
+    if layer_types := getattr(text_config, "layer_types", None):
+        return len(set(layer_types)) > 1
+    return False
+
 
 try:
     from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
