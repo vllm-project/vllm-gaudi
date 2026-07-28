@@ -5660,10 +5660,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     ):
         """Helper to get dummy multimodal inputs with custom options."""
 
+        # Modalities whose items are single still images at a raw WxH and can
+        # therefore be warmed through the raw-image path below. 'image' is the
+        # generic case; 'vision_chunk' is Kimi-K2.5/K2.6's unified image/video
+        # modality, whose image items are still PIL images (wrapped in a
+        # VisionChunkImage dict) that resize per-resolution in the tower.
+        image_like_modalities = ('image', 'vision_chunk')
+
         # Create custom mm_options with specific width/height
         mm_options = None
         if width is not None and height is not None:
-            if modality == 'image':
+            if modality in image_like_modalities:
+                # Keyed as "image" only to mark the raw path as active; the raw
+                # branch below does not read mm_options, so the key/modality
+                # mismatch for vision_chunk is harmless.
                 mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height)}
             elif modality == 'video':
                 mm_options = {
@@ -5680,7 +5690,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Use the registry's API with custom mm_options
         if mm_options is not None:
             processor = self._get_mm_warmup_processor()
-            if modality == 'image':
+            if modality in image_like_modalities:
                 # Build the dummy image at the requested raw WxH directly and
                 # run it through the model's own processor. The upstream
                 # DummyInputsBuilder._get_dummy_images clamps width/height
@@ -5691,8 +5701,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # raw image straight through processor.apply lets the model's
                 # resize (smart_resize / navit_resize / ...) pick the exact
                 # same grid as real traffic, guaranteeing a warmup cache hit.
-                processor_inputs = self._build_raw_image_processor_inputs(
-                    processor, modality, count, width, height)
+                processor_inputs = self._build_raw_image_processor_inputs(processor, modality, count, width, height)
             else:
                 processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
                     seq_len=self.model_config_copy.max_model_len,
@@ -5731,9 +5740,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         images = [Image.new("RGB", (width, height), color=255)] * count
 
+        # vision_chunk (Kimi-K2.5/K2.6) does not accept bare PIL images: its
+        # parser expects VisionChunkImage dicts ({"type": "image", "image":
+        # PIL}). 'image' takes the raw PIL directly. Wrap accordingly so the
+        # raw WxH still flows through the model's own resize (navit_resize) and
+        # the warmed grid matches real serving traffic.
+        mm_items = ([{"type": "image", "image": img} for img in images] if modality == 'vision_chunk' else images)
+
         dummy_builder = processor.dummy_inputs
         dummy_text = dummy_builder.get_dummy_text({modality: count})
-        mm_data_items = processor.info.parse_mm_data({modality: images}, validate=False)
+        mm_data_items = processor.info.parse_mm_data({modality: mm_items}, validate=False)
 
         return ProcessorInputs(
             prompt=dummy_text,

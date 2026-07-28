@@ -145,6 +145,28 @@ INFO 09-22 16:39:43 [hpu_model_runner.py:3411] Sampler warmup completed successf
 
 If warm-up is globally skipped, these logs do not appear.
 
+## Multimodal Warm-up
+
+Native-resolution vision towers (e.g. Gemma4, Kimi-K2.5/K2.6, Qwen2.5/3/3.5-VL) produce a different patch grid per image resolution, unlike batch-based towers (e.g. Gemma3) which only vary by batch size. If a real request's resolution does not match anything warmed at startup, the vision-tower graph recompiles on the critical path.
+
+By default, warm-up derives a spread of aspect-ratio shapes from the model's patch-count buckets (`VLLM_MULTIMODAL_BUCKETS`). To guarantee a specific production resolution is precompiled, set `VLLM_MULTIMODAL_RESOLUTIONS` to a comma-separated list of raw pixel `WxH` pairs:
+
+```text
+VLLM_MULTIMODAL_RESOLUTIONS=1024x768,768x1024
+```
+
+The `width`/`height` given via `--limit-mm-per-prompt` (e.g. `--limit-mm-per-prompt '{"image": {"count": 1, "width": 1024, "height": 768}}'`) are unioned with `VLLM_MULTIMODAL_RESOLUTIONS`. Each resolution is built as a raw solid-color image and fed through the model's own processor (`smart_resize`/`navit_resize`/...), rather than a precomputed grid, so the compiled graph matches exactly what a real request at that resolution produces. This is supported for the `image` modality and for Kimi-K2.5/K2.6's `vision_chunk` modality.
+
+```{.}
+INFO 07-27 23:22:27 hpu_model_runner.py:5845] Using explicit multimodal warmup resolutions (WxH): [(864, 480), (1024, 768), (768, 1024)]
+INFO 07-27 23:22:27 hpu_model_runner.py:5098] [Warmup][Graph/Multimodal(vision_chunk)][1/3] batch_size:1 seq_len:0 resolution:864X480 free_mem:15.26 GiB
+INFO 07-27 23:22:27 hpu_model_runner.py:5098] [Warmup][Graph/Multimodal(vision_chunk)][2/3] batch_size:1 seq_len:0 resolution:1024X768 free_mem:15.26 GiB
+INFO 07-27 23:22:27 hpu_model_runner.py:5098] [Warmup][Graph/Multimodal(vision_chunk)][3/3] batch_size:1 seq_len:0 resolution:768X1024 free_mem:15.26 GiB
+```
+
+!!! note
+    `VLLM_MULTIMODAL_RESOLUTIONS` only takes effect for native-resolution (non-batch-based) vision towers. Batch-based towers ignore it and warm up the standard batch-size buckets instead.
+
 ## Defragmenter Warm-up
 
 The defragmenter reclaims and compacts sparse KV-cache block usage at runtime by swapping rarely packed high-index blocks with lower free indices. Its warm-up phase pre-compiles the small swap graphs so that later online defragmentation can execute with near-zero graph compile latency.
