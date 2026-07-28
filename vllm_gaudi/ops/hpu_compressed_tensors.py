@@ -330,8 +330,6 @@ class HPUCompressedTensorsW8A8Int8_BF16Fallback(CompressedTensorsScheme):
                        input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
 
         weight_loader = extra_weight_attrs.get("weight_loader")
-        if hpu_ops.is_hpu_gaudi2:
-            weight_loader = hpu_ops.gaudi_weight_wrapper(weight_loader)
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
