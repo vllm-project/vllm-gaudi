@@ -124,85 +124,23 @@ run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test() {
 }
 
 # QWEN3 FP8 + MOE compressed tensor + dynamic scaling
-_run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test() {
+run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test() {
     echo "➡️ Testing Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all} VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
     echo "✅ Test with Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling successful."
 }
 
-_run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test() {
+run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test() {
     echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all} VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
     echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling successful."
 }
 
 # QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-channel, activation per-tensor)
-_run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test() {
+run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test() {
     echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all} VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
+    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
     echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling successful."
-}
-
-# Run the three Qwen3-30B MoE FP8 load/generate tests in parallel, one HPU card each.
-# Each model fits on a single card, so this overlaps model-load time instead of paying
-# it three times sequentially.
-#
-# IMPORTANT: the inner functions must honor an externally-set HABANA_VISIBLE_DEVICES
-# (they use ${HABANA_VISIBLE_DEVICES:-all}); otherwise every instance would grab all
-# cards and the processes would deadlock on device acquisition (the original hang).
-#
-# Card selection: when HABANA_VISIBLE_DEVICES is unset/"all" the visible cards are
-# discovered via hl-smi; a fixed 0/1/2 mapping is never assumed. If fewer than three
-# cards are visible the tests run sequentially on whatever is present.
-#
-# set -e does not catch failures in backgrounded jobs, so each child's exit code is
-# waited on explicitly. Each job's output is redirected to a per-test log; after the
-# wait loop every log is printed sequentially so the output is grouped and readable
-# instead of interleaved across the parallel jobs.
-run_qwen3_moe_fp8_parallel() {
-    local fns=(
-        _run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test
-        _run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test
-        _run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test
-    )
-    local names=(dynamic static_per_tensor static)
-
-    local visible="${HABANA_VISIBLE_DEVICES:-all}"
-    if [[ "$visible" == "all" ]]; then
-        if command -v hl-smi >/dev/null 2>&1; then
-            visible=$(hl-smi -Q index -f csv,noheader | tr -d ' ' | paste -sd, -)
-        fi
-        visible="${visible:-0,1,2}"
-    fi
-    local cards=()
-    IFS=',' read -r -a cards <<< "$visible"
-
-    local rc=0 i
-    if [[ "${#cards[@]}" -lt "${#fns[@]}" ]]; then
-        echo "⚠️  Only ${#cards[@]} HPU card(s) visible (${visible}); running Qwen3-30B MoE FP8 tests sequentially."
-        for i in "${!fns[@]}"; do
-            HABANA_VISIBLE_DEVICES="${cards[$((i % ${#cards[@]}))]}" "${fns[$i]}" || rc=1
-        done
-        return "$rc"
-    fi
-
-    echo "🚀 Running ${#fns[@]} Qwen3-30B MoE FP8 tests in parallel on cards ${cards[0]},${cards[1]},${cards[2]}..."
-    local pids=()
-    for i in "${!fns[@]}"; do
-        HABANA_VISIBLE_DEVICES="${cards[$i]}" "${fns[$i]}" > "qwen3_moe_${names[$i]}.log" 2>&1 &
-        pids+=($!)
-    done
-
-    for i in "${!pids[@]}"; do
-        if wait "${pids[$i]}"; then
-            echo "✅ Qwen3-30B MoE FP8 [${names[$i]}] passed"
-        else
-            echo "❌ Qwen3-30B MoE FP8 [${names[$i]}] FAILED"; rc=1
-        fi
-        echo "----- Qwen3-30B MoE FP8 [${names[$i]}] log -----"
-        cat "qwen3_moe_${names[$i]}.log"
-    done
-    return "$rc"
 }
 
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
@@ -413,7 +351,7 @@ run_gpqa_kimi_k26_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only (baseline, no fsdpa_slicing)
 # Requires: pip install 'lm_eval[longbench]'
-_run_longbench_qwen3_30b_fp8_static_test() {
+run_longbench_qwen3_30b_fp8_static_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
@@ -459,7 +397,7 @@ run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache and fsdpa slicing in torch.compile mode
 # Requires: pip install 'lm_eval[longbench]'
-_run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
+run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
@@ -472,7 +410,7 @@ _run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with FP8 KV cache and fsdpa slicing in torch.compile mode
 # Requires: pip install 'lm_eval[longbench]'
-_run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
+run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 KV_CACHE_DTYPE=fp8_inc \
@@ -487,7 +425,7 @@ _run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
 # GSM8K on Qwen3.5-35B-A3B
 # This test requires new transformers and huggingface_hub versions for Qwen3.5 model support, once VLLM supports latest transfomer,
 # we can remove the pip version pinning and restoration in this test and just rely on the environment having the right versions.
-_run_gsm8k_qwen35_35b_a3b_test() {
+run_gsm8k_qwen35_35b_a3b_test() {
     echo "➡️ Testing GSM8K on Qwen3.5-35B-A3B..."
     VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.8 \
     VLLM_PROMPT_BS_BUCKET_MAX=32 \
@@ -499,7 +437,7 @@ _run_gsm8k_qwen35_35b_a3b_test() {
 # GSM8K on Qwen3.6-35B-A3B
 # This test requires new transformers and huggingface_hub versions for Qwen3.6 model support, once VLLM supports latest transfomer,
 # we can remove the pip version pinning and restoration in this test and just rely on the environment having the right versions.
-_run_gsm8k_qwen36_35b_a3b_test() {
+run_gsm8k_qwen36_35b_a3b_test() {
     echo "➡️ Testing GSM8K on Qwen3.6-35B-A3B..."
     VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.1 \
     VLLM_PROMPT_BS_BUCKET_MAX=32 \
@@ -508,7 +446,7 @@ _run_gsm8k_qwen36_35b_a3b_test() {
 }
 
 # GSM8K on gemma-4-E2B (YOCO / KV-sharing model)
-_run_gsm8k_gemma4_e2b_test() {
+run_gsm8k_gemma4_e2b_test() {
     echo "➡️ Testing GSM8K on gemma-4-E2B-it..."
     VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
@@ -517,7 +455,7 @@ _run_gsm8k_gemma4_e2b_test() {
 }
 
 # GSM8K on gemma-4-31B
-_run_gsm8k_gemma4_31b_test() {
+run_gsm8k_gemma4_31b_test() {
     echo "➡️ Testing GSM8K on gemma-4-31B-it..."
     TP_SIZE=2 VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
@@ -526,7 +464,7 @@ _run_gsm8k_gemma4_31b_test() {
 }
 
 # GSM8K on gemma-4-26B-A4B (MoE)
-_run_gsm8k_gemma4_26b_test() {
+run_gsm8k_gemma4_26b_test() {
     echo "➡️ Testing GSM8K on gemma-4-26B-A4B-it..."
     TP_SIZE=2 VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
@@ -556,7 +494,7 @@ run_preemption_test() {
 }
 
 # Spec decode with ngram
-_run_spec_decode_ngram_test() {
+run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 1024
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --accuracy_rate 0.75
@@ -564,7 +502,7 @@ _run_spec_decode_ngram_test() {
 }
 
 # Spec decode with eagle3
-_run_spec_decode_eagle3_test() {
+run_spec_decode_eagle3_test() {
     echo "➡️ Testing Spec-decode with eagle3..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.70 --osl 2048
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.63
@@ -572,102 +510,11 @@ _run_spec_decode_eagle3_test() {
 }
 
 # Spec decode with eagle3 and num_speculative_tokens = 2
-_run_spec_decode_eagle3_num_spec_2_test() {
+run_spec_decode_eagle3_num_spec_2_test() {
     echo "➡️ Testing Spec-decode with eagle3 and num_speculative_tokens = 2..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.59 --osl 2048 --num_spec_tokens 2
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.59 --num_spec_tokens 2
     echo "✅ Test with spec decode with eagle3 and num_speculative_tokens = 2 passed."
-}
-
-# --- Parallel group runners ---
-# Each run_*_parallel function below is CI-discoverable (its own matrix job) and runs
-# its member _run_* tests concurrently, pinning each to a slice of HPU cards sized by
-# that test's tensor-parallel degree. Members inherit the exported HABANA_VISIBLE_DEVICES
-# (none set it themselves). If too few cards are visible, members run sequentially.
-# set -e does not catch failures in backgrounded jobs, so each child's exit code is
-# waited on explicitly; output is captured per-test and printed after the wait loop.
-_run_parallel_on_card_slices() {
-    local label="$1"; shift
-    local fns=() tps=()
-    while [[ "$#" -gt 0 ]]; do
-        fns+=("$1"); tps+=("$2"); shift 2
-    done
-
-    local visible="${HABANA_VISIBLE_DEVICES:-all}"
-    if [[ "$visible" == "all" ]]; then
-        if command -v hl-smi >/dev/null 2>&1; then
-            visible=$(hl-smi -Q index -f csv,noheader | tr -d ' ' | paste -sd, -)
-        fi
-        visible="${visible:-0,1,2,3,4,5,6,7}"
-    fi
-    local cards=()
-    IFS=',' read -r -a cards <<< "$visible"
-
-    local need=0 t
-    for t in "${tps[@]}"; do need=$((need + t)); done
-
-    local rc=0 i
-    if [[ "${#cards[@]}" -lt "$need" ]]; then
-        echo "⚠️  Only ${#cards[@]} HPU card(s) visible (${visible}); need ${need}. Running ${label} tests sequentially."
-        for i in "${!fns[@]}"; do
-            "${fns[$i]}" || rc=1
-        done
-        return "$rc"
-    fi
-
-    echo "🚀 Running ${#fns[@]} ${label} tests in parallel across cards ${visible}..."
-    local pids=() offset=0 len slice
-    for i in "${!fns[@]}"; do
-        len="${tps[$i]}"
-        slice="$(IFS=,; echo "${cards[*]:offset:len}")"
-        echo "   ${label} [${fns[$i]}] -> HABANA_VISIBLE_DEVICES=${slice}"
-        HABANA_VISIBLE_DEVICES="$slice" "${fns[$i]}" > "${label}_${i}.log" 2>&1 &
-        pids+=("$!")
-        offset=$((offset + len))
-    done
-
-    for i in "${!pids[@]}"; do
-        if wait "${pids[$i]}"; then
-            echo "✅ ${label} [${fns[$i]}] passed"
-        else
-            echo "❌ ${label} [${fns[$i]}] FAILED"; rc=1
-        fi
-        echo "----- ${label} [${fns[$i]}] log -----"
-        cat "${label}_${i}.log"
-    done
-    return "$rc"
-}
-
-# GSM8K on Qwen3.5 / Qwen3.6 35B-A3B (1 card each)
-run_gsm8k_qwen3x_35b_a3b_parallel() {
-    _run_parallel_on_card_slices qwen3x_35b \
-        _run_gsm8k_qwen36_35b_a3b_test 1 \
-        _run_gsm8k_qwen35_35b_a3b_test 1
-}
-
-# LongBench on Qwen3-30B FP8 static: baseline + fp8/bf16 fsdpa-slicing compile (TP=2 each)
-run_longbench_qwen3_30b_fp8_static_parallel() {
-    pip install 'lm_eval[longbench]' --quiet
-    _run_parallel_on_card_slices longbench_30b \
-        _run_longbench_qwen3_30b_fp8_static_test 2 \
-        _run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test 2 \
-        _run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test 2
-}
-
-# GSM8K on gemma-4: E2B (1 card), 26B / 31B (TP=2)
-run_gsm8k_gemma4_parallel() {
-    _run_parallel_on_card_slices gemma4 \
-        _run_gsm8k_gemma4_e2b_test 1 \
-        _run_gsm8k_gemma4_26b_test 2 \
-        _run_gsm8k_gemma4_31b_test 2
-}
-
-# Spec decode: eagle3 num_spec_2 / eagle3 / ngram (1 card each)
-run_spec_decode_parallel() {
-    _run_parallel_on_card_slices spec_decode \
-        _run_spec_decode_eagle3_num_spec_2_test 1 \
-        _run_spec_decode_eagle3_test 1 \
-        _run_spec_decode_ngram_test 1
 }
 
 # --- Other tests ---
@@ -753,7 +600,9 @@ launch_all_tests() {
     run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
     run_qwen3_blockfp8_dynamic_scaling_load_generate_test
     run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test
-    run_qwen3_moe_fp8_parallel
+    run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test
+    run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test
+    run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test
     run_llama3_per_tensor_scaling_load_generate_test
     run_llama3_modelopt_per_tensor_scaling_load_generate_test
     run_granite_inc_calibration_and_quantization_load_generate_test
@@ -773,11 +622,15 @@ launch_all_tests() {
     run_gsm8k_deepseek_test
     run_gsm8k_qwen3_30b_test
     run_gpqa_kimi_k26_test
-    run_longbench_qwen3_30b_fp8_static_parallel
+    run_longbench_qwen3_30b_fp8_static_test
     run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test
     run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test
+    run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
+    run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
     run_preemption_test
-    run_spec_decode_parallel
+    run_spec_decode_ngram_test
+    run_spec_decode_eagle3_test
+    run_spec_decode_eagle3_num_spec_2_test
     run_embedding_model_test
     run_pd_disaggregate_nixl_libfabric_test
     run_pd_disaggregate_nixl_ucx_test
