@@ -61,6 +61,11 @@ class HPUMLAAttention(MLAAttention):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        # Passed by the base MultiHeadLatentAttentionWrapper.forward for DCP
+        # (decode context parallel) query replication. DCP is not enabled on
+        # HPU, so this is always None here; accept-and-ignore to keep the
+        # forward signature in sync with the upstream call site.
+        q_dcp_replicated: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
@@ -241,6 +246,12 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         quant_config=None,
         prefix: str = "",
         skip_topk: bool = False,
+        # Added upstream by vllm#48407 (short-prefill sparse-indexer scoring
+        # skip). The optimization it gates is guarded by
+        # current_platform.is_cuda() upstream, so it never applies on HPU. We
+        # accept-and-ignore the kwarg to keep the constructor signature in sync
+        # with the base MultiHeadLatentAttentionWrapper / deepseek_v2 call site.
+        allow_short_prefill_indexer_scoring_skip: bool = False,
     ) -> None:
         # Skip MultiHeadLatentAttentionWrapper.__init__() because it creates
         # MLAAttention → FlashAttnPrefillBackend which crashes on HPU.
@@ -268,6 +279,14 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.is_sparse = mla_modules.is_sparse
 
         self.skip_topk = skip_topk
+        # qrep is active when the query projection is a DCP-group-sharded
+        # layer that materializes the full group head set locally. Upstream
+        # sets this in MultiHeadLatentAttentionWrapper.__init__ (read by the
+        # base-class forward at mla.py). Because HPU skips that base __init__
+        # and inlines the field assignments, mirror the attribute here too or
+        # the shared forward raises AttributeError("dcp_q_replicate").
+        q_proj_layer = self.q_b_proj if self.q_lora_rank is not None else self.q_proj
+        self.dcp_q_replicate = getattr(q_proj_layer, "qrep_active", False)
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
