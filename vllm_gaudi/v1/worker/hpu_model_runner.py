@@ -795,8 +795,9 @@ def apply_model_specific_patches(model_runner):
     is_llama4 = is_hpu_llama4_model(model_runner.model)
     model_type = getattr(model_runner.vllm_config.model_config.hf_config, "model_type", "")
     is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5_moe")
+    is_gemma4 = model_type in ("gemma4",)
 
-    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe
+    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe or is_gemma4
     if is_llama4:
         apply_hpu_llama4_post_load_patches(model_runner.model)
     if is_qwen_moe:
