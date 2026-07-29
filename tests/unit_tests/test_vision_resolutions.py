@@ -27,19 +27,77 @@ from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
     ("env_value", "expected"),
     [
         ("", []),
-        ("1024x768", [(1024, 768)]),
-        ("1024x768,768x1024", [(1024, 768), (768, 1024)]),
+        # Each entry is a (width, height, count_spec) triple. The count_spec
+        # is how the operator declares which vision-tower item counts warmup
+        # compiles graphs for; the runner never enumerates counts on its own.
+        ("1024x768", [(1024, 768, None)]),
+        ("1024x768,768x1024", [(1024, 768, None), (768, 1024, None)]),
         # tolerate surrounding whitespace and a trailing comma
-        (" 1024x768 , 768x1024 ", [(1024, 768), (768, 1024)]),
-        ("1024x768,", [(1024, 768)]),
+        (" 1024x768 , 768x1024 ", [(1024, 768, None), (768, 1024, None)]),
+        ("1024x768,", [(1024, 768, None)]),
         # uppercase separator
-        ("1024X768", [(1024, 768)]),
+        ("1024X768", [(1024, 768, None)]),
         # non-square / portrait / extreme-wide are preserved verbatim
-        ("1920x1080,1080x1920,3440x1440", [(1920, 1080), (1080, 1920), (3440, 1440)]),
+        ("1920x1080,1080x1920,3440x1440", [(1920, 1080, None), (1080, 1920, None), (3440, 1440, None)]),
     ],
 )
 def test_parse_resolutions(env_value, expected):
     assert HPUVisionBucketManager._parse_resolutions(env_value) == expected
+
+
+# The three operator-controlled count-spec forms, one case each.
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        # 1. "WxH"     -> count_spec None: warm ONE graph at the limit-mm
+        #    ceiling (user_max_count). Resolution axis only.
+        ("864x480", [(864, 480, None)]),
+        # 2. "WxHxN"   -> count_spec int N: pin exactly the count-N graph. Use
+        #    when traffic always sends N items and caching is off.
+        ("864x480x20", [(864, 480, 20)]),
+        # 3. "WxHxN-M" -> count_spec (N, M): warm the contiguous count range
+        #    [N, M]. Use when the per-call uncached count varies (mixed
+        #    request sizes, or prefix/image caching).
+        ("864x480x1-20", [(864, 480, (1, 20))]),
+    ],
+)
+def test_parse_resolutions_count_spec_forms(env_value, expected):
+    assert HPUVisionBucketManager._parse_resolutions(env_value) == expected
+
+
+def test_parse_resolutions_discrete_counts_via_comma():
+    # Discrete (non-contiguous) counts are expressed by listing pinned entries,
+    # NOT by the range form. This is the customer's real workload: count-1
+    # captioning screenshots and count-20 video frames, nothing in between --
+    # 2 graphs, not 20.
+    assert HPUVisionBucketManager._parse_resolutions("864x480x1,864x480x20") == [
+        (864, 480, 1),
+        (864, 480, 20),
+    ]
+
+
+def test_parse_resolutions_mixed_forms_in_one_env():
+    # A single env value may mix all three forms across comma-separated entries.
+    assert HPUVisionBucketManager._parse_resolutions("1024x768, 768x1024x5, 640x480x1-4") == [
+        (1024, 768, None),
+        (768, 1024, 5),
+        (640, 480, (1, 4)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "bad_env",
+    [
+        "864x480x20-1",   # hi < lo
+        "864x480x0-5",    # lo < 1
+        "864x480x1-2-3",  # malformed range
+        "864x480x1x2x3",  # too many x-parts
+        "864",            # missing height
+    ],
+)
+def test_parse_resolutions_rejects_invalid(bad_env):
+    with pytest.raises(ValueError):
+        HPUVisionBucketManager._parse_resolutions(bad_env)
 
 
 def test_parse_resolutions_none_env_is_empty():
