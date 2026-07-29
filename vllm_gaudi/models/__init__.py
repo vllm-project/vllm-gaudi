@@ -53,6 +53,10 @@ def register_model():
     ModelRegistry.register_model("Llama4ForConditionalGeneration",
                                  "vllm_gaudi.models.llama4:HpuLlama4ForConditionalGeneration")
 
+    from vllm_gaudi.models.gemma4 import HpuGemma4ForConditionalGeneration  # noqa: F401
+    ModelRegistry.register_model("Gemma4ForConditionalGeneration",
+                                 "vllm_gaudi.models.gemma4:HpuGemma4ForConditionalGeneration")
+
     import vllm_gaudi.models.deepseek_v2  # noqa: F401
 
     from vllm_gaudi.models.deepseek_ocr import HpuDeepseekOCRForCausalLM  # noqa: F401
