@@ -61,12 +61,14 @@ class HPUMLAAttention(MLAAttention):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
-        # Passed by the base MultiHeadLatentAttentionWrapper.forward for DCP
-        # (decode context parallel) query replication. DCP is not enabled on
-        # HPU, so this is always None here; accept-and-ignore to keep the
-        # forward signature in sync with the upstream call site.
         q_dcp_replicated: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # `q_dcp_replicated` was added to the base MLAAttention.forward signature
+        # by vllm#45964 (DCP query replication for MLA decode). Decode-context
+        # parallelism is not enabled on HPU, so the inherited wrapper forward
+        # always passes this as None; accept and ignore it to keep the HPU path
+        # behaviourally identical to pre-#45964.
+        del q_dcp_replicated
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
 
@@ -279,12 +281,11 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.is_sparse = mla_modules.is_sparse
 
         self.skip_topk = skip_topk
-        # qrep is active when the query projection is a DCP-group-sharded
-        # layer that materializes the full group head set locally. Upstream
-        # sets this in MultiHeadLatentAttentionWrapper.__init__ (read by the
-        # base-class forward at mla.py). Because HPU skips that base __init__
-        # and inlines the field assignments, mirror the attribute here too or
-        # the shared forward raises AttributeError("dcp_q_replicate").
+        # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
+        # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
+        # we do not override forward) reads and forwards to mla_attn. Because we
+        # bypass super().__init__(), replicate the upstream assignment. DCP is
+        # not enabled on HPU, so `qrep_active` is absent and this stays False.
         q_proj_layer = self.q_b_proj if self.q_lora_rank is not None else self.q_proj
         self.dcp_q_replicate = getattr(q_proj_layer, "qrep_active", False)
         if self.indexer is not None:
