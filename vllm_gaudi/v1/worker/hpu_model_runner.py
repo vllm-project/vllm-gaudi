@@ -1943,18 +1943,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         for req_id in req_ids:
             req_state = self.requests[req_id]
 
-            total_feats = len(req_state.mm_features)
-            cached_feats = sum(1 for f in req_state.mm_features if f.identifier in self.encoder_cache)
-            scheduled_ids = None
-            sched_enc = getattr(scheduler_output, "scheduled_encoder_inputs", None)
-            if sched_enc is not None:
-                scheduled_ids = sched_enc.get(req_id)
-            logger.debug(
-                "[MM_SPLIT_DEBUG] req=%s total_features=%d already_cached=%d "
-                "encode_now=%d scheduler_scheduled_this_step=%s", req_id, total_feats, cached_feats,
-                total_feats - cached_feats,
-                (len(scheduled_ids) if scheduled_ids is not None else "n/a"))
-
             for mm_feature in req_state.mm_features:
                 mm_hash = mm_feature.identifier
                 if mm_hash in self.encoder_cache:
@@ -5893,18 +5881,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if len(buckets) > 0:
                 patch_size = int(self.get_patch_size_from_model())
                 guessed_resolutions = [
-                    (w, h, 1)
-                    for (w, h) in vision_bucket_manager.bucket_to_image_resolution(
-                        patch_size=patch_size)
+                    (w, h, 1) for (w, h) in vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
                 ]
             # Dedupe, guessed shapes first.
-            warmup_lists = list(
-                dict.fromkeys(guessed_resolutions + explicit_resolutions))
+            warmup_lists = list(dict.fromkeys(guessed_resolutions + explicit_resolutions))
             if explicit_resolutions:
                 logger.debug(
                     "Using explicit multimodal warmup resolutions (width, "
-                    "height, count[None=max|N=pin|(lo,hi)=range]): %s",
-                    explicit_resolutions)
+                    "height, count[None=max|N=pin|(lo,hi)=range]): %s", explicit_resolutions)
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
@@ -5925,8 +5909,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     width, height, count_spec = candidates[idx]
                     if isinstance(count_spec, tuple):
                         lo, hi = count_spec
-                        counts_to_warm = list(
-                            range(lo, min(hi, user_max_count) + 1))
+                        counts_to_warm = list(range(lo, min(hi, user_max_count) + 1))
                     elif count_spec is not None:
                         counts_to_warm = [min(count_spec, user_max_count)]
                     else:
@@ -5942,8 +5925,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             "enabled: cached image embeds make the per-call "
                             "uncached count vary in [1, %d], so other counts "
                             "will recompile at runtime. Declare a range "
-                            "(e.g. \"%dx%dx1-%d\") to warm them.",
-                            counts_to_warm[0], width, height, user_max_count,
+                            "(e.g. \"%dx%dx1-%d\") to warm them.", counts_to_warm[0], width, height, user_max_count,
                             width, height, user_max_count)
                 for count in counts_to_warm:
                     batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
