@@ -11,7 +11,7 @@ import pytest
 from vllm_gaudi.extension.config import (VersionRange, Config, Kernel, Env, boolean, All, Not, Eq, Enabled,
                                          FirstEnabled)
 from vllm_gaudi.extension.features import get_features
-from vllm_gaudi.extension.validation import choice, regex
+from vllm_gaudi.extension.validation import choice, regex, for_all
 
 
 def with_cfg(fn):
@@ -189,6 +189,17 @@ def test_choice():
     error = choice('a', 'b')('c')
     assert error is not None
     assert 'a, b' in error
+    assert 'c' in error
+
+
+def test_for_all_rejects_out_of_range_value():
+    check = for_all(choice('a', 'b'))
+    # All-valid list passes.
+    assert check(['a', 'b']) is None
+    # A single out-of-range value is rejected with an aggregated error,
+    # not a crash.
+    error = check(['a', 'c'])
+    assert error is not None
     assert 'c' in error
 
 
