@@ -69,6 +69,7 @@ setup(
             "01.hpu_custom_utils = vllm_gaudi:register_utils",
             "02.hpu_custom_ops = vllm_gaudi:register_ops",
             "03.hpu_custom_models = vllm_gaudi:register_models",
+            "04.hpu_tool_parsers = vllm_gaudi:register_tool_parsers",
         ],
         "pytest11": ["vllm_gaudi_compat = pytest_compat"],
     },
