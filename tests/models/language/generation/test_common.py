@@ -47,6 +47,8 @@ def launch_lm_eval(eval_config):
         model_args["reasoning_parser"] = eval_config["reasoning_parser"]
     if eval_config.get("max_num_batched_tokens") is not None:
         model_args["max_num_batched_tokens"] = eval_config["max_num_batched_tokens"]
+    if eval_config.get("add_bos_token") is not None:
+        model_args["add_bos_token"] = eval_config["add_bos_token"]
 
     if eval_config.get("inc"):
         assert os.environ.get("QUANT_CONFIG", None), "must set QUANT_CONFIG environment variable for using INC"

@@ -41,12 +41,27 @@ except ValueError:
     logger.warning("Invalid MAX_EXPERTS_PER_SLICE value, using default -1")
     MAX_EXPERTS_PER_SLICE = -1
 
+# Map model activation-config strings to the activation names the HPU fused-MoE
+# op's MoeActivationMode_t enum accepts. The Gaudi gelu TPC kernel already uses
+# the tanh approximation (see tpc_kernels .../gelu_f16.c: UNROLLED_KERNEL(..,
+# tanh_f16, ..)), so HF's "gelu_pytorch_tanh" / "gelu_tanh" map to the op's
+# plain "gelu" (numerically the tanh-approx GELU Gemma expects). Without this the
+# fused-MoE op rejects the unknown activation string and the kernel cannot launch
+# (Gemma4 MoE). The exact-vs-tanh GELU difference is ~1e-3 and does not affect
+# inference correctness.
+_MOE_ACTIVATION_ALIASES = {
+    "gelu_pytorch_tanh": "gelu",
+    "gelu_tanh": "gelu",
+    "gelu_new": "gelu",
+    "quick_gelu": "gelu",
+}
+
 
 def _as_activation_str(activation):
     """Normalize activation to string for HPU custom op."""
     if isinstance(activation, MoEActivation):
-        return activation.value
-    return activation
+        activation = activation.value
+    return _MOE_ACTIVATION_ALIASES.get(activation, activation)
 
 
 def get_inc_quant_method(layer):
@@ -820,6 +835,8 @@ def dequant_block_fp8_weight_naive(weight,
                                    do_unpad=False):
     if weight_scale is None:
         return weight
+    if weight_scale.device != weight.device:
+        weight_scale = weight_scale.to(weight.device)
     assert len(block_size) == 2
 
     weight_shape_len = len(weight.shape)
@@ -1142,7 +1159,8 @@ class MoeFP8Matmul(torch.nn.Module):
             )
         elif self.quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
             scale_dtype = self.scale_inv_fp8.dtype
-            return (self.weight.to(scale_dtype) * self.scale_inv_fp8).to(self.high_precision)
+            scale_inv_fp8 = self.scale_inv_fp8.to(self.weight.device)
+            return (self.weight.to(scale_dtype) * scale_inv_fp8).to(self.high_precision)
         else:
             raise NotImplementedError(f"Dequantize weights for {self.quant_method} strategy is not supported. \
                 Currently support block-wise and channel-wise strategy.")

@@ -9,6 +9,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.model_executor.utils import replace_parameter
 from vllm_gaudi.extension.utils import VLLMKVCache
 from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache)
 from vllm_gaudi.attention.backends.hpu_attn import HPUMLAMetadata
@@ -203,8 +204,12 @@ class HPUMLAAttention(MLAAttention):
         else:
             # Non-FP8 kv_b_proj: use upstream logic as before.
             MLAAttention.process_weights_after_loading(self, act_dtype)
-            self.W_UV = self.W_UV.contiguous()
-            self.W_UK_T = self.W_UK_T.contiguous()
+            # Since vllm#48251 base registers W_UV/W_UK_T as nn.Parameter (via
+            # replace_parameter), so a plain tensor reassignment raises
+            # TypeError. Route the contiguous() update through replace_parameter
+            # to preserve the registration.
+            replace_parameter(self, "W_UV", self.W_UV.contiguous())
+            replace_parameter(self, "W_UK_T", self.W_UK_T.contiguous())
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor

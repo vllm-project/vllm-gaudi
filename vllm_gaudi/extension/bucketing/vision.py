@@ -49,6 +49,24 @@ MULTIMODAL_CONFIG = {
         # patches per image
         'buckets': [196, 256, 441, 480, 576, 900, 1156]
     },
+    'kimi_k25': {
+        # MoonViT is a native-resolution (patch-count) tower, like qwen2_5_vl.
+        # Without this entry it falls back to the batch-based default [1,2,4,8],
+        # which mis-buckets the variable patch count and recompiles per shape.
+        'is_batch_based': False,
+        # patches per image (<= in_patch_limit=16384)
+        'buckets': [256, 576, 1024, 1600, 3136, 4096, 6400, 9216, 12544, 16384]
+    },
+    'gemma4': {
+        # Gemma4's vision tower rescales each image to <= max_soft_tokens and
+        # buckets by patch count (like qwen/kimi), not fixed-resolution like
+        # gemma3. Without this entry it falls back to the batch-based default
+        # [1, 2, 4, 8], never compiling the real production resolution.
+        'is_batch_based': False,
+        # patches per image (864x480 at patch_size=16 rescales toward
+        # max_soft_tokens=280 => ~2376 patches; buckets span the workload).
+        'buckets': [196, 256, 441, 480, 576, 900, 1156]
+    },
 }
 
 

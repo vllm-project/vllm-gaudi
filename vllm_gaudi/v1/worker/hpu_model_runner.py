@@ -12,7 +12,7 @@ import os
 import time
 from contextlib import suppress
 from tqdm import tqdm
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypeAlias, Union, cast)
 if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
@@ -91,7 +91,6 @@ from vllm.distributed.parallel_state import get_pp_group, get_dp_group
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.transformers_utils.config import is_interleaved
 from vllm.v1.worker.utils import (AttentionGroup, prepare_kernel_block_sizes, sanity_check_mm_encoder_outputs)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -131,6 +130,27 @@ from vllm_gaudi.extension.logger import logger as init_logger
 from vllm.model_executor.models.bert import _encode_token_type_ids
 
 logger = init_logger()
+
+
+def is_interleaved(config: Any) -> bool:
+    """Detect if the model with this config uses interleaved attention.
+
+    Restores the helper removed from ``vllm.transformers_utils.config`` by
+    upstream vLLM PR #49803 (commit ``26d725c334``), which inlined the check
+    at its former call sites. vllm-gaudi still relies on it in three places.
+
+    Args:
+        config: A ``PretrainedConfig`` (or any config exposing
+            ``get_text_config``).
+
+    Returns:
+        True if the text config declares more than one distinct layer type.
+    """
+    text_config = config.get_text_config()
+    if layer_types := getattr(text_config, "layer_types", None):
+        return len(set(layer_types)) > 1
+    return False
+
 
 try:
     from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
@@ -280,6 +300,21 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
                 mod.__dict__[attr_name] = new_obj
     if moved:
         logger.info("Moved %d stray tensors to %s", moved, device)
+
+
+def _model_has_moe_experts(model: torch.nn.Module) -> bool:
+    """Return True if the model has any fused-MoE op with per-expert weight views.
+
+    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase``) whose
+    per-expert ``MoeMatmul.weight`` attributes are plain-tensor views that go
+    stale after ``model.to(device)`` and must be rebound. Dense models (e.g.
+    Llama-3.3-70B) have none, so the INC pre-stage ``model.to('hpu')`` + rebind
+    is pure overhead for them -- and worse, it eagerly materializes the full
+    (pre-quantization) weights on a single card, OOMing large dense models
+    before ``convert()`` can shrink them.
+    """
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
+    return any(isinstance(getattr(module, "moe_op", None), VllmMixtureOfExpertsOpBase) for module in model.modules())
 
 
 def _rebind_moe_op_weights_to_device(model: torch.nn.Module, device: str) -> None:
@@ -775,8 +810,17 @@ def apply_model_specific_patches(model_runner):
     patch_llama4_get_attn_scale(model_runner.model)
     _init_mamba_split_weights(model_runner.model)
     from vllm_gaudi.models.llama4 import (apply_hpu_llama4_post_load_patches, is_hpu_llama4_model)
-    model_runner._has_heterogeneous_layers = is_hpu_llama4_model(model_runner.model)
-    apply_hpu_llama4_post_load_patches(model_runner.model)
+    from vllm_gaudi.models.qwen3_next import apply_hpu_qwen3_residual_fix
+
+    is_llama4 = is_hpu_llama4_model(model_runner.model)
+    model_type = getattr(model_runner.vllm_config.model_config.hf_config, "model_type", "")
+    is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5_moe")
+
+    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe
+    if is_llama4:
+        apply_hpu_llama4_post_load_patches(model_runner.model)
+    if is_qwen_moe:
+        apply_hpu_qwen3_residual_fix(model_runner.model)
 
 
 def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num_scheduled_tokens,
@@ -1258,8 +1302,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
             for block_type in mamba_like)
 
+        # Models whose mamba layers get relabeled "linear_attention" by
+        # transformers>=5's remap_legacy_layer_types (config.get_text_config()
+        # normalizes legacy "mamba"/"attention" hybrid layer_types to
+        # "linear_attention"/"full_attention"), but which are plain mamba
+        # hybrids, not true GDN/linear-attention models. Left unguarded,
+        # get_num_layers_by_block_type(..., "linear_attention") matches these
+        # relabeled mamba layers, so num_gdn is misdetected as >0 below. That
+        # skips the block_size=528 alignment for Granite 4.0-H (see
+        # initialize_kv_cache) and re-triggers "not warmed-up" recompilations /
+        # non-deterministic tool-calling output.
         self.num_gdn = 0
-        if self.num_mamba_like_layers > 0:
+        if (self.num_mamba_like_layers > 0 and self.model_config.hf_config.model_type != "granitemoehybrid"):
             # Auto-enable hybrid cache for GDN/mamba-like models.
             gdn_types = ["gdn_attention", "linear_attention"]
             self.num_gdn = sum(
@@ -2589,6 +2643,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks: list = [blocks[:num] for blocks, num in zip(contents.blocks, num_context_blocks)]
         num_context_blocks = [len(b) for b in context_blocks]
         context_groups = [[i] * b for i, b in enumerate(num_context_blocks)]
+        if self.interleaved_sliding_window and self._get_model_type() == "gemma4":
+            # Keep one extra block: a `sliding_window`-token window that ends at an
+            # arbitrary (non-block-aligned) context boundary straddles
+            # `sliding_window // block_size + 1` blocks.
+            # Dropping it would silently mask real in-window tokens for
+            # chunked prefill with a non-block-aligned context_len.
+            sliding_block_size = self.sliding_window // self.attn_block_size + 1
+            window_context_blocks_raw = [blocks[-sliding_block_size:] for blocks in context_blocks]
         # Bucketing uses self.block_size so that file-based buckets
         # (generated at the original block_size) continue to match.
         bucketing_ctx_blocks = [round_up(ctx_len, self.block_size) // self.block_size for ctx_len in context_lens]
@@ -2843,7 +2905,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_lens = async_h2d_copy(context_lens, dtype=torch.int32)
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
-
+        window_context_blocks_t = None
+        # Only keep the last window_size // block_size context blocks per sequence.
+        # window_context_blocks_raw was sliced from the UNPADDED per-request block
+        # lists (before align_and_pad appended -1 sentinels), so it holds each
+        # request's real last-window blocks. Pad it to (target_bs, sliding_block_size)
+        # -- a fixed-width bucket independent of target_blocks -- rather than reusing
+        # context_blocks' batch-wide target_blocks shape.
+        if self.interleaved_sliding_window and self._get_model_type() == "gemma4" and target_blocks > 0:
+            window_context_blocks = align_and_pad(window_context_blocks_raw, (target_bs, sliding_block_size),
+                                                  itertools.repeat(-1))
+            window_context_blocks_t = async_h2d_copy(window_context_blocks, dtype=torch.int32).flatten()
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=query_lens,
             context_lens_tensor=context_lens,
@@ -2860,7 +2932,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             padding_mask_flat=padding_mask_flat,
             blocks_caching_range=blocks_caching_range,
             mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
-            seqlens_offsets_for_blocks=seqlens_offsets_for_blocks)
+            seqlens_offsets_for_blocks=seqlens_offsets_for_blocks,
+            window_block_list=window_context_blocks_t)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -4648,7 +4721,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # INC's internal move is a no-op. (Regressed by upstream PR #41184
                 # moving the weights onto a RoutedExperts child, which changed the
                 # .to() traversal order.)
-                if not is_fake_hpu():
+                #
+                # Restrict this pre-stage to MoE models only. Dense models have no
+                # moe_op views to rebind, so the pre-stage move is pure overhead --
+                # and for a large dense model (e.g. Llama-3.3-70B FP8 on 1 card) it
+                # eagerly materializes the full pre-quantization weights on device
+                # BEFORE convert() can shrink them, OOMing on model.to('hpu').
+                # Leaving dense models on host until the post-INC move restores the
+                # pre-#1590 behavior that convert() shrinks them first.
+                if not is_fake_hpu() and _model_has_moe_experts(self.model):
                     self.model = self.model.to("hpu")
                     _rebind_moe_op_weights_to_device(self.model, "hpu")
                     htorch.core.mark_step()
@@ -5443,41 +5524,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if prompt_cfg:
             prompt_bs, prompt_query_len, prompt_num_blocks = prompt_cfg
 
-            # Granite 4.0-H (non-GDN mamba hybrid): self.block_size is 528
-            # (mamba page alignment). The prompt-warmup context is materialized
-            # as prompt_num_blocks * self.block_size KV tokens, so the largest
-            # long-context bucket (e.g. 249 blocks) would build a ~131K-token
-            # context and OOM at gpu_memory_util 0.9 during warmup. The compiled
-            # graph key is (bs, query_len, num_blocks) where num_blocks is the
-            # context-block COUNT, so we cap only the warmed block COUNT here;
-            # this bounds the warmup activation peak WITHOUT changing the 528
-            # kernel/bucketing/runtime semantics. Realistic tool-calling and
-            # humaneval requests carry only a short context (tool defs + query,
-            # far below this cap), so they still hit warmed buckets and incur no
-            # runtime "not warmed-up" recompilation; only requests approaching
-            # the 131K max capacity would. GDN hybrids and non-mamba models are
-            # untouched (block_size stays 128 there, so no oversized context).
-            if (self.num_mamba_like_layers > 0 and self.num_gdn == 0 and not self.is_pooling_model):
-                # ~33K tokens matches the historically OOM-safe short-context
-                # warmup peak (the short-ctx profile warms up to ~64 blocks of
-                # 528 ≈ 33K tokens at 0.9 without OOM).
-                warmup_ctx_token_cap = 33792
-                max_warmup_ctx_blocks = max(1, warmup_ctx_token_cap // self.block_size)
-                if prompt_num_blocks > max_warmup_ctx_blocks:
-                    # Emit once so a cold-start "Configuration was not
-                    # warmed-up" on a genuinely long-context request is
-                    # traceable back to this intentional warmup cap rather
-                    # than mistaken for a bucketing bug.
-                    logger.warning_once(
-                        "Capping non-GDN mamba-hybrid prompt warmup context "
-                        "from %s to %s blocks (block_size=%s, ~%s tokens) to "
-                        "bound the warmup activation peak. Requests whose "
-                        "prompt context exceeds ~%s tokens are not pre-warmed "
-                        "and may recompile once on first use.", prompt_num_blocks, max_warmup_ctx_blocks,
-                        self.block_size, max_warmup_ctx_blocks * self.block_size,
-                        max_warmup_ctx_blocks * self.block_size)
-                prompt_num_blocks = min(prompt_num_blocks, max_warmup_ctx_blocks)
-
             if self.is_pooling_model:
                 prompt_total_tokens = [prompt_query_len]
                 prompt_num_context_blocks = [0]
@@ -5916,14 +5962,26 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Running validation warmup to trigger guard specializations...")
             saved_graphed = self.graphed_buckets.copy()
             self.graphed_buckets.clear()
+
+            # Re-run only the LARGEST seq_len buckets (all num_blocks variants).
+            # During initial warmup, max seq_len  is processed FIRST, creating
+            # recipes in early compilations. Later, smaller seq_lens cause guard
+            # failures → NEW compilations with symbolic guards that shadow the
+            # earlier ones at inference.
+            #
+            # By re-running max seq_len buckets at the END of warmup, we ensure
+            # the NEWEST dynamo compilations (which will be selected first at
+            # inference) have Synapse recipes for the max seq_len shapes.
             prompt_buckets = self.bucketing_manager.prompt_buckets
             if prompt_buckets:
-                validation_prompt_buckets = [prompt_buckets[0]]
-                if len(prompt_buckets) > 1:
-                    validation_prompt_buckets.append(prompt_buckets[-1])
-                self.warmup_graphs(validation_prompt_buckets, True, kv_caches)
+                max_seq_len = max(b[1] for b in prompt_buckets)
+                max_seq_buckets = [b for b in prompt_buckets if b[1] == max_seq_len]
+                logger.info("Validation warmup: %s prompt buckets (seq_len=%s)", len(max_seq_buckets), max_seq_len)
+                self.warmup_graphs(max_seq_buckets, True, kv_caches)
+
             if self.bucketing_manager.decode_buckets:
                 self.warmup_graphs([self.bucketing_manager.decode_buckets[0]], False, kv_caches)
+
             self.graphed_buckets = saved_graphed
             logger.info("Validation warmup complete.")
 
@@ -6057,7 +6115,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    if layer_name in layer_kv_cache_spec.kv_cache_specs:
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    elif layer_name in self.shared_kv_cache_layers:
+                        # Shared layer: use the target layer's spec
+                        target = self.shared_kv_cache_layers[layer_name]
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[target]
+                    else:
+                        raise KeyError(f"No KV cache spec for layer {layer_name}")
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
@@ -6450,7 +6515,40 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             kv_cache_spec = group.kv_cache_spec
                             break
                     assert kv_cache_spec is not None, f"No spec found for {layer_name}"
-                    assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
+
+                    # Heterogeneous models (e.g. Gemma4 with interleaved
+                    # sliding/full attention, asymmetric head_dim 256/512 and
+                    # kv_heads 8/2) are grouped by core vLLM under a single
+                    # UniformTypeKVCacheSpecs wrapper rather than one spec per
+                    # group.  Unwrap it to the concrete per-layer spec so each
+                    # layer allocates KV storage sized to its OWN head_size /
+                    # num_kv_heads / page_size_bytes.  Symmetric siblings
+                    # (gemma3/qwen) never produce this wrapper type, so this
+                    # branch is inert for them.
+                    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                        per_layer_spec = kv_cache_spec.kv_cache_specs.get(layer_name)
+                        assert per_layer_spec is not None, (
+                            f"UniformTypeKVCacheSpecs has no per-layer spec for {layer_name}")
+                        kv_cache_spec = per_layer_spec
+
+                    # For heterogeneous models (e.g., Gemma4 with UniformTypeKVCacheSpecs),
+                    # the page_size_bytes is the sum of all layer specs' page sizes, but
+                    # the actual tensor might not align perfectly. Round down to the largest
+                    # usable number of blocks rather than asserting perfect alignment.
+                    remainder = kv_cache_tensor.size % kv_cache_spec.page_size_bytes
+                    if remainder != 0:
+                        usable_size = kv_cache_tensor.size - remainder
+                        waste_pct = remainder * 100.0 / kv_cache_tensor.size
+                        logger.warning(
+                            "KV cache tensor size (%s bytes) does not "
+                            "perfectly align with page_size_bytes (%s bytes). "
+                            "This is expected for heterogeneous models like Gemma4 with mixed "
+                            "attention types. Using %s bytes "
+                            "(%s bytes unused, %.2f%% waste).", f"{kv_cache_tensor.size:,}",
+                            f"{kv_cache_spec.page_size_bytes:,}", f"{usable_size:,}", f"{remainder:,}", waste_pct)
+                        # Use only the aligned portion of the tensor
+                        kv_cache_tensor = replace(kv_cache_tensor, size=usable_size)
+
                     num_blocks = \
                         kv_cache_tensor.size // kv_cache_spec.page_size_bytes
                     # `num_blocks` is the number of blocks the model runner can use.
@@ -6460,7 +6558,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # different memory capacities, `num_blocks` can be different on
                     # different GPUs, and `kv_cache_config.num_blocks` is set to
                     # the min of all `num_blocks`. Verify it here.
-                    assert num_blocks >= kv_cache_config.num_blocks
+                    # For heterogeneous models where we rounded down the tensor size,
+                    # num_blocks may be slightly less than expected - this is acceptable.
+                    if num_blocks < kv_cache_config.num_blocks:
+                        if remainder != 0:
+                            # This is expected for heterogeneous models after alignment
+                            logger.warning(
+                                "After alignment, num_blocks=%d is less than "
+                                "kv_cache_config.num_blocks=%d. "
+                                "This is expected for heterogeneous models like Gemma4.", num_blocks,
+                                kv_cache_config.num_blocks)
+                        else:
+                            # Unexpected - still assert in this case
+                            assert num_blocks >= kv_cache_config.num_blocks
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
@@ -6513,7 +6623,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 layer_names.add(layer_name)
         # Set up cross-layer KV cache sharing
         if self.shared_kv_cache_layers:
-            logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
+            #logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
                 kv_caches[layer_name] = kv_caches[target_layer_name]
         assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
@@ -7142,15 +7252,29 @@ class HPUAttentionMetadataProcessor:
             context_lens_t = prefill_metadata.context_lens_tensor
             assert context_lens_t is not None, "context_lens_tensor is required to build attn_bias"
 
-            block_list = attn_metadata.block_list
-            max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
+            window_block_list = getattr(attn_metadata, 'window_block_list', None)
+            block_list_for_mask = window_block_list if window_block_list is not None \
+                else attn_metadata.block_list
+            max_context_len = (block_list_for_mask.size(-1) // batch_size if block_list_for_mask is not None else 0)
             block_size = getattr(prefill_metadata, "block_size", self.block_size)
             max_context_len = max_context_len * block_size
 
-            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-            past_indices = torch.arange(max_context_len, device=device)
-            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+            if window_block_list is not None:
+                # Re-anchor ctx_len to the block-aligned gather frame so a
+                # non-block-aligned ctx_len doesn't misalign the sliding-window mask.
+                round_up_ctx = ((context_lens_t + block_size - 1) // block_size) * block_size
+                frame_base = torch.clamp(round_up_ctx - max_context_len, min=0)
+                context_lens_trimmed = context_lens_t - frame_base
+                invalid_lens_t = context_lens_trimmed - window_size + torch.arange(seq_len, device=device) - 1
+                past_indices = torch.arange(max_context_len, device=device)
+                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices.unsqueeze(0) < context_lens_trimmed.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+            else:
+                # Full block list: use absolute coordinate frame with window lower bound
+                invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
+                past_indices = torch.arange(max_context_len, device=device)
+                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
 
             # Create boolean sliding window mask
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)

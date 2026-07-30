@@ -19,6 +19,7 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFuse
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                        AttentionType, MultipleOf)
 from vllm.model_executor.layers.attention.mla_attention import (MLACommonImpl)
+from vllm.model_executor.utils import replace_parameter
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
 
@@ -356,13 +357,15 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
     # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        # W_UV and W_UK_T are plain tensor attributes (not nn.Parameter or
-        # register_buffer), so model.to('hpu') won't move them.  When INC
-        # CPU-first loading is active the source weights live on CPU, making
-        # these derived tensors CPU-resident too — which then causes a device
-        # mismatch at the bmm calls in forward.  Explicitly place on HPU.
-        self.W_UV: torch.Tensor = self.W_UV.contiguous().to("hpu")
-        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous().to("hpu")
+        # Since vllm#48251 the base process_weights_after_loading registers
+        # W_UV and W_UK_T as nn.Parameter (via replace_parameter), so a plain
+        # tensor reassignment raises TypeError. Route the contiguous/.to("hpu")
+        # update back through replace_parameter to preserve the registration.
+        # When INC CPU-first loading is active the source weights live on CPU,
+        # making these derived tensors CPU-resident too — which then causes a
+        # device mismatch at the bmm calls in forward.  Explicitly place on HPU.
+        replace_parameter(self, "W_UV", self.W_UV.contiguous().to("hpu"))
+        replace_parameter(self, "W_UK_T", self.W_UK_T.contiguous().to("hpu"))
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
@@ -579,6 +582,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                            scales=v_scales,
                                            block_size=attn_metadata.block_size,
                                            is_prompt=attn_metadata.is_prompt)
+            elif attn_metadata.is_prompt and slot_mapping is not None:
+                # KV sharing (YOCO): the local key/value are intentionally
+                # un-normed/un-RoPE'd (see Gemma4Attention shared-layer path).
+                # Read the target layer's normalized+RoPE'd K/V back from the
+                # shared cache at these slots (it wrote them earlier this pass).
+                key = key_cache.index_select(0, slot_mapping).view(key.shape)
+                value = value_cache.index_select(0, slot_mapping).view(value.shape)
 
         if attn_metadata.is_prompt or seq_len > 1:
             # Prompt run.
@@ -616,6 +626,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             _set_fetch_by_id(self.k_cache, True)
             _set_fetch_by_id(self.v_cache, True)
 
+            if self.sliding_window and hasattr(attn_metadata, 'window_block_list') \
+                    and attn_metadata.window_block_list is not None:
+                block_list = attn_metadata.window_block_list
             common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size,
                                                      k_scales, v_scales)
 

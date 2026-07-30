@@ -497,7 +497,17 @@ class HPUWorker(WorkerBase):
                     mamba_state_per_block, ratio)
                 available = adjusted
 
-        return available
+        # Core vLLM's determine_available_memory contract returns an int
+        # (bytes). Most models route through get_num_blocks() which casts to
+        # int, but gemma4's heterogeneous KV layout (interleaved sliding/full
+        # layers with different page_size_bytes) collapses into a single
+        # UniformTypeKVCacheSpecs group whose num_blocks math
+        # (`available_memory // page_size_bytes`) does NOT cast. A float
+        # available_memory then yields a float num_blocks, which the
+        # scheduler's BlockPool rejects via `isinstance(num_gpu_blocks, int)`.
+        # Coerce to int here so every downstream path (uniform AND
+        # heterogeneous) receives an integer byte budget.
+        return int(available)
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks

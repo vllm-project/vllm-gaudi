@@ -37,9 +37,27 @@ Currently:
   any request with ``logprobs=true``.  We replace ``gather_logprobs`` with an
   identical implementation that omits the two ``mark_unbacked`` calls.  HPU
   handles dynamic batch shapes without this hint.
+
+* ``vllm.v1.core.block_pool.BlockPool.free_blocks`` — upstream PR #42656
+  ("Apply LRU policy only to proper cache entries") made ``free_blocks``
+  partition freed blocks into with-hash / without-hash lists and issue two
+  queue ops (``prepend_n`` + ``append_n``) on every engine step.  When prefix
+  caching is disabled every block's hash is ``None``, so the split is a no-op
+  that only adds per-step CPU overhead — a measurable decode-throughput loss
+  on small/low-batch models.  We restore a single-pass free for the
+  ``enable_caching=False`` case and delegate to the original implementation
+  when prefix caching is on.  Remove once fixed upstream.
+
+* ``transformers.integrations.sdpa_attention.sdpa_attention_forward`` — the
+  transformers library's SDPA attention uses ``F.scaled_dot_product_attention``
+  which routes to suboptimal kernels on HPU. We replace it with an HPU-optimized
+  version that uses FusedSDPA when the ``fsdpa_impl`` attention implementation
+  is configured, providing 1.4-2x performance improvement for models that use
+  transformers SDPA attention (e.g., vision encoders in Gemma4 models).
 """
 
 import gc
+from typing import Callable, Optional
 
 import torch
 
@@ -228,7 +246,7 @@ def _patch_gather_logprobs() -> None:
 
     import vllm.v1.sample.sampler as _sampler_mod
 
-    if 'mark_unbacked' not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
+    if "mark_unbacked" not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
         return  # Not affected — older vLLM without PR #38933.
 
     _sampler_mod.Sampler.gather_logprobs = staticmethod(_hpu_gather_logprobs)
@@ -377,6 +395,46 @@ def _patch_get_num_layers_by_block_type() -> None:
     ModelConfig.get_num_layers_by_block_type = _hpu_get_num_layers_by_block_type
 
 
+def _patch_use_sequence_parallel_moe() -> None:
+    """Restore the ``data_parallel_size > 1`` guard on ``use_sequence_parallel_moe``.
+
+    vllm PR #48036 removed ``and self.data_parallel_size > 1`` from
+    ``ParallelConfig.use_sequence_parallel_moe`` to enable SP-MoE for DSv3.2 +
+    MTP on a single node. On HPU that flips SP-MoE on for plain EP + TP>1 +
+    DP==1 setups (e.g. Kimi-K2.6 / DeepSeek MLA), whose reduce_scatter /
+    sequence_parallel_chunk reshaping the HPU MLA rotary and RMSNorm ops cannot
+    yet handle, crashing the forward pass. Until those ops support the SP-MoE
+    layout, re-add the DP>1 guard so single-node EP behaves as before.
+
+    Guarded by ``inspect.getsource`` so this becomes a no-op if upstream
+    restores the guard or the property's shape changes.
+    """
+    import inspect
+
+    from vllm.config.parallel import ParallelConfig
+
+    prop = ParallelConfig.__dict__.get("use_sequence_parallel_moe")
+    if not isinstance(prop, property) or prop.fget is None:
+        return  # Not a property anymore — do not risk an incompatible override.
+
+    try:
+        source = inspect.getsource(prop.fget)
+    except (OSError, TypeError):
+        return  # Source unavailable — leave upstream in place.
+
+    if "use_sequence_parallel_moe" not in source or "enable_expert_parallel" not in source:
+        return  # Shape changed — do not risk an incompatible override.
+    if "data_parallel_size" in source:
+        return  # Guard already present (upstream restored it) — no-op.
+
+    _original_fget = prop.fget
+
+    def _hpu_use_sequence_parallel_moe(self) -> bool:
+        return _original_fget(self) and self.data_parallel_size > 1
+
+    ParallelConfig.use_sequence_parallel_moe = property(_hpu_use_sequence_parallel_moe)
+
+
 def _patch_cleanup_dist_env_and_memory() -> None:
     """Install the HPU-safe ``cleanup_dist_env_and_memory`` replacement.
 
@@ -391,6 +449,183 @@ def _patch_cleanup_dist_env_and_memory() -> None:
 
     parallel_state.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
     _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
+
+
+def _hpu_free_blocks(self, ordered_blocks) -> None:
+    """Single-pass ``BlockPool.free_blocks`` for ``enable_caching=False``.
+
+    Upstream vLLM PR #42656 rewrote ``free_blocks`` to partition freed blocks
+    into with-hash / without-hash lists and issue two queue ops
+    (``prepend_n`` + ``append_n``) on every engine step.  When prefix caching
+    is disabled, every block's hash is ``None``, so that split is a no-op that
+    only adds per-step CPU work; on short decode steps (small model / low
+    batch) it is a measurable fixed overhead (~3.5% output-token throughput on
+    llama-3.1-8B FP8, 1 card, 4096/1024, mc=8 — see GAUDISW-250180).  Free in
+    a single pass in that case; delegate to the original (upstream)
+    implementation when prefix caching is enabled so #42656's LRU ordering is
+    preserved.  Remove this patch once the fix lands upstream.
+    """
+    if self.enable_caching:
+        assert _ORIGINAL_FREE_BLOCKS is not None  # set by _patch_free_blocks before install
+        return _ORIGINAL_FREE_BLOCKS(self, ordered_blocks)
+
+    freed_blocks = []
+    for block in ordered_blocks:
+        block.ref_cnt -= 1
+        if block.ref_cnt == 0 and not block.is_null:
+            freed_blocks.append(block)
+    self.free_block_queue.append_n(freed_blocks)
+
+
+_ORIGINAL_FREE_BLOCKS: Optional[Callable] = None
+
+
+def _patch_free_blocks() -> None:
+    """Install the single-pass ``free_blocks`` fast path for APC-disabled runs.
+
+    Deferred to ``load_general_plugins`` time (same as the other patches) so
+    the ``vllm.v1.core`` import runs after platform initialisation.
+    Idempotent: only wraps the original ``free_blocks`` once.
+    """
+    global _ORIGINAL_FREE_BLOCKS
+    from vllm.v1.core.block_pool import BlockPool
+
+    if _ORIGINAL_FREE_BLOCKS is not None:
+        return  # already patched
+    _ORIGINAL_FREE_BLOCKS = BlockPool.free_blocks
+    BlockPool.free_blocks = _hpu_free_blocks
+
+
+# Global cache for FusedSDPA operator to avoid recreation overhead
+_CACHED_FSDPA_OP = None
+
+
+def _hpu_sdpa_attention_forward(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    dropout: float = 0.0,
+    scaling: float | None = None,
+    is_causal: bool | None = None,
+    position_bias: torch.Tensor | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, None]:
+    """HPU-optimized replacement for transformers' ``sdpa_attention_forward``.
+
+    Based on ``transformers.integrations.sdpa_attention.sdpa_attention_forward``
+    from transformers v5.14.1. Uses HPU FusedSDPA kernel when running on HPU
+    with fsdpa_impl config, providing better performance for models that use
+    transformers SDPA attention (e.g., vision encoders in multimodal models).
+
+    The FusedSDPA operator is cached globally to avoid recreation overhead
+    on each call, which would otherwise cause significant slowdown.
+    """
+    from transformers.integrations.sdpa_attention import (repeat_kv, use_gqa_in_sdpa, create_position_bias_mask,
+                                                          _is_torch_npu_available, logger)
+
+    if kwargs.get("output_attentions", False):
+        logger.warning_once("`sdpa` attention does not support `output_attentions=True`."
+                            " Please set your attention to `eager` if you want any of these features.")
+    sdpa_kwargs = {}
+    if hasattr(module, "num_key_value_groups") and module.num_key_value_groups > 1:
+        if not use_gqa_in_sdpa(attention_mask, key, value):
+            key = repeat_kv(key, module.num_key_value_groups)
+            value = repeat_kv(value, module.num_key_value_groups)
+        else:
+            sdpa_kwargs = {"enable_gqa": True}
+
+    q_length = query.shape[2]
+    kv_length = key.shape[2]
+
+    is_causal = is_causal if is_causal is not None else getattr(module, "is_causal", True)
+    is_causal = q_length > 1 and attention_mask is None and is_causal
+
+    if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
+        is_causal = is_causal.item()
+
+    if _is_torch_npu_available and attention_mask is not None and attention_mask.dtype != torch.bool:
+        attention_mask = torch.logical_not(attention_mask.bool()).to(query.device)
+
+    if is_causal and attention_mask is None and q_length > 1 and kv_length > q_length:
+        key = key[:, :, :q_length, :]
+        value = value[:, :, :q_length, :]
+        if position_bias is not None:
+            position_bias = position_bias[:, :, :, :q_length]
+
+    if position_bias is not None:
+        attention_mask = create_position_bias_mask(position_bias, attention_mask, is_causal, query, key)
+        is_causal = False
+
+    # Check if we should use HPU FusedSDPA
+    _use_hpu_fsdpa = False
+    _config = None
+    if query.device.type == "hpu":
+        try:
+            from vllm_gaudi.extension.runtime import get_config
+            _config = get_config()
+            if _config.prompt_attn_impl == "fsdpa_impl":
+                _use_hpu_fsdpa = True
+        except Exception:
+            pass
+
+    if _use_hpu_fsdpa and _config is not None:
+        global _CACHED_FSDPA_OP
+        if _CACHED_FSDPA_OP is None:
+            from vllm_gaudi.extension.utils import ModuleFusedSDPA
+            import vllm_gaudi.extension.kernels as kernels
+            HPUFusedSDPA = kernels.fsdpa()
+            _CACHED_FSDPA_OP = ModuleFusedSDPA(HPUFusedSDPA)
+
+        softmax_mode = "fp32" if _config.fp32_softmax else "fast"
+        attn_output = _CACHED_FSDPA_OP(
+            query,
+            key,
+            value,
+            attention_mask,
+            dropout_p=dropout,
+            is_causal=is_causal,
+            scale=scaling,
+            softmax_mode=softmax_mode,
+            recompute_mode=True,
+            valid_sequence_lengths=None,
+        )
+    else:
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attention_mask,
+            dropout_p=dropout,
+            scale=scaling,
+            is_causal=is_causal,
+            **sdpa_kwargs,
+        )
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    return attn_output, None
+
+
+def _patch_sdpa_attention_forward() -> None:
+    """Replace transformers' ``sdpa_attention_forward`` with HPU-optimized version.
+
+    This patch enables the HPU FusedSDPA kernel for models that use transformers
+    SDPA attention, providing 1.4-2x performance improvement.
+
+    The patch is only applied when running on HPU and when the fsdpa_impl
+    attention implementation is configured.
+    """
+    try:
+        import transformers.integrations.sdpa_attention as _sdpa_mod
+        _sdpa_mod.sdpa_attention_forward = _hpu_sdpa_attention_forward
+
+        # Also update ALL_ATTENTION_FUNCTIONS which caches function references
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+        if "sdpa" in ALL_ATTENTION_FUNCTIONS:
+            ALL_ATTENTION_FUNCTIONS["sdpa"] = _hpu_sdpa_attention_forward
+    except ImportError:
+        pass  # transformers version without this module
 
 
 def apply() -> None:
@@ -425,6 +660,9 @@ def apply() -> None:
         _patch_gather_logprobs()
         _patch_granite_hybrid_layer_types()
         _patch_get_num_layers_by_block_type()
+        _patch_use_sequence_parallel_moe()
+        _patch_free_blocks()
+        _patch_sdpa_attention_forward()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
