@@ -267,7 +267,10 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
-        self.skip_topk = skip_topk
+        # DSA sparse attention is not implemented on HPU: sparse layers run as
+        # dense MLA and the indexer must never be invoked (its kernels and the
+        # DeepseekV32IndexerBackend are CUDA-only).
+        self.skip_topk = skip_topk or self.is_sparse
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
@@ -290,6 +293,7 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             quant_config=quant_config,
             prefix=layer_name,
             kv_b_proj=self.kv_b_proj,
-            use_sparse=self.is_sparse,
+            # Dense-MLA fallback: never request a sparse backend on HPU.
+            use_sparse=False,
             indexer=self.indexer,
         )
