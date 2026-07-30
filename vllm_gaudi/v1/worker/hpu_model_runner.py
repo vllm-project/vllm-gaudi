@@ -91,7 +91,6 @@ from vllm.distributed.parallel_state import get_pp_group, get_dp_group
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.transformers_utils.config import is_interleaved
 from vllm.v1.worker.utils import (AttentionGroup, prepare_kernel_block_sizes, sanity_check_mm_encoder_outputs)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -131,6 +130,27 @@ from vllm_gaudi.extension.logger import logger as init_logger
 from vllm.model_executor.models.bert import _encode_token_type_ids
 
 logger = init_logger()
+
+
+def is_interleaved(config: Any) -> bool:
+    """Detect if the model with this config uses interleaved attention.
+
+    Restores the helper removed from ``vllm.transformers_utils.config`` by
+    upstream vLLM PR #49803 (commit ``26d725c334``), which inlined the check
+    at its former call sites. vllm-gaudi still relies on it in three places.
+
+    Args:
+        config: A ``PretrainedConfig`` (or any config exposing
+            ``get_text_config``).
+
+    Returns:
+        True if the text config declares more than one distinct layer type.
+    """
+    text_config = config.get_text_config()
+    if layer_types := getattr(text_config, "layer_types", None):
+        return len(set(layer_types)) > 1
+    return False
+
 
 try:
     from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
@@ -795,8 +815,9 @@ def apply_model_specific_patches(model_runner):
     is_llama4 = is_hpu_llama4_model(model_runner.model)
     model_type = getattr(model_runner.vllm_config.model_config.hf_config, "model_type", "")
     is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5_moe")
+    is_gemma4 = model_type in ("gemma4", )
 
-    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe
+    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe or is_gemma4
     if is_llama4:
         apply_hpu_llama4_post_load_patches(model_runner.model)
     if is_qwen_moe:
@@ -2623,6 +2644,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks: list = [blocks[:num] for blocks, num in zip(contents.blocks, num_context_blocks)]
         num_context_blocks = [len(b) for b in context_blocks]
         context_groups = [[i] * b for i, b in enumerate(num_context_blocks)]
+        if self.interleaved_sliding_window and self._get_model_type() == "gemma4":
+            # Keep one extra block: a `sliding_window`-token window that ends at an
+            # arbitrary (non-block-aligned) context boundary straddles
+            # `sliding_window // block_size + 1` blocks.
+            # Dropping it would silently mask real in-window tokens for
+            # chunked prefill with a non-block-aligned context_len.
+            sliding_block_size = self.sliding_window // self.attn_block_size + 1
+            window_context_blocks_raw = [blocks[-sliding_block_size:] for blocks in context_blocks]
         # Bucketing uses self.block_size so that file-based buckets
         # (generated at the original block_size) continue to match.
         bucketing_ctx_blocks = [round_up(ctx_len, self.block_size) // self.block_size for ctx_len in context_lens]
@@ -2877,7 +2906,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_lens = async_h2d_copy(context_lens, dtype=torch.int32)
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
-
+        window_context_blocks_t = None
+        # Only keep the last window_size // block_size context blocks per sequence.
+        # window_context_blocks_raw was sliced from the UNPADDED per-request block
+        # lists (before align_and_pad appended -1 sentinels), so it holds each
+        # request's real last-window blocks. Pad it to (target_bs, sliding_block_size)
+        # -- a fixed-width bucket independent of target_blocks -- rather than reusing
+        # context_blocks' batch-wide target_blocks shape.
+        if self.interleaved_sliding_window and self._get_model_type() == "gemma4" and target_blocks > 0:
+            window_context_blocks = align_and_pad(window_context_blocks_raw, (target_bs, sliding_block_size),
+                                                  itertools.repeat(-1))
+            window_context_blocks_t = async_h2d_copy(window_context_blocks, dtype=torch.int32).flatten()
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=query_lens,
             context_lens_tensor=context_lens,
@@ -2894,7 +2933,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             padding_mask_flat=padding_mask_flat,
             blocks_caching_range=blocks_caching_range,
             mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
-            seqlens_offsets_for_blocks=seqlens_offsets_for_blocks)
+            seqlens_offsets_for_blocks=seqlens_offsets_for_blocks,
+            window_block_list=window_context_blocks_t)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -5624,10 +5664,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return prompt_cfg, decode_cfg
 
     def get_patch_size_from_model(self):
-        """Get patch_size from the loaded vision model."""
-        # For Qwen2.5-VL and similar models
-        if hasattr(self.model.model, 'visual'):
-            return self.model.model.visual.patch_size
+        """Get patch_size from the loaded vision model.
+
+        Different vision models expose the tower at different attribute names
+        and nesting depths, so probe the known layouts:
+          * Qwen2.5-VL and similar: ``model.model.visual.patch_size``
+          * Kimi-K2.5/K2.6 (MoonViT): ``vision_tower.patch_size``
+        Falls back to 1 only when no known vision tower is found.
+        """
+        model = self.get_model()
+        candidates = [
+            getattr(getattr(model, 'model', None), 'visual', None),
+            getattr(model, 'visual', None),
+            getattr(model, 'vision_tower', None),
+        ]
+        for vision_model in candidates:
+            patch_size = getattr(vision_model, 'patch_size', None)
+            if patch_size is not None:
+                # Some towers store patch_size as a (h, w) tuple/list.
+                if isinstance(patch_size, (tuple, list)):
+                    return int(patch_size[0])
+                return int(patch_size)
         return 1
 
     def _get_dummy_mm_inputs_with_options(
@@ -5640,10 +5697,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     ):
         """Helper to get dummy multimodal inputs with custom options."""
 
+        # Modalities whose items are single still images at a raw WxH and can
+        # therefore be warmed through the raw-image path below. 'image' is the
+        # generic case; 'vision_chunk' is Kimi-K2.5/K2.6's unified image/video
+        # modality, whose image items are still PIL images (wrapped in a
+        # VisionChunkImage dict) that resize per-resolution in the tower.
+        image_like_modalities = ('image', 'vision_chunk')
+
         # Create custom mm_options with specific width/height
         mm_options = None
         if width is not None and height is not None:
-            if modality == 'image':
+            if modality in image_like_modalities:
+                # Keyed as "image" only to mark the raw path as active; the raw
+                # branch below does not read mm_options, so the key/modality
+                # mismatch for vision_chunk is harmless.
                 mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height)}
             elif modality == 'video':
                 mm_options = {
@@ -5660,11 +5727,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Use the registry's API with custom mm_options
         if mm_options is not None:
             processor = self._get_mm_warmup_processor()
-            processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
-                seq_len=self.model_config_copy.max_model_len,
-                mm_counts={modality: count},
-                mm_options=mm_options,
-            )
+            if modality in image_like_modalities:
+                # Build the dummy image at the requested raw WxH directly and
+                # run it through the model's own processor. The upstream
+                # DummyInputsBuilder._get_dummy_images clamps width/height
+                # independently against the model's max-feature size, which
+                # distorts the aspect ratio (e.g. 1770x1180 -> 1120x1180 ->
+                # wrong grid) so the warmed grid no longer matches what a real
+                # image of that resolution produces at serving time. Feeding a
+                # raw image straight through processor.apply lets the model's
+                # resize (smart_resize / navit_resize / ...) pick the exact
+                # same grid as real traffic, guaranteeing a warmup cache hit.
+                processor_inputs = self._build_raw_image_processor_inputs(processor, modality, count, width, height)
+            else:
+                processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                    seq_len=self.model_config_copy.max_model_len,
+                    mm_counts={modality: count},
+                    mm_options=mm_options,
+                )
             from vllm.multimodal.processing import TimingContext
             dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
         else:
@@ -5676,6 +5756,43 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             )
 
         return dummy_mm_inputs
+
+    def _build_raw_image_processor_inputs(self, processor, modality, count, width, height):
+        """Build ProcessorInputs from raw WxH images, bypassing the upstream
+        per-dimension clamp in DummyInputsBuilder._get_dummy_images.
+
+        Mirrors get_dummy_processor_inputs (dummy_text + parse_mm_data +
+        ProcessorInputs) but supplies our own solid image at the requested raw
+        WxH. The upstream builder clamps width and height *independently*
+        against the model's max-feature size, distorting the aspect ratio so
+        the warmed grid stops matching real traffic. Feeding the raw image
+        straight through processor.apply lets the model's own resize
+        (smart_resize / navit_resize / ...) pick exactly the same grid it
+        would for a real image of that resolution -- including scaling an
+        oversized image down -- so warmup and serving grids are identical by
+        construction.
+        """
+        from PIL import Image
+        from vllm.multimodal.processing.inputs import ProcessorInputs
+
+        images = [Image.new("RGB", (width, height), color=255)] * count
+
+        # vision_chunk (Kimi-K2.5/K2.6) does not accept bare PIL images: its
+        # parser expects VisionChunkImage dicts ({"type": "image", "image":
+        # PIL}). 'image' takes the raw PIL directly. Wrap accordingly so the
+        # raw WxH still flows through the model's own resize (navit_resize) and
+        # the warmed grid matches real serving traffic.
+        mm_items = ([{"type": "image", "image": img} for img in images] if modality == 'vision_chunk' else images)
+
+        dummy_builder = processor.dummy_inputs
+        dummy_text = dummy_builder.get_dummy_text({modality: count})
+        mm_data_items = processor.info.parse_mm_data({modality: mm_items}, validate=False)
+
+        return ProcessorInputs(
+            prompt=dummy_text,
+            mm_data_items=mm_data_items,
+            tokenization_kwargs={"truncation": False},
+        )
 
     def _get_mm_warmup_processor(self):
         if self._mm_warmup_processor is None:
@@ -5746,22 +5863,40 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Get width/height from config if available for warmup_lists
         warmup_lists = []
 
-        if not is_batch_based and mm_config:
-            # Try to get dimensions from enabled modality config
-            for modality in ["image", "video"]:
-                if modality == "image" and not is_image_warmup:
-                    continue
-                if modality == "video" and not is_video_warmup:
-                    continue
-                mm_options = mm_config.limit_per_prompt.get(modality)
-                if mm_options:
-                    width = getattr(mm_options, 'width', None)
-                    height = getattr(mm_options, 'height', None)
-                    if width is not None and height is not None:
-                        warmup_lists.append((width, height))
-                        break
+        # Collect explicit warmup resolutions (raw pixel WxH) from both
+        # sources and union them:
+        #   - VLLM_MULTIMODAL_RESOLUTIONS="1024x768,768x1024" (multi-res)
+        #   - limit_mm_per_prompt.<modality>.{width,height}    (single res)
+        # These raw WxH flow through the model's processor (smart_resize /
+        # navit_resize / ...), so the compiled grid matches real requests at
+        # the same WxH. Feed raw pixels here; never a pre-divided grid.
+        # When any explicit resolution is present for a non-batch model, warm
+        # up exactly those and skip the aspect-ratio shapes guessed from the
+        # patch-count buckets.
+        explicit_resolutions: list[tuple[int, int]] = []
+        if not is_batch_based:
+            explicit_resolutions.extend(getattr(vision_bucket_manager, 'multimodal_resolutions', []))
 
-        if not is_batch_based and len(buckets) > 0:
+            if mm_config:
+                # Try to get dimensions from enabled modality config
+                for modality in ["image", "video"]:
+                    if modality == "image" and not is_image_warmup:
+                        continue
+                    if modality == "video" and not is_video_warmup:
+                        continue
+                    mm_options = mm_config.limit_per_prompt.get(modality)
+                    if mm_options:
+                        width = getattr(mm_options, 'width', None)
+                        height = getattr(mm_options, 'height', None)
+                        if width is not None and height is not None:
+                            explicit_resolutions.append((width, height))
+                            break
+
+        if not is_batch_based and explicit_resolutions:
+            # Dedupe while preserving order.
+            warmup_lists = list(dict.fromkeys(explicit_resolutions))
+            logger.info("Using explicit multimodal warmup resolutions (WxH): %s", warmup_lists)
+        elif not is_batch_based and len(buckets) > 0:
             patch_size = int(self.get_patch_size_from_model())
             warmup_lists = warmup_lists + \
                 vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
@@ -6584,7 +6719,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 layer_names.add(layer_name)
         # Set up cross-layer KV cache sharing
         if self.shared_kv_cache_layers:
-            logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
+            #logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
                 kv_caches[layer_name] = kv_caches[target_layer_name]
         assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
@@ -7213,15 +7348,29 @@ class HPUAttentionMetadataProcessor:
             context_lens_t = prefill_metadata.context_lens_tensor
             assert context_lens_t is not None, "context_lens_tensor is required to build attn_bias"
 
-            block_list = attn_metadata.block_list
-            max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
+            window_block_list = getattr(attn_metadata, 'window_block_list', None)
+            block_list_for_mask = window_block_list if window_block_list is not None \
+                else attn_metadata.block_list
+            max_context_len = (block_list_for_mask.size(-1) // batch_size if block_list_for_mask is not None else 0)
             block_size = getattr(prefill_metadata, "block_size", self.block_size)
             max_context_len = max_context_len * block_size
 
-            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-            past_indices = torch.arange(max_context_len, device=device)
-            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+            if window_block_list is not None:
+                # Re-anchor ctx_len to the block-aligned gather frame so a
+                # non-block-aligned ctx_len doesn't misalign the sliding-window mask.
+                round_up_ctx = ((context_lens_t + block_size - 1) // block_size) * block_size
+                frame_base = torch.clamp(round_up_ctx - max_context_len, min=0)
+                context_lens_trimmed = context_lens_t - frame_base
+                invalid_lens_t = context_lens_trimmed - window_size + torch.arange(seq_len, device=device) - 1
+                past_indices = torch.arange(max_context_len, device=device)
+                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices.unsqueeze(0) < context_lens_trimmed.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+            else:
+                # Full block list: use absolute coordinate frame with window lower bound
+                invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
+                past_indices = torch.arange(max_context_len, device=device)
+                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
 
             # Create boolean sliding window mask
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)

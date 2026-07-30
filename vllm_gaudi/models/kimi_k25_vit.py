@@ -20,6 +20,7 @@ approach ``qwen3_5.py`` uses for GDN attention):
    re-wrapped in the module's own first-call shape decorator.
 """
 
+import habana_frameworks.torch.internal.bridge_config as bridge_config
 import torch
 import torch.nn.functional as F
 
@@ -73,15 +74,34 @@ def get_freqs_cis(self, grid_thws, device: torch.device) -> torch.Tensor:
 
     Identical to upstream but reshapes/repeats with the extra trailing (cos, sin)
     axis carried by the real ``freqs_cis`` buffer (``..., dim/2, 2``).
+
+    The ``freqs_cis`` table is materialized lazily and cached on first call, so
+    upstream steady-state behaviour is unchanged: it is built once — on ``device``,
+    in float32 (``_precompute_freqs_cis`` calls ``.float()``), AFTER the vision
+    tower's ``.to(dtype=...)`` has run — then reused. The only change is the
+    ``PT_COMPILE_ONLY_MODE`` guard: during HPU warmup Synapse compiles the recipe
+    without executing kernels, so ``_precompute_freqs_cis`` returns an
+    *uninitialized* tensor. Caching that garbage (as the plain ``hasattr`` guard
+    would) permanently poisons every real vision forward, yielding token-0 ("!")
+    output. So in compile-only mode we build the table for recipe compilation but
+    do NOT cache it; the first genuinely-executed forward then computes and caches
+    the real values. The per-bucket slice/reshape/repeat/concat recipes are
+    identical either way (same shapes), so no runtime recompilation results — the
+    Kimi vision tower runs eager (not hpu-graph-wrapped; ``compile_mm_encoder`` is
+    off), and eager recipes are keyed by shape, not by surrounding ops.
     """
-    if not hasattr(self, "freqs_cis"):
-        self.register_buffer("freqs_cis", _precompute_freqs_cis(self, device), persistent=False)
+    if hasattr(self, "freqs_cis"):
+        freqs_cis_buf = self.freqs_cis
+    else:
+        freqs_cis_buf = _precompute_freqs_cis(self, device)
+        if not bridge_config.get_pt_compile_only_mode():
+            self.register_buffer("freqs_cis", freqs_cis_buf, persistent=False)
 
     shapes = grid_thws if isinstance(grid_thws, list) else grid_thws.tolist()
     assert all(1 <= h <= self.max_height and 1 <= w <= self.max_width for t, h, w in shapes), \
         (shapes, self.max_height, self.max_width)
     return torch.cat(
-        [self.freqs_cis[:h, :w].reshape(-1, self.dim // 2, 2).repeat(t, 1, 1) for t, h, w in shapes],
+        [freqs_cis_buf[:h, :w].reshape(-1, self.dim // 2, 2).repeat(t, 1, 1) for t, h, w in shapes],
         dim=0,
     )
 

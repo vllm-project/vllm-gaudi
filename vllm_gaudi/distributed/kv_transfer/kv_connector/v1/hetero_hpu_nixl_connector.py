@@ -63,7 +63,9 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
+    SlidingWindowSpec,
 )
+from vllm.utils.math_utils import cdiv
 
 from typing import Any
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
@@ -292,6 +294,29 @@ def NixlConnectorScheduler_init_(self, vllm_config: VllmConfig, engine_id: str, 
     # Reverse lookup: local req_id -> (engine_id, remote_req_id) for O(1) removal
     self._heartbeat_req_engine: dict[ReqId, tuple[EngineId, ReqId]] = {}  # type: ignore[misc]
     self._last_heartbeat_time = 0.0
+
+    # Attributes expected by the (non-overridden) upstream base/pull scheduler
+    # methods.  This override replaces NixlConnectorScheduler.__init__ wholesale,
+    # so anything upstream sets there has to be mirrored or the shared paths
+    # raise AttributeError at runtime.  Values mirror upstream defaults.
+    self.kv_cache_config = kv_cache_config
+    self._kv_lease_duration = int(vllm_config.kv_transfer_config.get_from_extra_config("kv_lease_duration", 30))
+    self._heartbeat_interval = self._kv_lease_duration // 6
+    self.decoder_kv_blocks_ttl = vllm_config.kv_transfer_config.get_from_extra_config("decoder_kv_blocks_ttl", 480)
+    self.kv_recompute_threshold = int(vllm_config.kv_transfer_config.get_from_extra_config(
+        "kv_recompute_threshold", 64))
+    self.is_bidirectional_kv_xfer_enabled = vllm_config.kv_transfer_config.get_from_extra_config(
+        "bidirectional_kv_xfer", False)
+    # Hybrid memory allocator / sliding-window block clipping bookkeeping.
+    self._is_hma_required = (not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+                             and any(not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                                     for g in kv_cache_config.kv_cache_groups))
+    sw_sizes_tokens: list[tuple[int, int]] = [  # type: ignore[misc]
+        (g.kv_cache_spec.sliding_window,
+         g.kv_cache_spec.block_size) if isinstance(g.kv_cache_spec, SlidingWindowSpec) else (0, self.block_size)
+        for g in kv_cache_config.kv_cache_groups
+    ]
+    self.blocks_per_sw = [cdiv(n_tokens, block_size) + 1 if n_tokens else 0 for n_tokens, block_size in sw_sizes_tokens]
 
 
 def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
@@ -851,6 +876,20 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
     # handshake/validation code. Mirror upstream NixlConnectorWorker.__init__.
     # (kv_cache_config is already set above.)
     self.attn_backends = [backend]
+    # Upstream base_worker sets these in its own __init__ (which this override
+    # replaces) and the shared handshake / xfer paths read them.  Without
+    # pp_size the D-side handshake fails with "no attribute 'pp_size'"; the
+    # other two are pipeline-parallel bookkeeping whose upstream defaults are
+    # the correct values for the PP=1 path this connector exercises.
+    self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+    self._remote_region_offset = 0
+    self._hb_handshake_notif_only = False
+    # Bi-directional (D->P) KV transfer opt-in and the per-remote-engine clock
+    # offsets learned during the handshake; both are read by the shared
+    # base/pull worker paths (_read_blocks lease checks, add_remote_agent).
+    self._bidirectional_kv_xfer_enabled = vllm_config.kv_transfer_config.get_from_extra_config(
+        "bidirectional_kv_xfer", False)
+    self._engine_clock_offset: dict[EngineId, float] = {}  # type: ignore[misc]
     self._layer_specs = {
         layer: group.kv_cache_spec
         for group in kv_cache_config.kv_cache_groups
@@ -1400,7 +1439,11 @@ def kv_caches_postprocess(self, metadata: NixlConnectorMetadata):
 
     block_ids_to_permute = []
     for _, meta in metadata.reqs_to_save.items():
-        meta.local_physical_block_ids = self._logical_to_kernel_block_ids(meta.local_block_ids)
+        # Upstream made `ratio` an explicit arg instead of reading it off the
+        # worker; mirror its own local-save callsites and pass the tracked
+        # physical-per-logical block ratio.
+        meta.local_physical_block_ids = self._logical_to_kernel_block_ids(meta.local_block_ids,
+                                                                          self._physical_blocks_per_logical_kv_block)
         block_ids_to_permute.append(meta.local_physical_block_ids)
     for block_ids in block_ids_to_permute:
         post_process_device_kv_on_save(self, block_ids)
