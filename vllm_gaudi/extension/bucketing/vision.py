@@ -44,28 +44,28 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': False,
         'buckets': [1600, 2048, 3072, 6144, 8192, 131076]
     },
+    # Native-resolution towers with NO guessed-bucket warmup. Empty 'buckets'
+    # means the runner skips the aspect-ratio grid (those guessed shapes match
+    # no real request here and only lengthen warmup). The entry is still
+    # required so is_batch_based stays False -- deleting it would fall back to
+    # the batch-based default [1,2,4,8], which mis-buckets these towers.
+    #
+    # IMPORTANT: with empty buckets the operator MUST set
+    # VLLM_MULTIMODAL_RESOLUTIONS (or limit-mm-per-prompt width/height) to get
+    # any vision warmup; otherwise warmup_lists is empty and the first real
+    # request at each resolution recompiles on the critical path. The runner
+    # logs a warning at startup when this is the case.
     'qwen3_5': {
         'is_batch_based': False,
-        # patches per image
-        'buckets': [196, 256, 441, 480, 576, 900, 1156]
+        'buckets': []
     },
     'kimi_k25': {
-        # MoonViT is a native-resolution (patch-count) tower, like qwen2_5_vl.
-        # Without this entry it falls back to the batch-based default [1,2,4,8],
-        # which mis-buckets the variable patch count and recompiles per shape.
         'is_batch_based': False,
-        # patches per image (<= in_patch_limit=16384)
-        'buckets': [256, 576, 1024, 1600, 3136, 4096, 6400, 9216, 12544, 16384]
+        'buckets': []
     },
     'gemma4': {
-        # Gemma4's vision tower rescales each image to <= max_soft_tokens and
-        # buckets by patch count (like qwen/kimi), not fixed-resolution like
-        # gemma3. Without this entry it falls back to the batch-based default
-        # [1, 2, 4, 8], never compiling the real production resolution.
         'is_batch_based': False,
-        # patches per image (864x480 at patch_size=16 rescales toward
-        # max_soft_tokens=280 => ~2376 patches; buckets span the workload).
-        'buckets': [196, 256, 441, 480, 576, 900, 1156]
+        'buckets': []
     },
 }
 
@@ -93,18 +93,27 @@ class HPUVisionBucketManager:
                 multimodal_buckets = [int(x) for x in envvar.split(',')]
             self.multimodal_buckets = self._process_buckets(multimodal_buckets)
 
-        # Optional explicit warmup resolutions (raw pixel WxH), e.g.
-        # VLLM_MULTIMODAL_RESOLUTIONS="1024x768,768x1024". When set for a
-        # non-batch (native-resolution) model, warmup uses exactly these
-        # resolutions instead of the aspect-ratio shapes derived from the
-        # patch-count buckets. The raw WxH are fed through the model's own
-        # processor (smart_resize / navit_resize / ...), so the compiled
-        # grid matches what real requests at the same WxH produce.
         self.multimodal_resolutions = self._parse_resolutions(os.environ.get('VLLM_MULTIMODAL_RESOLUTIONS', ""))
 
     @staticmethod
     def _parse_resolutions(envvar):
-        """Parse "WxH,WxH,..." into a list of (width, height) int pairs."""
+        """Parse VLLM_MULTIMODAL_RESOLUTIONS into (width, height, count_spec)
+        triples. Item counts are operator-controlled; the runner never
+        enumerates counts on its own -- the operator declares exactly which
+        counts to warm. Three per-entry forms:
+
+          - "WxH"      -> count_spec None: warm ONE graph at count =
+                          user_max_count (the limit-mm-per-prompt ceiling).
+          - "WxHxN"    -> count_spec int N: warm ONLY the count-N graph. Use
+                          when traffic always sends N images and caching is off.
+          - "WxHxN-M"  -> count_spec (N, M): warm the item-count RANGE [N, M]
+                          (clamped to user_max_count). Declare this when the
+                          per-call count varies -- mixed request sizes, or
+                          prefix/image caching making the uncached count land
+                          anywhere in the range. Example: "864x480x1-20".
+
+        Counts are per-call item counts reaching the vision tower, not pixels.
+        """
         if not envvar:
             return []
         resolutions = []
@@ -112,8 +121,25 @@ class HPUVisionBucketManager:
             item = item.strip()
             if not item:
                 continue
-            w, h = item.lower().split('x')
-            resolutions.append((int(w), int(h)))
+            parts = item.lower().split('x')
+            if len(parts) == 2:
+                w, h = parts
+                resolutions.append((int(w), int(h), None))
+            elif len(parts) == 3:
+                w, h, n = parts
+                if '-' in n:
+                    lo, hi = n.split('-', 1)
+                    lo_i, hi_i = int(lo), int(hi)
+                    if lo_i < 1 or hi_i < lo_i:
+                        raise ValueError(f"Invalid count range '{n}' in "
+                                         f"VLLM_MULTIMODAL_RESOLUTIONS entry '{item}'; "
+                                         "expected 'N-M' with 1 <= N <= M")
+                    resolutions.append((int(w), int(h), (lo_i, hi_i)))
+                else:
+                    resolutions.append((int(w), int(h), int(n)))
+            else:
+                raise ValueError(f"Invalid VLLM_MULTIMODAL_RESOLUTIONS entry '{item}'; "
+                                 "expected 'WxH', 'WxHxN', or 'WxHxN-M'")
         return resolutions
 
     def _get_multimodal_config(self, model_name):

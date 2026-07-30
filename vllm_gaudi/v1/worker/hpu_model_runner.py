@@ -176,6 +176,11 @@ HPU_TORCH_DTYPE_TO_STR_DTYPE = {
 
 shutdown_inc_called = False
 
+# Warn once if a single modality's multimodal warmup will compile more than
+# this many vision-tower graphs (one per item count per resolution). Wide
+# VLLM_MULTIMODAL_RESOLUTIONS count ranges multiply the total quickly.
+_MM_WARMUP_GRAPH_WARN_THRESHOLD = 25
+
 
 @contextlib.contextmanager
 def _override_platform_device_type(device_type: str):
@@ -5769,6 +5774,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         image_args: int,
         width: int,
         height: int,
+        count_override: int | None = None,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
@@ -5776,8 +5782,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             batch = image_args
             count = 1
         else:
-            mm_options = self.model_config.get_multimodal_config().limit_per_prompt.get(modality)
+            mm_options = self._resolve_mm_limit_options(self.model_config.get_multimodal_config(), modality)
             count = mm_options.count if mm_options and hasattr(mm_options, 'count') else 1
+            if count_override is not None:
+                count = count_override
             batch = count
 
         # Get num_frames for video modality
@@ -5807,6 +5815,36 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
         ))
 
+    def _resolve_mm_limit_options(self, mm_config, modality):
+        """limit_per_prompt options for `modality`, with a generic-key fallback.
+
+        Native-resolution towers report their own modality (Kimi:
+        'vision_chunk'), but operators usually configure the per-prompt count
+        under the generic CLI key 'image'/'video'
+        (--limit-mm-per-prompt '{"image": {"count": 20}}'). Without the
+        fallback, limit_per_prompt.get('vision_chunk') returns None and count
+        silently defaults to 1 -> warmup compiles only the 1-item graph and
+        every real (N-item) request recompiles. Prefer the exact-modality
+        entry; fall back to 'image'/'video' only when it is absent.
+        """
+        if mm_config is None:
+            return None
+        mm_options = mm_config.limit_per_prompt.get(modality)
+        if mm_options is not None:
+            return mm_options
+        fallback_keys: tuple[str, ...]
+        if modality in ('image', 'vision_chunk'):
+            fallback_keys = ('image', 'video')
+        elif modality == 'video':
+            fallback_keys = ('video', 'image')
+        else:
+            fallback_keys = ()
+        for key in fallback_keys:
+            mm_options = mm_config.limit_per_prompt.get(key)
+            if mm_options is not None:
+                return mm_options
+        return None
+
     def warmup_multimodal_graphs(self, buckets):
 
         phase = 'Graph/Multimodal'
@@ -5830,68 +5868,121 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # sources and union them:
         #   - VLLM_MULTIMODAL_RESOLUTIONS="1024x768,768x1024" (multi-res)
         #   - limit_mm_per_prompt.<modality>.{width,height}    (single res)
-        # These raw WxH flow through the model's processor (smart_resize /
-        # navit_resize / ...), so the compiled grid matches real requests at
-        # the same WxH. Feed raw pixels here; never a pre-divided grid.
-        # When any explicit resolution is present for a non-batch model, warm
-        # up exactly those and skip the aspect-ratio shapes guessed from the
-        # patch-count buckets.
-        explicit_resolutions: list[tuple[int, int]] = []
+        explicit_resolutions: list[tuple[int, int, int | tuple[int, int] | None]] = []
         if not is_batch_based:
             explicit_resolutions.extend(getattr(vision_bucket_manager, 'multimodal_resolutions', []))
 
             if mm_config:
-                # Try to get dimensions from enabled modality config
-                for modality in ["image", "video"]:
-                    if modality == "image" and not is_image_warmup:
-                        continue
-                    if modality == "video" and not is_video_warmup:
-                        continue
+                for modality in self.mm_budget.mm_limits:
                     mm_options = mm_config.limit_per_prompt.get(modality)
-                    if mm_options:
-                        width = getattr(mm_options, 'width', None)
-                        height = getattr(mm_options, 'height', None)
-                        if width is not None and height is not None:
-                            explicit_resolutions.append((width, height))
-                            break
+                    if mm_options is None:
+                        continue
+                    width = getattr(mm_options, 'width', None)
+                    height = getattr(mm_options, 'height', None)
+                    if width is not None and height is not None:
+                        explicit_resolutions.append((width, height, None))
 
-        if not is_batch_based and explicit_resolutions:
-            # Dedupe while preserving order.
-            warmup_lists = list(dict.fromkeys(explicit_resolutions))
-            logger.info("Using explicit multimodal warmup resolutions (WxH): %s", warmup_lists)
-        elif not is_batch_based and len(buckets) > 0:
-            patch_size = int(self.get_patch_size_from_model())
-            warmup_lists = warmup_lists + \
-                vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
+        # Non-batch models warm the guessed aspect-ratio shapes (count 1) from
+        # vision.py buckets, plus the explicit operator resolutions on top.
+        if not is_batch_based:
+            guessed_resolutions: list[tuple[int, int, int | tuple[int, int] | None]] = []
+            if len(buckets) > 0:
+                patch_size = int(self.get_patch_size_from_model())
+                guessed_resolutions = [
+                    (w, h, 1) for (w, h) in vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
+                ]
+            # Dedupe, guessed shapes first.
+            warmup_lists = list(dict.fromkeys(guessed_resolutions + explicit_resolutions))
+            if explicit_resolutions:
+                logger.info(
+                    "Using explicit multimodal warmup resolutions (width, "
+                    "height, count[None=max|N=pin|(lo,hi)=range]): %s", explicit_resolutions)
+            elif not warmup_lists:
+                # Native-resolution tower with empty patch-count buckets (e.g.
+                # Gemma4/Kimi/Qwen3.5) and no operator-supplied resolutions:
+                # nothing gets warmed and every resolution recompiles on its
+                # first real request. Make this visible rather than silent.
+                logger.warning("No multimodal warmup resolutions for this "
+                               "native-resolution vision tower: patch-count buckets are "
+                               "empty and neither VLLM_MULTIMODAL_RESOLUTIONS nor "
+                               "limit-mm-per-prompt width/height is set. The vision-tower "
+                               "graph will recompile on the first request at each "
+                               "resolution. Set VLLM_MULTIMODAL_RESOLUTIONS (e.g. "
+                               "\"1024x768,864x480x1-20\") to precompile your production "
+                               "resolutions.")
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
                 continue
             phase = f'Graph/Multimodal({modality})'
             candidates = buckets if is_batch_based else warmup_lists
+            explicit_set = set(explicit_resolutions)
+            mm_options = self._resolve_mm_limit_options(mm_config, modality)
+            user_max_count = mm_options.count if mm_options and hasattr(mm_options, 'count') else 1
+
+            # Count graphs as we go (one per item count per resolution) and warn
+            # once when the running total crosses the threshold. Wide count
+            # ranges in VLLM_MULTIMODAL_RESOLUTIONS multiply this quickly, so
+            # this lets an operator who set e.g. "...x1-50" know why warmup is
+            # taking a while.
+            graph_count = 0
+            warned_graph_count = False
             for idx in range(len(candidates)):
+                counts_to_warm: list[int | None]
                 if is_batch_based:
                     image_args = candidates[idx]
                     width = 896  # pixels as in gemma3 config
                     height = 896  # pixels as in gemma3 config
+                    counts_to_warm = [None]
                 else:
                     image_args = None
-                    width, height = candidates[idx]
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
-                                                                   image_args=image_args,
-                                                                   width=width,
-                                                                   height=height)
-                dummy_encoder_outputs = \
-                    self.model.embed_multimodal(
-                    **batched_dummy_mm_inputs)
-                if is_batch_based:
-                    sanity_check_mm_encoder_outputs(
-                        dummy_encoder_outputs,
-                        expected_num_items=candidates[idx],
-                    )
-                    self.graphed_buckets.add(candidates[idx])
-                self.log_warmup_multimodal(phase, idx, len(candidates), candidates[idx] if is_batch_based else 1, 0,
-                                           width, height)
+                    width, height, count_spec = candidates[idx]
+                    if isinstance(count_spec, tuple):
+                        lo, hi = count_spec
+                        counts_to_warm = list(range(lo, min(hi, user_max_count) + 1))
+                    elif count_spec is not None:
+                        counts_to_warm = [min(count_spec, user_max_count)]
+                    else:
+                        counts_to_warm = [user_max_count]
+                    # Warn only for operator resolutions; guessed shapes are
+                    # intentionally count-1.
+                    if candidates[idx] in explicit_set \
+                            and len(counts_to_warm) == 1 and user_max_count > 1 \
+                            and self.cache_config.enable_prefix_caching:
+                        logger.warning(
+                            "VLLM_MULTIMODAL_RESOLUTIONS warms a single item "
+                            "count (%d) for %dx%d, but prefix caching is "
+                            "enabled: cached image embeds make the per-call "
+                            "uncached count vary in [1, %d], so other counts "
+                            "will recompile at runtime. Declare a range "
+                            "(e.g. \"%dx%dx1-%d\") to warm them.", counts_to_warm[0], width, height, user_max_count,
+                            width, height, user_max_count)
+                graph_count += len(counts_to_warm)
+                if not warned_graph_count and graph_count > _MM_WARMUP_GRAPH_WARN_THRESHOLD:
+                    warned_graph_count = True
+                    logger.warning(
+                        "Multimodal warmup will compile over %d %s graphs (one "
+                        "per item count per resolution). Wide count ranges in "
+                        "VLLM_MULTIMODAL_RESOLUTIONS multiply this and can make "
+                        "warmup slow and memory-heavy; declare only the counts "
+                        "your traffic actually sends.", _MM_WARMUP_GRAPH_WARN_THRESHOLD, modality)
+                for count in counts_to_warm:
+                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
+                                                                       image_args=image_args,
+                                                                       width=width,
+                                                                       height=height,
+                                                                       count_override=count)
+                    dummy_encoder_outputs = \
+                        self.model.embed_multimodal(
+                        **batched_dummy_mm_inputs)
+                    if is_batch_based:
+                        sanity_check_mm_encoder_outputs(
+                            dummy_encoder_outputs,
+                            expected_num_items=candidates[idx],
+                        )
+                        self.graphed_buckets.add(candidates[idx])
+                    batch_size = candidates[idx] if is_batch_based else count
+                    self.log_warmup_multimodal(phase, idx, len(candidates), batch_size, 0, width, height)
 
     @torch.inference_mode()
     def warmup_model(self) -> None:
