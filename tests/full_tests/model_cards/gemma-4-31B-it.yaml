@@ -4,9 +4,9 @@ model_card:
   num_fewshot: 5
   trust_remote_code: true
   limit: 256
-  max_model_len: 4096
+  max_model_len: 262144
   add_bos_token: true
 
 metrics:
   name: exact_match,strict-match
-  value: 0.84
+  value: 0.92
