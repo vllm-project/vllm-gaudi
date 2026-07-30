@@ -83,7 +83,10 @@ class HpuPlatform(Platform):
             return AttentionBackendEnum.CPU_ATTN.get_path()
 
         if attn_selector_config.use_sparse:
-            raise NotImplementedError("Sparse Attention is not supported on HPU.")
+            if not attn_selector_config.use_mla:
+                raise NotImplementedError("Sparse Attention is not supported on HPU.")
+            logger.warning("Sparse attention (DSA) is not implemented on HPU; running DSA layers as dense MLA "
+                           "(exact for sequences up to index_topk tokens, approximate beyond).")
 
         if attn_selector_config.use_mla:
             logger.info("Using HPUAttentionMLA backend.")
