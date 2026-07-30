@@ -44,9 +44,17 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': False,
         'buckets': [1600, 2048, 3072, 6144, 8192, 131076]
     },
-    # No guessed-bucket warmup; configure via VLLM_MULTIMODAL_RESOLUTIONS /
-    # limit-mm WxH. Entry still required: absence falls back to batch-based
-    # [1,2,4,8].
+    # Native-resolution towers with NO guessed-bucket warmup. Empty 'buckets'
+    # means the runner skips the aspect-ratio grid (those guessed shapes match
+    # no real request here and only lengthen warmup). The entry is still
+    # required so is_batch_based stays False -- deleting it would fall back to
+    # the batch-based default [1,2,4,8], which mis-buckets these towers.
+    #
+    # IMPORTANT: with empty buckets the operator MUST set
+    # VLLM_MULTIMODAL_RESOLUTIONS (or limit-mm-per-prompt width/height) to get
+    # any vision warmup; otherwise warmup_lists is empty and the first real
+    # request at each resolution recompiles on the critical path. The runner
+    # logs a warning at startup when this is the case.
     'qwen3_5': {
         'is_batch_based': False,
         'buckets': []
@@ -123,10 +131,9 @@ class HPUVisionBucketManager:
                     lo, hi = n.split('-', 1)
                     lo_i, hi_i = int(lo), int(hi)
                     if lo_i < 1 or hi_i < lo_i:
-                        raise ValueError(
-                            f"Invalid count range '{n}' in "
-                            f"VLLM_MULTIMODAL_RESOLUTIONS entry '{item}'; "
-                            "expected 'N-M' with 1 <= N <= M")
+                        raise ValueError(f"Invalid count range '{n}' in "
+                                         f"VLLM_MULTIMODAL_RESOLUTIONS entry '{item}'; "
+                                         "expected 'N-M' with 1 <= N <= M")
                     resolutions.append((int(w), int(h), (lo_i, hi_i)))
                 else:
                     resolutions.append((int(w), int(h), int(n)))

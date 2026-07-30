@@ -149,7 +149,7 @@ If warm-up is globally skipped, these logs do not appear.
 
 Native-resolution vision towers (e.g. Gemma4, Kimi-K2.5/K2.6, Qwen2.5/3/3.5-VL) produce a different patch grid per image resolution, unlike batch-based towers (e.g. Gemma3) which only vary by batch size. If a real request's resolution does not match anything warmed at startup, the vision-tower graph recompiles on the critical path.
 
-By default, warm-up derives a spread of aspect-ratio shapes from the model's patch-count buckets (`VLLM_MULTIMODAL_BUCKETS`). To guarantee a specific production resolution is precompiled, set `VLLM_MULTIMODAL_RESOLUTIONS` to a comma-separated list of raw pixel resolution entries:
+By default, warm-up derives a spread of aspect-ratio shapes from the model's patch-count buckets (`VLLM_MULTIMODAL_BUCKETS`). Some native-resolution towers (Gemma4, Kimi-K2.5/K2.6, Qwen3.5) ship with **empty** patch-count buckets on purpose — the guessed aspect-ratio shapes match no real request for these models and only lengthen warm-up. For them there is no guessed warm-up at all, so you **must** set `VLLM_MULTIMODAL_RESOLUTIONS` (or `--limit-mm-per-prompt` width/height) to precompile anything; otherwise the vision-tower graph recompiles on the first real request at each resolution (the runner logs a warning at startup when this happens). To guarantee a specific production resolution is precompiled, set `VLLM_MULTIMODAL_RESOLUTIONS` to a comma-separated list of raw pixel resolution entries:
 
 ```text
 VLLM_MULTIMODAL_RESOLUTIONS=1024x768,768x1024
@@ -168,6 +168,9 @@ Each entry may optionally carry an **item-count axis** that controls how many im
 ```text
 VLLM_MULTIMODAL_RESOLUTIONS=1024x768,768x1024x2,864x480x1-20
 ```
+
+!!! warning
+    A range warms **one full graph per item count**, per resolution. `864x480x1-20` compiles 20 graphs for that single resolution, and each additional ranged entry multiplies on top. A wide range (e.g. `1-50`) can make warm-up time and memory blow up fast — declare only the counts your traffic actually sends, not a broad span "just in case."
 
 The `width`/`height` given via `--limit-mm-per-prompt` (e.g. `--limit-mm-per-prompt '{"image": {"count": 1, "width": 1024, "height": 768}}'`) are unioned with `VLLM_MULTIMODAL_RESOLUTIONS`. Each resolution is built as a raw solid-color image and fed through the model's own processor (`smart_resize`/`navit_resize`/...), rather than a precomputed grid, so the compiled graph matches exactly what a real request at that resolution produces. This is supported for the `image` modality and for Kimi-K2.5/K2.6's `vision_chunk` modality.
 

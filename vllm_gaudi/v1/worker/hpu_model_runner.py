@@ -176,6 +176,11 @@ HPU_TORCH_DTYPE_TO_STR_DTYPE = {
 
 shutdown_inc_called = False
 
+# Warn once if a single modality's multimodal warmup will compile more than
+# this many vision-tower graphs (one per item count per resolution). Wide
+# VLLM_MULTIMODAL_RESOLUTIONS count ranges multiply the total quickly.
+_MM_WARMUP_GRAPH_WARN_THRESHOLD = 25
+
 
 @contextlib.contextmanager
 def _override_platform_device_type(device_type: str):
@@ -5925,9 +5930,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Dedupe, guessed shapes first.
             warmup_lists = list(dict.fromkeys(guessed_resolutions + explicit_resolutions))
             if explicit_resolutions:
-                logger.debug(
+                logger.info(
                     "Using explicit multimodal warmup resolutions (width, "
                     "height, count[None=max|N=pin|(lo,hi)=range]): %s", explicit_resolutions)
+            elif not warmup_lists:
+                # Native-resolution tower with empty patch-count buckets (e.g.
+                # Gemma4/Kimi/Qwen3.5) and no operator-supplied resolutions:
+                # nothing gets warmed and every resolution recompiles on its
+                # first real request. Make this visible rather than silent.
+                logger.warning("No multimodal warmup resolutions for this "
+                               "native-resolution vision tower: patch-count buckets are "
+                               "empty and neither VLLM_MULTIMODAL_RESOLUTIONS nor "
+                               "limit-mm-per-prompt width/height is set. The vision-tower "
+                               "graph will recompile on the first request at each "
+                               "resolution. Set VLLM_MULTIMODAL_RESOLUTIONS (e.g. "
+                               "\"1024x768,864x480x1-20\") to precompile your production "
+                               "resolutions.")
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
@@ -5937,6 +5955,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             explicit_set = set(explicit_resolutions)
             mm_options = self._resolve_mm_limit_options(mm_config, modality)
             user_max_count = mm_options.count if mm_options and hasattr(mm_options, 'count') else 1
+
+            # Count graphs as we go (one per item count per resolution) and warn
+            # once when the running total crosses the threshold. Wide count
+            # ranges in VLLM_MULTIMODAL_RESOLUTIONS multiply this quickly, so
+            # this lets an operator who set e.g. "...x1-50" know why warmup is
+            # taking a while.
+            graph_count = 0
+            warned_graph_count = False
             for idx in range(len(candidates)):
                 if is_batch_based:
                     image_args = candidates[idx]
@@ -5966,6 +5992,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             "will recompile at runtime. Declare a range "
                             "(e.g. \"%dx%dx1-%d\") to warm them.", counts_to_warm[0], width, height, user_max_count,
                             width, height, user_max_count)
+                graph_count += len(counts_to_warm)
+                if not warned_graph_count and graph_count > _MM_WARMUP_GRAPH_WARN_THRESHOLD:
+                    warned_graph_count = True
+                    logger.warning(
+                        "Multimodal warmup will compile over %d %s graphs (one "
+                        "per item count per resolution). Wide count ranges in "
+                        "VLLM_MULTIMODAL_RESOLUTIONS multiply this and can make "
+                        "warmup slow and memory-heavy; declare only the counts "
+                        "your traffic actually sends.", _MM_WARMUP_GRAPH_WARN_THRESHOLD, modality)
                 for count in counts_to_warm:
                     batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
                                                                        image_args=image_args,
