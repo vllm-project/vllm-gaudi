@@ -5869,6 +5869,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         mm_options = mm_config.limit_per_prompt.get(modality)
         if mm_options is not None:
             return mm_options
+        fallback_keys: tuple[str, ...]
         if modality in ('image', 'vision_chunk'):
             fallback_keys = ('image', 'video')
         elif modality == 'video':
@@ -5964,6 +5965,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             graph_count = 0
             warned_graph_count = False
             for idx in range(len(candidates)):
+                counts_to_warm: list[int | None]
                 if is_batch_based:
                     image_args = candidates[idx]
                     width = 896  # pixels as in gemma3 config
