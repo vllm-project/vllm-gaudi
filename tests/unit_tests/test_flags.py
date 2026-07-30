@@ -200,6 +200,7 @@ def test_for_all_rejects_out_of_range_value():
     # not a crash.
     error = check(['a', 'c'])
     assert error is not None
+    assert error.startswith('Errors:')
     assert 'c' in error
 
 

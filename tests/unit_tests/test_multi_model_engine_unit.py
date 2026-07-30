@@ -313,6 +313,9 @@ def test_deserialize_reconfigure_config_error_does_not_leak_payload(monkeypatch)
 
     secret = "SUPER_SECRET_TOKEN_1234"
     payload = cloudpickle.dumps({"model": secret})
+    # Sanity-check the secret is actually in the payload, so the leak
+    # assertion below is meaningful and not a false negative.
+    assert secret.encode() in payload
 
     with pytest.raises(TypeError) as exc_info:
         core_patch._deserialize_reconfigure_config(payload)
