@@ -4,6 +4,8 @@
 # Added by the IBM Team, 2024
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/mamba_mixer2.py
 
+import logging
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -42,6 +44,8 @@ from vllm_gaudi.ops.granite_causal_conv1d import (
 )
 from vllm_gaudi.ops.ssd_combined import hpu_mamba_chunk_scan_combined_varlen
 from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
+
+logger = logging.getLogger(__name__)
 
 
 # Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.Mixer2RMSNormGated
@@ -256,6 +260,19 @@ class HPUMambaMixer2(MambaMixer2):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
+
+        # ReplaySSM (upstream vLLM #48018) caches SSM decode inputs in extra
+        # KV-cache tensors. The HPU conv+SSM path (conv_ssm_forward) and the
+        # hardcoded 2-tuple self.kv_cache above implement only the non-replay
+        # layout, so the feature is forced off on HPU. The base
+        # MambaMixer2.__init__ sets these attributes and the inherited
+        # get_state_shape()/get_state_dtype() read them during EngineCore
+        # init; since HPUMambaMixer2 overrides __init__ entirely, set them
+        # explicitly to avoid AttributeError.
+        if cache_config is not None and getattr(cache_config, "use_replayssm", False):
+            logger.warning("ReplaySSM is not supported on HPU; forcing use_replayssm=False for layer %s", prefix)
+        self.use_replayssm = False
+        self.replayssm_buffer_len = None
 
         # Pre-compute sizes for forward pass
         self.tped_intermediate_size = self.intermediate_size // self.tp_size
