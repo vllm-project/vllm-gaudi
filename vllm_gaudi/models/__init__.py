@@ -70,3 +70,4 @@ def register_model():
     import vllm_gaudi.models.qwen3_5  # noqa: F401
     import vllm_gaudi.models.kimi_k25_vit  # noqa: F401
     import vllm_gaudi.models.kimi_k25  # noqa: F401
+    import vllm_gaudi.models.gemma4_mm  # noqa: F401
