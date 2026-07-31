@@ -38,13 +38,24 @@ Currently:
   identical implementation that omits the two ``mark_unbacked`` calls.  HPU
   handles dynamic batch shapes without this hint.
 
-* ``vllm.model_executor.layers.mamba.abstract.MambaBase.bind_kv_cache`` —
-  upstream PR #44456 unpacks a single packed int8 page via
-  ``kv_cache.squeeze(dim=(1, 2))``.  The HPU runner allocates a separate
-  tensor per Mamba state and hands the layer a ready-made tuple, so the
-  upstream method raises ``AttributeError: 'tuple' object has no attribute
-  'squeeze'`` at EngineCore init.  We replace it with a variant that assigns
-  the pre-split tuple directly (restoring the pre-#44456 contract).
+* ``vllm.distributed.device_communicators.shm_broadcast.check_shm_free_space``
+  — upstream PR #48879 ("Fail fast when /dev/shm is too small for the shm ring
+  buffer") added a pre-allocation guard that compares the ring buffer's *full
+  nominal* size (default ``24 MiB x 10 = 240 MiB`` per ``MessageQueue``) against
+  the free space on ``/dev/shm`` and raises ``RuntimeError: Insufficient space
+  in /dev/shm`` when it does not fit. HPU CI containers expose the Docker
+  default 64 MiB ``/dev/shm``, where the pre-#48879 code path worked fine: the
+  segment is created with ``SharedMemory(create=True, size=...)`` (an
+  ``ftruncate`` on tmpfs, which allocates pages lazily on write), and the TP2 /
+  DP / multi-proc EngineCore workers only ever touch a small fraction of the
+  nominal ring. The new eager check aborts EngineCore start-up before any page
+  is touched, breaking every shared-memory-broadcast config
+  (``run_data_parallel_test``, ``run_tp2_load_generate_test``,
+  ``run_deepseek_v2_inc_dynamic_tp2_load_generate_test``,
+  ``run_gsm8k_qwen3_30b_test``). Restore the pre-#48879 behaviour on HPU by
+  replacing the guard with a no-op so the lazy tmpfs allocation proceeds.
+
+  Upstream ref: https://github.com/vllm-project/vllm/pull/48879
 
 * ``vllm.v1.core.block_pool.BlockPool.free_blocks`` — upstream PR #42656
   ("Apply LRU policy only to proper cache entries") made ``free_blocks``
@@ -55,6 +66,15 @@ Currently:
   on small/low-batch models.  We restore a single-pass free for the
   ``enable_caching=False`` case and delegate to the original implementation
   when prefix caching is on.  Remove once fixed upstream.
+
+* ``vllm.model_executor.layers.mamba.abstract.MambaBase.bind_kv_cache`` —
+  upstream PR #44456 unpacks a single packed int8 page via
+  ``kv_cache.squeeze(dim=(1, 2))``.  The HPU runner allocates a separate
+  tensor per Mamba state and hands the layer a ready-made tuple, so the
+  upstream method raises ``AttributeError: 'tuple' object has no attribute
+  'squeeze'`` at EngineCore init.  We replace it with a variant that assigns
+  the pre-split tuple directly (restoring the pre-#44456 contract).  Regressed
+  when the 0.26.0 sliding-window port dropped the original patch.
 
 * ``transformers.integrations.sdpa_attention.sdpa_attention_forward`` — the
   transformers library's SDPA attention uses ``F.scaled_dot_product_attention``
@@ -539,6 +559,66 @@ def _patch_cleanup_dist_env_and_memory() -> None:
     _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
 
 
+def _hpu_check_shm_free_space(*args, **kwargs) -> None:
+    """No-op replacement for ``shm_broadcast.check_shm_free_space``.
+
+    Upstream vLLM PR #48879 added an eager guard that rejects creating the shm
+    ring buffer when its *nominal* size (default 240 MiB per ``MessageQueue``)
+    exceeds the free space on ``/dev/shm``. HPU CI containers expose the Docker
+    default 64 MiB ``/dev/shm``, on which the pre-#48879 path worked: the
+    segment is backed by tmpfs and only the pages actually written are
+    allocated, and the broadcast workers touch a small fraction of the ring.
+    The guard aborts EngineCore start-up before any page is touched, so restore
+    the prior behaviour by skipping the check on HPU.
+
+    Accepts ``*args, **kwargs`` rather than mirroring the upstream signature so
+    that a future signature change (an added positional/keyword parameter) does
+    not raise ``TypeError`` at the (single, bare-name) call site in
+    ``ShmRingBuffer.__init__``. All arguments are ignored.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/48879
+    """
+    return None
+
+
+def _patch_check_shm_free_space() -> None:
+    """Neutralize the eager ``/dev/shm`` size guard added by vLLM PR #48879.
+
+    ``ShmRingBuffer.__init__`` calls ``check_shm_free_space`` by bare name, so
+    replacing the module-level attribute intercepts every ring-buffer creation.
+
+    We always override the symbol when it exists, rather than inspecting its
+    source to confirm it still raises: the no-op is harmless even if upstream
+    later softens the guard to size-to-fit (nothing would have raised anyway),
+    whereas a source-string heuristic is brittle — upstream could keep failing
+    fast while raising a different exception type, wrapping the logic in a
+    helper, or rewording the message, any of which would silently stop the
+    patch from applying and reintroduce the ``Insufficient space in /dev/shm``
+    startup crash on HPU. The attribute-presence check below still self-retires
+    the patch if upstream removes or renames the function (e.g. lands a proper
+    fix).
+
+    Deferred to ``load_general_plugins`` time so the
+    ``vllm.distributed.device_communicators`` import chain runs after platform
+    initialisation.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/48879
+    """
+    try:
+        import vllm.distributed.device_communicators.shm_broadcast as _shm_mod
+    except ImportError:
+        return  # Import path changed/removed upstream — nothing to patch.
+
+    upstream = getattr(_shm_mod, "check_shm_free_space", None)
+    if upstream is None:
+        return  # Guard absent (pre-#48879 or renamed) — nothing to patch.
+
+    if upstream is _hpu_check_shm_free_space:
+        return  # Already installed (idempotent within this process).
+
+    _shm_mod.check_shm_free_space = _hpu_check_shm_free_space
+
+
 def _hpu_free_blocks(self, ordered_blocks) -> None:
     """Single-pass ``BlockPool.free_blocks`` for ``enable_caching=False``.
 
@@ -749,6 +829,7 @@ def apply() -> None:
         _patch_granite_hybrid_layer_types()
         _patch_get_num_layers_by_block_type()
         _patch_use_sequence_parallel_moe()
+        _patch_check_shm_free_space()
         _patch_mamba_bind_kv_cache()
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
