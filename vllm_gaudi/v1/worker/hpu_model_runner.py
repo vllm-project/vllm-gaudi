@@ -820,8 +820,9 @@ def apply_model_specific_patches(model_runner):
     is_llama4 = is_hpu_llama4_model(model_runner.model)
     model_type = getattr(model_runner.vllm_config.model_config.hf_config, "model_type", "")
     is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5_moe")
+    is_gemma4 = model_type in ("gemma4", )
 
-    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe
+    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe or is_gemma4
     if is_llama4:
         apply_hpu_llama4_post_load_patches(model_runner.model)
     if is_qwen_moe:
@@ -5668,10 +5669,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return prompt_cfg, decode_cfg
 
     def get_patch_size_from_model(self):
-        """Get patch_size from the loaded vision model."""
-        # For Qwen2.5-VL and similar models
-        if hasattr(self.model.model, 'visual'):
-            return self.model.model.visual.patch_size
+        """Get patch_size from the loaded vision model.
+
+        Different vision models expose the tower at different attribute names
+        and nesting depths, so probe the known layouts:
+          * Qwen2.5-VL and similar: ``model.model.visual.patch_size``
+          * Kimi-K2.5/K2.6 (MoonViT): ``vision_tower.patch_size``
+        Falls back to 1 only when no known vision tower is found.
+        """
+        model = self.get_model()
+        candidates = [
+            getattr(getattr(model, 'model', None), 'visual', None),
+            getattr(model, 'visual', None),
+            getattr(model, 'vision_tower', None),
+        ]
+        for vision_model in candidates:
+            patch_size = getattr(vision_model, 'patch_size', None)
+            if patch_size is not None:
+                # Some towers store patch_size as a (h, w) tuple/list.
+                if isinstance(patch_size, (tuple, list)):
+                    return int(patch_size[0])
+                return int(patch_size)
         return 1
 
     def _get_dummy_mm_inputs_with_options(
