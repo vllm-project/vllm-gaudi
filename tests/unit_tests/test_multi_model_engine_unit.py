@@ -550,3 +550,79 @@ def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypa
     assert cache_config.mamba_cache_mode == "align"
     assert cache_config.mamba_block_size == 528
     assert cache_config.mamba_page_size_padded == 2111
+
+
+def test_normalize_reconfigure_resets_mamba_block_size_from_max_model_len_sentinel(monkeypatch):
+    """Regression: _normalize_reconfigure_config_for_platform must reset
+    mamba_block_size when it equals max_model_len (the 'none' mode sentinel).
+
+    In vLLM's HybridAttentionMambaModelConfig.verify_and_update_config, when
+    prefix caching is disabled (mamba_cache_mode='none'), mamba_block_size is
+    set to max_model_len as a sentinel value meaning "one block per sequence".
+    When the reconfigure path changes mamba_cache_mode to 'align', the old
+    sentinel must be replaced with cache_config.block_size.  Without the fix,
+    the KVCacheCoordinatorBase assertion (scheduler_block_size %
+    mamba_block_size == 0) fails because max_model_len (e.g. 32768) is not
+    divisible by the HPU attention block size (e.g. 528).
+    """
+
+    class _FakeModelClass:
+
+        @staticmethod
+        def get_mamba_state_shape_from_config(_config):
+            return [(1, )]
+
+        @staticmethod
+        def get_mamba_state_dtype_from_config(_config):
+            return [torch.uint8]
+
+    class _FakeMambaSpec:
+
+        def __init__(self, **_kwargs):
+            self.page_size_bytes = 2111
+
+    MAX_MODEL_LEN = 32768
+
+    model_config = SimpleNamespace(
+        model="ibm-granite/granite-4.0-h-small",
+        is_hybrid=True,
+        architecture="GraniteMoeHybridForCausalLM",
+        hf_config=SimpleNamespace(model_type="granitemoehybrid"),
+        dtype=torch.bfloat16,
+        get_num_kv_heads=lambda _parallel: 1,
+        get_head_size=lambda: 1,
+        max_model_len=MAX_MODEL_LEN,
+    )
+    cache_config = SimpleNamespace(
+        block_size=528,
+        mamba_block_size=MAX_MODEL_LEN,  # sentinel set by vLLM for "none" mode
+        mamba_cache_mode="none",
+        mamba_page_size_padded=2162688,
+        cache_dtype="auto",
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=SimpleNamespace(),
+        scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
+    )
+
+    check_and_update_config = Mock()
+    update_block_size_for_backend = Mock()
+    monkeypatch.setattr(core_patch.current_platform, "check_and_update_config", check_and_update_config)
+    monkeypatch.setattr(core_patch.current_platform, "update_block_size_for_backend", update_block_size_for_backend)
+    monkeypatch.setattr(core_patch, "MambaSpec", _FakeMambaSpec)
+    monkeypatch.setattr(
+        "vllm.model_executor.models.ModelRegistry.resolve_model_cls",
+        lambda *_args, **_kwargs: (_FakeModelClass, None),
+    )
+
+    core_patch._normalize_reconfigure_config_for_platform(config)
+
+    # Mode must be updated and mamba_block_size must be reset from the sentinel.
+    assert cache_config.mamba_cache_mode == "align"
+    assert cache_config.mamba_block_size == 528, (
+        "mamba_block_size must be reset from max_model_len sentinel to block_size")
+    # mamba_page_size_padded was already set, so no second normalization pass.
+    assert check_and_update_config.call_count == 1
+    assert update_block_size_for_backend.call_count == 1
