@@ -248,6 +248,12 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         quant_config=None,
         prefix: str = "",
         skip_topk: bool = False,
+        # Added upstream by vllm#48407 (short-prefill sparse-indexer scoring
+        # skip). The optimization it gates is guarded by
+        # current_platform.is_cuda() upstream, so it never applies on HPU. We
+        # accept-and-ignore the kwarg to keep the constructor signature in sync
+        # with the base MultiHeadLatentAttentionWrapper / deepseek_v2 call site.
+        allow_short_prefill_indexer_scoring_skip: bool = False,
     ) -> None:
         # Skip MultiHeadLatentAttentionWrapper.__init__() because it creates
         # MLAAttention → FlashAttnPrefillBackend which crashes on HPU.
