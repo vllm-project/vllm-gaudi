@@ -178,7 +178,6 @@ def _apply_hpu_gemma4_patches(language_model: nn.Module) -> None:
     # Patch _run_decoder_layers for fast-prefill path (self_decoder/cross_decoder)
     from vllm.model_executor.models import gemma4 as upstream_gemma4_module
     upstream_gemma4_module._run_decoder_layers = _hpu_run_decoder_layers
-    upstream_gemma4_module.__dict__["_run_decoder_layers"] = _hpu_run_decoder_layers
 
 
 class HpuGemma4ForConditionalGeneration(UpstreamGemma4ForConditionalGeneration):
