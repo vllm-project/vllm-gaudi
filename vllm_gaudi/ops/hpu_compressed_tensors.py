@@ -5,7 +5,14 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
-from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEConfig
+
+try:
+    # Upstream vLLM PR #44941 renamed the MoE factory ``FusedMoE`` ->
+    # ``FusedMoEFactory``; alias back for version-agnostic type hints.
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
+except ImportError:
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 

@@ -11,7 +11,14 @@ import vllm
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+try:
+    # Upstream vLLM PR #44941 renamed the MoE factory function
+    # ``FusedMoE`` -> ``FusedMoEFactory`` in fused_moe.layer. Alias it back to
+    # ``FusedMoE`` so the rest of this module (type hints, comments) is
+    # version-agnostic across the rename boundary.
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
+except ImportError:
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter, )

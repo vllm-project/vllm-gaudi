@@ -54,7 +54,14 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (FusedMoE, fused_moe_make_expert_params_mapping)
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+
+try:
+    # Upstream vLLM PR #44941 renamed the MoE factory ``FusedMoE`` ->
+    # ``FusedMoEFactory``; alias back for version-agnostic use.
+    from vllm.model_executor.layers.fused_moe import FusedMoEFactory as FusedMoE
+except ImportError:
+    from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear, QKVParallelLinear, ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
