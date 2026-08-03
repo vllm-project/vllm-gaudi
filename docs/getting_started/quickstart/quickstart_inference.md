@@ -105,6 +105,22 @@ Then, use the OpenAI Python client or curl:
         }'
     ```
 
+## MiniMax-M3 Tool Calling
+
+MiniMax-M3 uses an XML tool-call format. Start the model with the serving
+configuration appropriate for your deployment. To enable automatic tool
+calling on HPU, add the following options to the `vllm serve` command:
+
+```bash
+--reasoning-parser minimax_m3 \
+--enable-auto-tool-choice \
+--tool-call-parser minimax_m3_py
+```
+
+The pure-Python `minimax_m3_py` parser replaces the upstream Rust parser, which
+is not included in the HPU `+empty` build. The `vllm-gaudi` plugin registers it
+automatically, so no `--tool-parser-plugin` argument is required.
+
 ## OpenAI Chat Completions API with vLLM
 
 vLLM also supports the OpenAI chat completions API format. To follow the process, start the server:
