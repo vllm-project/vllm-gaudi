@@ -4,8 +4,6 @@
 # Added by the IBM Team, 2024
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/mamba_mixer2.py
 
-import logging
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -44,8 +42,9 @@ from vllm_gaudi.ops.granite_causal_conv1d import (
 )
 from vllm_gaudi.ops.ssd_combined import hpu_mamba_chunk_scan_combined_varlen
 from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
+from vllm_gaudi.extension.logger import logger as init_logger
 
-logger = logging.getLogger(__name__)
+logger = init_logger()
 
 
 # Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.Mixer2RMSNormGated

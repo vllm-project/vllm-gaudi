@@ -93,13 +93,13 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = (lambda block_hashes, req_context: generate_store_output([]))
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 1
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(0, 1, 2))
 
     # single block lookup with a hit in a middle block
     runner.new_request(token_ids=[0] * offloaded_block_size * 2 + [1] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = (lambda block_hashes, req_context: generate_store_output([]))
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 1
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(3, 4, 5))
 
 
@@ -152,7 +152,7 @@ def test_request_preemption(request_runner, async_scheduling: bool):
 
     # request should now return from preemption
     # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 3
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 3
     runner.manager.prepare_store.side_effect = (lambda block_hashes, req_context: generate_store_output(block_hashes))
     runner.run(
         decoded_tokens=[0] * gpu_block_size,
@@ -192,7 +192,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
     # start a request to load the first block, but don't complete
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 1
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
@@ -204,7 +204,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
 
     # start a new request to load the same first block
     runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 1
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
@@ -254,7 +254,7 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     # start a request to load the first block, but don't complete
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 1
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
