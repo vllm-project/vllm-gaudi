@@ -1,0 +1,28 @@
+model_card:
+  # Nemotron-H FP8 (non-gated squared-ReLU MoE + quant-aware Mamba in_proj),
+  # enabled on HPU by PR #1667. This GSM8K card guards the accuracy of that
+  # enablement so a rebase can't silently regress the unfused non-gated FP8
+  # expert path or the mixed-dtype Mamba2 KV-cache allocation.
+  #
+  # NOTE: RedHatAI/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8-dynamic is a 550B
+  # (55B-active) model -- weight load + warmup alone exceeds the 5-min CI
+  # target and it needs large TP (multi-card). If a smaller Nemotron-H FP8
+  # checkpoint is available, prefer it here to keep this test CI-affordable;
+  # otherwise this card should run in the long/nightly tier, not the fast set.
+  model_name: "RedHatAI/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8-dynamic"
+  tasks: "gsm8k"
+  num_fewshot: 5
+  trust_remote_code: true
+  limit: 256
+  max_num_seqs: 128
+  max_model_len: 16384
+  batch_size: 32
+  dtype: bfloat16
+  gpu_memory_utilization: 0.8
+  max_num_batched_tokens: 16384
+
+metrics:
+  name: exact_match,strict-match
+  # PLACEHOLDER -- replace with your measured GSM8K score. The harness gates on
+  # (value - 0.03), so set this to the observed score rounded down slightly.
+  value: 0.80

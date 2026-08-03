@@ -445,6 +445,19 @@ run_gsm8k_qwen36_35b_a3b_test() {
     echo "✅ Test with Qwen3.6-35B-A3B passed."
 }
 
+
+# GSM8K on Nemotron-H FP8 (non-gated squared-ReLU MoE + quant-aware Mamba
+# in_proj). Guards the HPU enablement from PR #1667: the unfused non-gated FP8
+# expert path and the mixed-dtype Mamba2 KV-cache allocation both regress
+# silently, so an accuracy gate is the right guardrail.
+run_gsm8k_nemotron_h_fp8_test() {
+    echo "➡️ Testing GSM8K on Nemotron-H FP8..."
+    VLLM_SKIP_WARMUP=True \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/nemotron-h-fp8.yaml"
+    echo "✅ Test with Nemotron-H FP8 passed."
+}
+
 # GSM8K on gemma-4-E4B (YOCO / KV-sharing model)
 run_gsm8k_gemma4_e4b_test() {
     echo "➡️ Testing GSM8K on gemma-4-E4B-it..."
