@@ -1,7 +1,7 @@
 # Dependencies for HPU code
 pandas>=2.2.3
 numba>=0.58.0
-numpy>=1.26.0
+numpy>=2.2.6
 kaldi-native-fbank >= 1.18.7
 tblib==3.1.0
 # Cap FastAPI below 0.137: that release made include_router() build a route
