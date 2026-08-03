@@ -5,13 +5,16 @@ on:
     - cron: '0 */2 * * *' # Every 2 hours
   workflow_dispatch:
 
+# Least-privilege default; the dashboard job opts into its write scope below.
 permissions:
-  issues: write
-  pull-requests: read
+  contents: read
 
 jobs:
   update-dashboard:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write        # Required to create/update the dashboard issue
+      pull-requests: read  # Required to read open PRs for the dashboard
     steps:
       - name: Generate Dashboard Content
         id: dashboard
