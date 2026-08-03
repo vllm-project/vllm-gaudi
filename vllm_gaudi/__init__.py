@@ -147,3 +147,15 @@ def register_models():
     from .models import register_model
 
     register_model()
+
+
+def register_tool_parsers():
+    """Register out-of-tree tool-call parsers for the HPU platform.
+
+    Importing the package runs each parser module's
+    ``ToolParserManager.register_module(...)`` call, so the parsers become
+    selectable via ``--tool-call-parser <name>`` with no
+    ``--tool-parser-plugin`` file. This runs in both the API-server and engine
+    processes (general plugin), matching how vLLM loads tool parsers.
+    """
+    import vllm_gaudi.entrypoints.openai.tool_parsers  # noqa: F401
