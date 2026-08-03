@@ -9,4 +9,4 @@ tblib==3.1.0
 # which prometheus-fastapi-instrumentator (<=8.0.0) chokes on while resolving
 # route.path -> 500 on every request. Upstream bug:
 # trallnag/prometheus-fastapi-instrumentator#370. Remove once it ships a fix.
-fastapi<0.137
+fastapi<0.142
