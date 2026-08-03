@@ -6,13 +6,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEConfig
-
-try:
-    # Upstream vLLM PR #44941 renamed the MoE factory ``FusedMoE`` ->
-    # ``FusedMoEFactory``; alias back for version-agnostic type hints.
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
-except ImportError:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
@@ -32,7 +26,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors import (compress
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
     compressed_tensors_moe_w8a8_fp8,
     compressed_tensors_moe_wna16,
-    compressed_tensors_moe_wna16_marlin,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
@@ -41,8 +34,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (find_matched_target)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
     CompressedTensorsW8A8Fp8MoEMethod)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_marlin import (  # noqa: E501
-    CompressedTensorsWNA16MarlinMoEMethod)
+# PR #44941 removed the dedicated WNA16 Marlin MoE method/module; the OOT HPU
+# method now derives from the unified ``CompressedTensorsWNA16MoEMethod``.
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+    CompressedTensorsWNA16MoEMethod as CompressedTensorsWNA16MarlinMoEMethod)
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -1188,8 +1183,6 @@ compressed_tensors_moe.CompressedTensorsWNA16MoEMethod = \
 compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
 compressed_tensors_moe_wna16.CompressedTensorsWNA16MoEMethod = \
-    HPUCompressedTensorsWNA16MoEMethod
-compressed_tensors_moe_wna16_marlin.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors.CompressedTensorsConfig = HPUCompressedTensorsConfig
 

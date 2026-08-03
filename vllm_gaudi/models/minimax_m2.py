@@ -34,12 +34,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_world_size)
-try:
-    # Upstream vLLM PR #44941 renamed the MoE factory ``FusedMoE`` ->
-    # ``FusedMoEFactory``; alias back for version-agnostic use.
-    from vllm.model_executor.layers.fused_moe import FusedMoEFactory as FusedMoE
-except ImportError:
-    from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory as FusedMoE
 from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear, ReplicatedLinear, RowParallelLinear)
