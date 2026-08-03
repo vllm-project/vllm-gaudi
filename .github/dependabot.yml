@@ -1,0 +1,26 @@
+# Dependabot keeps dependencies patched and, together with SHA-pinned
+# GitHub Actions, addresses the OpenSSF Scorecard "Pinned-Dependencies"
+# and "Vulnerabilities" checks. See:
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates
+version: 2
+updates:
+  # Python packaging metadata (requirements*.txt, pyproject.toml).
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+
+  # GitHub Actions used by the workflows in .github/workflows.
+  # Dependabot updates the pinned SHAs while preserving the human-readable
+  # version comment, so actions can stay pinned and current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
