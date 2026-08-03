@@ -88,11 +88,11 @@ def test_parse_resolutions_mixed_forms_in_one_env():
 @pytest.mark.parametrize(
     "bad_env",
     [
-        "864x480x20-1",   # hi < lo
-        "864x480x0-5",    # lo < 1
+        "864x480x20-1",  # hi < lo
+        "864x480x0-5",  # lo < 1
         "864x480x1-2-3",  # malformed range
         "864x480x1x2x3",  # too many x-parts
-        "864",            # missing height
+        "864",  # missing height
     ],
 )
 def test_parse_resolutions_rejects_invalid(bad_env):
