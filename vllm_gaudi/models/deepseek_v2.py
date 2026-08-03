@@ -69,7 +69,10 @@ def _hpu_deepseek_v2_model_forward(
             start=self.start_layer,
     ):
         if idx in self.aux_hidden_state_layers:
-            aux_hidden_states.append(hidden_states + residual)
+            # residual is None before the first layer runs (first PP rank);
+            # treat it as zero so the pre-residual hidden state is just
+            # hidden_states.
+            aux_hidden_states.append(hidden_states if residual is None else hidden_states + residual)
         hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
 
     if not get_pp_group().is_last_rank:
