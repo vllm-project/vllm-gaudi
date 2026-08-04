@@ -454,8 +454,11 @@ def test_compressed_tensors_linear_method_w8a8int8_bf16fallback_static_per_chann
     with safe_open(get_data_path("data/compressed_tensors/linear_w8a8int8_bf16fallback_static_per_channel.safetensors"),
                    framework="pt",
                    device="hpu") as f:
-        oot_op.weight.copy_(f.get_tensor("weight"))
-        oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
+        # Load through the real weight_loader (not param.copy_()) so the full
+        # served-model path is exercised. See issue #1612: the INT8 scheme must
+        # not wrap this loader with the FP8-only gaudi_weight_wrapper.
+        oot_op.weight.weight_loader(oot_op.weight, f.get_tensor("weight"))
+        oot_op.weight_scale.weight_loader(oot_op.weight_scale, f.get_tensor("weight_scale"))
         input = f.get_tensor("input")
         ref_output = f.get_tensor("ref_output")
 
@@ -464,6 +467,70 @@ def test_compressed_tensors_linear_method_w8a8int8_bf16fallback_static_per_chann
     sut_output = oot_op(input)
 
     torch.testing.assert_close(ref_output, sut_output.float(), atol=1e-3, rtol=1e-3)
+
+
+def test_compressed_tensors_w8a8int8_weight_loader_does_not_corrupt_int8(default_vllm_config: None, dist_init):
+    """Regression test for #1612.
+
+    Load INT8 weights and their fp32 scales through the *real* `weight_loader`
+    stored on each parameter (the path a served model actually takes), not via
+    `param.copy_()`. On Gaudi2 the INT8 scheme used to wrap that loader with the
+    FP8-only `gaudi_weight_wrapper`, which doubled every non-fp8 tensor (INT8
+    weight overflowed +/-127, fp32 scale scaled by 2x) -> garbage output.
+
+    Prior unit tests missed this because they copied straight into the params,
+    bypassing the wrapper entirely.
+    """
+    config = {
+        "config_groups": {
+            "group_0": {
+                "input_activations": {
+                    "dynamic": True,
+                    "num_bits": 8,
+                    "strategy": "token",
+                    "symmetric": True,
+                    "type": "int"
+                },
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": {
+                    "dynamic": False,
+                    "num_bits": 8,
+                    "observer": "mse",
+                    "strategy": "channel",
+                    "symmetric": True,
+                    "type": "int"
+                }
+            }
+        },
+        "format": "int-quantized",
+        "ignore": ["lm_head"],
+        "kv_cache_scheme": None,
+        "quant_method": "compressed-tensors",
+        "quantization_status": "compressed"
+    }
+
+    oot_quant_config = CompressedTensorsConfig.from_config(config)
+    oot_op = create_row_parallel_linear(input_size=128, output_size=64, quant_config=oot_quant_config).to("hpu")
+    assert isinstance(oot_op.scheme, HPUCompressedTensorsW8A8Int8_BF16Fallback)
+
+    # Deliberately include a near-int8-max value: if the loader doubles the
+    # weight it overflows int8 and wraps around, which torch.int8.copy_ would
+    # also clamp -> the corruption is unmistakable.
+    src_weight = torch.zeros(64, 128, dtype=torch.int8)
+    src_weight.fill_(3)
+    src_weight[0, 0] = 100  # 100 * 2 = 200 overflows int8 (max 127)
+    src_weight[1, 1] = -100
+    src_weight = src_weight.to("hpu")
+    src_scale = torch.full((64, 1), 0.02093, dtype=torch.float32, device="hpu")
+
+    # Drive the real loader bound to each param.
+    oot_op.weight.weight_loader(oot_op.weight, src_weight)
+    oot_op.weight_scale.weight_loader(oot_op.weight_scale, src_scale)
+
+    # The loader must not mutate INT8 weights or fp32 scales.
+    torch.testing.assert_close(oot_op.weight.data.cpu(), src_weight.cpu())
+    torch.testing.assert_close(oot_op.weight_scale.data.cpu(), src_scale.cpu())
 
 
 def test_compressed_tensors_linear_method_w8a8fp8_block(default_vllm_config: None, dist_init):
