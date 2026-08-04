@@ -527,10 +527,12 @@ _run_parallel_on_card_slices() {
     local rc=0 i
     if [[ "${#cards[@]}" -lt "$need" ]]; then
         echo "⚠️  Only ${#cards[@]} HPU card(s) visible (${visible}); need ${need}. Running ${label} tests sequentially."
+        # Call directly (no '|| rc=1'): keep set -e fail-fast inside each test so a
+        # failing inner command (e.g. pytest) aborts instead of being masked.
         for i in "${!fns[@]}"; do
-            "${fns[$i]}" || rc=1
+            "${fns[$i]}"
         done
-        return "$rc"
+        return 0
     fi
 
     echo "🚀 Running ${#fns[@]} ${label} tests in parallel across cards ${visible}..."
@@ -563,10 +565,11 @@ run_gsm8k_qwen3x_35b_a3b_parallel() {
         _run_gsm8k_qwen35_35b_a3b_test 1
 }
 
-# GSM8K on gemma-4: E4B (1 card), 26B / 31B (TP=4 each)
+# GSM8K on gemma-4: E4B (1 card) runs first, then 26B / 31B (TP=4 each) in
+# parallel across the two 4-card halves of an 8-card host.
 run_gsm8k_gemma4_parallel() {
+    _run_gsm8k_gemma4_e4b_test
     _run_parallel_on_card_slices gemma4 \
-        _run_gsm8k_gemma4_e4b_test 1 \
         _run_gsm8k_gemma4_26b_test 4 \
         _run_gsm8k_gemma4_31b_test 4
 }
