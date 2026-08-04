@@ -24,3 +24,16 @@ updates:
     labels:
       - dependencies
       - github-actions
+
+  # Container base images in the .cd/ Dockerfiles. This keeps the digest of the
+  # SHA-pinned public UBI base image (tag + digest form) current: Dependabot
+  # tracks the tag and opens PRs bumping the digest. First-party Gaudi images on
+  # vault.habana.ai are parameterized/unpinned and are skipped automatically.
+  - package-ecosystem: docker
+    directory: /.cd
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker
