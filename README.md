@@ -12,6 +12,10 @@ vLLM Hardware Plugin for Intel® Gaudi®
 | <a href="https://vllm-gaudi.readthedocs.io/en/latest/index.html"><b>Documentation</b></a> | <a href="https://docs.habana.ai/en/latest/index.html"><b>Intel® Gaudi® Documentation</b></a> | <a href="https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html"><b>Optimizing Training Platform Guide</b></a> |
 </p>
 
+<p align="center">
+  <a href="https://scorecard.dev/viewer/?uri=github.com/vllm-project/vllm-gaudi"><img src="https://api.scorecard.dev/projects/github.com/vllm-project/vllm-gaudi/badge" alt="OpenSSF Scorecard"></a>
+</p>
+
 ---
 *Latest News* 🔥
 - [2026/07] Version 0.24.0 is now available, built on [vLLM 0.24.0](https://github.com/vllm-project/vllm/releases/tag/v0.24.0) and fully compatible with [Intel® Gaudi® v1.24.1](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.11.
