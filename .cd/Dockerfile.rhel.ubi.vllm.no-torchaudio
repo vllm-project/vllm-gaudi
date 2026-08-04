@@ -28,7 +28,10 @@ ARG VLLM_GAUDI_REPO="https://github.com/vllm-project/vllm-gaudi.git"
 # ============================================================================
 # Stage 1: gaudi-base - Base system setup with Habana drivers
 # ============================================================================
-FROM registry.access.redhat.com/ubi9/ubi:${OS_VERSION} AS gaudi-base
+# Pin the public UBI base image by digest (OpenSSF Scorecard Pinned-Dependencies).
+# Digest is for registry.access.redhat.com/ubi9/ubi:9.6 (multi-arch manifest list).
+# When bumping OS_VERSION, update this digest to the matching ubi9/ubi:<ver> tag.
+FROM registry.access.redhat.com/ubi9/ubi@sha256:dec374e05cc13ebbc0975c9f521f3db6942d27f8ccdf06b180160490eef8bdbc AS gaudi-base
 
 # Re-declare global ARGs to use them in this stage
 ARG ARTIFACTORY_URL
