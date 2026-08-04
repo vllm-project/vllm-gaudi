@@ -1,0 +1,71 @@
+# Release process
+
+This document describes how `vllm-gaudi` is versioned, branched, tagged, and
+how its release artifacts are signed and verified.
+
+## Versioning and branching
+
+- **Versions track upstream vLLM.** A `vllm-gaudi` release `vX.Y.Z` is built on
+  and compatible with the corresponding upstream `vllm` `vX.Y.Z` release.
+- **Release branches.** Each release line lives on a `releases/vX.Y.Z` branch,
+  cut from `main`. Fixes for a release are backported to its branch via PRs
+  targeting that branch (see `AGENTS.md`).
+- **Tags.** Releases are tagged `vX.Y.Z`. Pre-releases use an `rcN` suffix
+  (e.g. `v0.24.0rc0`) and post-releases a `.postN` suffix
+  (e.g. `v0.19.1.post1`).
+- **`main`** is the active development branch. All changes land via PR; direct
+  pushes to `main` and to release branches are not permitted.
+
+## Signed release artifacts
+
+Every published release is accompanied by a **signed source tarball**, so
+consumers can verify the origin and integrity of what they download.
+
+Signing is performed automatically by the
+[`Sign release artifacts`](.github/workflows/release-sign.yml) workflow when a
+release is published. It uses **Sigstore/Cosign keyless signing**: the
+signature is tied to the release workflow's GitHub OIDC identity via a
+short-lived Sigstore (Fulcio) certificate and recorded in the public Rekor
+transparency log. There is no long-lived private signing key.
+
+Each release includes these assets:
+
+| Asset | Description |
+| :--- | :--- |
+| `vllm-gaudi-<tag>.tar.gz` | Source tarball for the tag |
+| `vllm-gaudi-<tag>.tar.gz.sha256` | SHA-256 checksum of the tarball |
+| `vllm-gaudi-<tag>.tar.gz.sig` | Cosign signature |
+| `vllm-gaudi-<tag>.tar.gz.pem` | Fulcio signing certificate |
+
+> Note: GitHub also auto-generates its own `Source code (tar.gz/zip)` links on
+> every release. Prefer the signed `vllm-gaudi-<tag>.tar.gz` asset above when
+> integrity matters, as only that artifact is covered by the signature.
+
+## Verifying a signed release
+
+Install [Cosign](https://docs.sigstore.dev/system_config/installation/), then,
+for a given tag (example `v0.24.0`):
+
+```bash
+TAG=v0.24.0
+BASE="https://github.com/vllm-project/vllm-gaudi/releases/download/${TAG}"
+ART="vllm-gaudi-${TAG}.tar.gz"
+
+# Download the tarball, signature and certificate.
+curl -sSLO "${BASE}/${ART}"
+curl -sSLO "${BASE}/${ART}.sig"
+curl -sSLO "${BASE}/${ART}.pem"
+
+# Verify: the signature must come from this repo's release workflow, via
+# GitHub's OIDC issuer.
+cosign verify-blob \
+  --certificate "${ART}.pem" \
+  --signature "${ART}.sig" \
+  --certificate-identity-regexp \
+    '^https://github\.com/vllm-project/vllm-gaudi/\.github/workflows/release-sign\.yml@refs/.+$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  "${ART}"
+```
+
+A successful run prints `Verified OK`. You can additionally check the
+checksum with `sha256sum -c "${ART}.sha256"`.
