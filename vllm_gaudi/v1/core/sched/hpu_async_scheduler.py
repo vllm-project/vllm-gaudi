@@ -165,9 +165,18 @@ class HPUAsyncScheduler(AsyncScheduler):
         # (request, new_token_ids). Capturing extra keywords and forwarding
         # them verbatim to super() lets a single override work against both.
         if request.num_output_placeholders == 0 and len(new_token_ids) > 0:
-            # If the discard flag was set (e.g. from preemption), reset it here since
-            # we are effectively discarding the token anyway.
-            if request.discard_latest_async_tokens:
+            # If the discard flag was set (e.g. from preemption), reset it here
+            # since we are effectively discarding the token anyway.
+            #
+            # vLLM removed the Request.discard_latest_async_tokens boolean on
+            # newer branches. vllm-project/vllm#48245 replaced the whole
+            # forced-preemption discard mechanism with
+            # num_stale_output_tokens/drop_stale_output on Request, draining
+            # stale in-flight frames inside the base Scheduler via the is_stale
+            # path; the pinned SHA follows that lineage, so the attribute no
+            # longer exists. getattr keeps this override version-agnostic:
+            # reset the legacy flag when present, otherwise skip silently.
+            if getattr(request, "discard_latest_async_tokens", False):
                 request.discard_latest_async_tokens = False
             return [], False
 
