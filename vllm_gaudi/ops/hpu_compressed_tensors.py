@@ -53,9 +53,7 @@ from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfEx
                                       VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.ops.hpu_fused_moe import (
-    _NO_MUL_ACTIVATIONS,
     _normalize_moe_activation,
-    _unfused_no_mul_moe_fp8,
     select_experts_from_routed,
 )
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_tensor
@@ -565,26 +563,13 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
 
         activation = _normalize_moe_activation(layer.activation)
-        if activation in _NO_MUL_ACTIVATIONS:
-            # Non-gated (is_act_and_mul=False) FP8 experts, e.g. Nemotron-H's
-            # squared-ReLU. The Habana fused-MoE kernel is gated-only and its
-            # MoeActivationMode_t enum has no relu2, so dequantize the experts
-            # and compute y = w2(act(w1 x)) unfused.
-            output = _unfused_no_mul_moe_fp8(
-                layer,
-                x,
-                topk_ids,
-                topk_weights,
-                _NO_MUL_ACTIVATIONS[activation],
-            )
-        else:
-            output = layer.moe_op(
-                x,
-                topk_ids.to(torch.int64),
-                topk_weights.to(x.dtype),
-                permuted_weights=True,
-                activation=activation,
-            )
+        output = layer.moe_op(
+            x,
+            topk_ids.to(torch.int64),
+            topk_weights.to(x.dtype),
+            permuted_weights=True,
+            activation=activation,
+        )
         if layer.moe_config.is_sequence_parallel:
             return output.view(*(output.size(0), *input_shape[1:]))
         return output.view(*input_shape)
