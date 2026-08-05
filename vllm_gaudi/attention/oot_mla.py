@@ -248,6 +248,12 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         quant_config=None,
         prefix: str = "",
         skip_topk: bool = False,
+        # Added upstream by vllm#50000 (Kimi K3). Gates non-causal multi-token
+        # decode; the base MultiHeadLatentAttentionWrapper forwards it to
+        # MLAAttention, which the HPU decode path honours via attn metadata.
+        # Keep it in the constructor signature and pass it through so the HPU
+        # wrapper stays in sync with the base / deepseek_v2 call site.
+        non_causal_multi_token_decode: bool = False,
         # Added upstream by vllm#48407 (short-prefill sparse-indexer scoring
         # skip). The optimization it gates is guarded by
         # current_platform.is_cuda() upstream, so it never applies on HPU. We
@@ -279,6 +285,12 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.indexer = mla_modules.indexer
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
+        # vllm#50000 (Kimi K3) added `self.g_proj = mla_modules.g_proj`, which
+        # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
+        # we do not override forward) reads to gate the attention output. Because
+        # we bypass super().__init__(), replicate the assignment. It defaults to
+        # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
+        self.g_proj = mla_modules.g_proj
 
         self.skip_topk = skip_topk
         # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
@@ -312,4 +324,5 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
