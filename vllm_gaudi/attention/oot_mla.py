@@ -69,8 +69,11 @@ class HPUMLAAttention(MLAAttention):
         # always passes this as None; accept and ignore it to keep the HPU path
         # behaviourally identical to pre-#45964.
         del q_dcp_replicated
-        if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
+        # NOTE: vllm#49389 removed the deprecated runtime KV-scale calculation
+        # path (the `calculate_kv_scales` attribute and the
+        # `maybe_calc_kv_scales` custom op). Neither exists at the pinned vLLM
+        # SHA, so the OOT MLA forward no longer attempts runtime scale
+        # calculation.
 
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
