@@ -72,10 +72,10 @@ RUN \
 # (see vllm_gaudi/patches.py). vLLM only sets a lower bound (transformers>=5.5.3),
 # so the resolved version can be older than what the plugin imports at runtime
 # (e.g. create_position_bias_mask from transformers.integrations.sdpa_attention,
-# added in 5.14.1) -> ImportError on Gemma4. Installed after vLLM so it wins, and
-# with deps so huggingface_hub/tokenizers resolve to matching versions.
-# Remove once vLLM's own transformers pin covers this floor.
-RUN pip install "transformers==5.14.1"
+# added in 5.14.1) -> ImportError on Gemma4. Installed after vLLM so it wins, with
+# deps so pip pulls the huggingface_hub/tokenizers 5.14.1 requires (already-satisfied
+# versions are kept). Remove once vLLM's own transformers pin covers this floor.
+RUN pip install --no-cache-dir "transformers==5.14.1"
 
 # torchaudio install removed.
 
