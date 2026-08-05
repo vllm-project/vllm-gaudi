@@ -6,7 +6,7 @@ import torch
 import contextlib
 import vllm.model_executor.custom_op as custom_op
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
 
 
 @contextlib.contextmanager

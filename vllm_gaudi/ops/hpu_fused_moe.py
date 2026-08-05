@@ -11,7 +11,7 @@ import vllm
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter, )
