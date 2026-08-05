@@ -90,7 +90,14 @@ class ExponentialBucketingStrategy():
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         decode_query_bucket_cfg = [1, 1, 1, 1]
         max_decode_blocks = math.ceil(max_model_len / block_size) * max_num_seqs
-        max_decode_blocks = min(max_blocks, max_decode_blocks) if use_contiguous_pa else max_decode_blocks
+        # Clamp the top block bucket to the number of KV blocks that physically
+        # exist. The theoretical worst case (every sequence filled to
+        # max_model_len) can be many times larger than the allocated KV cache
+        # and OOMs on the first decode warmup step. A decode request can never
+        # reference more blocks than the cache holds, so buckets above this
+        # ceiling are unreachable. Previously this clamp only ran under
+        # contiguous PA, so the default (non-contiguous) path could OOM.
+        max_decode_blocks = min(max_blocks, max_decode_blocks)
         decode_blocks_limit = math.ceil(math.log2(max_decode_blocks)) + 1
         # Compensate for wider range: add extra buckets to maintain density at high end
         if not use_contiguous_pa and max_blocks > 0:
