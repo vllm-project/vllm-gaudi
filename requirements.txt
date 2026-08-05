@@ -1,4 +1,10 @@
 # Dependencies for HPU code
+# vllm_gaudi/patches.py imports create_position_bias_mask from
+# transformers.integrations.sdpa_attention, added in transformers 5.14.1. vLLM
+# only sets transformers>=5.5.3, so without this floor an older transformers can
+# be resolved and the HPU SDPA patch fails at import (ImportError on Gemma4).
+# Floor, not ==, so it composes with vLLM's own bound and future bumps.
+transformers>=5.14.1
 pandas>=2.2.3
 numba>=0.58.0
 numpy>=1.26.0
