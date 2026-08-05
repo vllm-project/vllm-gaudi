@@ -214,6 +214,13 @@ RUN set -e && \
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
     VLLM_TARGET_DEVICE=hpu pip install --no-cache-dir -v . --no-build-isolation && \
+    # Pin transformers to the version vllm-gaudi's HPU patches are written against
+    # (see vllm_gaudi/patches.py). vLLM only sets transformers>=5.5.3, so the resolved
+    # version can be older than what the plugin imports at runtime (e.g.
+    # create_position_bias_mask, added in 5.14.1) -> ImportError on Gemma4. Installed
+    # after vLLM so it wins, with deps so huggingface_hub/tokenizers match.
+    # Remove once vLLM's own transformers pin covers this floor.
+    pip install --no-cache-dir "transformers==5.14.1" && \
     pip check
 
 # Setup non-root user for OpenShift compatibility

@@ -68,6 +68,15 @@ RUN \
     VLLM_TARGET_DEVICE=hpu pip install -v . --no-build-isolation
 # --- END: COMBINED RUN COMMAND ---
 
+# Pin transformers to the version vllm-gaudi's HPU patches are written against
+# (see vllm_gaudi/patches.py). vLLM only sets a lower bound (transformers>=5.5.3),
+# so the resolved version can be older than what the plugin imports at runtime
+# (e.g. create_position_bias_mask from transformers.integrations.sdpa_attention,
+# added in 5.14.1) -> ImportError on Gemma4. Installed after vLLM so it wins, and
+# with deps so huggingface_hub/tokenizers resolve to matching versions.
+# Remove once vLLM's own transformers pin covers this floor.
+RUN pip install "transformers==5.14.1"
+
 # Install additional Python packages (torchaudio install removed)
 RUN pip install datasets && \
     pip install pandas
