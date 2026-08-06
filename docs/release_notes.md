@@ -2,6 +2,14 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.26.0
+
+This version is based on [vLLM 0.26.0](https://github.com/vllm-project/vllm/releases/tag/v0.26.0) and supports [Intel® Gaudi® Software v1.24.1](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.11.
+
+This release enables the plugin on upstream vLLM 0.26.0 and realigns the Intel® Gaudi® platform with extensive upstream API drift across MoE/MLA, quantization, serving, attention, KV-offload, the multi-model server, and the NIXL connector. It adds new model support for MiniMax-M3, the Gemma-4 family, the Kimi-K2.5 vision tower, and Qwen3-Coder-Next, improves MXFP4 gpt-oss serving and FP8/INC quantization stability, reduces graph compilation and warmup overhead, strengthens security, and restores the latest `transformers` version.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.26.0.md).
+
 ## 0.24.0
 
 This version is based on [vLLM 0.24.0](https://github.com/vllm-project/vllm/releases/tag/v0.24.0) and supports [Intel® Gaudi® Software v1.24.1](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.11.
