@@ -117,7 +117,7 @@ This release is based on [vLLM v0.26.0](https://github.com/vllm-project/vllm/rel
 | [#1665](https://github.com/vllm-project/vllm-gaudi/pull/1665) | Add item-count axis to multimodal warmup resolutions | @libinta |
 | [#1671](https://github.com/vllm-project/vllm-gaudi/pull/1671) | Port of: granite-4.0-h-small made compatible with single process models swap - #1595 | @iboiko-habana |
 | [#1668](https://github.com/vllm-project/vllm-gaudi/pull/1668) | Fix #1612: don't wrap INT8 W8A8 loader with FP8-only gaudi_weight_wrapper | @rsmyrek |
-| [#1664](https://github.com/vllm-project/vllm-gaudi/pull/1664) | Enable GLM-5.2 (DSA MoE) on HPU via dense-MLA fallbacak | @sureshnam |
+| [#1664](https://github.com/vllm-project/vllm-gaudi/pull/1664) | Enable GLM-5.2 (DSA MoE) on HPU via dense-MLA fallback | @sureshnam |
 | [#1655](https://github.com/vllm-project/vllm-gaudi/pull/1655) | Add pure-Python MiniMax-M3 tool-call parser for HPU | @mkrze |
 | [#1656](https://github.com/vllm-project/vllm-gaudi/pull/1656) | Improve MiniMax-M3 MoE decode performance after upstream merge | @mkrze |
 | [#1662](https://github.com/vllm-project/vllm-gaudi/pull/1662) | Gemma4:optimization for sliding window and transformers sdpa attn | @libinta |
@@ -144,13 +144,13 @@ This release is based on [vLLM v0.26.0](https://github.com/vllm-project/vllm/rel
 | [#1598](https://github.com/vllm-project/vllm-gaudi/pull/1598) | Fix FP8 dequant device mismatch | @mkrze |
 | [#1610](https://github.com/vllm-project/vllm-gaudi/pull/1610) | Port of #1607: Warn when calibrate_model.sh -u is used on TP>1 without -r | @adobrzyn |
 | [#1618](https://github.com/vllm-project/vllm-gaudi/pull/1618) | fix: pair SP-MoE dispatch/combine at dp_size==1 for Qwen3-30B EP (BF16 + FP8/compressed-tensors) | @pawel-olejniczak |
-| [#1594](https://github.com/vllm-project/vllm-gaudi/pull/1594) | Port: Fix Maverick FP8 INC calibration OOM after #41184 MoE refacotr #1590 | @iboiko-habana |
+| [#1594](https://github.com/vllm-project/vllm-gaudi/pull/1594) | Port: Fix Maverick FP8 INC calibration OOM after #41184 MoE refactor #1590 | @iboiko-habana |
 | [#1615](https://github.com/vllm-project/vllm-gaudi/pull/1615) | Cherry pick from v0.24.0 to main | @PatrykWo |
 | [#1616](https://github.com/vllm-project/vllm-gaudi/pull/1616) | fix: skip GPU-only blocks-first KV asserts in HPU NIXL TransferTopology | @pawel-olejniczak |
 | [#1611](https://github.com/vllm-project/vllm-gaudi/pull/1611) | Resolve 10 vLLM API-drift breaks (MoE/MLA/quant/server/attn) | @pawel-olejniczak |
-| [#1600](https://github.com/vllm-project/vllm-gaudi/pull/1600) | remove covnv1d update tpc kernel | @slokesha |
+| [#1600](https://github.com/vllm-project/vllm-gaudi/pull/1600) | remove conv1d update tpc kernel | @slokesha |
 | [#1562](https://github.com/vllm-project/vllm-gaudi/pull/1562) | fix: realign HPU plugin with upstream vLLM API drift (kv-offload OffloadingWorker + ServingRender + GraniteMoeHybrid layer types + FusedMoE shared_expert_weight) and fix DP teardown hang | @pawel-olejniczak |
-| [#1552](https://github.com/vllm-project/vllm-gaudi/pull/1552) | Fix decode bucket sparsity for longprompt | @shepark |
+| [#1552](https://github.com/vllm-project/vllm-gaudi/pull/1552) | Fix decode bucket sparsity for long prompt | @shepark |
 | [#1580](https://github.com/vllm-project/vllm-gaudi/pull/1580) | Free dead INC-quantized FP8 MoE weight copy to halve device memory, fix for MoE refactor #41184 | @iboiko-habana |
 | [#1566](https://github.com/vllm-project/vllm-gaudi/pull/1566) | Detach shared MoE gate when experts is the MoERunner (vLLM #41184) | @iboiko-habana |
 | [#1546](https://github.com/vllm-project/vllm-gaudi/pull/1546) | [HPU] Fix contiguous PA wrong-rows on prefill context (perf-preserving) | @adobrzyn |
