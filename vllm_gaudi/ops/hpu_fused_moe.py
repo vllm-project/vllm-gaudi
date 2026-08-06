@@ -325,7 +325,8 @@ def select_experts_from_routed(layer, hidden_states: torch.Tensor,
     router moved onto ``MoERunner``). ``RoutedExperts`` does, however, carry all
     the routing parameters, so we reproduce upstream's behaviour via the
     standalone ``select_experts`` helper. It is imported lazily because
-    ``cpu_fused_moe`` registers a CPU custom op at module import time.
+    ``experts.cpu_moe`` pulls CPU custom ops from ``vllm._custom_ops`` at
+    module import time.
 
     Args:
         layer: The ``RoutedExperts`` instance holding the routing parameters.
@@ -335,7 +336,7 @@ def select_experts_from_routed(layer, hidden_states: torch.Tensor,
     Returns:
         A ``(topk_weights, topk_ids)`` tuple.
     """
-    from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import select_experts
 
     return select_experts(
         hidden_states=hidden_states,
