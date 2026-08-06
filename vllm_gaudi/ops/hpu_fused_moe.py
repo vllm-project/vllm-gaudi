@@ -45,6 +45,11 @@ _MOE_ACTIVATION_ALIASES = {
     "gelu_pytorch_tanh": "gelu",
     "gelu_new": "gelu",
     "quick_gelu": "gelu",
+    # Non-gated squared-ReLU (Nemotron-H). The model's activation config value is
+    # "relu2_no_mul"; the Habana MoeActivationMode_t enum spells it "relu2". The
+    # no-gate/no-multiply behaviour is selected separately via is_gated=False
+    # (see VllmMixtureOfExpertsOpFP8PerChannel), not by this activation name.
+    "relu2_no_mul": "relu2",
 }
 
 

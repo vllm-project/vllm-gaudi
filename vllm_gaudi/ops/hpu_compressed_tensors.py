@@ -457,6 +457,10 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
                 experts_max,
                 dispatch_fn=None,
             )
+            # Non-gated experts (is_act_and_mul=False, e.g. Nemotron-H's
+            # squared-ReLU) make the fused kernel skip the gate split+multiply.
+            # Gated layers leave is_gated=True and their kernel call is unchanged.
+            layer.moe_op.is_gated = layer.moe_config.is_act_and_mul
 
         if self.static_input_scales:
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
