@@ -58,17 +58,9 @@ ART="vllm-gaudi-${TAG}.tar.gz"
 curl -sSLO "${BASE}/${ART}"
 curl -sSLO "${BASE}/${ART}.sig"
 curl -sSLO "${BASE}/${ART}.pem"
-
-# Verify that the signature was produced by this repository's release
-# workflow and issued through GitHub's OIDC provider.
-cosign verify-blob \
-  --certificate "${ART}.pem" \
-  --signature "${ART}.sig" \
-  --certificate-identity-regexp \
-    '^https://github\.com/vllm-project/vllm-gaudi/\.github/workflows/release-sign\.yml@refs/.+$' \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  "${ART}"
 ```
 
-A successful run prints `Verified OK`. You can additionally check the
-checksum with `sha256sum -c "${ART}.sha256"`.
+Verify the downloaded tarball against its signature and certificate using
+Cosign, checking that the signature was produced by this repository's release
+workflow and issued through GitHub's OIDC provider. You can additionally check
+the checksum with `sha256sum -c "${ART}.sha256"`.
