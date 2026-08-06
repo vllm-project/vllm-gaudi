@@ -108,7 +108,7 @@ def get_features():
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
         Value(
             'flatten_input',
-            Any(ModelType('qwen3_moe'), ModelType('qwen3_5_moe'), ModelType('granitemoe'), ModelType('glm4_moe'),
+            Any(ModelType('qwen3_moe'), ModelType('granitemoe'), ModelType('glm4_moe'),
                 ModelType('gemma4'))),
         Value('high_level_profiler_enabled', False, env_var='VLLM_PROFILER_ENABLED', env_var_type=boolean),
         Value('track_graph_compilation', False, env_var='PT_HPU_METRICS_GC_DETAILS', env_var_type=boolean),
