@@ -151,17 +151,34 @@ class HPUAsyncScheduler(AsyncScheduler):
                 num_new_tokens = (num_new_tokens // chunk_size * chunk_size)
         return num_new_tokens
 
-    def _update_request_with_output(self, request: Request, new_token_ids: list[int]) -> tuple[list[int], bool]:
+    def _update_request_with_output(self, request: Request, new_token_ids: list[int],
+                                    **kwargs) -> tuple[list[int], bool]:
         # HPU may complete prompt processing and generate logits for a request
         # even if the scheduler only scheduled a partial chunk (where
         # num_output_placeholders is 0). We must discard these spurious tokens
         # to prevent assertion failures in the base class and to avoid
         # corrupting the request state.
+        #
+        # **kwargs keeps this override version-agnostic across upstream
+        # signature drift. vllm-project/vllm#48245 added an `is_stale: bool`
+        # parameter that Scheduler.update_from_output now forwards by keyword
+        # (`is_stale=output_is_stale`); older branches call with just
+        # (request, new_token_ids). Capturing extra keywords and forwarding
+        # them verbatim to super() lets a single override work against both.
         if request.num_output_placeholders == 0 and len(new_token_ids) > 0:
-            # If the discard flag was set (e.g. from preemption), reset it here since
-            # we are effectively discarding the token anyway.
-            if request.discard_latest_async_tokens:
+            # If the discard flag was set (e.g. from preemption), reset it here
+            # since we are effectively discarding the token anyway.
+            #
+            # vLLM removed the Request.discard_latest_async_tokens boolean on
+            # newer branches. vllm-project/vllm#48245 replaced the whole
+            # forced-preemption discard mechanism with
+            # num_stale_output_tokens/drop_stale_output on Request, draining
+            # stale in-flight frames inside the base Scheduler via the is_stale
+            # path; the pinned SHA follows that lineage, so the attribute no
+            # longer exists. getattr keeps this override version-agnostic:
+            # reset the legacy flag when present, otherwise skip silently.
+            if getattr(request, "discard_latest_async_tokens", False):
                 request.discard_latest_async_tokens = False
             return [], False
 
-        return super()._update_request_with_output(request, new_token_ids)
+        return super()._update_request_with_output(request, new_token_ids, **kwargs)

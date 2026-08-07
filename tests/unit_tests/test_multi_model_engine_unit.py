@@ -303,6 +303,26 @@ def test_deserialize_reconfigure_config_rejects_non_vllm_config(monkeypatch):
         core_patch._deserialize_reconfigure_config(payload)
 
 
+def test_deserialize_reconfigure_config_error_does_not_leak_payload(monkeypatch):
+    """
+    Error/log leak scan: when a reconfigure payload is rejected, the raised
+    error must not echo the (untrusted, possibly secret-bearing) payload back.
+    """
+    monkeypatch.setattr(core_patch, "VllmConfig", _FakeVllmConfig)
+    monkeypatch.setattr(core_patch.envs, "VLLM_ALLOW_INSECURE_SERIALIZATION", True)
+
+    secret = "SUPER_SECRET_TOKEN_1234"
+    payload = cloudpickle.dumps({"model": secret})
+    # Sanity-check the secret is actually in the payload, so the leak
+    # assertion below is meaningful and not a false negative.
+    assert secret.encode() in payload
+
+    with pytest.raises(TypeError) as exc_info:
+        core_patch._deserialize_reconfigure_config(payload)
+
+    assert secret not in str(exc_info.value)
+
+
 def test_deserialize_reconfigure_config_accepts_valid_payload(monkeypatch):
     monkeypatch.setattr(core_patch, "VllmConfig", _FakeVllmConfig)
     monkeypatch.setattr(core_patch.envs, "VLLM_ALLOW_INSECURE_SERIALIZATION", True)
