@@ -484,6 +484,7 @@ class MiniMaxM3VideoBackend(VideoBackend):
         if indices and indices[-1] != last_frame_idx and last_ts - prev_kept_ts > eps:
             indices.append(last_frame_idx)
 
-        if not indices:
-            indices = [0]
+        # Note: `indices` is guaranteed non-empty here because the early guard
+        # ensures total_frames >= 1, so the first loop iteration always appends
+        # frame 0.
         return indices
