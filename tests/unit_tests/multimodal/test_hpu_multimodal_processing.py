@@ -146,8 +146,17 @@ def test_hf_processor_call_kwargs(
 ):
     """Test that HPU processor call uses correct device."""
 
+    # Upstream vLLM #50390 made InputProcessingContext._postprocess_output copy
+    # non-CPU processor outputs back to host unless the multimodal transport is
+    # the zero-copy "torch_shm" IPC. The default "direct_rpc" transport would
+    # move the HPU tensors to CPU, so keep them on the accelerator by selecting
+    # torch_shm — otherwise the device assertions below would never hold.
     ctx = InputProcessingContext(
-        model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
+        model_config=ModelConfig(
+            model_id,
+            mm_processor_kwargs=config_kwargs,
+            mm_tensor_ipc="torch_shm",
+        ),
         tokenizer=None,
     )
 
