@@ -145,6 +145,45 @@ INFO 09-22 16:39:43 [hpu_model_runner.py:3411] Sampler warmup completed successf
 
 If warm-up is globally skipped, these logs do not appear.
 
+## Multimodal Warm-up
+
+Native-resolution vision towers (e.g. Gemma4, Kimi-K2.5/K2.6, Qwen2.5/3/3.5-VL) produce a different patch grid per image resolution, unlike batch-based towers (e.g. Gemma3) which only vary by batch size. If a real request's resolution does not match anything warmed at startup, the vision-tower graph recompiles on the critical path.
+
+By default, warm-up derives a spread of aspect-ratio shapes from the model's patch-count buckets (`VLLM_MULTIMODAL_BUCKETS`). Some native-resolution towers (Gemma4, Kimi-K2.5/K2.6, Qwen3.5) ship with **empty** patch-count buckets on purpose — the guessed aspect-ratio shapes match no real request for these models and only lengthen warm-up. For them there is no guessed warm-up at all, so you **must** set `VLLM_MULTIMODAL_RESOLUTIONS` (or `--limit-mm-per-prompt` width/height) to precompile anything; otherwise the vision-tower graph recompiles on the first real request at each resolution (the runner logs a warning at startup when this happens). To guarantee a specific production resolution is precompiled, set `VLLM_MULTIMODAL_RESOLUTIONS` to a comma-separated list of raw pixel resolution entries:
+
+```text
+VLLM_MULTIMODAL_RESOLUTIONS=1024x768,768x1024
+```
+
+Each entry may optionally carry an **item-count axis** that controls how many images per request are warmed at that resolution. Item counts are operator-controlled -- the runner never enumerates counts on its own -- so declare exactly what your traffic sends. Three per-entry forms are supported:
+
+| Form | Meaning |
+|------|---------|
+| `WxH` | Warm ONE graph at count = the `--limit-mm-per-prompt` ceiling (`user_max_count`). |
+| `WxHxN` | Warm ONLY the count-`N` graph. Use when traffic always sends `N` images per request and image/prefix caching is off. |
+| `WxHxN-M` | Warm the item-count RANGE `[N, M]` (clamped to `user_max_count`). Declare this when the per-call count varies -- mixed request sizes, or prefix/image caching making the uncached count land anywhere in the range. Example: `864x480x1-20`. |
+
+`N` must satisfy `1 <= N <= M`; an invalid range raises at startup.
+
+```text
+VLLM_MULTIMODAL_RESOLUTIONS=1024x768,768x1024x2,864x480x1-20
+```
+
+!!! warning
+    A range warms **one full graph per item count**, per resolution. `864x480x1-20` compiles 20 graphs for that single resolution, and each additional ranged entry multiplies on top. A wide range (e.g. `1-50`) can make warm-up time and memory blow up fast — declare only the counts your traffic actually sends, not a broad span "just in case."
+
+The `width`/`height` given via `--limit-mm-per-prompt` (e.g. `--limit-mm-per-prompt '{"image": {"count": 1, "width": 1024, "height": 768}}'`) are unioned with `VLLM_MULTIMODAL_RESOLUTIONS`. Each resolution is built as a raw solid-color image and fed through the model's own processor (`smart_resize`/`navit_resize`/...), rather than a precomputed grid, so the compiled graph matches exactly what a real request at that resolution produces. This is supported for the `image` modality and for Kimi-K2.5/K2.6's `vision_chunk` modality.
+
+```{.}
+INFO 07-27 23:22:27 hpu_model_runner.py:5890] Using explicit multimodal warmup resolutions (width, height, count[None=max|N=pin|(lo,hi)=range]): [(864, 480, None), (1024, 768, 2), (768, 1024, (1, 20))]
+INFO 07-27 23:22:27 hpu_model_runner.py:5098] [Warmup][Graph/Multimodal(vision_chunk)][1/3] batch_size:1 seq_len:0 resolution:864X480 free_mem:15.26 GiB
+INFO 07-27 23:22:27 hpu_model_runner.py:5098] [Warmup][Graph/Multimodal(vision_chunk)][2/3] batch_size:1 seq_len:0 resolution:1024X768 free_mem:15.26 GiB
+INFO 07-27 23:22:27 hpu_model_runner.py:5098] [Warmup][Graph/Multimodal(vision_chunk)][3/3] batch_size:1 seq_len:0 resolution:768X1024 free_mem:15.26 GiB
+```
+
+!!! note
+    `VLLM_MULTIMODAL_RESOLUTIONS` only takes effect for native-resolution (non-batch-based) vision towers. Batch-based towers ignore it and warm up the standard batch-size buckets instead.
+
 ## Defragmenter Warm-up
 
 The defragmenter reclaims and compacts sparse KV-cache block usage at runtime by swapping rarely packed high-index blocks with lower free indices. Its warm-up phase pre-compiles the small swap graphs so that later online defragmentation can execute with near-zero graph compile latency.
