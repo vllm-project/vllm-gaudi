@@ -12,6 +12,11 @@ on:
   # Allow manual triggering from the GitHub Actions UI
   workflow_dispatch: {}
 
+# Least-privilege default; the job that pushes the stable commit
+# (store_last_stable_vllm_commit) opts into contents: write at the job level.
+permissions:
+  contents: read
+
 jobs:
   # JOB 1: (NEW) Discovers an available runner and locks it for all subsequent jobs.
   discover_runner:

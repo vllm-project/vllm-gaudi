@@ -22,14 +22,16 @@ on:
         required: false
         type: string
 
-# This permission is required for the action to push changes to the repository
+# Least-privilege default; the job that pushes changes opts in below.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   update-community-commit:
     name: "Update and Push Community Commit"
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to push the updated commit to the repository
 
     steps:
       # Step 1: Validate inputs
