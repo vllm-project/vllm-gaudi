@@ -669,6 +669,27 @@ def _patch_free_blocks() -> None:
 _CACHED_FSDPA_OP = None
 
 
+def _ensure_fsdpa_cached() -> None:
+    """Eagerly initialize the FusedSDPA operator cache.
+
+    Must be called BEFORE torch.compile traces _hpu_sdpa_attention_forward,
+    otherwise dynamo creates a guard on `_CACHED_FSDPA_OP is None` which
+    fails at runtime and triggers recompilation.
+
+    Called from hpu_model_runner.py during model initialization.
+    """
+    global _CACHED_FSDPA_OP
+    if _CACHED_FSDPA_OP is not None:
+        return
+    try:
+        from vllm_gaudi.extension.utils import ModuleFusedSDPA
+        import vllm_gaudi.extension.kernels as kernels
+        HPUFusedSDPA = kernels.fsdpa()
+        _CACHED_FSDPA_OP = ModuleFusedSDPA(HPUFusedSDPA)
+    except Exception:
+        pass
+
+
 def _hpu_sdpa_attention_forward(
     module: torch.nn.Module,
     query: torch.Tensor,
@@ -740,12 +761,12 @@ def _hpu_sdpa_attention_forward(
             pass
 
     if _use_hpu_fsdpa and _config is not None:
+        # _CACHED_FSDPA_OP is initialized eagerly by _ensure_fsdpa_cached()
+        # before torch.compile traces this function. This avoids the dynamo
+        # guard on `_CACHED_FSDPA_OP is None` that would trigger recompilation.
         global _CACHED_FSDPA_OP
-        if _CACHED_FSDPA_OP is None:
-            from vllm_gaudi.extension.utils import ModuleFusedSDPA
-            import vllm_gaudi.extension.kernels as kernels
-            HPUFusedSDPA = kernels.fsdpa()
-            _CACHED_FSDPA_OP = ModuleFusedSDPA(HPUFusedSDPA)
+        _ensure_fsdpa_cached()
+        assert _CACHED_FSDPA_OP is not None
 
         softmax_mode = "fp32" if _config.fp32_softmax else "fast"
         attn_output = _CACHED_FSDPA_OP(
@@ -795,6 +816,11 @@ def _patch_sdpa_attention_forward() -> None:
             ALL_ATTENTION_FUNCTIONS["sdpa"] = _hpu_sdpa_attention_forward
     except ImportError:
         pass  # transformers version without this module
+
+    # Eagerly initialize the operator cache at patch-registration time,
+    # before torch.compile traces the function. Same pattern as hpu_attn.py
+    # which calls kernels.fsdpa() in __init__.
+    _ensure_fsdpa_cached()
 
 
 def apply() -> None:
