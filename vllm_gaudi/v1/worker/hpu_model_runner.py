@@ -2410,8 +2410,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                               skip_copy=not batch_changed)
         return sampling_metadata
 
-    def get_habana_paged_attn_buffers(self, block_tables, slot_mapping, batch_size, block_size=None,
-                                       force_non_contiguous=False):
+    def get_habana_paged_attn_buffers(self,
+                                      block_tables,
+                                      slot_mapping,
+                                      batch_size,
+                                      block_size=None,
+                                      force_non_contiguous=False):
         """Build paged attention buffers for decode.
 
         Args:
