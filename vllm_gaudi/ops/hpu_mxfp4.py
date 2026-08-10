@@ -12,13 +12,16 @@ from functools import partial
 import torch
 import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization import mxfp4 as mxfp4_module
 from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
 
 from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpMXFP4
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
+from vllm_gaudi.ops.hpu_fused_moe import (
+    _normalize_moe_activation,
+    select_experts_from_routed,
+)
 from vllm_gaudi.v1.worker.hpu_dp_utils import (
     dispatch_hidden_states,
     dispatch_tensor,
@@ -103,7 +106,7 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         **kwargs,
@@ -116,7 +119,10 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
             topk_weights = F.softmax(topk_weights, dim=-1, dtype=torch.float32)
         else:
             if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-                topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+                # `RoutedExperts` no longer owns a `.router` (upstream PR #41184
+                # moved it onto `MoERunner`); route via the shared helper that
+                # reproduces upstream's select_experts from the layer's params.
+                topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
             else:
                 topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
                 topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
