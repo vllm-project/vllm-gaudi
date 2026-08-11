@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.hashing import get_hash_fn_by_name
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -89,7 +89,6 @@ def _reset_executor_sleep_state(model_executor: Any) -> None:
             model_executor.sleeping_tags = set()
 
     model_executor.is_sleeping = False
-    logger.info("[gaudi_reconfigure] executor sleeping tags reset")
 
 
 def _require_reconfigure_attr(config: Any, path: tuple[str, ...]) -> None:
@@ -179,14 +178,25 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
         if isinstance(mamba_mode, str) and mamba_mode.lower() == "none":
             cache_config.mamba_cache_mode = "align"
 
-        if getattr(cache_config, "mamba_block_size", None) in (None, 0):
+        # When mamba_cache_mode is "none" (no prefix caching), vLLM's
+        # HybridAttentionMambaModelConfig sets mamba_block_size to
+        # max_model_len as a sentinel meaning "one block per sequence".
+        # That sentinel is not valid for "align" mode and would fail the
+        # KVCacheCoordinatorBase assertion (scheduler_block_size %
+        # mamba_block_size == 0) because max_model_len (e.g. 32768) is
+        # not divisible by the HPU attention block size (e.g. 528).
+        # Treat None, 0, and max_model_len as "unset" and use block_size.
+        max_model_len = getattr(model_config, "max_model_len", None)
+        mamba_bs = getattr(cache_config, "mamba_block_size", None)
+        if mamba_bs is None or mamba_bs == 0 or (max_model_len is not None and mamba_bs == max_model_len):
             cache_config.mamba_block_size = cache_config.block_size
 
         # Ensure mamba_page_size_padded exists. Final divisibility and other
         # backend-specific alignment should be handled by platform hooks.
         from vllm.model_executor.models import ModelRegistry
 
-        if getattr(cache_config, "mamba_page_size_padded", None) is None:
+        mamba_page_size_was_none = getattr(cache_config, "mamba_page_size_padded", None) is None
+        if mamba_page_size_was_none:
             model_cls, _ = ModelRegistry.resolve_model_cls(
                 model_config.architecture,
                 model_config=model_config,
@@ -198,12 +208,13 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
             ).page_size_bytes
             cache_config.mamba_page_size_padded = raw_mamba_page
 
-        # Re-run platform normalization after applying Granite-specific
-        # fallback fields so alignment math stays centralized.
-        _run_platform_normalization(
-            config,
-            "[gaudi_reconfigure] Granite hybrid mamba alignment fallback failed for model %s: %s",
-        )
+        # Re-run platform normalization only when the fallback above had to
+        # supply mamba_page_size_padded from scratch (it was None).
+        if mamba_page_size_was_none:
+            _run_platform_normalization(
+                config,
+                "[gaudi_reconfigure] Granite hybrid mamba alignment fallback failed for model %s: %s",
+            )
     except Exception:
         raise
 
@@ -247,7 +258,6 @@ def install_engine_core_patch() -> None:
             # Pause scheduling and clear caches to avoid mixed state.
             try:
                 self.pause_scheduler(mode="abort", clear_cache=True)
-                logger.info("[gaudi_reconfigure] scheduler paused and caches reset")
             except Exception as exc:  # pragma: no cover - best effort
                 logger.warning("Failed to pause scheduler before reconfigure: %s", exc)
 
@@ -257,7 +267,6 @@ def install_engine_core_patch() -> None:
                     logger.warning("[gaudi_reconfigure] executor already marked sleeping before reconfigure")
                 else:
                     self.model_executor.sleep(level=1)
-                    logger.info("[gaudi_reconfigure] executor slept (level=1)")
             except Exception as exc:  # pragma: no cover - best effort
                 logger.warning("Failed to sleep executor before reconfigure: %s", exc)
 
@@ -285,7 +294,6 @@ def install_engine_core_patch() -> None:
                 load_kwargs["quant_config_path"] = quant_config_path
 
             self.collective_rpc("load_model", kwargs=load_kwargs)
-            logger.info("[gaudi_reconfigure] worker model reload complete")
 
             # Update config and reinitialize KV caches.
             self.vllm_config = new_config
@@ -293,14 +301,10 @@ def install_engine_core_patch() -> None:
 
             kv_cache_config = self._initialize_kv_caches(new_config)
             num_gpu_blocks = new_config.cache_config.num_gpu_blocks
-            logger.info(
-                "[gaudi_reconfigure] kv cache reinitialized: num_gpu_blocks=%d",
-                num_gpu_blocks,
-            )
+            logger.info("[gaudi_reconfigure] kv cache reinitialized: num_gpu_blocks=%d", num_gpu_blocks)
 
             # Rebuild structured output manager.
             self.structured_output_manager = StructuredOutputManager(new_config)
-            logger.info("[gaudi_reconfigure] structured output manager rebuilt")
 
             # Rebuild scheduler.
             Scheduler = new_config.scheduler_config.get_scheduler_cls()
@@ -308,9 +312,9 @@ def install_engine_core_patch() -> None:
                 logger.warning("Disabling chunked prefill for model without KVCache")
                 new_config.scheduler_config.enable_chunked_prefill = False
 
-            scheduler_block_size = (new_config.cache_config.block_size *
-                                    new_config.parallel_config.decode_context_parallel_size *
-                                    new_config.parallel_config.prefill_context_parallel_size)
+            # Use the same block-size resolution as the initial EngineCore startup
+            # (core.py).
+            scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, new_config)
 
             self.scheduler = Scheduler(
                 vllm_config=new_config,
@@ -319,18 +323,16 @@ def install_engine_core_patch() -> None:
                 include_finished_set=False,
                 log_stats=self.log_stats,
                 block_size=scheduler_block_size,
+                hash_block_size=hash_block_size,
             )
-            logger.info("[gaudi_reconfigure] scheduler rebuilt")
 
             self.use_spec_decode = new_config.speculative_config is not None
             if self.scheduler.connector is not None:  # type: ignore[has-type]
                 self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore[arg-type]
-                logger.info("[gaudi_reconfigure] kv output aggregator initialized")
 
             # Rebuild multimodal receiver cache.
             self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
             self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(new_config)
-            logger.info("[gaudi_reconfigure] multimodal receiver cache rebuilt")
 
             kv_connector = self.scheduler.get_kv_connector()
             if kv_connector is not None:
@@ -343,7 +345,6 @@ def install_engine_core_patch() -> None:
                         if worker_dict is not None:
                             content.update(worker_dict)
                     kv_connector.set_xfer_handshake_metadata_pp_aware(content)
-                    logger.info("[gaudi_reconfigure] kv connector handshake metadata refreshed")
 
             # Rebuild batch queue and scheduling helpers.
             self.batch_queue_size = new_config.max_concurrent_batches
@@ -362,7 +363,6 @@ def install_engine_core_patch() -> None:
             self.step_fn = self.step if self.batch_queue is None else self.step_with_batch_queue
             self.async_scheduling = new_config.scheduler_config.async_scheduling
             self.aborts_queue = queue.Queue()
-            logger.info("[gaudi_reconfigure] execution state rebuilt")
 
             _reset_executor_sleep_state(self.model_executor)
 
