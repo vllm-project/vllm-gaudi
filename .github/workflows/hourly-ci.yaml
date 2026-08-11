@@ -4,17 +4,98 @@
 name: Hourly Commit Check and Tests
 
 on:
-  # Schedule the workflow to run once a day
+  # The workflow is scheduled at the fast (8-hour) cadence; the 'gate' job below
+  # decides at runtime whether a given tick actually proceeds. Effective cadence:
+  #   - last real run PASSED  -> run every 8h (this schedule, every tick)
+  #   - last real run FAILED  -> back off to once every 24h (skip 2 of every 3 ticks)
   schedule:
-    # Runs at minute 0, hour 0 (00:00 UTC) every day
-    - cron: '0 0 * * *'
+    # Runs at minute 0, every 8th hour (00:00, 08:00, 16:00 UTC)
+    - cron: '0 */8 * * *'
 
   # Allow manual triggering from the GitHub Actions UI
   workflow_dispatch: {}
 
 jobs:
+  # JOB 0: (NEW) Decides whether this scheduled tick should proceed.
+  # Adaptive cadence: healthy pipeline runs every 8h; a failing pipeline backs
+  # off to every 24h so we don't burn HPU runners re-running a known-broken state.
+  gate:
+    # Runs on a cheap GitHub-hosted runner so a "skip" never locks an HPU runner.
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+    steps:
+      - name: Decide whether to run
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$REPO"
+          AUTH="Authorization: Bearer $GH_TOKEN"
+          ACCEPT="Accept: application/vnd.github+json"
+
+          # Manual runs always proceed.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Manual dispatch -> running."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Look at recent completed runs of THIS workflow on main and find the most
+          # recent *real* run: one where the unit-test job actually executed. This
+          # deliberately ignores earlier "backed-off" ticks (whose test jobs were
+          # skipped and whose overall conclusion is misleadingly 'success').
+          RUNS=$(curl -fsSL -H "$AUTH" -H "$ACCEPT" \
+            "$API/actions/workflows/hourly-ci.yaml/runs?branch=main&status=completed&per_page=20")
+
+          LAST_CONCLUSION=""
+          LAST_CREATED=""
+          for RUN_ID in $(echo "$RUNS" | jq -r '.workflow_runs[].id'); do
+            UT=$(curl -fsSL -H "$AUTH" -H "$ACCEPT" \
+              "$API/actions/runs/$RUN_ID/jobs?per_page=100" \
+              | jq -r '.jobs[] | select(.name=="run_unit_tests") | .conclusion' | head -n1)
+            if [ -n "$UT" ] && [ "$UT" != "null" ] && [ "$UT" != "skipped" ]; then
+              LAST_CONCLUSION=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | .conclusion")
+              LAST_CREATED=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | .created_at")
+              break
+            fi
+          done
+
+          if [ -z "$LAST_CONCLUSION" ]; then
+            echo "No prior real run found -> running (bootstrap)."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Last real run: conclusion=$LAST_CONCLUSION created_at=$LAST_CREATED"
+
+          if [ "$LAST_CONCLUSION" = "success" ]; then
+            echo "Last real run passed -> 8h cadence -> running."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Last real run did not pass -> 24h cadence. Only proceed once ~24h have
+          # elapsed since that run started. Using elapsed time (not an exact hour
+          # match) keeps this robust to GitHub's scheduled-event delivery drift.
+          LAST_EPOCH=$(date -u -d "$LAST_CREATED" +%s)
+          NOW_EPOCH=$(date -u +%s)
+          AGE_HOURS=$(( (NOW_EPOCH - LAST_EPOCH) / 3600 ))
+          echo "Last real run failing; hours since it started: $AGE_HOURS"
+          if [ "$AGE_HOURS" -ge 23 ]; then
+            echo "Failing cadence, >=23h elapsed -> running (24h back-off tick)."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Failing cadence, only ${AGE_HOURS}h elapsed (<23h) -> skipping this tick."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # JOB 1: (NEW) Discovers an available runner and locks it for all subsequent jobs.
   discover_runner:
+    needs: gate
+    if: needs.gate.outputs.should_run == 'true'
     runs-on: hourly-ci # Picks any available runner from the 'hourly-ci' pool
     outputs:
       runner_name: ${{ steps.get_name.outputs.name }}
@@ -286,8 +367,10 @@ jobs:
 
   cleanup_docker_image:
     name: Cleanup Docker Image
-    if: always()
-    needs: [discover_runner, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test]
+    # Run whenever the pipeline actually proceeded (even on failure), but never on
+    # a gate-skipped tick, where no HPU runner was locked and runner_name is empty.
+    if: always() && needs.gate.outputs.should_run == 'true'
+    needs: [gate, discover_runner, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:
       - name: Remove Docker image to free up space
