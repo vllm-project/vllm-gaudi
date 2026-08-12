@@ -129,6 +129,7 @@ run_tests_for_model() {
     --enforce-eager \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
+    --served-model-name meta-llama/Llama-3.1-8B \
     --block-size $PREFILL_BLOCK_SIZE \
     --max-model-len 8192 \
     --max-num-batched-tokens 99999 \
@@ -167,6 +168,7 @@ run_tests_for_model() {
     --enforce-eager \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size $DECODER_TP_SIZE \
+    --served-model-name meta-llama/Llama-3.1-8B \
     --block-size $DECODE_BLOCK_SIZE \
     --max-model-len 8192 \
     --max-num-batched-tokens 99999 \
@@ -245,7 +247,7 @@ curl -X POST -s http://localhost:9195/v1/completions \
   #sleep 10000
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  TEST_MODEL=$model_name python -m pytest -s -x test_accuracy.py
+  TEST_MODEL=meta-llama/Llama-3.1-8B python -m pytest -s -x test_accuracy.py
 
   # Clean up before running next model
   cleanup_instances
