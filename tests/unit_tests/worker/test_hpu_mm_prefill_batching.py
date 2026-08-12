@@ -66,6 +66,12 @@ def _make_runner_stub(max_prefill_batch_size: int,
     stub.max_num_tokens = max_num_tokens
     stub.use_merged_prefill = use_merged_prefill
     stub.unified_attn = unified_attn
+    # num_mamba_like_layers is an instance-only attribute (set in __init__), so
+    # MagicMock(spec=HPUModelRunner) does not provide it. _can_merge_prefill_contents
+    # reads it on its first line; default to 0 (plain attention) so the existing
+    # merge tests exercise the non-mamba path. Tests that need the mamba guard
+    # override this to a positive value.
+    stub.num_mamba_like_layers = 0
 
     stub._can_merge_prefill_contents = (HPUModelRunner._can_merge_prefill_contents.__get__(stub))
     stub._get_prompt_bucketing_fn = (HPUModelRunner._get_prompt_bucketing_fn.__get__(stub))
@@ -163,6 +169,23 @@ class TestCanMergePrefillContents:
         lhs = BatchContents()
         rhs = _make_batch_contents("req-0", 128)
         assert runner._can_merge_prefill_contents(lhs, rhs) is True
+
+    def test_mamba_never_merges(self):
+        """Mamba/hybrid models must never merge prefills, even when the batch
+        size limit would otherwise allow it.
+
+        The mamba2 prefill path requires single-request batches: merging trips
+        ``assert len(req_ids) == 1`` in _form_prefill_batch with prefix
+        caching, or ``padded_batch == 1`` in granite_causal_conv1d_fn without
+        it. max_prefill_batch_size=8 with two history-less prefills merges for
+        plain attention (see test_bs4_allows_merge); the guard must block it
+        purely on model type.
+        """
+        runner = _make_runner_stub(max_prefill_batch_size=8)
+        runner.num_mamba_like_layers = 4  # hybrid/mamba model
+        lhs = _make_batch_contents("req-0", 128)
+        rhs = _make_batch_contents("req-1", 128)
+        assert runner._can_merge_prefill_contents(lhs, rhs) is False
 
 
 # ===========================================================================
