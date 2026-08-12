@@ -86,3 +86,25 @@ def _hpu_deepseek_v2_model_forward(
 
 # Applies to DeepseekV2/V3/Deepseek/GlmMoe/DSA — all share model_cls = DeepseekV2Model.
 deepseek_v2.DeepseekV2Model.forward = _hpu_deepseek_v2_model_forward
+
+_orig_deepseek_v2_model_load_weights = deepseek_v2.DeepseekV2Model.load_weights
+
+
+def _hpu_deepseek_v2_model_load_weights(self, weights):
+    """Drop GLM-5 DSA shared-indexer projection weights (`indexers_proj`).
+
+    vLLM's DeepseekV2Model has no module for them, and on HPU DSA layers run
+    as dense MLA with the indexer never executed, so the projection that
+    shares indexer K caches across layers is dead weight here.
+    """
+
+    def _filtered(ws):
+        for name, weight in ws:
+            if ".indexers_proj." in name:
+                continue
+            yield name, weight
+
+    return _orig_deepseek_v2_model_load_weights(self, _filtered(weights))
+
+
+deepseek_v2.DeepseekV2Model.load_weights = _hpu_deepseek_v2_model_load_weights
