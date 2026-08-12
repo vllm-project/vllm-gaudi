@@ -78,6 +78,11 @@ NS = "]<]minimax[>["
 TOOL_CALL_START = NS + "<tool_call>"
 TOOL_CALL_END = NS + "</tool_call>"
 INVOKE_START = NS + "<invoke"
+# MiniMax-M3 rarely drops the leading "<" of the invoke open tag, emitting
+# "]<]minimax[>[invoke name=..." instead of "]<]minimax[>[<invoke name=...".
+# Tolerate that variant, mirroring the headless-parameter recovery already done
+# for dropped parameter opening tags (see the NS branches below).
+INVOKE_START_NOLT = NS + "invoke"
 INVOKE_END = NS + "</invoke>"
 ELEMENT_START = NS + "<"
 ELEMENT_END_START = NS + "</"
@@ -88,6 +93,25 @@ _INVOKE_NAME_RE = re.compile(r"""name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
 
 # Sentinel for "schema-aware conversion failed, use fallback".
 _FAIL = object()
+
+
+def _find_invoke_open(text: str, start: int) -> tuple[int, int]:
+    """Find the next invoke open tag at/after ``start``.
+
+    Returns ``(pos, opener_len)`` for the earliest match of either the
+    well-formed ``INVOKE_START`` or the dropped-"<" variant
+    ``INVOKE_START_NOLT`` (a known MiniMax-M3 quirk); on a tie the well-formed
+    form wins. Returns ``(-1, 0)`` when neither is present. This can never
+    false-positive on well-formed text: right after the namespace marker a real
+    invoke has "<", so ``INVOKE_START_NOLT`` only matches where "<" was dropped.
+    """
+    p_full = text.find(INVOKE_START, start)
+    p_nolt = text.find(INVOKE_START_NOLT, start)
+    if p_full == -1:
+        return (p_nolt, len(INVOKE_START_NOLT)) if p_nolt != -1 else (-1, 0)
+    if p_nolt == -1 or p_full <= p_nolt:
+        return (p_full, len(INVOKE_START))
+    return (p_nolt, len(INVOKE_START_NOLT))
 
 
 class _ParseError(Exception):
@@ -564,11 +588,15 @@ class MinimaxM3PyToolParser(ToolParser):
 
     def _parse_one_invoke(self, inv_block: str, request) -> ToolCall:
         """Parse a complete ``<invoke ...>...</invoke>`` block into a ToolCall."""
-        # Search past INVOKE_START: the namespace marker itself contains a ">".
-        header_end = inv_block.find(">", len(INVOKE_START))
+        # Tolerate a dropped leading "<" on the invoke open tag (MiniMax-M3
+        # quirk); the block may start with INVOKE_START or INVOKE_START_NOLT.
+        opener_len = (len(INVOKE_START) if inv_block.startswith(INVOKE_START) else
+                      len(INVOKE_START_NOLT) if inv_block.startswith(INVOKE_START_NOLT) else len(INVOKE_START))
+        # Search past the opener: the namespace marker itself contains a ">".
+        header_end = inv_block.find(">", opener_len)
         if header_end == -1:
             raise _ParseError("invoke header not closed")
-        header = inv_block[len(INVOKE_START):header_end]
+        header = inv_block[opener_len:header_end]
         m = _INVOKE_NAME_RE.search(header)
         if not m:
             raise _ParseError("invoke name not found")
@@ -598,7 +626,7 @@ class MinimaxM3PyToolParser(ToolParser):
             cur.skip_ws()
             if cur.eof() or cur.startswith(TOOL_CALL_END):
                 break
-            if not cur.startswith(INVOKE_START):
+            if not (cur.startswith(INVOKE_START) or cur.startswith(INVOKE_START_NOLT)):
                 break  # stray text / malformed boundary -> stop
             inv_end = text.find(INVOKE_END, cur.i)
             if inv_end == -1:
@@ -732,17 +760,17 @@ class MinimaxM3PyToolParser(ToolParser):
                 while True:
                     if self._open is None:
                         end_pos = current_text.find(TOOL_CALL_END, self._m3_pos)
-                        inv_pos = current_text.find(INVOKE_START, self._m3_pos)
+                        inv_pos, inv_open_len = _find_invoke_open(current_text, self._m3_pos)
                         if end_pos != -1 and (inv_pos == -1 or end_pos < inv_pos):
                             self._m3_pos = end_pos + len(TOOL_CALL_END)
                             self._m3_mode = "done"
                             break
                         if inv_pos == -1:
                             break  # nothing to open yet
-                        header_end = current_text.find(">", inv_pos + len(INVOKE_START))
+                        header_end = current_text.find(">", inv_pos + inv_open_len)
                         if header_end == -1:
                             break  # invoke header still streaming
-                        header = current_text[inv_pos + len(INVOKE_START):header_end]
+                        header = current_text[inv_pos + inv_open_len:header_end]
                         m = _INVOKE_NAME_RE.search(header)
                         name = ((m.group(1) or m.group(2) or m.group(3) or "").strip() if m else "")
                         if not name:
