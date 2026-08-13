@@ -663,7 +663,15 @@ def patched_fused_moe_forward(
         # is initialized on routed_experts (which the runner holds directly), so
         # unlike the old FusedMoE-layer-based init we do NOT need the layer here.
         self.routed_experts._ensure_moe_quant_config_init()
-        self._maybe_sync_shared_experts_stream(shared_experts_input)
+        # Upstream removed MoERunner._maybe_sync_shared_experts_stream (vllm
+        # PR #51838); the multi-stream shared-expert launch now lives on
+        # SharedExperts.maybe_forward_async, mirrored by _forward_impl. On HPU
+        # (not CUDA-alike) maybe_forward_async returns False, so shared experts
+        # run synchronously inside _apply_quant_method — behaviourally identical
+        # to the old no-op stream sync, but kept in sync with upstream.
+        shared_experts_overlapping = False
+        if self._shared_experts is not None:
+            shared_experts_overlapping = self._shared_experts.maybe_forward_async(shared_experts_input)
         # Apply the gate if the runner holds it (mirrors _forward_impl).
         if self.gate is not None:
             if self._fse_fuse_gate:
@@ -673,12 +681,14 @@ def patched_fused_moe_forward(
                 router_logits, _ = self.gate(hidden_states)
         # Core MoERunner._apply_quant_method takes no layer argument — it reads
         # everything it needs off the runner (self.routed_experts / self.router).
-        # Call it exactly as upstream _forward_impl does.
+        # Call it exactly as upstream _forward_impl does, threading the overlap
+        # flag so an async-launched shared expert is awaited (not recomputed).
         shared_output, fused_hidden = self._apply_quant_method(
             hidden_states=hidden_states,
             router_logits=router_logits,
             shared_experts_input=shared_experts_input,
             input_ids=input_ids,
+            shared_experts_overlapping=shared_experts_overlapping,
         )
         result = self._maybe_combine(shared_output, fused_hidden)
     else:
@@ -701,13 +711,21 @@ def patched_fused_moe_forward(
     if og_hidden_dim_pre_xform is not None:
         fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
-    shared_output = self._maybe_reduce_shared_expert_output(shared_output)
+    # Mirror upstream MoERunner.forward's two mutually-exclusive all-reduce
+    # points, threaded by _fused_output_is_reduced: reduce a latent routed
+    # output before its (possibly non-linear) transform, then reduce shared
+    # output to match, else all-reduce the combined sum in the final step.
+    fused_output_is_reduced = self._fused_output_is_reduced
+    fused_output, fused_output_is_reduced = self._maybe_reduce_routed_output_before_transform(
+        fused_output, fused_output_is_reduced)
+
+    shared_output = self._maybe_reduce_shared_expert_output(shared_output, fused_output_is_reduced)
     shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
     fused_output = self.apply_routed_output_transform(fused_output)
 
     combined = (shared_output + fused_output) if shared_output is not None else fused_output
 
-    combined = self._maybe_reduce_final_output(combined, og_hidden_dim_post_xform)
+    combined = self._maybe_reduce_final_output(combined, og_hidden_dim_post_xform, fused_output_is_reduced)
     return self._maybe_add_zero_expert_output(combined)
 
 
