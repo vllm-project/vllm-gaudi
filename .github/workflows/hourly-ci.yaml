@@ -4,17 +4,109 @@
 name: Hourly Commit Check and Tests
 
 on:
-  # Schedule the workflow to run once a day
+  # The workflow is scheduled at the fast (8-hour) cadence; the 'gate' job below
+  # decides at runtime whether a given tick actually proceeds. Effective cadence:
+  #   - last real run PASSED  -> run every 8h (this schedule, every tick)
+  #   - last real run FAILED  -> back off to once every 24h (skip 2 of every 3 ticks)
   schedule:
-    # Runs at minute 0, hour 0 (00:00 UTC) every day
-    - cron: '0 0 * * *'
+    # Runs at minute 0, every 8th hour (00:00, 08:00, 16:00 UTC)
+    - cron: '0 */8 * * *'
 
   # Allow manual triggering from the GitHub Actions UI
   workflow_dispatch: {}
 
 jobs:
+  # JOB 0: (NEW) Decides whether this scheduled tick should proceed.
+  # Adaptive cadence: healthy pipeline runs every 8h; a failing pipeline backs
+  # off to every 24h so we don't burn HPU runners re-running a known-broken state.
+  gate:
+    # Runs on a cheap GitHub-hosted runner so a "skip" never locks an HPU runner.
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read # Required to query this workflow's previous runs and their jobs
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+      # ISO-8601 start time of the last real run; empty on bootstrap/manual runs.
+      # setup_and_build uses this as the exact commit-diff window.
+      last_started: ${{ steps.decide.outputs.last_started }}
+    steps:
+      - name: Decide whether to run
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$REPO"
+          AUTH="Authorization: Bearer $GH_TOKEN"
+          ACCEPT="Accept: application/vnd.github+json"
+
+          # Manual runs always proceed.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Manual dispatch -> running."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Look at recent completed runs of THIS workflow on main and find the most
+          # recent *real* run: one where the unit-test job actually executed. This
+          # deliberately ignores earlier "backed-off" ticks (whose test jobs were
+          # skipped and whose overall conclusion is misleadingly 'success').
+          RUNS=$(curl -fsSL -H "$AUTH" -H "$ACCEPT" \
+            "$API/actions/workflows/hourly-ci.yaml/runs?branch=main&status=completed&per_page=20")
+
+          LAST_CONCLUSION=""
+          LAST_STARTED=""
+          for RUN_ID in $(echo "$RUNS" | jq -r '.workflow_runs[].id'); do
+            JOBS=$(curl -fsSL -H "$AUTH" -H "$ACCEPT" \
+              "$API/actions/runs/$RUN_ID/jobs?per_page=100")
+            # First run_unit_tests conclusion, or empty if the job is absent/null.
+            # Done inside jq (no 'head', which would SIGPIPE under 'set -o pipefail').
+            UT=$(echo "$JOBS" | jq -r 'first(.jobs[] | select(.name=="run_unit_tests") | .conclusion) // empty')
+            if [ -n "$UT" ] && [ "$UT" != "skipped" ]; then
+              LAST_CONCLUSION=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | .conclusion")
+              # Prefer run_started_at (when the run actually began); fall back to created_at.
+              LAST_STARTED=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | (.run_started_at // .created_at)")
+              break
+            fi
+          done
+
+          if [ -z "$LAST_CONCLUSION" ]; then
+            echo "No prior real run found -> running (bootstrap)."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Last real run: conclusion=$LAST_CONCLUSION started_at=$LAST_STARTED"
+          # Expose the last real run's start so setup_and_build can scope the
+          # commit diff to exactly "since the last time we actually ran".
+          echo "last_started=$LAST_STARTED" >> "$GITHUB_OUTPUT"
+
+          if [ "$LAST_CONCLUSION" = "success" ]; then
+            echo "Last real run passed -> 8h cadence -> running."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Last real run did not pass -> 24h cadence. Only proceed once ~24h have
+          # elapsed since that run started. Using elapsed time (not an exact hour
+          # match) keeps this robust to GitHub's scheduled-event delivery drift.
+          LAST_EPOCH=$(date -u -d "$LAST_STARTED" +%s)
+          NOW_EPOCH=$(date -u +%s)
+          AGE_HOURS=$(( (NOW_EPOCH - LAST_EPOCH) / 3600 ))
+          echo "Last real run failing; hours since it started: $AGE_HOURS"
+          if [ "$AGE_HOURS" -ge 23 ]; then
+            echo "Failing cadence, >=23h elapsed -> running (24h back-off tick)."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Failing cadence, only ${AGE_HOURS}h elapsed (<23h) -> skipping this tick."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # JOB 1: (NEW) Discovers an available runner and locks it for all subsequent jobs.
   discover_runner:
+    needs: gate
+    if: needs.gate.outputs.should_run == 'true'
     runs-on: hourly-ci # Picks any available runner from the 'hourly-ci' pool
     outputs:
       runner_name: ${{ steps.get_name.outputs.name }}
@@ -32,8 +124,8 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.ref == 'refs/heads/main'
-    # <-- UPDATED: Now needs 'discover_tests' AND 'discover_runner'
-    needs: [discover_tests, discover_runner]
+    # <-- UPDATED: Now needs 'gate' (for the diff window), 'discover_tests' AND 'discover_runner'
+    needs: [gate, discover_tests, discover_runner]
     # <-- UPDATED: Runs on the specific runner from the discover_runner job
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     permissions:
@@ -42,7 +134,7 @@ jobs:
       latest_commit: ${{ steps.latest_vllm_commit.outputs.LATEST_COMMIT }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Fetch full history for accurate commit comparison
           fetch-depth: 0
@@ -55,7 +147,7 @@ jobs:
           echo "Cleanup complete."
 
       - name: Clean and Checkout repository again
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           clean: true # Ensure a clean workspace before checkout
@@ -67,14 +159,24 @@ jobs:
 
       - name: Calculate previous run time
         id: prev_run_time
+        env:
+          LAST_STARTED: ${{ needs.gate.outputs.last_started }}
         run: |
-          PREV_RUN_TIME=$(date -u -d "24 hours ago" +"%Y-%m-%dT%H:%M:%SZ")
+          # Scope the commit diff to exactly "since the last real run" so the
+          # window tracks the adaptive cadence (8h when healthy, up to 24h during
+          # back-off). Fall back to 24h when there is no prior run (bootstrap) or
+          # on manual dispatch, where the gate exposes no start time.
+          if [ -n "$LAST_STARTED" ]; then
+            PREV_RUN_TIME=$(date -u -d "$LAST_STARTED" +"%Y-%m-%dT%H:%M:%SZ")
+          else
+            PREV_RUN_TIME=$(date -u -d "24 hours ago" +"%Y-%m-%dT%H:%M:%SZ")
+          fi
           echo "Looking for commits since: $PREV_RUN_TIME"
           echo "PREV_RUN_TIME=$PREV_RUN_TIME" >> "$GITHUB_OUTPUT"
 
-      - name: List commit differences in the last 24 hours
+      - name: List commit differences since the last run
         run: |
-          echo "Commits merged/pushed in vllm-project/vllm.git in the last 24 hours:"
+          echo "Commits merged/pushed in vllm-project/vllm.git since ${{ steps.prev_run_time.outputs.PREV_RUN_TIME }}:"
           git log HEAD..vllm-upstream/main --pretty=format:"%h - %an, %ar : %s" --since="${{ steps.prev_run_time.outputs.PREV_RUN_TIME }}"
 
       - name: Get latest commit sha from vllm-upstream/main
@@ -132,7 +234,7 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Discover test functions
         id: set-matrix
         run: |
@@ -259,7 +361,7 @@ jobs:
       contents: write # Permission is required to push a commit
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: vllm/last-good-commit-for-vllm-gaudi
           fetch-depth: 0 # Fetch full history to ensure we can push changes
@@ -286,7 +388,10 @@ jobs:
 
   cleanup_docker_image:
     name: Cleanup Docker Image
-    if: always()
+    # Run whenever a runner was actually locked (even if later jobs failed), but
+    # never when discover_runner was skipped (gate said no) or failed -- in those
+    # cases runner_name is empty and this job would fail to start.
+    if: always() && needs.discover_runner.result == 'success'
     needs: [discover_runner, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     steps:

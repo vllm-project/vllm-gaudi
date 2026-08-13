@@ -69,8 +69,11 @@ class HPUMLAAttention(MLAAttention):
         # always passes this as None; accept and ignore it to keep the HPU path
         # behaviourally identical to pre-#45964.
         del q_dcp_replicated
-        if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
+        # NOTE: vllm#49389 removed the deprecated runtime KV-scale calculation
+        # path (the `calculate_kv_scales` attribute and the
+        # `maybe_calc_kv_scales` custom op). Neither exists at the pinned vLLM
+        # SHA, so the OOT MLA forward no longer attempts runtime scale
+        # calculation.
 
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
@@ -292,7 +295,10 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
         self.g_proj = mla_modules.g_proj
 
-        self.skip_topk = skip_topk
+        # DSA sparse attention is not implemented on HPU: sparse layers run as
+        # dense MLA and the indexer must never be invoked (its kernels and the
+        # DeepseekV32IndexerBackend are CUDA-only).
+        self.skip_topk = skip_topk or self.is_sparse
         # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
         # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
         # we do not override forward) reads and forwards to mla_attn. Because we
@@ -322,7 +328,8 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             quant_config=quant_config,
             prefix=layer_name,
             kv_b_proj=self.kv_b_proj,
-            use_sparse=self.is_sparse,
+            # Dense-MLA fallback: never request a sparse backend on HPU.
+            use_sparse=False,
             indexer=self.indexer,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
         )

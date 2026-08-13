@@ -136,7 +136,10 @@ def _hpu_qwen3next_sparse_moe_forward(
     if self.is_sequence_parallel:
         hidden_states = sequence_parallel_chunk(hidden_states)
 
-    if self.experts.is_internal_router:
+    # Upstream removed the MoERunner.is_internal_router property (vllm PR
+    # #51838); its body was simply `self.gate is not None`. Inline that check
+    # so the runner-holds-the-gate path still routes through the internal gate.
+    if getattr(self.experts, "gate", None) is not None:
         final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=hidden_states)
     else:
         router_logits, _ = self.gate(hidden_states)
