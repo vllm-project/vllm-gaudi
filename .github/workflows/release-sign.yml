@@ -54,6 +54,11 @@ jobs:
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        with:
+          # Pin cosign v2: v3 deprecates --output-signature/--output-certificate
+          # and defaults to the new bundle format, which breaks the sign-blob
+          # step below (it expects separate .sig/.pem outputs).
+          cosign-release: "v2.6.5"
 
       - name: Download GitHub's auto-generated source tarball
         id: build

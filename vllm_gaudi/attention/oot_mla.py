@@ -295,7 +295,10 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
         self.g_proj = mla_modules.g_proj
 
-        self.skip_topk = skip_topk
+        # DSA sparse attention is not implemented on HPU: sparse layers run as
+        # dense MLA and the indexer must never be invoked (its kernels and the
+        # DeepseekV32IndexerBackend are CUDA-only).
+        self.skip_topk = skip_topk or self.is_sparse
         # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
         # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
         # we do not override forward) reads and forwards to mla_attn. Because we
@@ -325,7 +328,8 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             quant_config=quant_config,
             prefix=layer_name,
             kv_b_proj=self.kv_b_proj,
-            use_sparse=self.is_sparse,
+            # Dense-MLA fallback: never request a sparse backend on HPU.
+            use_sparse=False,
             indexer=self.indexer,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
         )

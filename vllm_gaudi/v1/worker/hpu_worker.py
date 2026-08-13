@@ -32,7 +32,7 @@ from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerO
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.utils import is_fake_hpu
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, _GDN_MAMBA_TYPES
+from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, _GDN_MAMBA_TYPES, _rebind_moe_expert_weights)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -659,6 +659,8 @@ class HPUWorker(WorkerBase):
         else:
             with HabanaMemoryProfiler() as m:
                 self.model_runner.model.to("cpu")
+                # Re-derive MoeMatmul.weight slices from the now-CPU params
+                _rebind_moe_expert_weights(self.model_runner.model)
                 gc.collect()
                 torch.hpu.synchronize()
             msg = f"Moving model to CPU for sleep mode took {m.get_summary_string()}"
@@ -707,6 +709,9 @@ class HPUWorker(WorkerBase):
             else:
                 with HabanaMemoryProfiler() as m:
                     self.model_runner.model.to(self.vllm_config.device_config.device)
+                    # Re-derive MoeMatmul.weight slices from the now-moved
+                    # parent FusedMoE registered params (w13_weight/w2_weight).
+                    _rebind_moe_expert_weights(self.model_runner.model)
                     gc.collect()
                     torch.hpu.synchronize()
                 msg = f"Waking up model, moving it back to HPU took {m.get_summary_string()}"
