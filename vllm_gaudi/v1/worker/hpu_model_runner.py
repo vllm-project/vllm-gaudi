@@ -2560,6 +2560,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return self._bucketize_2d_prompt
 
     def _can_merge_prefill_contents(self, lhs, rhs):
+        # Mamba/hybrid models require single-request prefill batches on HPU: the
+        # mamba2 prefill path is built around single-sequence chunks (see the
+        # "Chunks contain tokens from a *single* sequence only" invariant in
+        # _form_prefill_batch). Merging >=2 co-scheduled fresh prefills breaks
+        # that invariant in two ways:
+        #   * with prefix caching, _form_prefill_batch asserts
+        #     len(contents.req_ids) == 1 and the merged batch trips it;
+        #   * without prefix caching, granite_causal_conv1d_fn asserts
+        #     padded_batch == 1 and the merged batch trips it downstream.
+        # Neither is prefix-caching-specific, so gate on the model type, not on
+        # use_prefix_caching (which would also wrongly block merges for plain
+        # attention models that CAN merge under prefix caching).
+        if self.num_mamba_like_layers > 0:
+            return False
         # --- Logic to handle chunked prefill/prefix caching for HPU ---
         # 1. Check basic states of LHS (accumulated batch) and RHS (incoming request).
         # lhs_is_not_empty: Check if the accumulated batch actually contains any requests.
