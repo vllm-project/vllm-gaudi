@@ -658,6 +658,14 @@ def patched_fused_moe_forward(
         # is initialized on routed_experts (which the runner holds directly), so
         # unlike the old FusedMoE-layer-based init we do NOT need the layer here.
         self.routed_experts._ensure_moe_quant_config_init()
+        # Sync the aux/main stream for shared-expert multi-stream overlap,
+        # mirroring upstream MoERunner._forward_impl. vllm PR #52024 reverted the
+        # dual-stream decode work: SharedExperts.maybe_forward_async was removed
+        # (folded back into maybe_sync_shared_experts_stream, re-exposed on the
+        # runner as _maybe_sync_shared_experts_stream), and _apply_quant_method no
+        # longer takes a shared_experts_overlapping flag — overlap is decided
+        # internally. On HPU (not CUDA-alike) this is a no-op and the shared
+        # experts run synchronously inside _apply_quant_method.
         self._maybe_sync_shared_experts_stream(shared_experts_input)
         # Apply the gate if the runner holds it (mirrors _forward_impl).
         if self.gate is not None:
@@ -668,7 +676,9 @@ def patched_fused_moe_forward(
                 router_logits, _ = self.gate(hidden_states)
         # Core MoERunner._apply_quant_method takes no layer argument — it reads
         # everything it needs off the runner (self.routed_experts / self.router).
-        # Call it exactly as upstream _forward_impl does.
+        # Call it exactly as upstream _forward_impl does. vllm PR #52024 dropped
+        # the shared_experts_overlapping argument: overlap is decided internally
+        # and the shared-expert output is stashed on self._shared_experts.
         shared_output, fused_hidden = self._apply_quant_method(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -696,13 +706,21 @@ def patched_fused_moe_forward(
     if og_hidden_dim_pre_xform is not None:
         fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
-    shared_output = self._maybe_reduce_shared_expert_output(shared_output)
+    # Mirror upstream MoERunner.forward's two mutually-exclusive all-reduce
+    # points, threaded by _fused_output_is_reduced: reduce a latent routed
+    # output before its (possibly non-linear) transform, then reduce shared
+    # output to match, else all-reduce the combined sum in the final step.
+    fused_output_is_reduced = self._fused_output_is_reduced
+    fused_output, fused_output_is_reduced = self._maybe_reduce_routed_output_before_transform(
+        fused_output, fused_output_is_reduced)
+
+    shared_output = self._maybe_reduce_shared_expert_output(shared_output, fused_output_is_reduced)
     shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
     fused_output = self.apply_routed_output_transform(fused_output)
 
     combined = (shared_output + fused_output) if shared_output is not None else fused_output
 
-    combined = self._maybe_reduce_final_output(combined, og_hidden_dim_post_xform)
+    combined = self._maybe_reduce_final_output(combined, og_hidden_dim_post_xform, fused_output_is_reduced)
     return self._maybe_add_zero_expert_output(combined)
 
 
