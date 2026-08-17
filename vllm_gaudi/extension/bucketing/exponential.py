@@ -81,7 +81,13 @@ class ExponentialBucketingStrategy():
 
         return prompt_bs_bucket_cfg, prompt_query_bucket_cfg, prompt_ctx_bucket_cfg
 
-    def get_decode_cfgs(self, max_num_seqs, block_size, max_num_batched_tokens, max_model_len, max_blocks):
+    def get_decode_cfgs(self,
+                        max_num_seqs,
+                        block_size,
+                        max_num_batched_tokens,
+                        max_model_len,
+                        max_blocks,
+                        is_hybrid=False):
         self.check_for_user_flags('decode')
         use_contiguous_pa = get_config().use_contiguous_pa
 
@@ -89,21 +95,30 @@ class ExponentialBucketingStrategy():
         decode_bs_limit = math.ceil(math.log2(max_num_seqs)) + 1
         decode_bs_bucket_cfg = [1, 2, max_num_seqs, decode_bs_limit]
         decode_query_bucket_cfg = [1, 1, 1, 1]
+        # Start from the theoretical worst case: every sequence filled to
+        # max_model_len. Left unbounded this produces block buckets many times
+        # larger than the KV cache actually allocated, which OOMs on the first
+        # decode warmup step.
         max_decode_blocks = math.ceil(max_model_len / block_size) * max_num_seqs
-        # Clamp the top block bucket to the number of KV blocks that physically
-        # exist. The theoretical worst case (every sequence filled to
-        # max_model_len) can be many times larger than the allocated KV cache
-        # and OOMs on the first decode warmup step. A decode request can never
-        # reference more blocks than the cache holds, so buckets above this
-        # ceiling are unreachable. Previously this clamp only ran under
-        # contiguous PA, so the default (non-contiguous) path could OOM.
-        max_decode_blocks = min(max_blocks, max_decode_blocks)
+        if use_contiguous_pa:
+            # Contiguous PA indexes blocks by the highest block id in the batch,
+            # which is bounded by the size of the cache.
+            max_decode_blocks = min(max_blocks, max_decode_blocks)
+        elif not is_hybrid:
+            # Non-contiguous PA counts block *references*: len(block_list) =
+            # sum(num_blocks). With prefix caching a shared block is counted once
+            # per sequence, so the reference count can exceed num_hpu_blocks
+            # (observed ~2x in real long-prompt runs). Clamp to 3x physical blocks
+            # to keep that headroom while still bounding warmup memory. This
+            # ceiling also caps _fallback_max_ctx, so real high-reference decode
+            # batches still find a matching bucket instead of recompiling.
+            #
+            # Hybrid models (block_size != attn_block_size) are excluded: their
+            # sequences can share a single long prefix across the whole batch, so
+            # references legitimately reach the full worst case. They keep the
+            # unbounded range so runtime lookups never recompile.
+            max_decode_blocks = min(max_decode_blocks, max_blocks * 3)
         decode_blocks_limit = math.ceil(math.log2(max_decode_blocks)) + 1
-        # Compensate for wider range: add extra buckets to maintain density at high end
-        if not use_contiguous_pa and max_blocks > 0:
-            bounded_max = max_blocks * 3
-            if max_decode_blocks > bounded_max:
-                decode_blocks_limit += math.ceil(math.log2(max_decode_blocks / bounded_max)) + 1
         decode_block_bucket_cfg = [1, max_num_seqs, max_decode_blocks, decode_blocks_limit]
 
         msg = ("Decode bucket config (min, step, max_warmup, limit) "

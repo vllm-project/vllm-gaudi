@@ -6084,6 +6084,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # attn_block_size.  Scope the mutation to avoid affecting prompt
             # fallback paths that still need the original block_size.
             saved_block_size = self.bucketing_manager.block_size
+            # Hybrid models can share one long prefix across the whole batch, so
+            # decode block references can reach the full worst case; flag them so
+            # the decode block range is left unbounded (not clamped to 3x physical).
+            self.bucketing_manager.is_hybrid = self.attn_block_size != self.block_size
             if self.attn_block_size != self.block_size:
                 self.bucketing_manager.block_size = self.attn_block_size
             try:
