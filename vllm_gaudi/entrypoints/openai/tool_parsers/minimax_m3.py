@@ -83,6 +83,11 @@ INVOKE_START = NS + "<invoke"
 # Tolerate that variant, mirroring the headless-parameter recovery already done
 # for dropped parameter opening tags (see the NS branches below).
 INVOKE_START_NOLT = NS + "invoke"
+# All recognized invoke open tags, in preference order (well-formed first, so it
+# wins a same-position tie). Any future dropped-tag variant is added here only;
+# every parsing path resolves openers through ``_match_invoke_opener`` /
+# ``_find_invoke_open`` so the call sites never need per-variant updates.
+INVOKE_OPENERS = (INVOKE_START, INVOKE_START_NOLT)
 INVOKE_END = NS + "</invoke>"
 ELEMENT_START = NS + "<"
 ELEMENT_END_START = NS + "</"
@@ -95,23 +100,38 @@ _INVOKE_NAME_RE = re.compile(r"""name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
 _FAIL = object()
 
 
+def _match_invoke_opener(s: str, pos: int = 0) -> int | None:
+    """Length of the invoke opener at ``s[pos:]``, or ``None`` if none matches.
+
+    Openers come from ``INVOKE_OPENERS`` (well-formed ``INVOKE_START`` and the
+    dropped-"<" ``INVOKE_START_NOLT`` MiniMax-M3 quirk). At most one can match at
+    a given position -- right after the namespace marker a real invoke has "<",
+    so ``INVOKE_START_NOLT`` only matches where the "<" was dropped.
+    """
+    for opener in INVOKE_OPENERS:
+        if s.startswith(opener, pos):
+            return len(opener)
+    return None
+
+
 def _find_invoke_open(text: str, start: int) -> tuple[int, int]:
     """Find the next invoke open tag at/after ``start``.
 
-    Returns ``(pos, opener_len)`` for the earliest match of either the
-    well-formed ``INVOKE_START`` or the dropped-"<" variant
-    ``INVOKE_START_NOLT`` (a known MiniMax-M3 quirk); on a tie the well-formed
-    form wins. Returns ``(-1, 0)`` when neither is present. This can never
-    false-positive on well-formed text: right after the namespace marker a real
-    invoke has "<", so ``INVOKE_START_NOLT`` only matches where "<" was dropped.
+    Returns ``(pos, opener_len)`` for the earliest matching opener in
+    ``INVOKE_OPENERS`` (well-formed ``INVOKE_START`` or the dropped-"<" variant
+    ``INVOKE_START_NOLT``), preferring the earlier -- and, on a tie, the earlier
+    entry in ``INVOKE_OPENERS`` (well-formed). Returns ``(-1, 0)`` when neither
+    is present. Never false-positives on well-formed text (see
+    ``_match_invoke_opener``).
     """
-    p_full = text.find(INVOKE_START, start)
-    p_nolt = text.find(INVOKE_START_NOLT, start)
-    if p_full == -1:
-        return (p_nolt, len(INVOKE_START_NOLT)) if p_nolt != -1 else (-1, 0)
-    if p_nolt == -1 or p_full <= p_nolt:
-        return (p_full, len(INVOKE_START))
-    return (p_nolt, len(INVOKE_START_NOLT))
+    best_pos = -1
+    best_len = 0
+    for opener in INVOKE_OPENERS:
+        p = text.find(opener, start)
+        if p != -1 and (best_pos == -1 or p < best_pos):
+            best_pos = p
+            best_len = len(opener)
+    return (best_pos, best_len)
 
 
 class _ParseError(Exception):
@@ -589,9 +609,8 @@ class MinimaxM3PyToolParser(ToolParser):
     def _parse_one_invoke(self, inv_block: str, request) -> ToolCall:
         """Parse a complete ``<invoke ...>...</invoke>`` block into a ToolCall."""
         # Tolerate a dropped leading "<" on the invoke open tag (MiniMax-M3
-        # quirk); the block may start with INVOKE_START or INVOKE_START_NOLT.
-        opener_len = (len(INVOKE_START) if inv_block.startswith(INVOKE_START) else
-                      len(INVOKE_START_NOLT) if inv_block.startswith(INVOKE_START_NOLT) else len(INVOKE_START))
+        # quirk); the block may start with any opener in INVOKE_OPENERS.
+        opener_len = _match_invoke_opener(inv_block) or len(INVOKE_START)
         # Search past the opener: the namespace marker itself contains a ">".
         header_end = inv_block.find(">", opener_len)
         if header_end == -1:
@@ -626,7 +645,7 @@ class MinimaxM3PyToolParser(ToolParser):
             cur.skip_ws()
             if cur.eof() or cur.startswith(TOOL_CALL_END):
                 break
-            if not (cur.startswith(INVOKE_START) or cur.startswith(INVOKE_START_NOLT)):
+            if _match_invoke_opener(cur.s, cur.i) is None:
                 break  # stray text / malformed boundary -> stop
             inv_end = text.find(INVOKE_END, cur.i)
             if inv_end == -1:
