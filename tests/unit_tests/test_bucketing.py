@@ -374,7 +374,11 @@ def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
     worst_case = math.ceil(_REAL_MAX_MODEL_LEN / _REAL_BLOCK_SIZE) * _REAL_MAX_NUM_SEQS
     expected_max = min(worst_case, _REAL_MAX_BLOCKS * 3)
     expected_limit = math.ceil(math.log2(expected_max)) + 1
+    assert worst_case == _REAL_BUGGY_MAX_DECODE_BLOCKS, "sanity: unclamped worst case matches the pre-fix value"
     assert expected_max == _REAL_FIXED_MAX_DECODE_BLOCKS, "sanity: real scenario clamps to max_blocks*3"
+    assert block_cfg[2] < _REAL_BUGGY_MAX_DECODE_BLOCKS, (
+        f"clamp must shrink the block max below the pre-fix OOM value "
+        f"{_REAL_BUGGY_MAX_DECODE_BLOCKS}, got {block_cfg[2]}")
     assert block_cfg[0] == 1, f"block min: expected 1, got {block_cfg[0]}"
     assert block_cfg[1] == _REAL_MAX_NUM_SEQS, (f"block step: expected {_REAL_MAX_NUM_SEQS}, got {block_cfg[1]}")
     assert block_cfg[2] == expected_max, (f"block max: expected {expected_max}, got {block_cfg[2]}")
