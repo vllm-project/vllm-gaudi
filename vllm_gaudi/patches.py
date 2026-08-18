@@ -764,9 +764,9 @@ def _hpu_sdpa_attention_forward(
         # _CACHED_FSDPA_OP is initialized eagerly by _ensure_fsdpa_cached()
         # before torch.compile traces this function. This avoids the dynamo
         # guard on `_CACHED_FSDPA_OP is None` that would trigger recompilation.
-        global _CACHED_FSDPA_OP
         _ensure_fsdpa_cached()
-        assert _CACHED_FSDPA_OP is not None
+        if _CACHED_FSDPA_OP is None:
+            raise RuntimeError("FSDPA op failed to initialize")
 
         softmax_mode = "fp32" if _config.fp32_softmax else "fast"
         attn_output = _CACHED_FSDPA_OP(
