@@ -12,6 +12,7 @@ from vllm_gaudi.entrypoints.openai.tool_parsers.minimax_m3 import (
     ELEMENT_START,
     INVOKE_END,
     INVOKE_START,
+    INVOKE_START_NOLT,
     TOOL_CALL_END,
     TOOL_CALL_START,
     MinimaxM3PyToolParser,
@@ -41,6 +42,12 @@ def _element(name: str, value: str) -> str:
 def _invoke(path: str, count: int = 2, enabled: bool = True) -> str:
     body = (_element("path", path) + _element("count", str(count)) + _element("enabled", str(enabled).lower()))
     return f'{INVOKE_START} name="write_file">{body}{INVOKE_END}'
+
+
+def _invoke_dropped_lt(path: str, count: int = 2, enabled: bool = True) -> str:
+    # MiniMax-M3 sometimes drops the leading "<" of the invoke open tag.
+    body = (_element("path", path) + _element("count", str(count)) + _element("enabled", str(enabled).lower()))
+    return f'{INVOKE_START_NOLT} name="write_file">{body}{INVOKE_END}'
 
 
 def _function_field(function, name: str):
@@ -111,6 +118,38 @@ def test_extract_multiple_tool_calls():
 
     assert result.tools_called
     assert [json.loads(call.function.arguments)["path"] for call in result.tool_calls] == ["first", "second"]
+
+
+def test_extract_tool_calls_dropped_invoke_lt():
+    text = f"before{TOOL_CALL_START}{_invoke_dropped_lt('/tmp/out')}{TOOL_CALL_END}"
+
+    result = MinimaxM3PyToolParser(None).extract_tool_calls(text, _request())
+
+    assert result.tools_called
+    assert result.content == "before"
+    assert len(result.tool_calls) == 1
+    function = result.tool_calls[0].function
+    assert function.name == "write_file"
+    assert json.loads(function.arguments) == {
+        "path": "/tmp/out",
+        "count": 2,
+        "enabled": True,
+    }
+
+
+def test_streaming_dropped_invoke_lt():
+    text = f"before{TOOL_CALL_START}{_invoke_dropped_lt('/tmp/out')}{TOOL_CALL_END}"
+    parser = MinimaxM3PyToolParser(None)
+
+    content, names, arguments = _stream(parser, text, _request())
+
+    assert content == "before"
+    assert names == {0: "write_file"}
+    assert json.loads(arguments[0]) == {
+        "path": "/tmp/out",
+        "count": 2,
+        "enabled": True,
+    }
 
 
 def test_non_streaming_malformed_call_preserves_output():
