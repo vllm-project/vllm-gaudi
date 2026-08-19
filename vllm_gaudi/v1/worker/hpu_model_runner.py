@@ -2547,6 +2547,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return self._bucketize_2d_prompt
 
     def _can_merge_prefill_contents(self, lhs, rhs):
+        # Mamba/hybrid models require single-request prefill batches on HPU: the
+        # mamba2 prefill path is built around single-sequence chunks (see the
+        # "Chunks contain tokens from a *single* sequence only" invariant in
+        # _form_prefill_batch). Merging >=2 co-scheduled fresh prefills breaks
+        # that invariant in two ways:
+        #   * with prefix caching, _form_prefill_batch asserts
+        #     len(contents.req_ids) == 1 and the merged batch trips it;
+        #   * without prefix caching, granite_causal_conv1d_fn asserts
+        #     padded_batch == 1 and the merged batch trips it downstream.
+        # Neither is prefix-caching-specific, so gate on the model type, not on
+        # use_prefix_caching (which would also wrongly block merges for plain
+        # attention models that CAN merge under prefix caching).
+        if self.num_mamba_like_layers > 0:
+            return False
         # --- Logic to handle chunked prefill/prefix caching for HPU ---
         # 1. Check basic states of LHS (accumulated batch) and RHS (incoming request).
         # lhs_is_not_empty: Check if the accumulated batch actually contains any requests.
@@ -6085,6 +6099,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # attn_block_size.  Scope the mutation to avoid affecting prompt
             # fallback paths that still need the original block_size.
             saved_block_size = self.bucketing_manager.block_size
+            # Hybrid models can share one long prefix across the whole batch, so
+            # decode block references can reach the full worst case; flag them so
+            # the decode block range is left unbounded (not clamped to 3x physical).
+            self.bucketing_manager.is_hybrid = self.attn_block_size != self.block_size
             if self.attn_block_size != self.block_size:
                 self.bucketing_manager.block_size = self.attn_block_size
             try:
