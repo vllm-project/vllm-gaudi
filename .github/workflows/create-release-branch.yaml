@@ -12,15 +12,16 @@ on:
         required: true
         type: string
 
-# Required permissions for creating a branch and pushing a commit.
+# Least-privilege default; jobs that push commits or open issues opt in below.
 permissions:
-  contents: write
-  issues: write # Added permission to allow creating issues
+  contents: read
 
 jobs:
   prepare-release-branch:
     name: "Prepare Release Branch"
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to create the release branch and push the commit
     outputs:
       tag_name: ${{ steps.extract_tag.outputs.tag_name }}
       commit_id: ${{ steps.get_vllm_commit.outputs.commit_id }}
@@ -335,6 +336,8 @@ jobs:
   summarize_and_notify:
     name: "Summarize Test Results and Notify"
     runs-on: ubuntu-latest
+    permissions:
+      issues: write # Required to create the summary report issue
     # --- This job runs on ubuntu-latest, so no runner change is needed ---
     # It will correctly wait for all the test jobs to finish
     if: needs.prepare-release-branch.result == 'success'
@@ -406,7 +409,7 @@ jobs:
           echo "SUBJECT=$SUBJECT" >> "$GITHUB_ENV"
 
       - name: "Create GitHub Issue with Summary"
-        uses: peter-evans/create-issue-from-file@e8ef132d6df98ed982188e460ebb3b5d4ef3a9cd  # v5.0.1
+        uses: peter-evans/create-issue-from-file@fca9117c27cdc29c6c4db3b86c48e4115a786710  # v6.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           title: ${{ env.SUBJECT }}

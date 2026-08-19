@@ -338,6 +338,15 @@ def select_experts_from_routed(layer, hidden_states: torch.Tensor,
     """
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import select_experts
 
+    # Models hand the runner a placeholder ``router_logits`` (== hidden_states)
+    # and expect the runner to overwrite it with the gate output. If that step
+    # is skipped the placeholder reaches expert selection and only fails later,
+    # deep inside the routing kernels, as an opaque broadcast error.
+    num_experts = layer.moe_config.num_logical_experts
+    if router_logits.size(-1) != num_experts:
+        raise RuntimeError(f"Router logits have {router_logits.size(-1)} columns but the layer routes to "
+                           f"{num_experts} experts; the MoE gate was not applied to the hidden states.")
+
     return select_experts(
         hidden_states=hidden_states,
         router_logits=router_logits,
@@ -658,15 +667,15 @@ def patched_fused_moe_forward(
         # is initialized on routed_experts (which the runner holds directly), so
         # unlike the old FusedMoE-layer-based init we do NOT need the layer here.
         self.routed_experts._ensure_moe_quant_config_init()
-        # Upstream removed MoERunner._maybe_sync_shared_experts_stream (vllm
-        # PR #51838); the multi-stream shared-expert launch now lives on
-        # SharedExperts.maybe_forward_async, mirrored by _forward_impl. On HPU
-        # (not CUDA-alike) maybe_forward_async returns False, so shared experts
-        # run synchronously inside _apply_quant_method — behaviourally identical
-        # to the old no-op stream sync, but kept in sync with upstream.
-        shared_experts_overlapping = False
-        if self._shared_experts is not None:
-            shared_experts_overlapping = self._shared_experts.maybe_forward_async(shared_experts_input)
+        # Sync the aux/main stream for shared-expert multi-stream overlap,
+        # mirroring upstream MoERunner._forward_impl. vllm PR #52024 reverted the
+        # dual-stream decode work: SharedExperts.maybe_forward_async was removed
+        # (folded back into maybe_sync_shared_experts_stream, re-exposed on the
+        # runner as _maybe_sync_shared_experts_stream), and _apply_quant_method no
+        # longer takes a shared_experts_overlapping flag — overlap is decided
+        # internally. On HPU (not CUDA-alike) this is a no-op and the shared
+        # experts run synchronously inside _apply_quant_method.
+        self._maybe_sync_shared_experts_stream(shared_experts_input)
         # Apply the gate if the runner holds it (mirrors _forward_impl).
         if self.gate is not None:
             if self._fse_fuse_gate:
@@ -676,14 +685,14 @@ def patched_fused_moe_forward(
                 router_logits, _ = self.gate(hidden_states)
         # Core MoERunner._apply_quant_method takes no layer argument — it reads
         # everything it needs off the runner (self.routed_experts / self.router).
-        # Call it exactly as upstream _forward_impl does, threading the overlap
-        # flag so an async-launched shared expert is awaited (not recomputed).
+        # Call it exactly as upstream _forward_impl does. vllm PR #52024 dropped
+        # the shared_experts_overlapping argument: overlap is decided internally
+        # and the shared-expert output is stashed on self._shared_experts.
         shared_output, fused_hidden = self._apply_quant_method(
             hidden_states=hidden_states,
             router_logits=router_logits,
             shared_experts_input=shared_experts_input,
             input_ids=input_ids,
-            shared_experts_overlapping=shared_experts_overlapping,
         )
         result = self._maybe_combine(shared_output, fused_hidden)
     else:
