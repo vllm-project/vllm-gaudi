@@ -241,6 +241,9 @@ class HpuPlatform(Platform):
         if get_config().VLLM_CONTIGUOUS_PA:
             logger.warning("Using Contiguous PA, disabling prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
+            if vllm_config.model_config.get_sliding_window():
+                logger.info("Contiguous paged attention is enabled; sliding-window layers "
+                            "will use indexed KV-cache fetches.")
 
         if (vllm_config.cache_config.enable_prefix_caching and vllm_config.cache_config.mamba_cache_mode == "all"):
             vllm_config.cache_config.mamba_cache_mode = "align"

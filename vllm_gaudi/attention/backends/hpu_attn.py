@@ -658,10 +658,16 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Decoding run.
             # GAUDISW-248985: decode block_list is the contiguous-identity layout, so
             # keep the zero-copy slice fetch (cache[:n]); only prefill needs gather.
+            # Exception: sliding window with contiguous PA needs gather-by-id because
+            # window_block_list contains scattered block IDs (not identity layout).
             _set_fetch_by_id(self.k_cache, False)
             _set_fetch_by_id(self.v_cache, False)
+
             if self.sliding_window and \
                 attn_metadata.window_block_list is not None:
+                # Sliding window blocks are not contiguous - need gather-by-id
+                _set_fetch_by_id(self.k_cache, True)
+                _set_fetch_by_id(self.v_cache, True)
                 block_list = attn_metadata.window_block_list
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping
