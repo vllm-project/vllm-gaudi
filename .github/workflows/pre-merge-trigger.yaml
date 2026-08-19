@@ -12,6 +12,11 @@ on:
       - main
       - releases/**
 
+# Least-privilege default; execute_pre_merge opts into the actions/PR/issues
+# scopes it needs at the job level.
+permissions:
+  contents: read
+
 concurrency:
   group: pre-merge-trigger-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: true
