@@ -2410,7 +2410,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                               skip_copy=not batch_changed)
         return sampling_metadata
 
-    def get_habana_paged_attn_buffers(self, block_tables, slot_mapping, batch_size, block_size=None):
+    def get_habana_paged_attn_buffers(self,
+                                      block_tables,
+                                      slot_mapping,
+                                      batch_size,
+                                      block_size=None,
+                                      force_non_contiguous=False):
+        """Build paged attention buffers for decode.
+
+        Args:
+            force_non_contiguous: If True, use non-contiguous mode even when
+                use_contiguous_pa is enabled. Required for sliding window blocks
+                which have scattered block IDs that don't work with contiguous PA's
+                slice-based fetch.
+        """
         block_size = self.attn_block_size if block_size is None else block_size
         last_block_usage = [slot[0] % block_size + 1 for slot in slot_mapping]
         block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
@@ -2423,7 +2436,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         padding_fn = None
         block_bucket_size: int
-        if self.use_contiguous_pa:
+        use_contiguous = self.use_contiguous_pa and not force_non_contiguous
+        if use_contiguous:
             actual_blocks_needed = max(block_list) + 1 if block_list else 0
 
             block_bucket_size = \
@@ -3216,11 +3230,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 sliding_block_size += 1
 
             window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]
+            # Sliding window blocks have scattered IDs (not identity layout),
+            # so force non-contiguous mode to use gather-by-id fetch
             window_block_list, window_block_groups, window_block_usage = \
                 self.get_habana_paged_attn_buffers(
                     window_block_tables, slot_mapping.tolist(),
                     padded_batch_size * num_tokens,
-                    block_size=decode_block_size)
+                    block_size=decode_block_size,
+                    force_non_contiguous=True)
 
         if self.model_has_chunked_attention:
             chunk_size_in_blocks = (self.model.model.config.text_config.attention_chunk_size // decode_block_size)
@@ -5638,13 +5655,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # causing warmup to record wrong num_blocks otherwise.
             decode_block_size = self.attn_block_size
             if self.use_contiguous_pa:
-                decode_seq_lengths = [decode_block_size] * decode_bs
+                # For sliding window models, each dummy sequence needs at least
+                # sliding_block_size blocks to properly warmup the window_block_list
+                # bucket sizes. With force_non_contiguous=True, the bucket is based
+                # on len(block_list) not max(block_list)+1, so we need enough blocks
+                # per sequence to match runtime window sizes.
+                if self.interleaved_sliding_window:
+                    sw_blocks = self.sliding_window // decode_block_size + 1
+                    min_tokens_per_seq = sw_blocks * decode_block_size
+                else:
+                    min_tokens_per_seq = decode_block_size
+                decode_seq_lengths = [min_tokens_per_seq] * decode_bs
                 # Cap block_id at physical pool — contiguous PA uses
                 # block_id as the allocation base which must be valid.
                 block_id = min(decode_num_blocks - 1, self.kv_cache_config.num_blocks - 1)
             else:
                 decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
                 block_id = 0
+
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
