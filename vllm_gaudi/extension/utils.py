@@ -84,7 +84,11 @@ class VLLMKVCache(torch.nn.Module):
         # keeps the zero-copy slice. We use an instance flag rather than a kwarg
         # because INC's PatchedVLLMKVCache wraps this method with a fixed signature.
         if self.use_contiguous_pa and not getattr(self, "_fetch_by_id", False):
-            return cache[:blocks.size(0)]
+            # Use narrow() instead of a Python slice [:n] so that Dynamo tracks
+            # the output's first dimension as blocks.size(0) (= block_bucket_size,
+            # the same symbolic variable as block_mapping.shape[0]) rather than
+            # collapsing it to cache.shape[0] via aten.slice's min(end, size) rule.
+            return cache.narrow(0, 0, blocks.size(0))
         else:
             return cache.index_select(0, blocks)
 
