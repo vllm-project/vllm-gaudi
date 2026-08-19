@@ -232,10 +232,11 @@ class _MockConfig:
 
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
-def test_exponential_decode_cfgs_non_contiguous_pa_unbounded(mock_get_config):
-    """max_decode_blocks should be ceil(max_model_len/block_size)*max_num_seqs
-    when use_contiguous_pa=False.  Actual bounding of generated buckets
-    happens via filters in generate_buckets().
+def test_exponential_decode_cfgs_non_contiguous_pa_clamped_to_3x(mock_get_config):
+    """With use_contiguous_pa=False the theoretical worst case
+    (ceil(max_model_len/block_size)*max_num_seqs) is clamped to max_blocks*3.
+    The 3x headroom covers prefix-cache reference amplification (a shared block
+    is counted once per sequence) while bounding warmup memory.
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
@@ -250,7 +251,9 @@ def test_exponential_decode_cfgs_non_contiguous_pa_unbounded(mock_get_config):
                                                max_model_len=max_model_len,
                                                max_blocks=max_blocks)
 
-    expected_max = math.ceil(max_model_len / block_size) * max_num_seqs
+    worst_case = math.ceil(max_model_len / block_size) * max_num_seqs
+    expected_max = min(worst_case, max_blocks * 3)
+    assert expected_max == max_blocks * 3, "sanity: this scenario should be clamped"
     assert block_cfg[2] == expected_max, (f"Expected max_decode_blocks={expected_max}, got {block_cfg[2]}")
 
 
@@ -273,7 +276,7 @@ def test_exponential_decode_cfgs_contiguous_pa_uses_max_blocks(mock_get_config):
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
 def test_exponential_decode_cfgs_non_contiguous_pa_formula(mock_get_config):
-    """Verify non-contiguous PA decode cfg uses ceil(max_model_len/block_size)*max_num_seqs."""
+    """Verify non-contiguous PA decode cfg = min(ceil(max_model_len/block_size)*max_num_seqs, max_blocks*3)."""
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
 
@@ -288,7 +291,8 @@ def test_exponential_decode_cfgs_non_contiguous_pa_formula(mock_get_config):
                                                max_model_len=max_model_len,
                                                max_blocks=max_blocks)
 
-    expected_max = math.ceil(max_model_len / block_size) * max_num_seqs
+    worst_case = math.ceil(max_model_len / block_size) * max_num_seqs
+    expected_max = min(worst_case, max_blocks * 3)
     assert block_cfg[2] == expected_max, (f"Expected max_decode_blocks={expected_max}, got {block_cfg[2]}")
 
 
@@ -345,16 +349,18 @@ _REAL_BLOCK_SIZE = 128
 _REAL_MAX_NUM_SEQS = 256
 _REAL_MAX_BLOCKS = 3593  # num_hpu_blocks
 _REAL_MAX_BATCHED_TOKENS = 2048
-_REAL_FIXED_MAX_DECODE_BLOCKS = _REAL_MAX_BLOCKS * 3  # 10779
-_REAL_BUGGY_MAX_DECODE_BLOCKS = 183808  # min(91964//128*256, 3593*256//4)
+_REAL_FIXED_MAX_DECODE_BLOCKS = _REAL_MAX_BLOCKS * 3  # 10779 (clamped ceiling)
+# Pre-fix unclamped worst case (every seq at max_model_len): the block bucket
+# that OOMed on the first decode warmup step before the max_blocks*3 clamp.
+_REAL_BUGGY_MAX_DECODE_BLOCKS = math.ceil(_REAL_MAX_MODEL_LEN / _REAL_BLOCK_SIZE) * _REAL_MAX_NUM_SEQS  # 184064
 
 
 @patch('vllm_gaudi.extension.bucketing.exponential.get_config')
 def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
     """Verify decode bucket config matches expected values for real scenario.
-    With non-contiguous PA: block config limit includes extra buckets
-    when max_decode_blocks > max_blocks*3 to maintain bucket density
-    at high block counts (longprompt density fix).
+    With non-contiguous PA the theoretical worst case is clamped to
+    max_blocks*3, which both bounds warmup memory and keeps enough headroom
+    for prefix-cache reference amplification (~2x observed).
     """
     mock_get_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
@@ -365,13 +371,14 @@ def test_real_scenario_decode_cfg_matches_fixed_log(mock_get_config):
                                                max_model_len=_REAL_MAX_MODEL_LEN,
                                                max_blocks=_REAL_MAX_BLOCKS)
 
-    expected_max = math.ceil(_REAL_MAX_MODEL_LEN / _REAL_BLOCK_SIZE) * _REAL_MAX_NUM_SEQS
+    worst_case = math.ceil(_REAL_MAX_MODEL_LEN / _REAL_BLOCK_SIZE) * _REAL_MAX_NUM_SEQS
+    expected_max = min(worst_case, _REAL_MAX_BLOCKS * 3)
     expected_limit = math.ceil(math.log2(expected_max)) + 1
-    # Account for extra buckets added when max_decode_blocks exceeds
-    # bounded_max (longprompt density compensation)
-    bounded_max = _REAL_MAX_BLOCKS * 3
-    if expected_max > bounded_max:
-        expected_limit += math.ceil(math.log2(expected_max / bounded_max)) + 1
+    assert worst_case == _REAL_BUGGY_MAX_DECODE_BLOCKS, "sanity: unclamped worst case matches the pre-fix value"
+    assert expected_max == _REAL_FIXED_MAX_DECODE_BLOCKS, "sanity: real scenario clamps to max_blocks*3"
+    assert block_cfg[2] < _REAL_BUGGY_MAX_DECODE_BLOCKS, (
+        f"clamp must shrink the block max below the pre-fix OOM value "
+        f"{_REAL_BUGGY_MAX_DECODE_BLOCKS}, got {block_cfg[2]}")
     assert block_cfg[0] == 1, f"block min: expected 1, got {block_cfg[0]}"
     assert block_cfg[1] == _REAL_MAX_NUM_SEQS, (f"block step: expected {_REAL_MAX_NUM_SEQS}, got {block_cfg[1]}")
     assert block_cfg[2] == expected_max, (f"block max: expected {expected_max}, got {block_cfg[2]}")
@@ -414,7 +421,8 @@ def test_real_scenario_decode_block_range_within_cfg_max(mock_get_config):
                                                max_blocks=_REAL_MAX_BLOCKS)
 
     block_range = strategy.get_range(block_cfg)
-    expected_max = math.ceil(_REAL_MAX_MODEL_LEN / _REAL_BLOCK_SIZE) * _REAL_MAX_NUM_SEQS
+    worst_case = math.ceil(_REAL_MAX_MODEL_LEN / _REAL_BLOCK_SIZE) * _REAL_MAX_NUM_SEQS
+    expected_max = min(worst_case, _REAL_MAX_BLOCKS * 3)
 
     assert max(block_range) <= expected_max, (f"Largest block bucket {max(block_range)} exceeds cfg max {expected_max}")
 
