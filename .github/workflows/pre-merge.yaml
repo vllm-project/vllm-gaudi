@@ -17,10 +17,10 @@ on:
       use_hourly_runner:    { description: 'Use hourly-ci pool (maintainers only)',          required: false, type: string, default: 'false' }
       vllm_ref_override:    { description: 'Override upstream vllm checkout ref (branch/tag/SHA; maintainers only)', required: false, type: string, default: '' }
 
+# Least-privilege default; the jobs that post PR comments (gatekeeper,
+# post-comment) opt into pull-requests: write at the job level.
 permissions:
-  pull-requests: write
-  # This line allows it to read the status of checks like DCO
-  checks: read
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.pr_number || inputs.head_sha || github.ref }}
