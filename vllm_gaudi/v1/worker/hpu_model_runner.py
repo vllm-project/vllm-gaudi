@@ -5140,36 +5140,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if orig_mod is not None:
                     _sync_moe_kernel_flags(orig_mod)
 
-                # Force external router path: the model's forward checks
-                # experts.is_internal_router to decide the gate path.
+                # Re-point the runner at the post-INC block-level gate.
+                # _remove_duplicate_submodules() detached the gate from the
+                # runner so INC would patch it only under mlp; the reference
+                # kept there is the pre-INC module, whose weight was mutated
+                # in place to fp8. The runner still owns gate application
+                # (upstream removed the external-router path together with
+                # is_internal_router), and models pass router_logits as a
+                # placeholder equal to hidden_states, so leaving the runner
+                # without a gate sends hidden_states into expert selection.
+                # object.__setattr__ keeps the gate out of _modules so INC's
+                # module->parent map still sees mlp as the sole parent.
                 if isinstance(experts, MoERunner):
-                    # is_internal_router is a read-only property backed by
-                    # the public `gate` attribute (returns gate is not None);
-                    # clearing gate makes it return False. Upstream #41184
-                    # inverted FusedMoE into a MoERunner factory, so the gate
-                    # now lives directly on the runner instead of `_gate`.
-                    experts.gate = None
-                else:
+                    object.__setattr__(experts, "gate", block_gate)
+                elif not isinstance(
+                        getattr(type(experts), "is_internal_router", None),
+                        property,
+                ):
                     # INC wrappers (e.g. PatchedMixtralMoE) may inherit
-                    # is_internal_router as a read-only @property;
-                    # runner.gate = None below handles that case.
-                    if not isinstance(
-                            getattr(type(experts), "is_internal_router", None),
-                            property,
-                    ):
-                        experts.is_internal_router = False
+                    # is_internal_router as a read-only @property.
+                    experts.is_internal_router = False
                 runner = getattr(experts, "runner", None)
                 if runner is not None and hasattr(runner, "gate"):
-                    runner.gate = None
-                    # Refresh the cached gate ref captured at
-                    # FusedMoE.__init__ to the post-INC block-level gate.
-                    # The dp_size==1 fast path (patched_fused_moe_forward)
-                    # falls back to runner._hpu_gate_ref when runner.gate
-                    # is None; the pre-INC reference points at the now-
-                    # replaced module and produced shape/dtype mismatches
-                    # under fp8.
-                    if block_gate is not None:
-                        object.__setattr__(runner, "_hpu_gate_ref", block_gate)
+                    object.__setattr__(runner, "gate", block_gate)
 
                 if id(experts) in self._detached_moe_gates:
                     self._detached_moe_gates.remove(id(experts))
