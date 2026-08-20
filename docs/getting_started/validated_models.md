@@ -21,6 +21,7 @@ The following configurations have been validated to function with IntelÂ® GaudiÂ
 | [lmsys/gpt-oss-20b-bf16](https://huggingface.co/lmsys/gpt-oss-20b-bf16)     | 1, 2, 4    | BF16    | Gaudi 3|
 | [lmsys/gpt-oss-120b-bf16](https://huggingface.co/lmsys/gpt-oss-120b-bf16)     | 4    | BF16    | Gaudi 3|
 | [MiniMaxAI/MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2)     | 8    | BF16    | Gaudi 3|
+| [MiniMaxAI/MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3)     | 8    | BF16    | Gaudi 3|
 | [meta-llama/CodeLlama-34b-Instruct-hf](https://huggingface.co/meta-llama/CodeLlama-34b-Instruct-hf)     | 1    | BF16    |Gaudi 3|
 | [ibm-granite/Granite-3.1-8B-instruct](https://huggingface.co/ibm-granite/granite-3.1-8b-instruct)     | 1  | BF16    | Gaudi 3|
 | [ibm-granite/Granite-3B-code-instruct-128k](https://huggingface.co/ibm-granite/granite-3b-code-instruct-128k)     | 1  | BF16    | Gaudi 3|

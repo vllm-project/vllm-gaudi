@@ -15,6 +15,11 @@ on:
   # Allow manual triggering from the GitHub Actions UI
   workflow_dispatch: {}
 
+# Least-privilege default; the job that pushes the stable commit
+# (store_last_stable_vllm_commit) opts into contents: write at the job level.
+permissions:
+  contents: read
+
 jobs:
   # JOB 0: (NEW) Decides whether this scheduled tick should proceed.
   # Adaptive cadence: healthy pipeline runs every 8h; a failing pipeline backs

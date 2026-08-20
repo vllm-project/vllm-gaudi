@@ -343,6 +343,15 @@ def select_experts_from_routed(layer, hidden_states: torch.Tensor,
     """
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import select_experts
 
+    # Models hand the runner a placeholder ``router_logits`` (== hidden_states)
+    # and expect the runner to overwrite it with the gate output. If that step
+    # is skipped the placeholder reaches expert selection and only fails later,
+    # deep inside the routing kernels, as an opaque broadcast error.
+    num_experts = layer.moe_config.num_logical_experts
+    if router_logits.size(-1) != num_experts:
+        raise RuntimeError(f"Router logits have {router_logits.size(-1)} columns but the layer routes to "
+                           f"{num_experts} experts; the MoE gate was not applied to the hidden states.")
+
     return select_experts(
         hidden_states=hidden_states,
         router_logits=router_logits,
