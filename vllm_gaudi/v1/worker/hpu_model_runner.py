@@ -6141,10 +6141,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # attn_block_size.  Scope the mutation to avoid affecting prompt
             # fallback paths that still need the original block_size.
             saved_block_size = self.bucketing_manager.block_size
-            # Hybrid models can share one long prefix across the whole batch, so
-            # decode block references can reach the full worst case; flag them so
-            # the decode block range is left unbounded (not clamped to 3x physical).
-            self.bucketing_manager.is_hybrid = self.attn_block_size != self.block_size
+            # Skip the 3x-physical clamp on the decode block range (keeping the
+            # full, still-finite worst-case ceiling) for models whose decode
+            # block references can reach that worst case, otherwise those
+            # references miss the warmed buckets and recompile at runtime.
+            # This covers:
+            #   - inflated KV-cache block_size (Granite-4.0-H, attn != block),
+            #   - GDN hybrids (e.g. Qwen3.5) whose virtual block splitting
+            #     inflates the per-sequence block table,
+            #   - mamba hybrids, and
+            #   - interleaved sliding-window models (e.g. Gemma4) whose global
+            #     layers keep full-context block tables.
+            # attn_block_size == block_size for GDN/interleaved-SWA models, so
+            # this must not be detected via the block_size mismatch alone.
+            # Plain dense models keep the clamp, which bounds first-decode
+            # warmup memory.
+            self.bucketing_manager.skip_decode_block_clamp = (self.attn_block_size != self.block_size
+                                                              or self.num_gdn > 0 or self.num_mamba_like_layers > 0
+                                                              or self.interleaved_sliding_window)
             if self.attn_block_size != self.block_size:
                 self.bucketing_manager.block_size = self.attn_block_size
             try:
