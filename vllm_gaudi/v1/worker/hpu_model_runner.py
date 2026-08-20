@@ -32,7 +32,7 @@ from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
-from vllm_gaudi.extension.runtime import finalize_config, get_config
+from vllm_gaudi.extension.runtime import clear_config, finalize_config, get_config
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
@@ -1239,6 +1239,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # TODO: use ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         environment.set_vllm_config(vllm_config)
 
+        clear_config()
         finalize_config()
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -2445,6 +2446,28 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                           actual_blocks_needed)[2]
             block_bucket_size += self.get_dp_padding(block_bucket_size)
             block_bucket_size = max(block_bucket_size, actual_blocks_needed)
+            # After a model stash-restore the KV cache may be reinitialized with
+            # fewer blocks than the bucket table was built for.  Cap so that
+            # block_bucket_size never exceeds the allocated KV cache size
+            # (PAD_BLOCK_ID + 1 = total_blocks including the pad block), which
+            # keeps narrow()/shape checks in flat_pa valid and prevents OOB reads.
+            kv_total_blocks = self._PAD_BLOCK_ID + 1
+            if block_bucket_size > kv_total_blocks:
+                # Fail fast if actual requests need more blocks than are
+                # allocated.
+                if actual_blocks_needed > kv_total_blocks:
+                    raise RuntimeError(f"actual_blocks_needed ({actual_blocks_needed}) "
+                                       f"exceeds total KV blocks ({kv_total_blocks}). "
+                                       "The KV cache is under-provisioned for the current "
+                                       "batch; cannot proceed safely after stash-restore.")
+                if not getattr(self, '_block_bucket_cap_warned', False):
+                    logger.warning(
+                        "block_bucket_size (%d) exceeds total KV blocks "
+                        "(%d); capping to prevent OOB after stash-restore. "
+                        "This is expected on a model swap with a smaller "
+                        "KV cache.", block_bucket_size, kv_total_blocks)
+                    self._block_bucket_cap_warned = True
+                block_bucket_size = kv_total_blocks
 
             indices: list[Any]
             indices = [None] * block_bucket_size
