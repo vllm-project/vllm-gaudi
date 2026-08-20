@@ -303,11 +303,6 @@ class HPUMambaMixer2(MambaMixer2):
     ):
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
-        # 1. Split in_proj into two GEMMs for TPC/MME pipelining.
-        #    GEMM 1 (states: x,B,C,dt) is dispatched to the MME first;
-        #    GEMM 2 (gate) is dispatched second.  The Gaudi runtime can
-        #    overlap GEMM 2 on the MME with conv+SSM TPC work that
-        #    depends only on GEMM 1.
         if self._quantized_in_proj:
             # Quantized in_proj: run the standard quant-aware projection and
             # split its output. gate is the leading tped_intermediate_size
@@ -316,8 +311,12 @@ class HPUMambaMixer2(MambaMixer2):
             gate = projected[..., :self.tped_intermediate_size]
             states_proj = projected[..., self.tped_intermediate_size:]
         else:
+            # 1. Split in_proj into two GEMMs for TPC/MME pipelining.
+            #    GEMM 1 (states: x,B,C,dt) is dispatched to the MME first;
+            #    GEMM 2 (gate) is dispatched second.  The Gaudi runtime can
+            #    overlap GEMM 2 on the MME with conv+SSM TPC work that
+            #    depends only on GEMM 1.
             states_proj = F.linear(hidden_states, self._states_weight, self._states_bias)
-
             gate = F.linear(hidden_states, self._gate_weight, self._gate_bias)
 
         if mup_vector is not None:

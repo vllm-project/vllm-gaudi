@@ -825,7 +825,7 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 if not layer_name.endswith('.mixer'):
                     continue
                 layer_idx = int(layer_name.split('.')[-2])  # "...layers.5.mixer" -> 5
-                layer = model.model.layers[layer_idx]
+                layer = _get_decoder_layer_by_idx(model, layer_idx)
                 # The Mamba block is exposed as ".mamba" (Granite) or ".mixer"
                 # (Nemotron-H) depending on the model.
                 mamba_mixer = getattr(layer, 'mamba', None)
