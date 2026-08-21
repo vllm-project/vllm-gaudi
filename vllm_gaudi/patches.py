@@ -823,6 +823,28 @@ def _patch_sdpa_attention_forward() -> None:
     _ensure_fsdpa_cached()
 
 
+def _patch_inc_quantization_config() -> None:
+    """Register the HPU ``_FakeINCConfig`` as the resolver for ``inc``.
+
+    The Gaudi runtime-INC (Intel Neural Compressor) flow calibrates fp8 scales
+    at runtime and ships no on-disk config, so resolving ``inc`` to vLLM's
+    native ``INCConfig`` (whose ``get_config_filenames()`` expects
+    ``quantization_config.json``) makes ``get_quant_config`` raise ``Cannot find
+    the config file for inc`` — surfacing as a ``VllmConfig`` ValidationError
+    during ``create_engine_config`` (exposed by upstream vllm#51695). The
+    existing ``ops`` shim on ``get_quantization_config`` is order-sensitive;
+    registering via the public ``register_quantization_config`` API is immune to
+    import order because ``get_quantization_config`` merges the registry on
+    every call. ``inc`` is already in ``QUANTIZATION_METHODS``, so this only
+    overrides the config class and does not touch ``current_platform``.
+    """
+    from vllm.model_executor.layers.quantization import register_quantization_config
+
+    from vllm_gaudi.extension.quant import _FakeINCConfig
+
+    register_quantization_config("inc")(_FakeINCConfig)
+
+
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
     # --- torch.accelerator.empty_cache ---
@@ -860,6 +882,7 @@ def apply() -> None:
         _patch_mamba_bind_kv_cache()
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
+        _patch_inc_quantization_config()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 

@@ -21,13 +21,13 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
-from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.launchers.launcher import serve_http
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.openai.api_server import build_app, setup_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.utils.server_utils import get_uvicorn_log_config
+from vllm.entrypoints.launchers.utils.server_utils import get_uvicorn_log_config
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -709,6 +709,11 @@ async def _run_multi_model_server_worker(
 
 async def _run_multi_model_server(args: Namespace) -> None:
     decorate_logs("APIServer")
+
+    # Patch args.model with the actual default model from the multi-model config
+    # so that setup_server logs the correct model name in the banner.
+    config = _load_multi_model_config(_resolve_multi_model_config_path())
+    args.model = config.model_configs[config.default_model].model
 
     listen_address, sock = setup_server(args, reuse_port=False)
     await _run_multi_model_server_worker(listen_address, sock, args)

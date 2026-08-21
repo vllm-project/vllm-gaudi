@@ -149,6 +149,14 @@ If warm-up is globally skipped, these logs do not appear.
 
 Native-resolution vision towers (e.g. Gemma4, Kimi-K2.5/K2.6, Qwen2.5/3/3.5-VL) produce a different patch grid per image resolution, unlike batch-based towers (e.g. Gemma3) which only vary by batch size. If a real request's resolution does not match anything warmed at startup, the vision-tower graph recompiles on the critical path.
 
+Some multimodal paths have data-dependent output shapes that must be materialized during warm-up. For those models, set `VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY=true` to compile and execute multimodal warm-up outside compile-only mode:
+
+```text
+VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY=true
+```
+
+This setting increases startup time and applies only to multimodal warm-up in `torch.compile` mode. It has no effect when `VLLM_SKIP_WARMUP=true`.
+
 By default, warm-up derives a spread of aspect-ratio shapes from the model's patch-count buckets (`VLLM_MULTIMODAL_BUCKETS`). Some native-resolution towers (Gemma4, Kimi-K2.5/K2.6, Qwen3.5) ship with **empty** patch-count buckets on purpose — the guessed aspect-ratio shapes match no real request for these models and only lengthen warm-up. For them there is no guessed warm-up at all, so you **must** set `VLLM_MULTIMODAL_RESOLUTIONS` (or `--limit-mm-per-prompt` width/height) to precompile anything; otherwise the vision-tower graph recompiles on the first real request at each resolution (the runner logs a warning at startup when this happens). To guarantee a specific production resolution is precompiled, set `VLLM_MULTIMODAL_RESOLUTIONS` to a comma-separated list of raw pixel resolution entries:
 
 ```text
