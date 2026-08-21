@@ -21,13 +21,13 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
-from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.launchers.launcher import serve_http
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.openai.api_server import build_app, setup_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.utils.server_utils import get_uvicorn_log_config
+from vllm.entrypoints.launchers.utils.server_utils import get_uvicorn_log_config
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.renderers.online_renderer import OnlineRenderer
