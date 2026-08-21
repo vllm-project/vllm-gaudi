@@ -78,10 +78,13 @@ class HPUBucketingManager():
         self.max_num_prefill_seqs = max_num_prefill_seqs
         self.block_size = block_size
         self.max_num_batched_tokens = max_num_batched_tokens
-        # Set by the model runner before decode bucket generation for hybrid
-        # models (block_size != attn_block_size); keeps their decode block range
-        # unbounded (see ExponentialBucketingStrategy.get_decode_cfgs).
-        self.is_hybrid = False
+        # Set by the model runner before decode bucket generation for models
+        # whose decode block references can reach the theoretical worst case
+        # (GDN/mamba hybrids, interleaved sliding-window, or an inflated
+        # KV-cache block_size); keeps their full worst-case decode block
+        # range instead of clamping to 3x physical (see
+        # ExponentialBucketingStrategy.get_decode_cfgs).
+        self.skip_decode_block_clamp = False
         self.num_hpu_blocks = None
         self._fallback_max_ctx = 0
         self.max_model_len = max_model_len
@@ -206,7 +209,7 @@ class HPUBucketingManager():
                     max_num_batched_tokens=self.max_num_batched_tokens,
                     max_model_len=self.max_model_len,
                     max_blocks=self.num_hpu_blocks,
-                    is_hybrid=getattr(self, 'is_hybrid', False))
+                    skip_decode_block_clamp=getattr(self, 'skip_decode_block_clamp', False))
 
                 bs_range = strategy.get_range(bs_cfg)
                 query_range = strategy.get_range(query_cfg)
