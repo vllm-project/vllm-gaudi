@@ -5901,10 +5901,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         dummy_text = dummy_builder.get_dummy_text({modality: count})
         mm_data_items = processor.info.parse_mm_data({modality: mm_items}, validate=False)
 
+        # Upstream vllm#53093 removed the text components (str prompt +
+        # tokenization_kwargs) from ProcessorInputs; the prompt is now a
+        # pre-tokenized list[int] and tokenization happens in the caller.
+        # Mirror get_dummy_processor_inputs' tokenization exactly.
+        tokenizer = processor.info.ctx.tokenizer
+        if tokenizer is None:
+            dummy_prompt: list[int] = []
+        else:
+            dummy_prompt = tokenizer.encode(
+                dummy_text,
+                **processor.info.default_tok_params.get_encode_kwargs(),
+            )
+
         return ProcessorInputs(
-            prompt=dummy_text,
+            prompt=dummy_prompt,
             mm_data_items=mm_data_items,
-            tokenization_kwargs={"truncation": False},
         )
 
     def _get_mm_warmup_processor(self):
