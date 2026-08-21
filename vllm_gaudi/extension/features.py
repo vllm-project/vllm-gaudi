@@ -61,6 +61,9 @@ def get_user_flags():
         Env('VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD', int),
         Env('VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE', int),
         Env('VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS', boolean),
+
+        # FusedSDPA query tiling flags
+        Env('VLLM_HPU_FSDPA_Q_TILE_ENABLE', boolean),
     ]
     return to_dict(flags)
 
@@ -126,5 +129,9 @@ def get_features():
                   Kernel(fsdpa)),
               env_var='VLLM_HPU_FSDPA_SLICE_ENABLED',
               env_var_type=boolean),
+        # Splits the query dim of prompt attention so no per-call attn_bias reaches 2**31 bytes,
+        # which FusedSDPA cannot index (it silently returns NaN). Off by default: only long
+        # contexts with a wide context bucket can hit the limit.
+        Value('enable_fsdpa_q_tiling', False, env_var='VLLM_HPU_FSDPA_Q_TILE_ENABLE', env_var_type=boolean),
     ]
     return split_values_and_flags(features)
