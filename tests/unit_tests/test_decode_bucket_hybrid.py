@@ -90,15 +90,16 @@ class _MockConfig:
             object.__setattr__(self, k, v)
 
 
-def _make_bucketing_manager(block_size, max_model_len, max_num_seqs, num_hpu_blocks, is_hybrid=True):
+def _make_bucketing_manager(block_size, max_model_len, max_num_seqs, num_hpu_blocks, skip_decode_block_clamp=True):
     """Create a minimally-configured HPUBucketingManager.
 
-    Defaults to is_hybrid=True since this helper is used exclusively for hybrid
-    model scenarios, which keep the decode block range unbounded (not clamped).
+    Defaults to skip_decode_block_clamp=True since this helper is used
+    exclusively for hybrid model scenarios, which keep the full worst-case
+    decode block range (skip the 3x-physical clamp).
     """
     mgr = HPUBucketingManager.__new__(HPUBucketingManager)
     mgr.block_size = block_size
-    mgr.is_hybrid = is_hybrid
+    mgr.skip_decode_block_clamp = skip_decode_block_clamp
     mgr.max_model_len = max_model_len
     mgr.max_num_seqs = max_num_seqs
     mgr.max_num_prefill_seqs = 1
@@ -348,15 +349,15 @@ def test_hybrid_max_decode_blocks_formula(mock_exp_config):
     mock_exp_config.return_value = _MockConfig(use_contiguous_pa=False)
     strategy = ExponentialBucketingStrategy()
 
-    # Using attn_block_size=128 (correct). Hybrid models keep the unbounded
-    # worst case (is_hybrid=True), so no max_blocks*3 clamp is applied.
+    # Using attn_block_size=128 (correct). GDN hybrids keep the full worst
+    # case (skip_decode_block_clamp=True), so no max_blocks*3 clamp.
     _, _, block_cfg = strategy.get_decode_cfgs(
         max_num_seqs=_QWEN35_MAX_NUM_SEQS,
         block_size=_QWEN35_ATTN_BLOCK_SIZE,
         max_num_batched_tokens=131072,
         max_model_len=_QWEN35_MAX_MODEL_LEN,
         max_blocks=_QWEN35_NUM_HPU_BLOCKS,
-        is_hybrid=True,
+        skip_decode_block_clamp=True,
     )
     expected_max = math.ceil(_QWEN35_MAX_MODEL_LEN / _QWEN35_ATTN_BLOCK_SIZE) * _QWEN35_MAX_NUM_SEQS
     assert block_cfg[2] == expected_max, (
@@ -370,7 +371,7 @@ def test_hybrid_max_decode_blocks_formula(mock_exp_config):
         max_num_batched_tokens=131072,
         max_model_len=_QWEN35_MAX_MODEL_LEN,
         max_blocks=_QWEN35_NUM_HPU_BLOCKS,
-        is_hybrid=True,
+        skip_decode_block_clamp=True,
     )
     wrong_max = math.ceil(_QWEN35_MAX_MODEL_LEN / _QWEN35_BLOCK_SIZE) * _QWEN35_MAX_NUM_SEQS
     assert block_cfg_wrong[2] == wrong_max, (
