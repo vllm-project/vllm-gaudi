@@ -28,7 +28,9 @@ jobs:
     # Runs on a cheap GitHub-hosted runner so a "skip" never locks an HPU runner.
     runs-on: ubuntu-latest
     permissions:
-      actions: read # Required to query this workflow's previous runs and their jobs
+      # read: query this workflow's previous runs and their jobs;
+      # write: self-cancel the run on a skipped (backed-off) tick.
+      actions: write
     outputs:
       should_run: ${{ steps.decide.outputs.should_run }}
       # ISO-8601 start time of the last real run; empty on bootstrap/manual runs.
@@ -107,6 +109,31 @@ jobs:
             echo "Failing cadence, only ${AGE_HOURS}h elapsed (<23h) -> skipping this tick."
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Cancel this run on a skipped tick
+        # On a backed-off tick, cancel the run so it shows as 'cancelled' (grey)
+        # in the Actions UI instead of a misleading green 'success'.
+        if: steps.decide.outputs.should_run == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "Adaptive back-off: cancelling this run so it is marked 'cancelled', not 'success'."
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/cancel"
+          # Cancellation is asynchronous: block so GitHub terminates this job as
+          # 'cancelled' rather than letting the step finish and record 'success'.
+          # If it hasn't taken effect within ~3 min, fail loudly (red beats green).
+          for i in $(seq 1 18); do
+            echo "Waiting for cancellation to take effect... ($i)"
+            sleep 10
+          done
+          echo "::error::Run cancellation did not take effect in time." >&2
+          exit 1
 
   # JOB 1: (NEW) Discovers an available runner and locks it for all subsequent jobs.
   discover_runner:
