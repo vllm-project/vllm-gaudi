@@ -398,22 +398,21 @@ USING_INC = os.getenv("QUANT_CONFIG") is not None
 # planes are 1.01 GiB each runs clean).
 _FSDPA_PLANE_MAX_BYTES = 2**31
 
-_fsdpa_q_tiling_logged: set = set()
 
-
-def _fsdpa_num_q_tiles(attn_bias: Optional[torch.Tensor], plane_elem_bytes: Optional[int] = None) -> int:
+def _fsdpa_num_q_tiles(attn_bias: Optional[torch.Tensor]) -> int:
     """Number of query tiles that keep each indexed q x kv plane under _FSDPA_PLANE_MAX_BYTES.
 
     Returns 1 (no tiling) when enable_fsdpa_q_tiling is off or the plane already fits, so shapes
     that are not at risk keep taking a byte-identical path through the kernel.
 
-    plane_elem_bytes is the size of one element of the plane the kernel strides through; it defaults
-    to the bias's own element size. See the call site for why the fp32 path passes 4.
+    The overflow is a signed-int32 byte offset the kernel forms while striding the bias plane, so
+    the limit is byte-based on the bias's own element size and independent of the softmax precision
+    (fp32 softmax upcasts internally but still strides the 2 B/elem bias -- confirmed no overflow at
+    a 1.06 GiB bf16 plane under fp32 softmax).
     """
     if attn_bias is None or not get_config().enable_fsdpa_q_tiling:
         return 1
-    if plane_elem_bytes is None:
-        plane_elem_bytes = attn_bias.element_size()
+    plane_elem_bytes = attn_bias.element_size()
     # bias is [bs, 1, q_len, kv_len]; the kernel indexes one q_len x kv_len plane at a time.
     q_len = attn_bias.size(-2)
     kv_len = attn_bias.size(-1)
@@ -428,14 +427,11 @@ def _fsdpa_num_q_tiles(attn_bias: Optional[torch.Tensor], plane_elem_bytes: Opti
     while num_tiles < q_len and math.ceil(q_len / num_tiles) * row_bytes >= _FSDPA_PLANE_MAX_BYTES:
         num_tiles += 1
 
-    key = (tuple(attn_bias.shape), plane_elem_bytes, num_tiles)
-    if key not in _fsdpa_q_tiling_logged:
-        _fsdpa_q_tiling_logged.add(key)
-        logger.warning(
-            "Q-tiling FusedSDPA prompt attention: bias %s indexed plane is %d bytes (%dB/elem, "
-            ">= %d, the 32-bit FusedSDPA limit); splitting the query dim into %d tiles of <= %d rows.",
-            tuple(attn_bias.shape), plane_bytes, plane_elem_bytes, _FSDPA_PLANE_MAX_BYTES, num_tiles,
-            math.ceil(q_len / num_tiles))
+    # logger.warning(
+    #     "Q-tiling FusedSDPA prompt attention: bias %s indexed plane is %d bytes (%dB/elem, "
+    #     ">= %d, the 32-bit FusedSDPA limit); splitting the query dim into %d tiles.",
+    #     tuple(attn_bias.shape), plane_bytes, plane_elem_bytes, _FSDPA_PLANE_MAX_BYTES, num_tiles)
+
     return num_tiles
 
 
@@ -481,12 +477,10 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
             args += [sinks]
         return fsdpa_op(*args)
 
-    # FusedSDPA upcasts the score/mask plane to fp32 when softmax is fp32 or an input is fp32, so
-    # the indexed plane is 4 B/elem there even though a bf16 bias is 2 B/elem. Precautionary: fp32
-    # softmax was not observed to overflow at a 1.06 GiB bf16 bias, so this only ever over-tiles.
-    plane_elem_bytes = 4 if (softmax_mode == 'fp32' or query.dtype == torch.float32 or
-                             (attn_bias is not None and attn_bias.dtype == torch.float32)) else 2
-    num_q_tiles = _fsdpa_num_q_tiles(attn_bias, plane_elem_bytes)
+    # The kernel overflows a signed-int32 *byte* offset while striding the bias plane, so the limit
+    # tracks the bias element size regardless of softmax precision (fp32 softmax upcasts internally
+    # but still strides the 2 B/elem bias). No fp32 special-casing needed.
+    num_q_tiles = _fsdpa_num_q_tiles(attn_bias)
     if num_q_tiles == 1:
         attn_weights = call_fsdpa(query, attn_bias)
     else:
@@ -496,18 +490,12 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         # so each tile only needs the matching rows of it.
         q_len = query.size(-2)
         tile = math.ceil(q_len / num_q_tiles)
-        # Graph breaks between tiles are only safe in lazy mode. Mirrors
-        # SlicedFusedSDPABase._setup_slicing: in eager/compile mode a mark_step inside the
-        # attention op can trip the Synapse compiler, so there the tiles stay in one graph.
-        break_graph = htorch.utils.internal.is_lazy()
         tiles = []
         for start in range(0, q_len, tile):
             end = min(start + tile, q_len)
             # Views, not copies: the bias slice is already contiguous (the trailing dim is whole),
             # and the untiled path likewise hands the kernel a transposed, non-contiguous query.
             tiles.append(call_fsdpa(query[..., start:end, :], attn_bias[..., start:end, :]))
-            if break_graph:
-                htcore.mark_step()
         attn_weights = torch.cat(tiles, dim=-2)
 
     attn_weights = attn_weights.transpose(1, 2)
