@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     VLLM_MINIMAX_M3_MOE_TOKEN_TILE: int = 512
     VLLM_MINIMAX_M3_MOE_DECODE_GATHER: bool = True
     VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS: int = 16
+    VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY: bool = False
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -81,6 +82,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_MINIMAX_M3_MOE_DECODE_GATHER", "1").lower() in ("1", "true"),
     "VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS":
     lambda: int(os.environ.get("VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS", "16")),
+
+    # Run multimodal warmup outside PT_COMPILE_ONLY_MODE for models with
+    # data-dependent output shapes that must be materialized during warmup.
+    "VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY":
+    lambda: os.environ.get("VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY", "false").strip().lower() in ("1", "true"),
 }
 
 # end-env-vars-definition
