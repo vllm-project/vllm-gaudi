@@ -355,6 +355,7 @@ def _recurrent_timestep_body(
     HV: int,
     H: int,
     Kdim: int,
+    repeat: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compilable per-timestep body for hpu_fused_recurrent_gated_delta_rule.
 
@@ -362,10 +363,14 @@ def _recurrent_timestep_body(
     """
     q_t = q_t * scale
     h_state = h_state * torch.exp(g_t).view(HV, 1, 1)
-    proj = torch.sum(h_state * k_t.view(H, 1, Kdim), dim=-1)
+    # Work in grouped view [H, repeat, V, K] to broadcast q/k [H, 1, 1, K]
+    h_grouped = h_state.view(H, repeat, -1, Kdim)
+    k_exp = k_t.view(H, 1, 1, Kdim)
+    proj = torch.sum(h_grouped * k_exp, dim=-1).view(HV, -1)
     v_new = (v_t - proj) * b_t.view(HV, 1)
-    h_state = h_state + v_new.unsqueeze(-1) * k_t.view(H, 1, Kdim)
-    out_t = torch.sum(h_state * q_t.view(H, 1, Kdim), dim=-1)
+    h_grouped = h_grouped + v_new.view(H, repeat, -1, 1) * k_exp
+    out_t = torch.sum(h_grouped * q_t.view(H, 1, 1, Kdim), dim=-1).view(HV, -1)
+    h_state = h_grouped.view(HV, -1, Kdim)
     return out_t, h_state
 
 
@@ -573,15 +578,10 @@ def hpu_fused_recurrent_gated_delta_rule(
 
     # Match upstream kernel semantics: when HV > H, each q/k head is shared
     # across a group of value heads (grouped-value attention).
-    if H != HV:
-        if HV % H == 0:
-            repeat = HV // H
-            q = q.repeat_interleave(repeat, dim=2)
-            k = k.repeat_interleave(repeat, dim=2)
-            H = HV
-        else:
-            raise ValueError(f"Unsupported head mapping in hpu_fused_recurrent_gated_delta_rule: "
-                             f"q/k heads={H}, value heads={HV}. Expected HV % H == 0.")
+    if H != HV and HV % H != 0:
+        raise ValueError(f"Unsupported head mapping in hpu_fused_recurrent_gated_delta_rule: "
+                         f"q/k heads={H}, value heads={HV}. Expected HV % H == 0.")
+    repeat = HV // H
 
     # --- Vectorized decode fast path (shape-only detection) ---
     # Detect all-single-token decode from shapes alone — NO device-to-host
@@ -622,15 +622,21 @@ def hpu_fused_recurrent_gated_delta_rule(
             qf = _l2norm_last_dim(qf)
             kf = _l2norm_last_dim(kf)
 
-        out_full = torch.zeros(num_seqs, HV, Vdim, dtype=v.dtype, device=device)
+        # Grouped-value broadcast: reshape h_batch from [N, HV, V, K] to
+        # [N, H, repeat, V, K] so q/k [N, H, K] can broadcast without copy.
+        h_grouped = h_batch.view(num_seqs, H, repeat, Vdim, Kdim)
+        gf_grouped = gf.view(num_seqs, H, repeat, 1, 1)
+        vf_grouped = vf.view(num_seqs, H, repeat, Vdim)
+        bf_grouped = bf.view(num_seqs, H, repeat, 1)
 
-        # Inline compute (no separate function boundary for this test).
         q_s = qf * scale
-        h_batch = h_batch * torch.exp(gf).to(h_batch.dtype).unsqueeze(-1).unsqueeze(-1)
-        proj = torch.matmul(h_batch, kf.unsqueeze(-1)).squeeze(-1)
-        v_new = (vf - proj) * bf.unsqueeze(-1)
-        h_batch = h_batch + v_new.unsqueeze(-1) * kf.unsqueeze(2)
-        out_batch = torch.matmul(h_batch, q_s.unsqueeze(-1)).squeeze(-1)
+        h_grouped = h_grouped * torch.exp(gf_grouped).to(h_grouped.dtype)
+        proj = torch.matmul(h_grouped, kf.view(num_seqs, H, 1, Kdim, 1)).squeeze(-1)
+        v_new = (vf_grouped - proj) * bf_grouped
+        h_grouped = h_grouped + v_new.unsqueeze(-1) * kf.view(num_seqs, H, 1, 1, Kdim)
+        out_batch = torch.matmul(h_grouped, q_s.view(num_seqs, H, 1, Kdim, 1)).squeeze(-1)
+        out_batch = out_batch.view(num_seqs, HV, Vdim)
+        h_batch = h_grouped.view(num_seqs, HV, Vdim, Kdim)
 
         # Direct index_copy_ (no eager wrapper for this test).
         final_state.index_copy_(0, sidx, h_batch.to(final_state.dtype))
@@ -659,6 +665,7 @@ def hpu_fused_recurrent_gated_delta_rule(
         Kdim,
         Vdim,
         device,
+        repeat,
     )
 
 
@@ -682,6 +689,7 @@ def _recurrent_general_path(
     Kdim: int,
     Vdim: int,
     device: torch.device,
+    repeat: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """General multi-token recurrent path (Python loops, dynamo-disabled)."""
     if cu_seqlens is not None:
@@ -764,6 +772,7 @@ def _recurrent_general_path(
                 HV,
                 H,
                 Kdim,
+                repeat,
             )
             out[t] = out_t
 
