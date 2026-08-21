@@ -669,6 +669,27 @@ def _patch_free_blocks() -> None:
 _CACHED_FSDPA_OP = None
 
 
+def _ensure_fsdpa_cached() -> None:
+    """Eagerly initialize the FusedSDPA operator cache.
+
+    Must be called BEFORE torch.compile traces _hpu_sdpa_attention_forward,
+    otherwise dynamo creates a guard on `_CACHED_FSDPA_OP is None` which
+    fails at runtime and triggers recompilation.
+
+    Called from hpu_model_runner.py during model initialization.
+    """
+    global _CACHED_FSDPA_OP
+    if _CACHED_FSDPA_OP is not None:
+        return
+    try:
+        from vllm_gaudi.extension.utils import ModuleFusedSDPA
+        import vllm_gaudi.extension.kernels as kernels
+        HPUFusedSDPA = kernels.fsdpa()
+        _CACHED_FSDPA_OP = ModuleFusedSDPA(HPUFusedSDPA)
+    except Exception:
+        pass
+
+
 def _hpu_sdpa_attention_forward(
     module: torch.nn.Module,
     query: torch.Tensor,
@@ -740,12 +761,12 @@ def _hpu_sdpa_attention_forward(
             pass
 
     if _use_hpu_fsdpa and _config is not None:
-        global _CACHED_FSDPA_OP
+        # _CACHED_FSDPA_OP is initialized eagerly by _ensure_fsdpa_cached()
+        # before torch.compile traces this function. This avoids the dynamo
+        # guard on `_CACHED_FSDPA_OP is None` that would trigger recompilation.
+        _ensure_fsdpa_cached()
         if _CACHED_FSDPA_OP is None:
-            from vllm_gaudi.extension.utils import ModuleFusedSDPA
-            import vllm_gaudi.extension.kernels as kernels
-            HPUFusedSDPA = kernels.fsdpa()
-            _CACHED_FSDPA_OP = ModuleFusedSDPA(HPUFusedSDPA)
+            raise RuntimeError("FSDPA op failed to initialize")
 
         softmax_mode = "fp32" if _config.fp32_softmax else "fast"
         attn_output = _CACHED_FSDPA_OP(
@@ -796,6 +817,33 @@ def _patch_sdpa_attention_forward() -> None:
     except ImportError:
         pass  # transformers version without this module
 
+    # Eagerly initialize the operator cache at patch-registration time,
+    # before torch.compile traces the function. Same pattern as hpu_attn.py
+    # which calls kernels.fsdpa() in __init__.
+    _ensure_fsdpa_cached()
+
+
+def _patch_inc_quantization_config() -> None:
+    """Register the HPU ``_FakeINCConfig`` as the resolver for ``inc``.
+
+    The Gaudi runtime-INC (Intel Neural Compressor) flow calibrates fp8 scales
+    at runtime and ships no on-disk config, so resolving ``inc`` to vLLM's
+    native ``INCConfig`` (whose ``get_config_filenames()`` expects
+    ``quantization_config.json``) makes ``get_quant_config`` raise ``Cannot find
+    the config file for inc`` — surfacing as a ``VllmConfig`` ValidationError
+    during ``create_engine_config`` (exposed by upstream vllm#51695). The
+    existing ``ops`` shim on ``get_quantization_config`` is order-sensitive;
+    registering via the public ``register_quantization_config`` API is immune to
+    import order because ``get_quantization_config`` merges the registry on
+    every call. ``inc`` is already in ``QUANTIZATION_METHODS``, so this only
+    overrides the config class and does not touch ``current_platform``.
+    """
+    from vllm.model_executor.layers.quantization import register_quantization_config
+
+    from vllm_gaudi.extension.quant import _FakeINCConfig
+
+    register_quantization_config("inc")(_FakeINCConfig)
+
 
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
@@ -834,6 +882,7 @@ def apply() -> None:
         _patch_mamba_bind_kv_cache()
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
+        _patch_inc_quantization_config()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 

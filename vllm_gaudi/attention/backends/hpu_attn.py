@@ -357,15 +357,17 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
     # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        # Since vllm#48251 the base process_weights_after_loading registers
-        # W_UV and W_UK_T as nn.Parameter (via replace_parameter), so a plain
-        # tensor reassignment raises TypeError. Route the contiguous/.to("hpu")
-        # update back through replace_parameter to preserve the registration.
-        # When INC CPU-first loading is active the source weights live on CPU,
-        # making these derived tensors CPU-resident too — which then causes a
-        # device mismatch at the bmm calls in forward.  Explicitly place on HPU.
-        replace_parameter(self, "W_UV", self.W_UV.contiguous().to("hpu"))
-        replace_parameter(self, "W_UK_T", self.W_UK_T.contiguous().to("hpu"))
+        # Upstream moved MLA weight packing off the attention impl onto the
+        # MLAAttention module, so the base process_weights_after_loading is now
+        # the AttentionImplBase no-op and W_UV/W_UK_T are no longer registered on
+        # the impl. Only massage them when this impl actually owns them: they are
+        # registered as nn.Parameter, so route through replace_parameter to keep
+        # the registration; .to("hpu") avoids a CPU/HPU bmm device mismatch under
+        # INC CPU-first loading.
+        for name in ("W_UV", "W_UK_T"):
+            weight = getattr(self, name, None)
+            if weight is not None:
+                replace_parameter(self, name, weight.contiguous().to("hpu"))
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
@@ -658,10 +660,16 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Decoding run.
             # GAUDISW-248985: decode block_list is the contiguous-identity layout, so
             # keep the zero-copy slice fetch (cache[:n]); only prefill needs gather.
+            # Exception: sliding window with contiguous PA needs gather-by-id because
+            # window_block_list contains scattered block IDs (not identity layout).
             _set_fetch_by_id(self.k_cache, False)
             _set_fetch_by_id(self.v_cache, False)
+
             if self.sliding_window and \
                 attn_metadata.window_block_list is not None:
+                # Sliding window blocks are not contiguous - need gather-by-id
+                _set_fetch_by_id(self.k_cache, True)
+                _set_fetch_by_id(self.v_cache, True)
                 block_list = attn_metadata.window_block_list
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping

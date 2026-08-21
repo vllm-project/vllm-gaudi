@@ -27,12 +27,13 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 import torch.nn as nn
+import vllm_gaudi.envs as gaudi_envs
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
-from vllm_gaudi.extension.runtime import finalize_config, get_config
+from vllm_gaudi.extension.runtime import clear_config, finalize_config, get_config
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
@@ -1239,6 +1240,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # TODO: use ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         environment.set_vllm_config(vllm_config)
 
+        clear_config()
         finalize_config()
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -2410,7 +2412,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                               skip_copy=not batch_changed)
         return sampling_metadata
 
-    def get_habana_paged_attn_buffers(self, block_tables, slot_mapping, batch_size, block_size=None):
+    def get_habana_paged_attn_buffers(self,
+                                      block_tables,
+                                      slot_mapping,
+                                      batch_size,
+                                      block_size=None,
+                                      force_non_contiguous=False):
+        """Build paged attention buffers for decode.
+
+        Args:
+            force_non_contiguous: If True, use non-contiguous mode even when
+                use_contiguous_pa is enabled. Required for sliding window blocks
+                which have scattered block IDs that don't work with contiguous PA's
+                slice-based fetch.
+        """
         block_size = self.attn_block_size if block_size is None else block_size
         last_block_usage = [slot[0] % block_size + 1 for slot in slot_mapping]
         block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
@@ -2423,7 +2438,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         padding_fn = None
         block_bucket_size: int
-        if self.use_contiguous_pa:
+        use_contiguous = self.use_contiguous_pa and not force_non_contiguous
+        if use_contiguous:
             actual_blocks_needed = max(block_list) + 1 if block_list else 0
 
             block_bucket_size = \
@@ -2431,6 +2447,28 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                           actual_blocks_needed)[2]
             block_bucket_size += self.get_dp_padding(block_bucket_size)
             block_bucket_size = max(block_bucket_size, actual_blocks_needed)
+            # After a model stash-restore the KV cache may be reinitialized with
+            # fewer blocks than the bucket table was built for.  Cap so that
+            # block_bucket_size never exceeds the allocated KV cache size
+            # (PAD_BLOCK_ID + 1 = total_blocks including the pad block), which
+            # keeps narrow()/shape checks in flat_pa valid and prevents OOB reads.
+            kv_total_blocks = self._PAD_BLOCK_ID + 1
+            if block_bucket_size > kv_total_blocks:
+                # Fail fast if actual requests need more blocks than are
+                # allocated.
+                if actual_blocks_needed > kv_total_blocks:
+                    raise RuntimeError(f"actual_blocks_needed ({actual_blocks_needed}) "
+                                       f"exceeds total KV blocks ({kv_total_blocks}). "
+                                       "The KV cache is under-provisioned for the current "
+                                       "batch; cannot proceed safely after stash-restore.")
+                if not getattr(self, '_block_bucket_cap_warned', False):
+                    logger.warning(
+                        "block_bucket_size (%d) exceeds total KV blocks "
+                        "(%d); capping to prevent OOB after stash-restore. "
+                        "This is expected on a model swap with a smaller "
+                        "KV cache.", block_bucket_size, kv_total_blocks)
+                    self._block_bucket_cap_warned = True
+                block_bucket_size = kv_total_blocks
 
             indices: list[Any]
             indices = [None] * block_bucket_size
@@ -3216,11 +3254,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 sliding_block_size += 1
 
             window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]
+            # Sliding window blocks have scattered IDs (not identity layout),
+            # so force non-contiguous mode to use gather-by-id fetch
             window_block_list, window_block_groups, window_block_usage = \
                 self.get_habana_paged_attn_buffers(
                     window_block_tables, slot_mapping.tolist(),
                     padded_batch_size * num_tokens,
-                    block_size=decode_block_size)
+                    block_size=decode_block_size,
+                    force_non_contiguous=True)
 
         if self.model_has_chunked_attention:
             chunk_size_in_blocks = (self.model.model.config.text_config.attention_chunk_size // decode_block_size)
@@ -5123,36 +5164,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if orig_mod is not None:
                     _sync_moe_kernel_flags(orig_mod)
 
-                # Force external router path: the model's forward checks
-                # experts.is_internal_router to decide the gate path.
+                # Re-point the runner at the post-INC block-level gate.
+                # _remove_duplicate_submodules() detached the gate from the
+                # runner so INC would patch it only under mlp; the reference
+                # kept there is the pre-INC module, whose weight was mutated
+                # in place to fp8. The runner still owns gate application
+                # (upstream removed the external-router path together with
+                # is_internal_router), and models pass router_logits as a
+                # placeholder equal to hidden_states, so leaving the runner
+                # without a gate sends hidden_states into expert selection.
+                # object.__setattr__ keeps the gate out of _modules so INC's
+                # module->parent map still sees mlp as the sole parent.
                 if isinstance(experts, MoERunner):
-                    # is_internal_router is a read-only property backed by
-                    # the public `gate` attribute (returns gate is not None);
-                    # clearing gate makes it return False. Upstream #41184
-                    # inverted FusedMoE into a MoERunner factory, so the gate
-                    # now lives directly on the runner instead of `_gate`.
-                    experts.gate = None
-                else:
+                    object.__setattr__(experts, "gate", block_gate)
+                elif not isinstance(
+                        getattr(type(experts), "is_internal_router", None),
+                        property,
+                ):
                     # INC wrappers (e.g. PatchedMixtralMoE) may inherit
-                    # is_internal_router as a read-only @property;
-                    # runner.gate = None below handles that case.
-                    if not isinstance(
-                            getattr(type(experts), "is_internal_router", None),
-                            property,
-                    ):
-                        experts.is_internal_router = False
+                    # is_internal_router as a read-only @property.
+                    experts.is_internal_router = False
                 runner = getattr(experts, "runner", None)
                 if runner is not None and hasattr(runner, "gate"):
-                    runner.gate = None
-                    # Refresh the cached gate ref captured at
-                    # FusedMoE.__init__ to the post-INC block-level gate.
-                    # The dp_size==1 fast path (patched_fused_moe_forward)
-                    # falls back to runner._hpu_gate_ref when runner.gate
-                    # is None; the pre-INC reference points at the now-
-                    # replaced module and produced shape/dtype mismatches
-                    # under fp8.
-                    if block_gate is not None:
-                        object.__setattr__(runner, "_hpu_gate_ref", block_gate)
+                    object.__setattr__(runner, "gate", block_gate)
 
                 if id(experts) in self._detached_moe_gates:
                     self._detached_moe_gates.remove(id(experts))
@@ -5638,13 +5672,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # causing warmup to record wrong num_blocks otherwise.
             decode_block_size = self.attn_block_size
             if self.use_contiguous_pa:
-                decode_seq_lengths = [decode_block_size] * decode_bs
+                # For sliding window models, each dummy sequence needs at least
+                # sliding_block_size blocks to properly warmup the window_block_list
+                # bucket sizes. With force_non_contiguous=True, the bucket is based
+                # on len(block_list) not max(block_list)+1, so we need enough blocks
+                # per sequence to match runtime window sizes.
+                if self.interleaved_sliding_window:
+                    sw_blocks = self.sliding_window // decode_block_size + 1
+                    min_tokens_per_seq = sw_blocks * decode_block_size
+                else:
+                    min_tokens_per_seq = decode_block_size
+                decode_seq_lengths = [min_tokens_per_seq] * decode_bs
                 # Cap block_id at physical pool — contiguous PA uses
                 # block_id as the allocation base which must be valid.
                 block_id = min(decode_num_blocks - 1, self.kv_cache_config.num_blocks - 1)
             else:
                 decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
                 block_id = 0
+
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
@@ -6098,10 +6143,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # attn_block_size.  Scope the mutation to avoid affecting prompt
             # fallback paths that still need the original block_size.
             saved_block_size = self.bucketing_manager.block_size
-            # Hybrid models can share one long prefix across the whole batch, so
-            # decode block references can reach the full worst case; flag them so
-            # the decode block range is left unbounded (not clamped to 3x physical).
-            self.bucketing_manager.is_hybrid = self.attn_block_size != self.block_size
+            # Skip the 3x-physical clamp on the decode block range (keeping the
+            # full, still-finite worst-case ceiling) for models whose decode
+            # block references can reach that worst case, otherwise those
+            # references miss the warmed buckets and recompile at runtime.
+            # This covers:
+            #   - inflated KV-cache block_size (Granite-4.0-H, attn != block),
+            #   - GDN hybrids (e.g. Qwen3.5) whose virtual block splitting
+            #     inflates the per-sequence block table,
+            #   - mamba hybrids, and
+            #   - interleaved sliding-window models (e.g. Gemma4) whose global
+            #     layers keep full-context block tables.
+            # attn_block_size == block_size for GDN/interleaved-SWA models, so
+            # this must not be detected via the block_size mismatch alone.
+            # Plain dense models keep the clamp, which bounds first-decode
+            # warmup memory.
+            self.bucketing_manager.skip_decode_block_clamp = (self.attn_block_size != self.block_size
+                                                              or self.num_gdn > 0 or self.num_mamba_like_layers > 0
+                                                              or self.interleaved_sliding_window)
             if self.attn_block_size != self.block_size:
                 self.bucketing_manager.block_size = self.attn_block_size
             try:
@@ -6164,11 +6223,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
 
-        # In lazy mode, run MM warmup outside PT_COMPILE_ONLY_MODE
-        # to avoid GC errors. In torch.compile mode, run it inside
-        # for faster recipe-only compilation.
         use_torch_compile = (not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager)
-        if self.supports_mm_inputs and not use_torch_compile:
+        mm_warmup_outside = gaudi_envs.VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY
+        if self.supports_mm_inputs and (not use_torch_compile or mm_warmup_outside):
             self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
         compile_only_mode_context = functools.partial(bc.env_setting, "PT_COMPILE_ONLY_MODE", True)
@@ -6183,7 +6240,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            'Warmup time will be negatively impacted. '
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context() if can_use_compile_only_mode else contextlib.nullcontext():
-            if self.supports_mm_inputs and use_torch_compile:
+            if self.supports_mm_inputs and use_torch_compile and not mm_warmup_outside:
                 self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
             if not self.model_config.enforce_eager and not self.is_pooling_model:

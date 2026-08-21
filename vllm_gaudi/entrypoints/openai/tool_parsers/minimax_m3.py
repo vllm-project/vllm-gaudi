@@ -78,6 +78,16 @@ NS = "]<]minimax[>["
 TOOL_CALL_START = NS + "<tool_call>"
 TOOL_CALL_END = NS + "</tool_call>"
 INVOKE_START = NS + "<invoke"
+# MiniMax-M3 rarely drops the leading "<" of the invoke open tag, emitting
+# "]<]minimax[>[invoke name=..." instead of "]<]minimax[>[<invoke name=...".
+# Tolerate that variant, mirroring the headless-parameter recovery already done
+# for dropped parameter opening tags (see the NS branches below).
+INVOKE_START_NOLT = NS + "invoke"
+# All recognized invoke open tags, in preference order (well-formed first, so it
+# wins a same-position tie). Any future dropped-tag variant is added here only;
+# every parsing path resolves openers through ``_match_invoke_opener`` /
+# ``_find_invoke_open`` so the call sites never need per-variant updates.
+INVOKE_OPENERS = (INVOKE_START, INVOKE_START_NOLT)
 INVOKE_END = NS + "</invoke>"
 ELEMENT_START = NS + "<"
 ELEMENT_END_START = NS + "</"
@@ -88,6 +98,40 @@ _INVOKE_NAME_RE = re.compile(r"""name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
 
 # Sentinel for "schema-aware conversion failed, use fallback".
 _FAIL = object()
+
+
+def _match_invoke_opener(s: str, pos: int = 0) -> int | None:
+    """Length of the invoke opener at ``s[pos:]``, or ``None`` if none matches.
+
+    Openers come from ``INVOKE_OPENERS`` (well-formed ``INVOKE_START`` and the
+    dropped-"<" ``INVOKE_START_NOLT`` MiniMax-M3 quirk). At most one can match at
+    a given position -- right after the namespace marker a real invoke has "<",
+    so ``INVOKE_START_NOLT`` only matches where the "<" was dropped.
+    """
+    for opener in INVOKE_OPENERS:
+        if s.startswith(opener, pos):
+            return len(opener)
+    return None
+
+
+def _find_invoke_open(text: str, start: int) -> tuple[int, int]:
+    """Find the next invoke open tag at/after ``start``.
+
+    Returns ``(pos, opener_len)`` for the earliest matching opener in
+    ``INVOKE_OPENERS`` (well-formed ``INVOKE_START`` or the dropped-"<" variant
+    ``INVOKE_START_NOLT``), preferring the earlier -- and, on a tie, the earlier
+    entry in ``INVOKE_OPENERS`` (well-formed). Returns ``(-1, 0)`` when neither
+    is present. Never false-positives on well-formed text (see
+    ``_match_invoke_opener``).
+    """
+    best_pos = -1
+    best_len = 0
+    for opener in INVOKE_OPENERS:
+        p = text.find(opener, start)
+        if p != -1 and (best_pos == -1 or p < best_pos):
+            best_pos = p
+            best_len = len(opener)
+    return (best_pos, best_len)
 
 
 class _ParseError(Exception):
@@ -564,11 +608,14 @@ class MinimaxM3PyToolParser(ToolParser):
 
     def _parse_one_invoke(self, inv_block: str, request) -> ToolCall:
         """Parse a complete ``<invoke ...>...</invoke>`` block into a ToolCall."""
-        # Search past INVOKE_START: the namespace marker itself contains a ">".
-        header_end = inv_block.find(">", len(INVOKE_START))
+        # Tolerate a dropped leading "<" on the invoke open tag (MiniMax-M3
+        # quirk); the block may start with any opener in INVOKE_OPENERS.
+        opener_len = _match_invoke_opener(inv_block) or len(INVOKE_START)
+        # Search past the opener: the namespace marker itself contains a ">".
+        header_end = inv_block.find(">", opener_len)
         if header_end == -1:
             raise _ParseError("invoke header not closed")
-        header = inv_block[len(INVOKE_START):header_end]
+        header = inv_block[opener_len:header_end]
         m = _INVOKE_NAME_RE.search(header)
         if not m:
             raise _ParseError("invoke name not found")
@@ -598,7 +645,7 @@ class MinimaxM3PyToolParser(ToolParser):
             cur.skip_ws()
             if cur.eof() or cur.startswith(TOOL_CALL_END):
                 break
-            if not cur.startswith(INVOKE_START):
+            if _match_invoke_opener(cur.s, cur.i) is None:
                 break  # stray text / malformed boundary -> stop
             inv_end = text.find(INVOKE_END, cur.i)
             if inv_end == -1:
@@ -732,17 +779,17 @@ class MinimaxM3PyToolParser(ToolParser):
                 while True:
                     if self._open is None:
                         end_pos = current_text.find(TOOL_CALL_END, self._m3_pos)
-                        inv_pos = current_text.find(INVOKE_START, self._m3_pos)
+                        inv_pos, inv_open_len = _find_invoke_open(current_text, self._m3_pos)
                         if end_pos != -1 and (inv_pos == -1 or end_pos < inv_pos):
                             self._m3_pos = end_pos + len(TOOL_CALL_END)
                             self._m3_mode = "done"
                             break
                         if inv_pos == -1:
                             break  # nothing to open yet
-                        header_end = current_text.find(">", inv_pos + len(INVOKE_START))
+                        header_end = current_text.find(">", inv_pos + inv_open_len)
                         if header_end == -1:
                             break  # invoke header still streaming
-                        header = current_text[inv_pos + len(INVOKE_START):header_end]
+                        header = current_text[inv_pos + inv_open_len:header_end]
                         m = _INVOKE_NAME_RE.search(header)
                         name = ((m.group(1) or m.group(2) or m.group(3) or "").strip() if m else "")
                         if not name:
