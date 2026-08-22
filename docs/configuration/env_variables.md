@@ -33,6 +33,24 @@ This document lists the supported diagnostic and profiling, as well as performan
 | `VLLM_MINIMAX_M3_MOE_DECODE_GATHER` | Enables the MiniMax-M3 routed-expert gather path for low-token decode. Set to `0` or `false` to use the dense expert path. | `true` |
 | `VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS` | Maximum token count for the MiniMax-M3 routed-expert gather path. Larger batches use the dense expert path. | `16` |
 
+## Experimental: Custom FP8 MoE Gather Combine
+
+These variables control an **experimental** pure-PyTorch gathered-expert MoE
+combine for silu + FP8-per-channel weights, an alternative to the Habana
+`mixture_of_experts` op. It is off by default and intended for low-token
+(small batch / decode) workloads. The `VERIFY` knobs run both the custom and
+stock paths and dump output pairs for offline FP8-ULP comparison — use them
+only for validation runs, not in production (they double compute and force a
+graph break).
+
+| Parameter name                      | Description                                                                                                                                                        | Default value |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `VLLM_HPU_MOE_GATHER`               | Enables the custom gathered-expert FP8 MoE combine (silu only). Falls back to the stock fused op when disabled or when the gather crossover is exceeded.          | `false`       |
+| `VLLM_HPU_MOE_GATHER_MAX_TP`        | Upper bound on `tokens * top_k` for which the custom gather path is used. Above this the stock fused op is faster and is used instead.                             | `64`          |
+| `VLLM_HPU_MOE_GATHER_VERIFY`        | Validation mode: runs both the custom and stock paths on the same inputs and records output pairs for offline FP8-ULP comparison. Requires `VLLM_HPU_MOE_GATHER`. | `false`       |
+| `VLLM_HPU_MOE_GATHER_VERIFY_DIR`    | Directory where verify-mode output pairs are saved (`moecomb_T<T>_n<n>_r<rank>.pt`). If unset, nothing is written even when verify mode is on.                     | `None`        |
+| `VLLM_HPU_MOE_GATHER_VERIFY_LAYERS` | Maximum number of captures saved per token count `T` (per rank) in verify mode.                                                                                   | `40`          |
+
 Use `VLLM_BUCKETING_STRATEGY=exp` for the default exponential warm-up, `VLLM_BUCKETING_STRATEGY=lin` for explicitly configured linear ranges, or `VLLM_BUCKETING_STRATEGY=pad` for padding-aware ranges with absolute and relative padding limits.
 
 Leave `VLLM_EXPONENTIAL_BUCKETING` unset when using `VLLM_BUCKETING_STRATEGY`. The legacy flag is checked for backward compatibility and still overrides the selected strategy when present.
