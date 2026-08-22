@@ -27,33 +27,37 @@ from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
 
 # EXPERIMENTAL custom MoE combine: replace the Habana mixture_of_experts op (a
 # fixed per-layer stage pipeline) with a pure-PyTorch gathered-expert path.
-# Default stock. `HPU_MOE_GATHER_VERIFY=1` runs BOTH the custom path and the
-# Habana op on the same inputs and records FP8-ULP per layer.
-_HPU_MOE_GATHER = bool(os.environ.get("HPU_MOE_GATHER"))
-_HPU_MOE_GATHER_VERIFY = bool(os.environ.get("HPU_MOE_GATHER_VERIFY"))
+# Default stock. `VLLM_HPU_MOE_GATHER_VERIFY=1` (with VLLM_HPU_MOE_GATHER=1) runs
+# BOTH the custom path and the Habana op on the same inputs and records FP8-ULP
+# per layer.
+_HPU_MOE_GATHER = envs.VLLM_HPU_MOE_GATHER
+# Only meaningful together with the gather path.
+_HPU_MOE_GATHER_VERIFY = envs.VLLM_HPU_MOE_GATHER_VERIFY and _HPU_MOE_GATHER
 # Max tokens*topk (== gathered-expert count g) for which the custom gather path
 # is used. The gathered pure-PyTorch path wins below ~g=64 and LOSES to the stock
 # fused op once g approaches E (the dense gather + fp32 bmm path is slower than
 # the Habana op).
-_HPU_MOE_GATHER_MAX_TP = int(os.environ.get("HPU_MOE_GATHER_MAX_TP", "64"))
+_HPU_MOE_GATHER_MAX_TP = envs.VLLM_HPU_MOE_GATHER_MAX_TP
 if _HPU_MOE_GATHER:
     from vllm_gaudi.ops.hpu_moe_combine import gather_silu_fp8_moe  # noqa: E402
 else:
     gather_silu_fp8_moe = None
 
-_HPU_MOE_GATHER_VERIFY_DIR = os.environ.get("HPU_MOE_GATHER_VERIFY_DIR")
-_HPU_MOE_GATHER_VERIFY_LAYERS = int(os.environ.get("HPU_MOE_GATHER_VERIFY_LAYERS", "40"))
+_HPU_MOE_GATHER_VERIFY_DIR = envs.VLLM_HPU_MOE_GATHER_VERIFY_DIR
+_HPU_MOE_GATHER_VERIFY_LAYERS = envs.VLLM_HPU_MOE_GATHER_VERIFY_LAYERS
 
 
 def _verify_rank() -> int:
     """TP/expert-parallel rank for namespacing VERIFY captures (multi-rank runs
-    would otherwise collide on identical filenames). Falls back to env, then 0."""
+    would otherwise collide on identical filenames). Try the globally-unique RANK
+    first, then LOCAL_RANK for single-node launchers that set only LOCAL_RANK,
+    then 0 if neither is present."""
     try:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             return torch.distributed.get_rank()
     except Exception:
         pass
-    for _k in ("LOCAL_RANK", "RANK"):
+    for _k in ("RANK", "LOCAL_RANK"):
         _v = os.environ.get(_k)
         if _v is not None:
             try:
@@ -66,11 +70,12 @@ def _verify_rank() -> int:
 def _record_moe_combine_ulp(stock, custom, topk_ids):
     """Save (stock, custom) output pairs for offline FP8-ULP comparison.
 
-    Only called in verify mode (HPU_MOE_GATHER_VERIFY=1). The outputs are tiny
-    ([T,H] bf16), so torch.save here is cheap; the dynamo graph-break it causes
-    is acceptable for a validation run. All env values are module-level constants
-    so the non-verify compiled path stays fully specializable. Filenames are
-    rank-scoped so TP/expert-parallel ranks don't overwrite each other.
+    Only called in verify mode (VLLM_HPU_MOE_GATHER_VERIFY=1). The outputs are
+    tiny ([T,H] bf16), so torch.save here is cheap; the dynamo graph-break it
+    causes is acceptable for a validation run. All env values are module-level
+    constants so the non-verify compiled path stays fully specializable.
+    Filenames are rank-scoped so TP/expert-parallel ranks don't overwrite each
+    other.
     """
     if not _HPU_MOE_GATHER_VERIFY_DIR:
         return
@@ -78,7 +83,13 @@ def _record_moe_combine_ulp(stock, custom, topk_ids):
     _r = _verify_rank()
     _cnt = getattr(_record_moe_combine_ulp, "_cnt", {})
     if _cnt.get(_n, 0) < _HPU_MOE_GATHER_VERIFY_LAYERS:
-        os.makedirs(_HPU_MOE_GATHER_VERIFY_DIR, exist_ok=True)
+        if not os.path.isdir(_HPU_MOE_GATHER_VERIFY_DIR):
+            try:
+                os.makedirs(_HPU_MOE_GATHER_VERIFY_DIR, exist_ok=True)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to create MoE-gather verify output directory: "
+                    f"{_HPU_MOE_GATHER_VERIFY_DIR}") from e
         _c = _cnt.get(_n, 0)
         torch.save({"stock": stock.detach().cpu(), "custom": custom.detach().cpu(),
                     "T": _n, "rank": _r},
