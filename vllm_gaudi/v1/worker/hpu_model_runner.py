@@ -6662,8 +6662,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                 if not _needs_raw_buffer(kv_cache_tensor):
                     continue
-                # taking into account dummy block
-                size = (kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
+                # Pad by one dummy block sized to THIS tensor's spec. Its
+                # coalesced layers share one (standard Mamba2) spec; group 0 may
+                # be a smaller attention spec in hybrid models and under-pad the
+                # buffer, letting the last as_strided view run past the end.
+                raw_spec = _layer_spec[kv_cache_tensor.layers[0]]
+                size = kv_cache_tensor.size + raw_spec.page_size_bytes
                 tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
                 for layer_name in kv_cache_tensor.layers:
                     kv_caches[layer_name] = tensor
