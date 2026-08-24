@@ -83,6 +83,11 @@ def get_vllm_config():
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
     )
+    # PR #51718: get_kv_cache_configs now calls get_resolved_kv_cache_layout(),
+    # which raises "KV cache layout has not been resolved yet" unless the layout
+    # is pre-set (normally done once by the engine core). Resolve it here so the
+    # unit tests can call get_kv_cache_configs directly, mirroring upstream.
+    cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
     vllm_config = VllmConfig(
         model_config=model_config,
