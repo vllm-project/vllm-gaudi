@@ -523,9 +523,10 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     assert num_expected_blocks == available_memory // page_size // 2
     kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
-    assert len(kv_cache_config.kv_cache_tensors) == 2
-    assert kv_cache_config.kv_cache_tensors[0].size == available_memory // 2
-    assert kv_cache_config.kv_cache_tensors[1].size == available_memory // 2
+    # PR #51718 coalesces same-spec layers into ONE backing KVCacheTensor
+    # (layers=[layer_0, layer_1]) whose size spans the full allocation.
+    assert len(kv_cache_config.kv_cache_tensors) == 1
+    assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len =\
         estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
@@ -533,10 +534,13 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     assert max_context_len == 1310720
 
     # important: override tensor size to prevent large mem alloc during test
-    # this will only allocate 2 block worth of memory (2 * 32kb)
+    # this will only allocate one block worth of memory per layer
     kv_cache_config.num_blocks = 1
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        kv_cache_tensor.size = (kv_cache_spec[kv_cache_tensor.layers[0]].page_size_bytes)
+        page_size = kv_cache_spec[kv_cache_tensor.layers[0]].page_size_bytes
+        kv_cache_tensor.size = page_size * len(kv_cache_tensor.layers)
+        kv_cache_tensor.layer_stride = page_size
+        kv_cache_tensor.block_stride = page_size
 
     runner.initialize_kv_cache(kv_cache_config)
 
