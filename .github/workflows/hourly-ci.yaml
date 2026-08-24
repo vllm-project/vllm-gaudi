@@ -56,27 +56,34 @@ jobs:
             exit 0
           fi
 
-          # Look at recent completed runs of THIS workflow on main and find the most
-          # recent *real* run: one where the unit-test job actually executed. This
-          # deliberately ignores earlier "backed-off" ticks (whose test jobs were
-          # skipped and whose overall conclusion is misleadingly 'success').
+          # Only *scheduled* runs define the "hourly" health; manual dispatches
+          # always run (handled above) and must not skew the cadence.
           RUNS=$(curl -fsSL -H "$AUTH" -H "$ACCEPT" \
-            "$API/actions/workflows/hourly-ci.yaml/runs?branch=main&status=completed&per_page=20")
+            "$API/actions/workflows/hourly-ci.yaml/runs?branch=main&event=schedule&status=completed&per_page=30")
 
+          # Find the most recent *real* run: one that actually executed the pipeline,
+          # i.e. run_unit_tests finished as 'success' or 'failure'. This must ignore
+          # both skipped ticks (run_unit_tests=skipped) AND backed-off ticks we
+          # cancel (run_unit_tests=cancelled). Matching only "!= skipped" was the bug:
+          # a cancelled tick looked like a failing "real" run, so the gate saw a fresh
+          # non-success run every 8h and backed off forever.
           LAST_CONCLUSION=""
           LAST_STARTED=""
           for RUN_ID in $(echo "$RUNS" | jq -r '.workflow_runs[].id'); do
             JOBS=$(curl -fsSL -H "$AUTH" -H "$ACCEPT" \
               "$API/actions/runs/$RUN_ID/jobs?per_page=100")
-            # First run_unit_tests conclusion, or empty if the job is absent/null.
-            # Done inside jq (no 'head', which would SIGPIPE under 'set -o pipefail').
+            # run_unit_tests conclusion (empty if the job is absent/null). Selected
+            # inside jq (no 'head', which would SIGPIPE under 'set -o pipefail').
             UT=$(echo "$JOBS" | jq -r 'first(.jobs[] | select(.name=="run_unit_tests") | .conclusion) // empty')
-            if [ -n "$UT" ] && [ "$UT" != "skipped" ]; then
-              LAST_CONCLUSION=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | .conclusion")
-              # Prefer run_started_at (when the run actually began); fall back to created_at.
-              LAST_STARTED=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | (.run_started_at // .created_at)")
-              break
-            fi
+            case "$UT" in
+              success|failure)
+                # A run that actually produced a pass/fail verdict.
+                LAST_CONCLUSION=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | .conclusion")
+                # Prefer run_started_at (when the run actually began); fall back to created_at.
+                LAST_STARTED=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | (.run_started_at // .created_at)")
+                break
+                ;;
+            esac
           done
 
           if [ -z "$LAST_CONCLUSION" ]; then
