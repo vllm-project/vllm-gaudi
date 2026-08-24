@@ -87,7 +87,7 @@ class ExponentialBucketingStrategy():
                         max_num_batched_tokens,
                         max_model_len,
                         max_blocks,
-                        is_hybrid=False):
+                        skip_decode_block_clamp=False):
         self.check_for_user_flags('decode')
         use_contiguous_pa = get_config().use_contiguous_pa
 
@@ -104,7 +104,7 @@ class ExponentialBucketingStrategy():
             # Contiguous PA indexes blocks by the highest block id in the batch,
             # which is bounded by the size of the cache.
             max_decode_blocks = min(max_blocks, max_decode_blocks)
-        elif not is_hybrid:
+        elif not skip_decode_block_clamp:
             # Non-contiguous PA counts block *references*: len(block_list) =
             # sum(num_blocks). With prefix caching a shared block is counted once
             # per sequence, so the reference count can exceed num_hpu_blocks
@@ -113,10 +113,13 @@ class ExponentialBucketingStrategy():
             # ceiling also caps _fallback_max_ctx, so real high-reference decode
             # batches still find a matching bucket instead of recompiling.
             #
-            # Hybrid models (block_size != attn_block_size) are excluded: their
-            # sequences can share a single long prefix across the whole batch, so
-            # references legitimately reach the full worst case. They keep the
-            # unbounded range so runtime lookups never recompile.
+            # Models with structurally large or multi-group decode block tables
+            # (GDN/mamba hybrids, interleaved sliding-window, or an inflated
+            # KV-cache block_size) set skip_decode_block_clamp: their block
+            # references legitimately reach the full worst case, so they skip
+            # this clamp and keep the (still finite) worst-case ceiling, and
+            # runtime lookups never recompile. The runner decides this via
+            # HPUModelRunner.warmup_model.
             max_decode_blocks = min(max_decode_blocks, max_blocks * 3)
         decode_blocks_limit = math.ceil(math.log2(max_decode_blocks)) + 1
         # Compensate for wider range: add extra buckets to maintain density at high end

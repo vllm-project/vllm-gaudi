@@ -70,7 +70,7 @@ class PaddingAwareBucketingStrategy:
                         max_num_batched_tokens,
                         max_model_len,
                         max_blocks,
-                        is_hybrid=False):
+                        skip_decode_block_clamp=False):
         contiguous_pa = get_config().use_contiguous_pa
 
         decode_bs_bucket_cfg = read_bucket_settings('decode',
