@@ -12,7 +12,7 @@ import os
 import time
 from contextlib import suppress
 from tqdm import tqdm
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypeAlias, Union, cast)
 if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
@@ -6672,12 +6672,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
                     kv_cache_spec = group.kv_cache_spec
-                    for kk in kv_cache_config.kv_cache_tensors:
-                        if layer_name in kk.layers:
-                            kv_cache_tensor_size = kk.size
-                            break
-                    num_blocks = \
-                        kv_cache_tensor_size // kv_cache_spec.page_size_bytes
+                    # PR #51718: KVCacheTensor.size is now the total backing
+                    # allocation across all layers (num_blocks * bytes_per_block),
+                    # not a per-layer size. Use the engine block count directly.
+                    num_blocks = kv_cache_config.num_blocks
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         attn_kernel_block_size = kernel_block_size_by_gid[group_idx]
                         # Virtual block splitting: each scheduler block of
@@ -6799,12 +6797,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 kv_cache_spec = group.kv_cache_spec
                 for layer_name in group.layer_names:
                     kv_cache_spec = group.kv_cache_spec
-                    for kk in kv_cache_config.kv_cache_tensors:
-                        if layer_name in kk.layers:
-                            kv_cache_tensor_size = kk.size
-                            break
-                    num_blocks = \
-                        kv_cache_tensor_size // kv_cache_spec.page_size_bytes
+                    # PR #51718: KVCacheTensor.size is now the total backing
+                    # allocation across all layers (num_blocks * bytes_per_block),
+                    # not a per-layer size. Use the engine block count directly.
+                    num_blocks = kv_cache_config.num_blocks
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
@@ -6894,46 +6890,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             f"UniformTypeKVCacheSpecs has no per-layer spec for {layer_name}")
                         kv_cache_spec = per_layer_spec
 
-                    # For heterogeneous models (e.g., Gemma4 with UniformTypeKVCacheSpecs),
-                    # the page_size_bytes is the sum of all layer specs' page sizes, but
-                    # the actual tensor might not align perfectly. Round down to the largest
-                    # usable number of blocks rather than asserting perfect alignment.
-                    remainder = kv_cache_tensor.size % kv_cache_spec.page_size_bytes
-                    if remainder != 0:
-                        usable_size = kv_cache_tensor.size - remainder
-                        waste_pct = remainder * 100.0 / kv_cache_tensor.size
-                        logger.warning(
-                            "KV cache tensor size (%s bytes) does not "
-                            "perfectly align with page_size_bytes (%s bytes). "
-                            "This is expected for heterogeneous models like Gemma4 with mixed "
-                            "attention types. Using %s bytes "
-                            "(%s bytes unused, %.2f%% waste).", f"{kv_cache_tensor.size:,}",
-                            f"{kv_cache_spec.page_size_bytes:,}", f"{usable_size:,}", f"{remainder:,}", waste_pct)
-                        # Use only the aligned portion of the tensor
-                        kv_cache_tensor = replace(kv_cache_tensor, size=usable_size)
-
-                    num_blocks = \
-                        kv_cache_tensor.size // kv_cache_spec.page_size_bytes
-                    # `num_blocks` is the number of blocks the model runner can use.
-                    # `kv_cache_config.num_blocks` is the number of blocks that
-                    # KVCacheManager may allocate.
-                    # Since different GPUs may have different number of layers and
-                    # different memory capacities, `num_blocks` can be different on
-                    # different GPUs, and `kv_cache_config.num_blocks` is set to
-                    # the min of all `num_blocks`. Verify it here.
-                    # For heterogeneous models where we rounded down the tensor size,
-                    # num_blocks may be slightly less than expected - this is acceptable.
-                    if num_blocks < kv_cache_config.num_blocks:
-                        if remainder != 0:
-                            # This is expected for heterogeneous models after alignment
-                            logger.warning(
-                                "After alignment, num_blocks=%d is less than "
-                                "kv_cache_config.num_blocks=%d. "
-                                "This is expected for heterogeneous models like Gemma4.", num_blocks,
-                                kv_cache_config.num_blocks)
-                        else:
-                            # Unexpected - still assert in this case
-                            assert num_blocks >= kv_cache_config.num_blocks
+                    # PR #51718: KVCacheTensor.size is now the total backing
+                    # allocation across all layers, so the old per-tensor
+                    # `size // page_size_bytes` over-counts blocks by the layer
+                    # count and OOMs. Use the engine block count directly; it is
+                    # the authoritative per-layer block count for every model
+                    # (including heterogeneous ones like Gemma4).
+                    num_blocks = kv_cache_config.num_blocks
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
