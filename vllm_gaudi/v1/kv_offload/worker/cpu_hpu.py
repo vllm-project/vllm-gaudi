@@ -406,7 +406,7 @@ def register_kv_caches(
     block_tensors: list[CanonicalKVCacheTensor] = []
     block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
     for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-        tensor_layer_names = kv_cache_tensor.shared_by
+        tensor_layer_names = kv_cache_tensor.layers
 
         first_layer_name = tensor_layer_names[0]
         for tensor in tensors_per_block[first_layer_name]:

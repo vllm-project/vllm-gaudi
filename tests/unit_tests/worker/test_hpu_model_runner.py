@@ -40,7 +40,10 @@ def initialize_kv_cache(runner: HPUModelRunner):
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[
-            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
+            KVCacheTensor(size=tensor_size,
+                          layers=["layer.0"],
+                          layer_stride=tensor_size,
+                          block_stride=attn_spec.page_size_bytes),
         ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)],
     )
@@ -528,7 +531,7 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     # this will only allocate 2 block worth of memory (2 * 32kb)
     kv_cache_config.num_blocks = 1
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        kv_cache_tensor.size = (kv_cache_spec[kv_cache_tensor.shared_by[0]].page_size_bytes)
+        kv_cache_tensor.size = (kv_cache_spec[kv_cache_tensor.layers[0]].page_size_bytes)
 
     runner.initialize_kv_cache(kv_cache_config)
 

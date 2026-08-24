@@ -6640,7 +6640,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 torch.compile's aot_autograd does not support input mutations
                 on views with different dtypes (the raw buffer is bf16 but
                 GDN states may be float32)."""
-                for ln in kv_cache_tensor.shared_by:
+                for ln in kv_cache_tensor.layers:
                     spec = _layer_spec.get(ln)
                     if isinstance(spec, FullAttentionSpec):
                         continue
@@ -6665,7 +6665,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # taking into account dummy block
                 size = (kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
                 tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in kv_cache_tensor.layers:
                     kv_caches[layer_name] = tensor
 
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
@@ -6673,7 +6673,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 for layer_name in group.layer_names:
                     kv_cache_spec = group.kv_cache_spec
                     for kk in kv_cache_config.kv_cache_tensors:
-                        if layer_name in kk.shared_by:
+                        if layer_name in kk.layers:
                             kv_cache_tensor_size = kk.size
                             break
                     num_blocks = \
@@ -6722,9 +6722,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                      compact_total, gdn_max_reqs, self._num_gdn_groups, num_blocks + 1)
                         # Propagate to all layers sharing the same kv_cache_tensor.
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
+                            if layer_name not in kv_cache_tensor.layers:
                                 continue
-                            for shared_layer in kv_cache_tensor.shared_by:
+                            for shared_layer in kv_cache_tensor.layers:
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     elif isinstance(kv_cache_spec, MambaSpec) and \
@@ -6739,9 +6739,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                             state_tensors.append(tensor)
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
+                            if layer_name not in kv_cache_tensor.layers:
                                 continue
-                            for shared_layer in kv_cache_tensor.shared_by:
+                            for shared_layer in kv_cache_tensor.layers:
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     elif isinstance(kv_cache_spec, MambaSpec) and \
@@ -6800,7 +6800,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 for layer_name in group.layer_names:
                     kv_cache_spec = group.kv_cache_spec
                     for kk in kv_cache_config.kv_cache_tensors:
-                        if layer_name in kk.shared_by:
+                        if layer_name in kk.layers:
                             kv_cache_tensor_size = kk.size
                             break
                     num_blocks = \
@@ -6828,9 +6828,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                             state_tensors.append(tensor)
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
+                            if layer_name not in kv_cache_tensor.layers:
                                 continue
-                            for shared_layer in kv_cache_tensor.shared_by:
+                            for shared_layer in kv_cache_tensor.layers:
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     elif isinstance(kv_cache_spec, MambaSpec) and \
@@ -6844,9 +6844,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
                             state_tensors.append(tensor)
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
+                            if layer_name not in kv_cache_tensor.layers:
                                 continue
-                            for shared_layer in kv_cache_tensor.shared_by:
+                            for shared_layer in kv_cache_tensor.layers:
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     elif isinstance(kv_cache_spec, MambaSpec):
@@ -6861,16 +6861,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         # find other layers sharing the same kv cache tensor and
                         # populate all of them with the same tensor pair
                         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
+                            if layer_name not in kv_cache_tensor.layers:
                                 continue
-                            for shared_layer in kv_cache_tensor.shared_by:
+                            for shared_layer in kv_cache_tensor.layers:
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
                     else:
                         pass
         else:  # non-hybrid scenario
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in kv_cache_tensor.layers:
                     # Get the correct spec for this layer
                     kv_cache_spec = None
                     for group in kv_cache_config.kv_cache_groups:
