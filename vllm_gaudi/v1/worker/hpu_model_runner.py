@@ -27,12 +27,13 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 import torch.nn as nn
+import vllm_gaudi.envs as gaudi_envs
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
-from vllm_gaudi.extension.runtime import finalize_config, get_config
+from vllm_gaudi.extension.runtime import clear_config, finalize_config, get_config
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
@@ -790,7 +791,7 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
 
     mamba_like_arch = [
         "GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration",
-        "Qwen3NextForCausalLM"
+        "Qwen3NextForCausalLM", "NemotronHForCausalLM"
     ]
     if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):
         return
@@ -816,14 +817,25 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
             # Extract layer index from name (e.g., "model.layers.5.mixer" -> 5)
             if not any(pattern in layer_name for pattern in mamba_like_layer):
                 continue
-            parts = layer_name.split('.')
-            layer_idx = int(parts[-2])  # "model.layers.5.mixer" -> 5
-
             # Access the actual layer
             if '.mixer' in layer_name:
-                layer = model.model.layers[layer_idx]
-                layer.mamba.cache_group_idx = group_idx
+                # Only the mamba state cache registers under a name ending in
+                # ".mixer". Nemotron-H nests attention under the same attribute
+                # ("model.layers.N.mixer.attn"), which must be skipped here (it
+                # would also break the int(parts[-2]) index parsing).
+                if not layer_name.endswith('.mixer'):
+                    continue
+                layer_idx = int(layer_name.split('.')[-2])  # "...layers.5.mixer" -> 5
+                layer = _get_decoder_layer_by_idx(model, layer_idx)
+                # The Mamba block is exposed as ".mamba" (Granite) or ".mixer"
+                # (Nemotron-H) depending on the model.
+                mamba_mixer = getattr(layer, 'mamba', None)
+                if mamba_mixer is None:
+                    mamba_mixer = getattr(layer, 'mixer', None)
+                if mamba_mixer is not None:
+                    mamba_mixer.cache_group_idx = group_idx
             elif 'linear_attn' in layer_name:
+                layer_idx = int(layer_name.split('.')[-2])
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
                 if layer is not None and hasattr(layer, "linear_attn"):
                     layer.linear_attn.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
@@ -868,7 +880,7 @@ def apply_model_specific_patches(model_runner):
 
     is_llama4 = is_hpu_llama4_model(model_runner.model)
     model_type = getattr(model_runner.vllm_config.model_config.hf_config, "model_type", "")
-    is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5_moe")
+    is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5", "qwen3_5_text", "qwen3_5_moe")
     is_gemma4 = model_type in ("gemma4", )
 
     model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe or is_gemma4
@@ -1239,6 +1251,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # TODO: use ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         environment.set_vllm_config(vllm_config)
 
+        clear_config()
         finalize_config()
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -5899,10 +5912,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         dummy_text = dummy_builder.get_dummy_text({modality: count})
         mm_data_items = processor.info.parse_mm_data({modality: mm_items}, validate=False)
 
+        # Upstream vllm#53093 removed the text components (str prompt +
+        # tokenization_kwargs) from ProcessorInputs; the prompt is now a
+        # pre-tokenized list[int] and tokenization happens in the caller.
+        # Mirror get_dummy_processor_inputs' tokenization exactly.
+        tokenizer = processor.info.ctx.tokenizer
+        if tokenizer is None:
+            dummy_prompt: list[int] = []
+        else:
+            dummy_prompt = tokenizer.encode(
+                dummy_text,
+                **processor.info.default_tok_params.get_encode_kwargs(),
+            )
+
         return ProcessorInputs(
-            prompt=dummy_text,
+            prompt=dummy_prompt,
             mm_data_items=mm_data_items,
-            tokenization_kwargs={"truncation": False},
         )
 
     def _get_mm_warmup_processor(self):
@@ -6141,10 +6166,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # attn_block_size.  Scope the mutation to avoid affecting prompt
             # fallback paths that still need the original block_size.
             saved_block_size = self.bucketing_manager.block_size
-            # Hybrid models can share one long prefix across the whole batch, so
-            # decode block references can reach the full worst case; flag them so
-            # the decode block range is left unbounded (not clamped to 3x physical).
-            self.bucketing_manager.is_hybrid = self.attn_block_size != self.block_size
+            # Skip the 3x-physical clamp on the decode block range (keeping the
+            # full, still-finite worst-case ceiling) for models whose decode
+            # block references can reach that worst case, otherwise those
+            # references miss the warmed buckets and recompile at runtime.
+            # This covers:
+            #   - inflated KV-cache block_size (Granite-4.0-H, attn != block),
+            #   - GDN hybrids (e.g. Qwen3.5) whose virtual block splitting
+            #     inflates the per-sequence block table,
+            #   - mamba hybrids, and
+            #   - interleaved sliding-window models (e.g. Gemma4) whose global
+            #     layers keep full-context block tables.
+            # attn_block_size == block_size for GDN/interleaved-SWA models, so
+            # this must not be detected via the block_size mismatch alone.
+            # Plain dense models keep the clamp, which bounds first-decode
+            # warmup memory.
+            self.bucketing_manager.skip_decode_block_clamp = (self.attn_block_size != self.block_size
+                                                              or self.num_gdn > 0 or self.num_mamba_like_layers > 0
+                                                              or self.interleaved_sliding_window)
             if self.attn_block_size != self.block_size:
                 self.bucketing_manager.block_size = self.attn_block_size
             try:
@@ -6207,11 +6246,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
 
-        # In lazy mode, run MM warmup outside PT_COMPILE_ONLY_MODE
-        # to avoid GC errors. In torch.compile mode, run it inside
-        # for faster recipe-only compilation.
         use_torch_compile = (not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager)
-        if self.supports_mm_inputs and not use_torch_compile:
+        mm_warmup_outside = gaudi_envs.VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY
+        if self.supports_mm_inputs and (not use_torch_compile or mm_warmup_outside):
             self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
         compile_only_mode_context = functools.partial(bc.env_setting, "PT_COMPILE_ONLY_MODE", True)
@@ -6226,7 +6263,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            'Warmup time will be negatively impacted. '
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context() if can_use_compile_only_mode else contextlib.nullcontext():
-            if self.supports_mm_inputs and use_torch_compile:
+            if self.supports_mm_inputs and use_torch_compile and not mm_warmup_outside:
                 self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
             if not self.model_config.enforce_eager and not self.is_pooling_model:
@@ -6610,7 +6647,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if isinstance(spec, MambaSpec) and \
                             spec.mamba_type in _GDN_MAMBA_TYPES:
                         continue
-                    # Standard Mamba2 or unknown spec — needs raw buffer
+                    if isinstance(spec, MambaSpec) and len(set(spec.dtypes)) > 1:
+                        # Mixed-dtype standard Mamba2 (e.g. Nemotron-H: bf16
+                        # conv_state + float32 ssm_state) gets its own
+                        # contiguous tensors below, not as_strided views of the
+                        # shared raw buffer — aot_autograd rejects in-place
+                        # mutation of differently-typed views of one input.
+                        continue
+                    # Standard Mamba2 (uniform dtype) or unknown spec — needs
+                    # raw buffer for the as_strided interleaved layout.
                     return True
                 return False
 
@@ -6699,10 +6744,31 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             for shared_layer in kv_cache_tensor.shared_by:
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
+                    elif isinstance(kv_cache_spec, MambaSpec) and \
+                            len(set(kv_cache_spec.dtypes)) > 1:
+                        # Mixed-dtype standard Mamba2 (e.g. Nemotron-H: bf16
+                        # conv_state + float32 ssm_state). as_strided views of a
+                        # single raw buffer would alias one storage with two
+                        # dtypes; aot_autograd cannot compile the decode graph
+                        # then ("input mutations on views with different
+                        # dtypes"). Allocate separate contiguous tensors, like
+                        # the GDN path above, so each state is its own input.
+                        if isinstance(kv_caches.get(layer_name), tuple):
+                            continue
+                        state_tensors = []
+                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                            target_shape = (num_blocks + 1, *shape)
+                            state_tensors.append(torch.zeros(target_shape, dtype=dtype, device=self.device))
+                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                            if layer_name not in kv_cache_tensor.shared_by:
+                                continue
+                            for shared_layer in kv_cache_tensor.shared_by:
+                                kv_caches[shared_layer] = tuple(state_tensors)
+                            break
                     elif isinstance(kv_cache_spec, MambaSpec):
-                        # Standard Mamba2 and other MambaSpec types: use the
-                        # original as_strided interleaved layout from the raw
-                        # shared buffer.
+                        # Standard Mamba2 with uniform dtype: use the original
+                        # as_strided interleaved layout from the raw shared
+                        # buffer (same-dtype view mutations compile fine).
                         raw = kv_caches[layer_name]
                         offset = 0
                         state_tensors = []

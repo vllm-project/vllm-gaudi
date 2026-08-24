@@ -38,6 +38,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 # method now derives from the unified ``CompressedTensorsWNA16MoEMethod``.
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
     CompressedTensorsWNA16MoEMethod as CompressedTensorsWNA16MarlinMoEMethod)
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import WNA16MoEBackend
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -54,7 +55,10 @@ from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
                                       VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation, select_experts_from_routed
+from vllm_gaudi.ops.hpu_fused_moe import (
+    _normalize_moe_activation,
+    select_experts_from_routed,
+)
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_tensor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase, )
@@ -454,6 +458,10 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
                 experts_max,
                 dispatch_fn=None,
             )
+            # Non-gated experts (is_act_and_mul=False, e.g. Nemotron-H's
+            # squared-ReLU) make the fused kernel skip the gate split+multiply.
+            # Gated layers leave is_gated=True and their kernel call is unchanged.
+            layer.moe_op.is_gated = layer.moe_config.is_act_and_mul
 
         if self.static_input_scales:
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
@@ -561,12 +569,13 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
 
+        activation = _normalize_moe_activation(layer.activation)
         output = layer.moe_op(
             x,
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=True,
-            activation=_normalize_moe_activation(layer.activation),
+            activation=activation,
         )
         if layer.moe_config.is_sequence_parallel:
             return output.view(*(output.size(0), *input_shape[1:]))
@@ -792,6 +801,12 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         self.actorder = weight_quant.actorder
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
         self.layer_name = layer_name
+        # The bypassed base __init__ normally sets self.wna16_backend from the
+        # WNA16 backend oracle. The HPU path supplies its own MoE op and never
+        # uses a CUDA backend, but inherited methods (get_fused_moe_quant_config,
+        # supports_eplb) still read this attribute. Pin it to the non-accelerated
+        # EMULATION sentinel so those inherited paths take the generic branch.
+        self.wna16_backend = WNA16MoEBackend.EMULATION
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):

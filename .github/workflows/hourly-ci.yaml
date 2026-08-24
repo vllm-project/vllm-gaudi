@@ -28,7 +28,9 @@ jobs:
     # Runs on a cheap GitHub-hosted runner so a "skip" never locks an HPU runner.
     runs-on: ubuntu-latest
     permissions:
-      actions: read # Required to query this workflow's previous runs and their jobs
+      # read: query this workflow's previous runs and their jobs;
+      # write: self-cancel the run on a skipped (backed-off) tick.
+      actions: write
     outputs:
       should_run: ${{ steps.decide.outputs.should_run }}
       # ISO-8601 start time of the last real run; empty on bootstrap/manual runs.
@@ -54,27 +56,34 @@ jobs:
             exit 0
           fi
 
-          # Look at recent completed runs of THIS workflow on main and find the most
-          # recent *real* run: one where the unit-test job actually executed. This
-          # deliberately ignores earlier "backed-off" ticks (whose test jobs were
-          # skipped and whose overall conclusion is misleadingly 'success').
+          # Only *scheduled* runs define the "hourly" health; manual dispatches
+          # always run (handled above) and must not skew the cadence.
           RUNS=$(curl -fsSL -H "$AUTH" -H "$ACCEPT" \
-            "$API/actions/workflows/hourly-ci.yaml/runs?branch=main&status=completed&per_page=20")
+            "$API/actions/workflows/hourly-ci.yaml/runs?branch=main&event=schedule&status=completed&per_page=30")
 
+          # Find the most recent *real* run: one that actually executed the pipeline,
+          # i.e. run_unit_tests finished as 'success' or 'failure'. This must ignore
+          # both skipped ticks (run_unit_tests=skipped) AND backed-off ticks we
+          # cancel (run_unit_tests=cancelled). Matching only "!= skipped" was the bug:
+          # a cancelled tick looked like a failing "real" run, so the gate saw a fresh
+          # non-success run every 8h and backed off forever.
           LAST_CONCLUSION=""
           LAST_STARTED=""
           for RUN_ID in $(echo "$RUNS" | jq -r '.workflow_runs[].id'); do
             JOBS=$(curl -fsSL -H "$AUTH" -H "$ACCEPT" \
               "$API/actions/runs/$RUN_ID/jobs?per_page=100")
-            # First run_unit_tests conclusion, or empty if the job is absent/null.
-            # Done inside jq (no 'head', which would SIGPIPE under 'set -o pipefail').
+            # run_unit_tests conclusion (empty if the job is absent/null). Selected
+            # inside jq (no 'head', which would SIGPIPE under 'set -o pipefail').
             UT=$(echo "$JOBS" | jq -r 'first(.jobs[] | select(.name=="run_unit_tests") | .conclusion) // empty')
-            if [ -n "$UT" ] && [ "$UT" != "skipped" ]; then
-              LAST_CONCLUSION=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | .conclusion")
-              # Prefer run_started_at (when the run actually began); fall back to created_at.
-              LAST_STARTED=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | (.run_started_at // .created_at)")
-              break
-            fi
+            case "$UT" in
+              success|failure)
+                # A run that actually produced a pass/fail verdict.
+                LAST_CONCLUSION=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | .conclusion")
+                # Prefer run_started_at (when the run actually began); fall back to created_at.
+                LAST_STARTED=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | (.run_started_at // .created_at)")
+                break
+                ;;
+            esac
           done
 
           if [ -z "$LAST_CONCLUSION" ]; then
@@ -107,6 +116,31 @@ jobs:
             echo "Failing cadence, only ${AGE_HOURS}h elapsed (<23h) -> skipping this tick."
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Cancel this run on a skipped tick
+        # On a backed-off tick, cancel the run so it shows as 'cancelled' (grey)
+        # in the Actions UI instead of a misleading green 'success'.
+        if: steps.decide.outputs.should_run == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "Adaptive back-off: cancelling this run so it is marked 'cancelled', not 'success'."
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/cancel"
+          # Cancellation is asynchronous: block so GitHub terminates this job as
+          # 'cancelled' rather than letting the step finish and record 'success'.
+          # If it hasn't taken effect within ~3 min, fail loudly (red beats green).
+          for i in $(seq 1 18); do
+            echo "Waiting for cancellation to take effect... ($i)"
+            sleep 10
+          done
+          echo "::error::Run cancellation did not take effect in time." >&2
+          exit 1
 
   # JOB 1: (NEW) Discovers an available runner and locks it for all subsequent jobs.
   discover_runner:

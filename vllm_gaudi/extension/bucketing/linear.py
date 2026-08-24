@@ -59,7 +59,7 @@ class LinearBucketingStrategy:
                         max_num_batched_tokens,
                         max_model_len,
                         max_blocks,
-                        is_hybrid=False):
+                        skip_decode_block_clamp=False):
         prefix_caching = get_config().prefix_caching
         contiguous_pa = get_config().use_contiguous_pa
 
