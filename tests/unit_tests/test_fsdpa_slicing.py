@@ -21,7 +21,8 @@ from vllm_gaudi.extension.bucketing.linear import LinearBucketingStrategy
 from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingStrategy
 from vllm_gaudi.extension.config import Config, Eq, All, Disabled, Kernel, Value, Env, boolean
 from vllm_gaudi.extension.features import get_user_flags, get_features
-from vllm_gaudi.extension.ops import _fsdpa_prompt_attention, dynamic_quant
+from vllm_gaudi.extension.ops import (_fsdpa_prompt_attention, _fsdpa_num_q_tiles, _FSDPA_PLANE_MAX_BYTES,
+                                       dynamic_quant)
 from vllm_gaudi.extension.utils import (
     ModuleFP8FusedSDPA,
     ModuleFusedSDPA,
@@ -1273,6 +1274,74 @@ class TestFsdpaSlicingAccuracyFP8:
                                                             dim=0).item()
 
         assert cos_sim > 0.99, f"FP8 cosine similarity too low: {cos_sim}"
+
+
+@requires_hpu
+class TestFsdpaQTilingAccuracy:
+    """Query-tiling (VLLM_HPU_FSDPA_Q_TILE_ENABLE) fixes the FusedSDPA overflow NaN.
+
+    A query tile attends to the *full* K/V, so each tile's softmax is already
+    complete and the tiles simply concatenate -- there is no online-softmax
+    rescaling as in KV slicing. Splitting the query dim is therefore exact, and it
+    keeps every q x kv bias plane under the 2**31-byte 32-bit-offset limit that the
+    kernel overflows.
+    """
+
+    HEAD_DIM = 128
+
+    @staticmethod
+    def _fsdpa_apply():
+        from habana_frameworks.torch.hpex.kernels import FusedSDPA
+        return FusedSDPA.apply
+
+    def _run_fn(self, q, k, v, bias, scale, enable, limit):
+        """Run _fsdpa_prompt_attention with the q-tiling flag and byte limit patched.
+
+        q/k/v arrive as [bs, heads, seq, dim]; the function transposes internally,
+        so we hand it [bs, seq, heads, dim]. Returns (output, num_q_tiles)."""
+        cfg = MagicMock()
+        cfg.fp32_softmax = False
+        cfg.enable_fsdpa_q_tiling = enable
+        with patch('vllm_gaudi.extension.ops.get_config', return_value=cfg), \
+             patch('vllm_gaudi.extension.ops._FSDPA_PLANE_MAX_BYTES', limit):
+            num_tiles = _fsdpa_num_q_tiles(bias)
+            with torch.inference_mode():
+                out = _fsdpa_prompt_attention(query=q.transpose(1, 2),
+                                              key=k.transpose(1, 2),
+                                              value=v.transpose(1, 2),
+                                              scale=scale,
+                                              fsdpa_op=self._fsdpa_apply(),
+                                              is_causal=False,
+                                              attn_bias=bias)
+        torch.hpu.synchronize()
+        return out, num_tiles
+
+    def test_qtiling_fixes_nan_at_overflow_size(self):
+        """Regression: with the flag ON, a *real* overflow-sized bias plane is finite.
+
+        Untiled, at q_len x kv_len x 2 >= 2**31 bytes the FusedSDPA kernel wraps a
+        signed-int32 byte offset while striding the bias plane, reads garbage, and
+        silently returns NaN/Inf. With the flag ON the query dim is tiled so every
+        plane stays under 2**31 bytes; the output must be fully finite.
+
+        Allocates a ~2 GiB bias plane, so it is HPU-only and comparatively slow.
+        """
+        bs, heads, kv_heads, head_dim = 1, 8, 2, self.HEAD_DIM
+        q_len, kv_len = 8192, 131072  # 8192 * 131072 * 2 == 2**31 bytes exactly
+        assert q_len * kv_len * 2 >= _FSDPA_PLANE_MAX_BYTES
+
+        torch.manual_seed(42)
+        q = torch.randn(bs, heads, q_len, head_dim, dtype=torch.bfloat16, device='hpu') * 3.0
+        k = torch.randn(bs, kv_heads, kv_len, head_dim, dtype=torch.bfloat16, device='hpu')
+        v = torch.randn(bs, kv_heads, kv_len, head_dim, dtype=torch.bfloat16, device='hpu')
+        bias = torch.zeros(bs, 1, q_len, kv_len, dtype=torch.bfloat16, device='hpu')
+        scale = head_dim**-0.5
+
+        # flag ON -> tiled -> every plane < 2**31 bytes -> finite output.
+        tiled, n_on = self._run_fn(q, k, v, bias, scale, enable=True, limit=_FSDPA_PLANE_MAX_BYTES)
+        assert n_on > 1, f"overflow-sized plane should tile, got num_q_tiles={n_on}"
+        assert torch.isfinite(tiled).all(), \
+            f"q-tiling still produced non-finite output (tiles={n_on})"
 
 
 # ---------------------------------------------------------------------------
