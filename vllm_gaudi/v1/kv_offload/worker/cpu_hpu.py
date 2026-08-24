@@ -402,12 +402,22 @@ def register_kv_caches(
             # per-tensor page size (all tensors in a TensorTuple have equal size)
             page_size_bytes[layer_name] = block_tensors_for_layer[0].shape[1]
 
-    # Build CanonicalKVCaches
+    # Build CanonicalKVCaches.
+    # After vLLM PR #51718, KVCacheTensor.layers are COALESCED into one backing
+    # allocation at distinct strided offsets — they do NOT share KV data, so
+    # aliasing every layer's refs to the first would offload/restore wrong data.
+    # Canonicalize each layer independently and group only layers that genuinely
+    # alias the same buffer (cross-layer KV sharing) by identical view identity,
+    # mirroring upstream OffloadingConnectorWorker.register_kv_caches.
     block_tensors: list[CanonicalKVCacheTensor] = []
     block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
-    for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-        tensor_layer_names = kv_cache_tensor.layers
 
+    aliased_layers: dict[tuple[tuple[int, tuple[int, ...]], ...], list[str]] = defaultdict(list)
+    for layer_name, layer_tensors in tensors_per_block.items():
+        alias_key = tuple((t.data_ptr(), tuple(t.stride())) for t in layer_tensors)
+        aliased_layers[alias_key].append(layer_name)
+
+    for tensor_layer_names in aliased_layers.values():
         first_layer_name = tensor_layer_names[0]
         for tensor in tensors_per_block[first_layer_name]:
             block_tensors.append(
