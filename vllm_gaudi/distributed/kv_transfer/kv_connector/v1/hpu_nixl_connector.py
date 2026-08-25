@@ -419,9 +419,15 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
             seen_base_addresses.append(base_addr)
             # Only record non-Mamba page sizes.
             if isinstance(layer_spec, MambaSpec):
-                self.block_len_per_layer.append(physical_page_size // self._physical_blocks_per_logical_kv_block)
+                block_len = physical_page_size // self._physical_blocks_per_logical_kv_block
             else:
-                self.block_len_per_layer.append(physical_page_size)
+                block_len = physical_page_size
+            self.block_len_per_layer.append(block_len)
+            # vLLM #51718 made _build_fa_local index self.block_stride_per_layer, which the
+            # pre-#44456 baseline this override was copied from never populated. Each HPU K/V
+            # region is a dense blocks-first tensor whose blocks abut, so the stride between
+            # consecutive blocks equals the block length.
+            self.block_stride_per_layer.append(block_len)
             is_mla_region = isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
             self._region_is_mla.append(is_mla_region)
 
@@ -451,7 +457,8 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
             caches_data.append((base_addr, curr_tensor_size_bytes, self.device_id, ""))
 
     logger.debug("Different block lengths collected: %s", set(self.block_len_per_layer))
-    assert len(self.block_len_per_layer) == len(seen_base_addresses) == len(self._region_is_mla)
+    assert len(self.block_len_per_layer) == len(seen_base_addresses) == len(self._region_is_mla) == len(
+        self.block_stride_per_layer)
 
     self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
     self.num_regions = len(caches_data)
@@ -494,6 +501,8 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id][self.tp_rank],
         num_blocks=self.num_blocks,
         block_lens=self.block_len_per_layer,
+        # vLLM #51718 added block_strides as a required NixlAgentMetadata field.
+        block_strides=self.block_stride_per_layer,
         kv_cache_layout=self.kv_cache_layout if not self.use_host_buffer else self.host_buffer_kv_cache_layout,
         block_size=self.block_size,
         ssm_sizes=self._mamba_ssm_size,
