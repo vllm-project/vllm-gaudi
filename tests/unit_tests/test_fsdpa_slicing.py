@@ -22,7 +22,7 @@ from vllm_gaudi.extension.bucketing.padding_aware import PaddingAwareBucketingSt
 from vllm_gaudi.extension.config import Config, Eq, All, Disabled, Kernel, Value, Env, boolean
 from vllm_gaudi.extension.features import get_user_flags, get_features
 from vllm_gaudi.extension.ops import (_fsdpa_prompt_attention, _fsdpa_num_q_tiles, _FSDPA_PLANE_MAX_BYTES,
-                                       dynamic_quant)
+                                      dynamic_quant)
 from vllm_gaudi.extension.utils import (
     ModuleFP8FusedSDPA,
     ModuleFusedSDPA,
