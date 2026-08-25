@@ -363,7 +363,7 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         is_mamba=self._has_mamba,
     )
     self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
-                                                       self.transfer_topo.cross_layers_blocks)
+                                                       self.transfer_topo._cross_layers_blocks)
 
     if self.use_host_buffer:
         self.initialize_host_xfer_buffer(kv_caches=kv_caches)
