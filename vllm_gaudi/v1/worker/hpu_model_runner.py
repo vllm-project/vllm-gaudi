@@ -6621,6 +6621,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 profile_bs = max(profile_bs, int(cfg.split(",")[0]))
         self._gdn_max_reqs = max(self._original_max_num_seqs, profile_bs)
 
+        # Mamba/GDN state tensors, keyed by (spec, position within the group).
+        # Before vLLM #51718 a KVCacheTensor.shared_by listed at most one layer
+        # per group, so propagating one state tensor across it gave every layer
+        # of a group its own storage while layers at the same position in
+        # different groups shared one. #51718 turned that field into `.layers`,
+        # which coalesces *all* of a group's layers at distinct byte offsets, so
+        # propagating across it now collapses a whole group onto one state.
+        # State slots are selected per group (compact GDN:
+        # base_slot * num_gdn_groups + g_offset + 1; otherwise the group's own
+        # block table), so only the tensor identity can separate layers inside a
+        # group. Key by position to restore the pre-#51718 sharing.
+        mamba_state_cache: dict[tuple, tuple[torch.Tensor, ...]] = {}
+
+        def _mamba_state_tensors(spec: MambaSpec, layer_pos: int, num_slots: int) -> tuple[torch.Tensor, ...]:
+            key = (spec, layer_pos, num_slots)
+            tensors = mamba_state_cache.get(key)
+            if tensors is None:
+                tensors = tuple(
+                    torch.zeros((num_slots, *shape), dtype=dtype, device=self.device)
+                    for shape, dtype in zip(spec.shapes, spec.dtypes))
+                mamba_state_cache[key] = tensors
+            return tensors
+
         if self.use_hybrid_cache and self.num_mamba_like_layers > 0:
             # Build layer_name -> spec lookup for skipping raw buffer
             # allocation for GDN/linear_attention groups (they use
@@ -6674,7 +6697,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
                 kv_cache_spec = group.kv_cache_spec
-                for layer_name in group.layer_names:
+                for layer_pos, layer_name in enumerate(group.layer_names):
                     kv_cache_spec = group.kv_cache_spec
                     # PR #51718: KVCacheTensor.size is now the total backing
                     # allocation across all layers (num_blocks * bytes_per_block),
@@ -6711,41 +6734,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         # Total slots: max_num_reqs * num_gdn_groups + 2
                         # (slot 0 unused, last slot for -1 padding).
                         self._compact_gdn_group_ids.add(group_idx)
-                        if isinstance(kv_caches.get(layer_name), tuple):
-                            continue
                         gdn_max_reqs = self._gdn_max_reqs
                         compact_total = gdn_max_reqs * self._num_gdn_groups + 2
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (compact_total, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
                         logger.debug("GDN compact tensor: %d slots (max_reqs=%d * groups=%d + 2) vs baseline %d",
                                      compact_total, gdn_max_reqs, self._num_gdn_groups, num_blocks + 1)
-                        # Propagate to all layers sharing the same kv_cache_tensor.
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.layers:
-                                continue
-                            for shared_layer in kv_cache_tensor.layers:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, compact_total)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
                         # GDN/linear_attention: non-compact (baseline) allocation
                         # using contiguous tensors with num_blocks+1 slots.
-                        if isinstance(kv_caches.get(layer_name), tuple):
-                            continue
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (num_blocks + 1, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.layers:
-                                continue
-                            for shared_layer in kv_cache_tensor.layers:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, num_blocks + 1)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             len(set(kv_cache_spec.dtypes)) > 1:
                         # Mixed-dtype standard Mamba2 (e.g. Nemotron-H: bf16
@@ -6755,18 +6753,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         # then ("input mutations on views with different
                         # dtypes"). Allocate separate contiguous tensors, like
                         # the GDN path above, so each state is its own input.
-                        if isinstance(kv_caches.get(layer_name), tuple):
-                            continue
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (num_blocks + 1, *shape)
-                            state_tensors.append(torch.zeros(target_shape, dtype=dtype, device=self.device))
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
-                                continue
-                            for shared_layer in kv_cache_tensor.shared_by:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, num_blocks + 1)
                     elif isinstance(kv_cache_spec, MambaSpec):
                         # Standard Mamba2 with uniform dtype: use the original
                         # as_strided interleaved layout from the raw shared
@@ -6799,7 +6786,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         elif self.use_naive_mamba_cache_sharing and self.num_mamba_like_layers > 0:
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
                 kv_cache_spec = group.kv_cache_spec
-                for layer_name in group.layer_names:
+                for layer_pos, layer_name in enumerate(group.layer_names):
                     kv_cache_spec = group.kv_cache_spec
                     # PR #51718: KVCacheTensor.size is now the total backing
                     # allocation across all layers (num_blocks * bytes_per_block),
@@ -6818,54 +6805,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             self._compact_gdn_enabled:
                         # GDN/linear_attention: compact allocation.
                         self._compact_gdn_group_ids.add(group_idx)
-                        if isinstance(kv_caches.get(layer_name), tuple):
-                            continue
                         gdn_max_reqs = self._gdn_max_reqs
                         compact_total = gdn_max_reqs * self._num_gdn_groups + 2
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (compact_total, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.layers:
-                                continue
-                            for shared_layer in kv_cache_tensor.layers:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, compact_total)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
                         # GDN/linear_attention: non-compact (baseline) allocation.
-                        if isinstance(kv_caches.get(layer_name), tuple):
-                            continue
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (num_blocks + 1, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.layers:
-                                continue
-                            for shared_layer in kv_cache_tensor.layers:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, num_blocks + 1)
                     elif isinstance(kv_cache_spec, MambaSpec):
-                        # skip if already created by another layer sharing the same kv cache tensor
-                        if layer_name in kv_caches:
-                            continue
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (num_blocks + 1, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
-                        # find other layers sharing the same kv cache tensor and
-                        # populate all of them with the same tensor pair
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.layers:
-                                continue
-                            for shared_layer in kv_cache_tensor.layers:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, num_blocks + 1)
                     else:
                         pass
         else:  # non-hybrid scenario
