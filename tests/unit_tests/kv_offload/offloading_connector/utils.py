@@ -25,7 +25,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector, )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
@@ -214,13 +213,24 @@ class RequestRunner:
 
         self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
 
-        # register worker kv_caches to enable OffloadingWorker creations
-        # set_current_vllm_config is needed for get_kv_cache_layout() to work
+        # Register worker kv_caches to enable OffloadingWorker creations. vLLM
+        # PR #51718 removed register_cross_layers_kv_cache; register_kv_caches
+        # (dict[layer_name -> tensor]) is now the sole entry point and coalesces
+        # layers internally. set_current_vllm_config enables get_kv_cache_layout().
+        kv_caches: dict[str, torch.Tensor] = {}
+        for group in kv_cache_config.kv_cache_groups:
+            spec = group.kv_cache_spec
+            for layer_name in group.layer_names:
+                kv_caches[layer_name] = torch.empty(
+                    num_gpu_blocks,
+                    2,
+                    spec.block_size,
+                    spec.num_kv_heads,
+                    spec.head_size,
+                    dtype=spec.dtype,
+                )
         with set_current_vllm_config(vllm_config):
-            self.worker_connector.register_cross_layers_kv_cache(
-                kv_cache=torch.empty(0),
-                attn_backend=FlashAttentionBackend,
-            )
+            self.worker_connector.register_kv_caches(kv_caches)
 
         # extract connector of scheduler
         scheduler_connector = self.scheduler.connector
