@@ -342,6 +342,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         use_gather = (
             _HPU_MOE_GATHER
             and activation == "silu"
+            and self.quant_config.activation_scheme != "static"
             and x.shape[0] * topk_ids.shape[-1] <= _HPU_MOE_GATHER_MAX_TP
         )
         if use_gather:
