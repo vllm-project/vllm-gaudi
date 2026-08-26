@@ -24,10 +24,7 @@ def main():
         max_model_len=1024,
         max_num_batched_tokens=1024,
         gpu_memory_utilization=0.9,
-        # Small KV cache to force preemption. Must stay above the upstream
-        # admission check (needs >= max_model_len/block_size worth of blocks,
-        # rounded up), yet below the ~20 blocks the 4 requests peak at.
-        num_gpu_blocks_override=12,
+        num_gpu_blocks_override=8,  # to trigger preemption
         disable_log_stats=False,
     )
     # Generate texts from the prompts.
