@@ -20,8 +20,6 @@ if TYPE_CHECKING:
     VLLM_HPU_MOE_GATHER: bool = False
     VLLM_HPU_MOE_GATHER_MAX_TP: int = 64
     VLLM_HPU_MOE_GATHER_VERIFY: bool = False
-    VLLM_HPU_MOE_GATHER_VERIFY_DIR: Optional[str] = None
-    VLLM_HPU_MOE_GATHER_VERIFY_LAYERS: int = 40
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -102,10 +100,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.environ.get("VLLM_HPU_MOE_GATHER_MAX_TP", "64")),
     "VLLM_HPU_MOE_GATHER_VERIFY":
     lambda: os.environ.get("VLLM_HPU_MOE_GATHER_VERIFY", "0").lower() in ("1", "true"),
-    "VLLM_HPU_MOE_GATHER_VERIFY_DIR":
-    lambda: os.environ.get("VLLM_HPU_MOE_GATHER_VERIFY_DIR", None),
-    "VLLM_HPU_MOE_GATHER_VERIFY_LAYERS":
-    lambda: int(os.environ.get("VLLM_HPU_MOE_GATHER_VERIFY_LAYERS", "40")),
 }
 
 # end-env-vars-definition

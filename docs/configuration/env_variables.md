@@ -38,18 +38,15 @@ This document lists the supported diagnostic and profiling, as well as performan
 These variables control an **experimental** pure-PyTorch gathered-expert MoE
 combine for silu + FP8-per-channel weights, an alternative to the Habana
 `mixture_of_experts` op. It is off by default and intended for low-token
-(small batch / decode) workloads. The `VERIFY` knobs run both the custom and
-stock paths and dump output pairs for offline FP8-ULP comparison — use them
-only for validation runs, not in production (they double compute and force a
-graph break).
+(small batch / decode) workloads. Verification runs both the custom and stock
+paths and reduces their maximum FP8-ULP over the expert-parallel group in-memory
+without writing model-derived tensors to disk.
 
-| Parameter name                      | Description                                                                                                                                                        | Default value |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| `VLLM_HPU_MOE_GATHER`               | Enables the custom gathered-expert FP8 MoE combine (silu only). Falls back to the stock fused op when disabled or when the gather crossover is exceeded.          | `false`       |
-| `VLLM_HPU_MOE_GATHER_MAX_TP`        | Upper bound on `tokens * top_k` for which the custom gather path is used. Above this the stock fused op is faster and is used instead.                             | `64`          |
-| `VLLM_HPU_MOE_GATHER_VERIFY`        | Validation mode: runs both the custom and stock paths on the same inputs and records output pairs for offline FP8-ULP comparison. Requires `VLLM_HPU_MOE_GATHER`. | `false`       |
-| `VLLM_HPU_MOE_GATHER_VERIFY_DIR`    | Directory where verify-mode output pairs are saved (`moecomb_T<T>_n<n>_r<rank>.pt`). If unset, nothing is written even when verify mode is on.                     | `None`        |
-| `VLLM_HPU_MOE_GATHER_VERIFY_LAYERS` | Maximum number of captures saved per token count `T` (per rank) in verify mode.                                                                                   | `40`          |
+| Parameter name               | Description                                                                                                                                                        | Default value |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `VLLM_HPU_MOE_GATHER`        | Enables the custom gathered-expert FP8 MoE combine (silu only). Falls back to the stock fused op when disabled or when the gather crossover is exceeded.          | `false`       |
+| `VLLM_HPU_MOE_GATHER_MAX_TP` | Upper bound on `tokens * top_k` for which the custom gather path is used. Above this the stock fused op is faster and is used instead.                             | `64`          |
+| `VLLM_HPU_MOE_GATHER_VERIFY` | Runs both the custom and stock paths and reduces their maximum FP8-ULP across the EP group in-memory. Logs an info line at startup when enabled and warns if any element exceeds 2 ULP. Requires `VLLM_HPU_MOE_GATHER`. | `false` |
 
 Use `VLLM_BUCKETING_STRATEGY=exp` for the default exponential warm-up, `VLLM_BUCKETING_STRATEGY=lin` for explicitly configured linear ranges, or `VLLM_BUCKETING_STRATEGY=pad` for padding-aware ranges with absolute and relative padding limits.
 
