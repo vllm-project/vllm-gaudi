@@ -55,6 +55,21 @@ class HPUMLAAttention(MLAAttention):
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
 
+    def bind_kv_cache(self, kv_cache) -> None:
+        """Store the HPU per-layer KV-cache tuple unchanged.
+
+        vllm#51718 changed ``vllm.v1.worker.utils.bind_kv_cache`` to delegate
+        binding to each layer's own ``bind_kv_cache`` and added
+        ``MLAAttention.bind_kv_cache`` whose body is
+        ``self.kv_cache = kv_cache.squeeze(1)`` — it assumes a single packed
+        ``[B, H=1, N, C]`` tensor. On HPU the model runner allocates a per-layer
+        ``(key_cache, value_cache, key_scales, value_scales)`` tuple for MLA
+        layers and ``forward_impl`` consumes it directly (``kv_cache[0]``), so
+        the upstream ``.squeeze`` raises ``AttributeError: 'tuple' object has no
+        attribute 'squeeze'``. Keep the tuple as-is for the HPU path.
+        """
+        self.kv_cache = kv_cache
+
     def forward(
         self,
         q: torch.Tensor,
