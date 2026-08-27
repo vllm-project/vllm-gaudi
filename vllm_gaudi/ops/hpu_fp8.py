@@ -47,7 +47,7 @@ _HPU_MOE_GATHER_MAX_TP = envs.VLLM_HPU_MOE_GATHER_MAX_TP
 if _HPU_MOE_GATHER:
     from vllm_gaudi.ops.hpu_moe_combine import gather_silu_fp8_moe  # noqa: E402
 else:
-    gather_silu_fp8_moe = None
+    gather_silu_fp8_moe = None  # type: ignore[assignment]
 
 if _HPU_MOE_GATHER_VERIFY:
     logger.info("MoE gather combine VERIFY mode enabled: comparing custom vs stock "
