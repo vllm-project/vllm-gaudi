@@ -353,6 +353,39 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                   kv_lora_rank=self.kv_lora_rank)
         return output
 
+    @torch.compiler.disable
+    def forward_mqa_sparse(self, q, k_cache, attn_metadata, topk_indices):
+        """Sparse MLA decode: attend to only the top-K cache entries."""
+        if isinstance(k_cache, tuple):
+            k_cache = k_cache[0]
+        batch_size = q.shape[0]
+        topk = topk_indices.shape[1]
+
+        # Gather top-K latent KV from cache using physical slot indices
+        flat_idx = topk_indices[:batch_size].reshape(-1)
+        selected = k_cache[flat_idx].view(batch_size, topk, -1)
+
+        # Decompress KV
+        k_c, k_pe = selected.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_nope = self.kv_b_proj(k_c.reshape(-1, self.kv_lora_rank))[0]
+        kv_nope = kv_nope.view(
+            batch_size, topk, self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim)
+        k_nope, v = kv_nope.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k_pe_exp = k_pe.unsqueeze(2).expand(-1, -1, self.num_heads, -1)
+        key = torch.cat([k_nope, k_pe_exp], dim=-1)
+
+        # q: [B, H, D] -> [B, H, 1, D]
+        # key: [B, T, H, D] -> [B, H, T, D]
+        key = key.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        attn = torch.matmul(q.unsqueeze(2), key.transpose(-1, -2))
+        attn = torch.softmax(attn * self.scale, dim=-1)
+        out = torch.matmul(attn, v).squeeze(2)
+        return out.reshape(-1, self.num_heads * self.v_head_dim)
+
     # NOTE(Xinyu): Make the loaded weight contiguous to avoid the transpose
     # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
