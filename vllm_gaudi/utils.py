@@ -233,6 +233,18 @@ if not htorch.utils.internal.is_lazy():
 
     torch_utils.make_tensor_with_pad = make_tensor_with_pad_hpu
 
+    # Graph-break the sampler's logits-processor stage under torch.compile.
+    # apply_logits_processors reads the per-request output_token_ids lists,
+    # whose lengths grow by one each decode step; tracing that access installs
+    # a dynamo guard on len(output_token_ids[0]) that forces a full sampler
+    # recompile every step once penalties are active. Disabling compile here
+    # runs the penalty/bad-words math eagerly (no length guard) while sample()
+    # stays compiled. No-op on backends that run the sampler eagerly (e.g. CUDA).
+    from vllm.v1.sample.sampler import Sampler
+
+    Sampler.apply_logits_processors = torch.compiler.disable(  # type: ignore[method-assign]
+        Sampler.apply_logits_processors)
+
 
 def make_mrope_positions_tensor_with_pad(input_positions: list[list[int]], input_mrope_positions: list[list[list[int]]],
                                          max_prompt_len: int, pad: int) -> list[list[int]]:
