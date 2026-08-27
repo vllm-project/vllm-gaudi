@@ -625,6 +625,14 @@ run_offloading_connector_test() {
     echo "✅ Test OffloadingConnector passed."
 }
 
+# Async-scheduling penalty correctness (regression for stale output_token_ids)
+run_async_penalty_consistency_test() {
+    echo "➡️ Testing async-scheduling penalty consistency..."
+    VLLM_SKIP_WARMUP=true \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/sampler/test_async_penalty_consistency.py"
+    echo "✅ Test async-scheduling penalty consistency passed."
+}
+
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"
@@ -696,6 +704,7 @@ launch_all_tests() {
     run_pd_disaggregate_nixl_ucx_test
     run_cpu_offloading_test
     run_offloading_connector_test
+    run_async_penalty_consistency_test
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test
