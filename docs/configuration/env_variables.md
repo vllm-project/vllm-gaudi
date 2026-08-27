@@ -181,3 +181,23 @@ The slicing is only activated if all the following additional conditions are sat
 - It's a causal attention model.
 - The padding side is 'right'.
 - No sliding window nor sinks (BF16 only; FP8 does not support sinks).
+
+## Query Tiling for Large Prompt Attention Biases
+
+FusedSDPA addresses the attention bias with a 32-bit signed byte offset, so a dense prompt bias of
+2 GiB or more (`batch_size * query_len * (context_blocks * block_size + query_len) * itemsize >=
+2**31`) makes the offset wrap and the kernel silently returns `NaN` instead of raising. Long
+contexts combined with a wide context bucket can reach this, for example a
+`[1, 1, 8192, 131072]` bf16 bias, which is exactly `2**31` bytes.
+
+Query tiling splits the query dimension of prompt attention into the smallest number of tiles that
+keeps every per-call bias below the limit. Attention rows are independent, so each tile attends the
+full K/V and the results simply concatenate; the output is unchanged apart from the tiling itself.
+
+| Parameter name                    | Description                                                                | Default value |
+| --------------------------------- | -------------------------------------------------------------------------- | ------------- |
+| `VLLM_HPU_FSDPA_Q_TILE_ENABLE`    | Enable query tiling when the prompt attention bias would reach `2**31` bytes. | `false`     |
+
+!!! note
+    This is independent of `VLLM_HPU_FSDPA_SLICE_ENABLED` and works with any bucketing strategy.
+    When enabled, shapes whose bias already fits below the limit take the untiled path unchanged.

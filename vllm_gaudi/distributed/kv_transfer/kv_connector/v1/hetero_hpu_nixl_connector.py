@@ -823,7 +823,7 @@ def NixlConnectorWorker_init_(self, vllm_config: VllmConfig, engine_id: str, kv_
         attn_backends=[backend],
     )
     self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
-                                                       self.transfer_topo.cross_layers_blocks)
+                                                       self.transfer_topo._cross_layers_blocks)
     self._physical_blocks_per_logical_kv_block = 1
     # Default SSM sizes for non-Mamba models
     self._mamba_ssm_size = (0, 0)
