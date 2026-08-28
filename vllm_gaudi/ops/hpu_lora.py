@@ -17,12 +17,12 @@ class HPUVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
         # flatten to get num_tokens since HPU uses 2d input layout
-        # reshape indices_1, indices_0 to match shape of input
+        # reshape the embedding indices to match shape of input
         num_tokens = x.view(-1).shape[0]
-        indices_1 = self.punica_wrapper._embeddings_indices[1][:num_tokens].view_as(x)
+        embeddings_indices = self.punica_wrapper._embeddings_indices[:num_tokens].view_as(x)
 
         full_lora_a_embeddings = F.embedding(
-            x + indices_1,
+            x + embeddings_indices,
             self.lora_a_stacked_2d,
         )
         full_output = self.base_layer.forward(x)
