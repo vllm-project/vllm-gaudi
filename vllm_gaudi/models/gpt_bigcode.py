@@ -323,11 +323,5 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = None
-        if self.config.tie_word_embeddings:
-            skip_prefixes = ["lm_head."]
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=skip_prefixes,
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
