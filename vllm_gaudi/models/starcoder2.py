@@ -349,5 +349,12 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            # ColossalAI checkpoints may include lm_head.weight-derived
+            # tensors. Alias handling skips only the tied lm_head.weight.
+            ignore_unexpected_prefixes=(
+                ["lm_head.weight"] if self.config.tie_word_embeddings else None
+            ),
+        )
         return loader.load_weights(weights)
