@@ -327,8 +327,6 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self,
             # Tied checkpoints may include extra lm_head.* tensors, such as
             # quantization scales. Alias handling skips only lm_head.weight.
-            ignore_unexpected_prefixes=(
-                ["lm_head."] if self.config.tie_word_embeddings else None
-            ),
+            ignore_unexpected_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)

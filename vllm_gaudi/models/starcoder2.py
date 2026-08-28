@@ -353,8 +353,6 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
             self,
             # ColossalAI checkpoints may include lm_head.weight-derived
             # tensors. Alias handling skips only the tied lm_head.weight.
-            ignore_unexpected_prefixes=(
-                ["lm_head.weight"] if self.config.tie_word_embeddings else None
-            ),
+            ignore_unexpected_prefixes=(["lm_head.weight"] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
