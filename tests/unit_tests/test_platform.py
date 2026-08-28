@@ -33,6 +33,8 @@ def _clean_env():
     touched = (
         "PT_HPU_WEIGHT_SHARING",
         "PT_HPU_ENABLE_LAZY_COLLECTIVES",
+        "VLLM_COMPACT_GDN",
+        "PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE",
         *_EAGER_ONLY_VARS,
     )
     # set_torch_compile() flips torch._dynamo.config.disable in lazy mode;
@@ -136,6 +138,38 @@ def test_pt_hpu_enable_lazy_collectives_default_and_respect():
     with _set_lazy(True):
         HpuPlatform.set_torch_compile()
     assert os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] == "false"
+
+
+def test_compact_gdn_disables_synapse_input_reuse_default():
+    """Compact-GDN defaults PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE off (GAUDISW-247612)."""
+    os.environ["VLLM_COMPACT_GDN"] = "1"
+    with _set_lazy(False):
+        HpuPlatform.set_compile_env_defaults()
+    assert os.environ["PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE"] == "0"
+
+
+def test_compact_gdn_respects_user_input_reuse_value():
+    """User-set PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE must not be overwritten."""
+    os.environ["VLLM_COMPACT_GDN"] = "1"
+    os.environ["PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE"] = "1"
+    with _set_lazy(False):
+        HpuPlatform.set_compile_env_defaults()
+    assert os.environ["PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE"] == "1"
+
+
+def test_input_reuse_untouched_without_compact_gdn():
+    """Without compact-GDN the Synapse input-reuse default is left alone."""
+    with _set_lazy(False):
+        HpuPlatform.set_compile_env_defaults()
+    assert "PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE" not in os.environ
+
+
+def test_compact_gdn_input_reuse_lazy_is_noop():
+    """Lazy mode returns early, so the compact-GDN default is not applied."""
+    os.environ["VLLM_COMPACT_GDN"] = "1"
+    with _set_lazy(True):
+        HpuPlatform.set_compile_env_defaults()
+    assert "PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE" not in os.environ
 
 
 # ---------------------------------------------------------------------------

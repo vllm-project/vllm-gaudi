@@ -454,6 +454,20 @@ class HpuPlatform(Platform):
         # Allow utilization of the Parallel Compilation feature.
         if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
             os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
+        # Compact-GDN: disable Synapse persistent-input reuse.
+        # With compact-GDN the recurrent-state (conv/ssm) read and write are split
+        # across separate torch.compile recipes. Synapse's per-graph persistent-input
+        # reuse optimization can then reuse a still-live state buffer's memory as
+        # intra-graph scratch (the reading recipe cannot see that another recipe / the
+        # next step still needs it), corrupting the state and producing NaN output.
+        # The optimization is opt-in per input via the bridge; the reuse decision is
+        # made one recipe at a time and cannot detect this cross-recipe reuse, so we
+        # turn it off on this path. Disabling it may slightly raise peak memory (a
+        # persistent input's memory is no longer reused as scratch) but has no
+        # compute/latency impact. Never overwrites a user-provided value.
+        if os.environ.get('VLLM_COMPACT_GDN', '0').strip().lower() in ('1', 'true'):
+            if os.environ.get('PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE') is None:
+                os.environ['PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE'] = '0'
 
     @classmethod
     def adjust_cuda_hooks(cls) -> None:
