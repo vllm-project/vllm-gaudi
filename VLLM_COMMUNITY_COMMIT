@@ -1,4 +1,4 @@
-d1922cb5a718259976fcb9044c18c9711c9ca694
+026d5af7f410e59e3910a4d66af1f691db29ca1d
 # vllm-gaudi compatibility pinning:
 #   The vllm-gaudi plugin is installed on top of the vllm upstream checkout used by this CI job.
 #   When upstream vllm changes its API, the plugin may break before it has been updated.
