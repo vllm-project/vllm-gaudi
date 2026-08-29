@@ -714,15 +714,15 @@ class InputBatch:
         (vllm/v1/worker/gpu_input_batch.py). Async scheduling copies the
         sampled ids to CPU without a blocking sync; keep the CPU tensor and its
         copy-ready event so update_async_output_token_ids can splice the real
-        ids in later. Cleared when penalties are off (output token ids are
-        never read, so we skip the per-step sync).
+        ids in later. Cleared when no consumer reads output_token_ids (no
+        penalties and no bad_words), so the fast path skips the per-step sync.
 
         Args:
             sampled_token_ids_cpu: prior step's sampled ids, shape (num_reqs, 1).
             async_copy_ready_event: event recorded after the non-blocking
                 device-to-host copy was enqueued.
         """
-        if not self.no_penalties:
+        if self.needs_output_token_ids:
             self.sampled_token_ids_cpu = sampled_token_ids_cpu
             self.async_copy_ready_event = async_copy_ready_event
         else:
@@ -737,8 +737,9 @@ class InputBatch:
         appends a -1 to each request's output_token_ids after sampling, because
         the real id is still being copied to CPU. Called right before the
         sampler reads output_token_ids for penalties: synchronize on the
-        copy-ready event and replace the placeholders. No-op when penalties are
-        off or there is no prior step to repair.
+        copy-ready event and replace the placeholders. No-op when no consumer
+        reads output_token_ids (sampled_token_ids_cpu left None by
+        set_async_sampled_token_ids) or there is no prior step to repair.
         """
         if self.sampled_token_ids_cpu is None or self.prev_req_id_to_index is None:
             # Output token ids not needed or not async scheduling.
@@ -859,6 +860,19 @@ class InputBatch:
     def no_penalties(self) -> bool:
         return (len(self.presence_penalties_reqs) == 0 and len(self.frequency_penalties_reqs) == 0
                 and len(self.repetition_penalties_reqs) == 0)
+
+    @property
+    def needs_output_token_ids(self) -> bool:
+        """Whether any sampler consumer reads output_token_ids this batch.
+
+        Both penalties and bad_words read it, so the -1 placeholders must be
+        repaired before sampling if either is active for any request.
+
+        Upstream also ORs in a custom-logitsprocs flag; unreachable here because
+        batch_update_builder is never populated on HPU (see the PR#16728 TODO in
+        _make_sampling_metadata). Add it back when batch_update is enabled.
+        """
+        return not self.no_penalties or bool(self.bad_words_token_ids)
 
     @property
     def max_num_logprobs(self) -> Optional[int]:

@@ -4672,16 +4672,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
             }
-            # Async scheduling: append a -1 placeholder to each request's
-            # output_token_ids so penalties see the right length (real id still
-            # copying to CPU; spliced in next step by
-            # update_async_output_token_ids). Skipped when penalties are off to
-            # keep the fast path free of the per-step sync. Mirrors the append
-            # in vllm/v1/worker/gpu_model_runner.py.
-            if not self.input_batch.no_penalties:
-                for i, req_id in enumerate(self.input_batch.req_ids):
-                    if i not in invalid_req_indices_set:
-                        self.requests[req_id].output_token_ids.append(-1)
+            # Async scheduling: keep output_token_ids the right length with a -1
+            # placeholder while the real id is still copying to CPU; spliced in
+            # next step by update_async_output_token_ids. Unconditional, since
+            # the list is read per-request -- the batch-wide no_penalties flag
+            # only gates the repair, not the append.
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                if i not in invalid_req_indices_set:
+                    self.requests[req_id].output_token_ids.append(-1)
             # For the output, postprocessed_sampled_token_ids will be filled during serialization
         else:
             prefill_sampled_token_ids_device = prefill_sampled_token_ids
