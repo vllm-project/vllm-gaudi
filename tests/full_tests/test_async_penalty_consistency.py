@@ -3,11 +3,11 @@
 """HPU async-scheduling penalty-correctness test.
 
 Regression test for the bug fixed by "[HPU] Make sampling penalties correct
-and fast under async scheduling": under async scheduling the just-sampled token
-is still being copied to CPU when the next step's sampler runs, so the per-request
-``output_token_ids`` list is stale and presence/frequency/repetition penalties
-(which read that list) are computed one token behind. The fix appends a ``-1``
-placeholder after sampling and splices the real id in before penalties are read.
+and fast under async scheduling". Under async scheduling on HPU the per-request
+``output_token_ids`` list was never populated, so presence/frequency/repetition
+penalties ran against an empty history and were effectively inert. The fix
+appends a ``-1`` placeholder after sampling and splices in the real id -- still
+copying to CPU at that point -- before penalties are read.
 
 This is the HPU-portable equivalent of vLLM's upstream GPU test
 ``tests/v1/e2e/general/test_async_scheduling.py`` (PR #26467). That test cannot
@@ -17,8 +17,8 @@ across many configs -- a property that relies on CUDA batch-invariant kernels
 which HPU does not provide. Here we pin everything except the one axis under
 test: async-scheduling OFF is the ground truth (penalties always read a current
 ``output_token_ids``); async-scheduling ON must produce identical tokens. Same
-model, batch, bucketing and greedy decode, so any mismatch is unambiguously the
-penalty staleness -- not kernel non-determinism.
+model, batch, bucketing and greedy decode, so any mismatch is unambiguously
+the penalty history -- not kernel non-determinism.
 
 Without the fix this test fails (async output diverges after a few decode
 steps); with the fix async and sync outputs match token-for-token.
@@ -40,11 +40,12 @@ PROMPTS = [
     "List reasons why the sky appears blue during the day:",
 ]
 
-# Greedy + long-enough generation so a stale-by-one token history flips the argmax.
+# Greedy + long-enough generation so a wrong token history visibly flips the argmax.
 _BASE = dict(temperature=0.0, max_tokens=48, min_tokens=46, seed=0)
 
-# Each penalty type reads output_token_ids and is exactly what goes stale under
-# async scheduling. Keyed by name so failures point at the offending penalty.
+# Each penalty type reads output_token_ids, which is exactly what went
+# unpopulated under async scheduling. Keyed by name so failures point at the
+# offending penalty.
 PENALTY_CONFIGS = {
     "presence": dict(presence_penalty=1.5),
     "frequency": dict(frequency_penalty=1.0),
@@ -69,7 +70,7 @@ def _run_all(async_scheduling):
     """
     llm = LLM(
         model=MODEL,
-        enforce_eager=True,          # isolate the correctness path; skip compile
+        enforce_eager=True,  # isolate the correctness path; skip compile
         async_scheduling=async_scheduling,
         dtype="bfloat16",
         max_model_len=1024,
@@ -87,9 +88,19 @@ def _run_all(async_scheduling):
 
 @pytest.fixture(scope="module")
 def async_vs_sync():
-    """Ground-truth (async off) and async-on outputs for every config."""
+    """Ground-truth (async off) and async-on outputs for every config.
+
+    Asserts the control up front: with NO penalty active, async and sync must
+    already be token-identical. Async scheduling shifts step boundaries and batch
+    composition, so unless that holds, a per-penalty divergence below could be an
+    async bucketing/padding artefact rather than the penalty history.
+    """
     reference = _run_all(async_scheduling=False)
     async_out = _run_all(async_scheduling=True)
+    assert reference["none"] == async_out["none"], (
+        "control failed: async and sync differ with NO penalty active, so this is an async "
+        "bucketing/padding difference -- the penalty comparisons below cannot be attributed "
+        "to the penalty history")
     return reference, async_out
 
 
@@ -102,9 +113,8 @@ def test_penalties_are_active(async_vs_sync):
     reference, _ = async_vs_sync
     baseline = reference["none"]
     for key in PENALTY_CONFIGS:
-        assert reference[key] != baseline, (
-            f"penalty '{key}' did not change greedy output vs no-penalty baseline; "
-            "test would be vacuous")
+        assert reference[key] != baseline, (f"penalty '{key}' did not change greedy output vs no-penalty baseline; "
+                                            "test would be vacuous")
 
 
 @pytest.mark.parametrize("penalty", list(PENALTY_CONFIGS))

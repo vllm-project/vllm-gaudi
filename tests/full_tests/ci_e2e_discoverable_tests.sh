@@ -629,7 +629,7 @@ run_offloading_connector_test() {
 run_async_penalty_consistency_test() {
     echo "➡️ Testing async-scheduling penalty consistency..."
     VLLM_SKIP_WARMUP=true \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/sampler/test_async_penalty_consistency.py"
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_async_penalty_consistency.py"
     echo "✅ Test async-scheduling penalty consistency passed."
 }
 
