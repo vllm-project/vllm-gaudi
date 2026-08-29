@@ -4985,7 +4985,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._compile_methods()
                 self.regional_compilation_layers_list = [RMSNorm, VocabParallelEmbedding]
                 self._regional_compilation(self.model)
-                self.sampler = self._compile(self.sampler)
+                # Run the logits-processor stage eagerly: it reads the growing
+                # output_token_ids lists, which otherwise recompile the sampler
+                # every decode step once penalties are active. Needs
+                # fullgraph=False (a disabled callee is unsupported under
+                # fullgraph).
+                Sampler.apply_logits_processors = torch.compiler.disable(  # type: ignore[method-assign]
+                    Sampler.apply_logits_processors)
+                self.sampler = self._compile(self.sampler, fullgraph=False)
             else:
                 self.model = self._compile(self.model)
 
@@ -5028,8 +5035,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         module = self._compile(module)
         setattr_nested(model, name, module)
 
-    def _compile(self, module):
-        return torch.compile(module, **self.compile_config.get_compile_args())
+    def _compile(self, module, **config_overrides):
+        """Compile a module with the runner's compile config.
+
+        Args:
+            module: Module to compile.
+            **config_overrides: HPUCompileConfig overrides, for compiling a
+                single submodule under different settings than the model.
+        """
+        config = HPUCompileConfig(**config_overrides) if config_overrides else self.compile_config
+        return torch.compile(module, **config.get_compile_args())
 
     def _use_graphs(self, attn_metadata, batch_size):
         if self.model_config.enforce_eager:
