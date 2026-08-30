@@ -1310,10 +1310,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.scheduler_config.max_num_seqs = self.max_model_len
             if prompt_profile_cfg:
                 self.scheduler_config.max_num_batched_tokens = prompt_profile_cfg[0] * prompt_profile_cfg[1]
-            if decode_profile_cfg:
+            elif decode_profile_cfg:
                 # Decode bucket ranges are derived from max_num_seqs, so the
                 # inflated value above would round the requested batch and block
                 # count up to a much coarser bucket. Pin it to the request.
+                # `elif` mirrors _generate_profiling: when both phases are
+                # requested only the prompt one is profiled, and pinning here
+                # would also shrink the prompt ladder under merged prefill,
+                # where max_num_prefill_seqs follows max_num_seqs.
                 self.scheduler_config.max_num_seqs = decode_profile_cfg[0]
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
 
@@ -5809,6 +5813,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _read_profiling_cfg(self):
         prompt_cfg = self._parse_profile_cfg(os.environ.get('VLLM_PROFILE_PROMPT', None))
         decode_cfg = self._parse_profile_cfg(os.environ.get('VLLM_PROFILE_DECODE', None))
+        # Only the first two decode values are used, so a third one would be
+        # silently dropped and the block count taken from the wrong position.
+        assert prompt_cfg is None or len(prompt_cfg) == 3, \
+            "VLLM_PROFILE_PROMPT expects '<bs>,<query_len>,<ctx_blocks>'"
+        assert decode_cfg is None or len(decode_cfg) == 2, \
+            "VLLM_PROFILE_DECODE expects '<bs>,<num_blocks>'"
         legacy_cfg = self._parse_legacy_profile_cfg(os.environ.get('VLLM_PT_PROFILE', None))
         if legacy_cfg and not (prompt_cfg or decode_cfg):
             phase, bs, seq_or_blocks, use_graphs = legacy_cfg
