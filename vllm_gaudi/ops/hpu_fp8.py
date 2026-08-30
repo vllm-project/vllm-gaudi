@@ -27,7 +27,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
 
 logger = init_logger(__name__)
 
-
 # EXPERIMENTAL custom MoE combine: replace the Habana mixture_of_experts op (a
 # fixed per-layer stage pipeline) with a pure-PyTorch gathered-expert path.
 # Default stock. `VLLM_HPU_MOE_GATHER_VERIFY=1` (with VLLM_HPU_MOE_GATHER=1) runs
@@ -68,7 +67,7 @@ def _fp8_ulp(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     b_bits = b_fp32.to(torch.float8_e4m3fn).view(torch.uint8).int()
     same_sign = (a_bits >= 128) == (b_bits >= 128)
     same_sign_ulp = (a_bits - b_bits).abs().float()
-    cross_ulp = (a_fp32 - b_fp32).abs() / (2.0 ** -9)
+    cross_ulp = (a_fp32 - b_fp32).abs() / (2.0**-9)
     return torch.where(same_sign, same_sign_ulp, cross_ulp)
 
 
@@ -85,8 +84,8 @@ def _verify_moe_combine(stock: torch.Tensor, custom: torch.Tensor) -> torch.Tens
                 group=ep_group.device_group,
             )
     if max_ulp > _HPU_MOE_GATHER_VERIFY_MAX_ULP:
-        logger.warning("MoE gather combine mismatch: max FP8-ULP = %s exceeds %d",
-                       max_ulp.item(), _HPU_MOE_GATHER_VERIFY_MAX_ULP)
+        logger.warning("MoE gather combine mismatch: max FP8-ULP = %s exceeds %d", max_ulp.item(),
+                       _HPU_MOE_GATHER_VERIFY_MAX_ULP)
     return max_ulp
 
 
@@ -339,18 +338,13 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         # must stay small (below the dense crossover). Beyond that (large batch /
         # long prefill) fall back to the stock fused op, which is faster and keeps
         # the graph shapes fixed. `tokens`/`K` are static (T, K from x/topk_ids).
-        use_gather = (
-            _HPU_MOE_GATHER
-            and activation == "silu"
-            and self.quant_config.activation_scheme != "static"
-            and x.shape[0] * topk_ids.shape[-1] <= _HPU_MOE_GATHER_MAX_TP
-        )
+        use_gather = (_HPU_MOE_GATHER and activation == "silu" and self.quant_config.activation_scheme != "static"
+                      and x.shape[0] * topk_ids.shape[-1] <= _HPU_MOE_GATHER_MAX_TP)
         if use_gather:
             # EXPERIMENTAL custom combine: gather only the routed experts
             # (bypasses the Habana op's fixed per-layer stage pipeline).
             if _HPU_MOE_GATHER_VERIFY:
-                stock = layer.moe_op(x, topk_ids, topk_weights,
-                                     permuted_weights=True, activation=activation)
+                stock = layer.moe_op(x, topk_ids, topk_weights, permuted_weights=True, activation=activation)
                 custom = gather_silu_fp8_moe(layer, x, topk_ids, topk_weights)
                 _verify_moe_combine(stock, custom)
                 output = custom
