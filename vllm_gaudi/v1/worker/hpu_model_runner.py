@@ -1310,6 +1310,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.scheduler_config.max_num_seqs = self.max_model_len
             if prompt_profile_cfg:
                 self.scheduler_config.max_num_batched_tokens = prompt_profile_cfg[0] * prompt_profile_cfg[1]
+            if decode_profile_cfg:
+                # Decode bucket ranges are derived from max_num_seqs, so the
+                # inflated value above would round the requested batch and block
+                # count up to a much coarser bucket. Pin it to the request.
+                self.scheduler_config.max_num_seqs = decode_profile_cfg[0]
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
 
         # Attention layers that are only in the KVCacheConfig of the runner
@@ -5775,10 +5780,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _generate_profiling(self, prompt_cfg, decode_cfg):
         steps = 3
         profiler = setup_profiler(warmup=steps - 1, active=1)
-        if prompt_cfg and prompt_cfg not in self.bucketing_manager.prompt_buckets:
-            self.bucketing_manager.prompt_buckets.insert(0, prompt_cfg)
-        elif decode_cfg and decode_cfg not in self.bucketing_manager.decode_buckets:
-            self.bucketing_manager.decode_buckets.insert(0, decode_cfg)
+        if prompt_cfg:
+            self.bucketing_manager.add_prompt_bucket(prompt_cfg)
+        elif decode_cfg:
+            self.bucketing_manager.add_decode_bucket(decode_cfg)
         torch.hpu.synchronize()
         profiler.start()
         for _ in range(steps):

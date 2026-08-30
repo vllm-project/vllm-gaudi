@@ -287,6 +287,16 @@ class HPUBucketingManager():
                     new_ctx = self._fallback_max_ctx
         return (new_batch_size, new_seq_len, new_ctx)
 
+    def add_prompt_bucket(self, bucket):
+        # Lookups use bisect, so the list must stay sorted.
+        if bucket not in self.prompt_buckets:
+            bisect.insort(self.prompt_buckets, bucket)
+
+    def add_decode_bucket(self, bucket):
+        # Lookups use bisect, so the list must stay sorted.
+        if bucket not in self.decode_buckets:
+            bisect.insort(self.decode_buckets, bucket)
+
     def find_prompt_bucket(self, batch_size, seq_len, ctx=0):
         if self.initialized:
             found_bucket = find_equal_or_closest_greater_config(self.prompt_buckets, (batch_size, seq_len, ctx))
@@ -553,6 +563,7 @@ def is_greater_or_equal(tuple1, tuple2):
 
 
 def find_equal_or_closest_greater_config(sorted_list, target_tuple):
+    # `sorted_list` must be sorted; an unsorted entry is invisible to bisect.
     idx = bisect.bisect_left(sorted_list, target_tuple)
     for i in range(idx, len(sorted_list)):
         if is_greater_or_equal(sorted_list[i], target_tuple):
