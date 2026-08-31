@@ -141,7 +141,7 @@ def test_pt_hpu_enable_lazy_collectives_default_and_respect():
 
 
 def test_compact_gdn_disables_synapse_input_reuse_default():
-    """Compact-GDN defaults PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE off (GAUDISW-247612)."""
+    """Compact-GDN defaults PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE off."""
     os.environ["VLLM_COMPACT_GDN"] = "1"
     with _set_lazy(False):
         HpuPlatform.set_compile_env_defaults()
