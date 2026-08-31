@@ -57,7 +57,7 @@ from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.platforms import current_platform
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
-from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
@@ -2010,7 +2010,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
                 # Input all modalities at once
                 mm_kwargs_combined: BatchedTensorInputs = {}
-                for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+                for _, _, mm_kwargs_group in group_and_batch_mm_kwargs(
                         mm_kwargs,
                         device=self.device,
                         pin_memory=self.pin_memory,
@@ -2053,7 +2053,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         encoder_outputs = []
-        for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
+        for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs,
                 device=self.device,
                 pin_memory=self.pin_memory,
@@ -6009,7 +6009,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # but not read from the cache
         assert dummy_mm_item is not None, "Item should not already be cached"
 
-        return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+        return next(mm_kwargs_group for _, _, mm_kwargs_group in group_and_batch_mm_kwargs(
             [(modality, dummy_mm_item)] * batch,
             device=self.device,
             pin_memory=self.pin_memory,
