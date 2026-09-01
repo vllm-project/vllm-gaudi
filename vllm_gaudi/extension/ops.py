@@ -391,6 +391,49 @@ def _naive_prompt_attention(query: torch.Tensor,
 
 USING_INC = os.getenv("QUANT_CONFIG") is not None
 
+# FusedSDPA indexes each q x kv plane of the attention bias with a 32-bit signed byte offset, so at
+# 2**31 bytes the offset wraps and the forward silently returns NaN instead of raising. Measured on
+# Gaudi3: a [1, 1, 8192, 130944] bf16 plane (2,145,386,496 B) is clean, [1, 1, 8192, 131072] (2**31 B)
+# is not. The offset resets per plane, so batch size does not enter (a bs=2 tensor of 2.02 GiB whose
+# planes are 1.01 GiB each runs clean).
+_FSDPA_PLANE_MAX_BYTES = 2**31
+
+
+def _fsdpa_num_q_tiles(attn_bias: Optional[torch.Tensor]) -> int:
+    """Number of query tiles that keep each indexed q x kv plane under _FSDPA_PLANE_MAX_BYTES.
+
+    Returns 1 (no tiling) when enable_fsdpa_q_tiling is off or the plane already fits, so shapes
+    that are not at risk keep taking a byte-identical path through the kernel.
+
+    The overflow is a signed-int32 byte offset the kernel forms while striding the bias plane, so
+    the limit is byte-based on the bias's own element size and independent of the softmax precision
+    (fp32 softmax upcasts internally but still strides the 2 B/elem bias -- confirmed no overflow at
+    a 1.06 GiB bf16 plane under fp32 softmax).
+    """
+    if attn_bias is None or not get_config().enable_fsdpa_q_tiling:
+        return 1
+    plane_elem_bytes = attn_bias.element_size()
+    # bias is [bs, 1, q_len, kv_len]; the kernel indexes one q_len x kv_len plane at a time.
+    q_len = attn_bias.size(-2)
+    kv_len = attn_bias.size(-1)
+    plane_bytes = q_len * kv_len * plane_elem_bytes
+    if plane_bytes < _FSDPA_PLANE_MAX_BYTES or q_len <= 1:
+        return 1
+    # tiling splits q_len, so the cost per query row is fixed.
+    row_bytes = plane_bytes // q_len
+    num_tiles = math.ceil(plane_bytes / _FSDPA_PLANE_MAX_BYTES)
+    # Guard the rounding: ceil(q_len / num_tiles) can exceed the even split, so confirm the
+    # resulting tile really fits and grow the count if it does not.
+    while num_tiles < q_len and math.ceil(q_len / num_tiles) * row_bytes >= _FSDPA_PLANE_MAX_BYTES:
+        num_tiles += 1
+
+    # logger.warning(
+    #     "Q-tiling FusedSDPA prompt attention: bias %s indexed plane is %d bytes (%dB/elem, "
+    #     ">= %d, the 32-bit FusedSDPA limit); splitting the query dim into %d tiles.",
+    #     tuple(attn_bias.shape), plane_bytes, plane_elem_bytes, _FSDPA_PLANE_MAX_BYTES, num_tiles)
+
+    return num_tiles
+
 
 def _fsdpa_prompt_attention(query: torch.Tensor,
                             key: torch.Tensor,
@@ -421,18 +464,39 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         is_causal = False
         valid_seq_lengths = None
 
-    args = [
-        query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
-        padding_side
-    ]
-    if sinks is not None:
-        args += [window_size] if window_size else [None]
+    def call_fsdpa(q, bias):
+        args = [
+            q, key, value, bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths, padding_side
+        ]
+        if sinks is not None:
+            args += [window_size] if window_size else [None]
+        else:
+            args += [window_size] if window_size else []
+        # use sinks in fsdpa
+        if sinks is not None:
+            args += [sinks]
+        return fsdpa_op(*args)
+
+    # The kernel overflows a signed-int32 *byte* offset while striding the bias plane, so the limit
+    # tracks the bias element size regardless of softmax precision (fp32 softmax upcasts internally
+    # but still strides the 2 B/elem bias). No fp32 special-casing needed.
+    num_q_tiles = _fsdpa_num_q_tiles(attn_bias)
+    if num_q_tiles == 1:
+        attn_weights = call_fsdpa(query, attn_bias)
     else:
-        args += [window_size] if window_size else []
-    # use sinks in fsdpa
-    if sinks is not None:
-        args += [sinks]
-    attn_weights = fsdpa_op(*args)
+        # Attention rows are independent: a query tile attends to the full K/V, so its softmax is
+        # already complete and the tiles simply concatenate. No online rescaling is needed, unlike
+        # the KV chunking done by SlicedFusedSDPA. The explicit bias carries the causal structure,
+        # so each tile only needs the matching rows of it.
+        q_len = query.size(-2)
+        tile = math.ceil(q_len / num_q_tiles)
+        tiles = []
+        for start in range(0, q_len, tile):
+            end = min(start + tile, q_len)
+            # Views, not copies: the bias slice is already contiguous (the trailing dim is whole),
+            # and the untiled path likewise hands the kernel a transposed, non-contiguous query.
+            tiles.append(call_fsdpa(query[..., start:end, :], attn_bias[..., start:end, :]))
+        attn_weights = torch.cat(tiles, dim=-2)
 
     attn_weights = attn_weights.transpose(1, 2)
     if sinks is not None:
