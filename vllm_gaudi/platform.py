@@ -9,6 +9,7 @@ import habana_frameworks.torch as htorch
 from vllm import envs
 
 from vllm.platforms import Platform, PlatformEnum
+import vllm_gaudi.envs as gaudi_envs
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.logger import logger as init_logger
 
@@ -465,7 +466,7 @@ class HpuPlatform(Platform):
         # turn it off on this path. Disabling it may slightly raise peak memory (a
         # persistent input's memory is no longer reused as scratch) but has no
         # compute/latency impact. Never overwrites a user-provided value.
-        if os.environ.get('VLLM_COMPACT_GDN', '0').strip().lower() in ('1', 'true'):
+        if gaudi_envs.VLLM_COMPACT_GDN:
             if os.environ.get('PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE') is None:
                 os.environ['PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE'] = '0'
 
