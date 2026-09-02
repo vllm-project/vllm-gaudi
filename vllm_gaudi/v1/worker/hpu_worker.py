@@ -608,6 +608,17 @@ class HPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)  # type: ignore[union-attr]
 
+    def synchronize_device(self) -> None:
+        """Block until in-flight HPU work completes.
+
+        Overrides WorkerBase, whose default calls torch.accelerator.synchronize(). HPU registers as a
+        torch accelerator but rejects a device-wide multi-stream wait, so the base default raises
+        RuntimeError once EngineCore broadcasts "synchronize_device" on every pause (e.g. LLM.sleep()).
+        """
+        if is_fake_hpu():
+            return
+        torch.hpu.synchronize()
+
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
 

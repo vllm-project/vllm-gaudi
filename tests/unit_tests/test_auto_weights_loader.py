@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 
 class ModuleWithBatchNorm(torch.nn.Module):
@@ -97,8 +97,11 @@ def test_module_skip_prefix():
     assert not torch.all(new_mod.nested_mod.bn.running_var == mod.nested_mod.bn.running_var)
     assert new_mod.nested_mod.bn.num_batches_tracked.item() == 0
 
-    loader = AutoWeightsLoader(new_mod, skip_prefixes=["prefix."])
-    loader.load_weights(weight_generator())
+    loader = AutoWeightsLoader(new_mod)
+    loader.load_weights(
+        weight_generator(),
+        mapper=WeightsMapper(orig_to_new_prefix={"prefix.": None}),
+    )
 
     # Ensure the stats are updated
     assert torch.all(new_mod.nested_mod.bn.running_mean == mod.nested_mod.bn.running_mean)
@@ -129,8 +132,11 @@ def test_module_skip_substr():
     assert not torch.all(new_mod.nested_mod.bn.running_var == mod.nested_mod.bn.running_var)
     assert new_mod.nested_mod.bn.num_batches_tracked.item() == 0
 
-    loader = AutoWeightsLoader(new_mod, skip_substrs=["substr."])
-    loader.load_weights(weight_generator())
+    loader = AutoWeightsLoader(new_mod)
+    loader.load_weights(
+        weight_generator(),
+        mapper=WeightsMapper(orig_to_new_substr={"substr.": None}),
+    )
 
     # Ensure the stats are updated
     assert torch.all(new_mod.nested_mod.bn.running_mean == mod.nested_mod.bn.running_mean)

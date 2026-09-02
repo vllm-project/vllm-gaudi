@@ -12,6 +12,14 @@ Currently:
 * ``torch._C._host_emptyCache`` — does not exist on HPU; we install a no-op
   stub to prevent ``AttributeError`` in ``cleanup_dist_env_and_memory``.
 
+* ``torch.accelerator.empty_host_cache`` — vllm PR #51107 switched
+  ``cleanup_dist_env_and_memory`` from ``torch._C._host_emptyCache()`` to
+  ``torch.accelerator.empty_host_cache()``.  On torch>=2.9 the attribute exists,
+  so vllm's ``except AttributeError`` guard no longer catches it; the call
+  dispatches to ``at::accelerator::emptyHostCache()``, which has no HPU host-cache
+  hook and segfaults at teardown.  We replace it with a no-op (sibling of the
+  ``empty_cache`` patch above).
+
 * ``vllm.distributed.parallel_state.cleanup_dist_env_and_memory`` — upstream
   (since vllm PR #34328) calls ``torch.accelerator.empty_cache()``, which
   requires the device's allocator to be a ``c10::DeviceAllocator``.  We
@@ -127,6 +135,19 @@ def _hpu_accelerator_empty_cache() -> None:
     empty_cache = current_platform.empty_cache
     if empty_cache is not None:
         empty_cache()
+
+
+def _hpu_accelerator_empty_host_cache() -> None:
+    """HPU-safe replacement for ``torch.accelerator.empty_host_cache()``.
+
+    HPU has no host-cache-release hook; the upstream C++ path
+    (``at::accelerator::emptyHostCache()``) segfaults at teardown. vLLM PR
+    #51107 swapped ``torch._C._host_emptyCache()`` for
+    ``torch.accelerator.empty_host_cache()`` in ``cleanup_dist_env_and_memory``,
+    and on torch>=2.9 the attribute exists so the upstream
+    ``except AttributeError`` guard no longer catches it.  Make it a no-op.
+    """
+    return
 
 
 def _patch_hf3fs_mock_client_for_cpu_only() -> None:
@@ -849,6 +870,10 @@ def apply() -> None:
     """Install all HPU runtime monkey-patches."""
     # --- torch.accelerator.empty_cache ---
     torch.accelerator.empty_cache = _hpu_accelerator_empty_cache
+
+    # --- torch.accelerator.empty_host_cache ---
+    if hasattr(torch.accelerator, "empty_host_cache"):
+        torch.accelerator.empty_host_cache = _hpu_accelerator_empty_host_cache
 
     # --- torch._C._host_emptyCache ---
     if not hasattr(torch._C, "_host_emptyCache"):

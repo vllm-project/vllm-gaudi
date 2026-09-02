@@ -24,7 +24,7 @@ from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launchers.launcher import serve_http
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.openai.api_server import build_app, setup_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.launchers.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.launchers.utils.server_utils import get_uvicorn_log_config
@@ -248,7 +248,7 @@ class MultiModelServingModels(OpenAIServingModels):
         return self.base_model_paths[0].name == model_name
 
     async def show_available_models(self):
-        from vllm.entrypoints.openai.engine.protocol import (
+        from vllm.entrypoints.serve.engine.protocol import (
             ModelCard,
             ModelList,
             ModelPermission,

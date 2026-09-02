@@ -22,12 +22,13 @@ def register_model():
     ModelRegistry.register_model("Qwen3VLMoeForConditionalGeneration",
                                  "vllm_gaudi.models.qwen3_vl_moe:HpuQwen3_VLMoeForConditionalGeneration")
 
-    from vllm_gaudi.models.hunyuan_v1 import HpuHunYuanDenseV1ForCausalLM  # noqa: F401
-    ModelRegistry.register_model("HunYuanDenseV1ForCausalLM",
-                                 "vllm_gaudi.models.hunyuan_v1:HpuHunYuanDenseV1ForCausalLM")
-
-    from vllm_gaudi.models.hunyuan_v1 import HpuHunYuanMoEV1ForCausalLM  # noqa: F401
-    ModelRegistry.register_model("HunYuanMoEV1ForCausalLM", "vllm_gaudi.models.hunyuan_v1:HpuHunYuanMoEV1ForCausalLM")
+    # HunYuanDenseV1ForCausalLM / HunYuanMoEV1ForCausalLM are intentionally not
+    # overridden here: upstream vLLM (#53615) deleted the native
+    # vllm.model_executor.models.hunyuan_v1 module our HPU subclasses derived
+    # from and now serves both architectures through the Transformers modeling
+    # backend. The override only added .contiguous() on the qk-norm reshape
+    # views of the deleted HunYuanAttention, so it has nothing left to
+    # specialize.
 
     from vllm_gaudi.models.minimax_m2 import HpuMiniMaxM2ForCausalLM  # noqa: F401
     ModelRegistry.register_model("MiniMaxM2ForCausalLM", "vllm_gaudi.models.minimax_m2:HpuMiniMaxM2ForCausalLM")
