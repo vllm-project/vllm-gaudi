@@ -3,6 +3,9 @@ from itertools import islice
 
 from vllm.distributed import get_pp_group
 from vllm.model_executor.models import deepseek_v2
+from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV32IndexerCache, Indexer)
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.sequence import IntermediateTensors
 
 
@@ -87,24 +90,65 @@ def _hpu_deepseek_v2_model_forward(
 # Applies to DeepseekV2/V3/Deepseek/GlmMoe/DSA — all share model_cls = DeepseekV2Model.
 deepseek_v2.DeepseekV2Model.forward = _hpu_deepseek_v2_model_forward
 
-_orig_deepseek_v2_model_load_weights = deepseek_v2.DeepseekV2Model.load_weights
+
+# ---------------------------------------------------------------------------
+# DSA / Indexer enablement on HPU
+# ---------------------------------------------------------------------------
+
+# --- IndexerCache: BF16 storage instead of FP8 uint8 -----------------------
+_orig_indexer_cache_init = DeepseekV32IndexerCache.__init__
 
 
-def _hpu_deepseek_v2_model_load_weights(self, weights):
-    """Drop GLM-5 DSA shared-indexer projection weights (`indexers_proj`).
-
-    vLLM's DeepseekV2Model has no module for them, and on HPU DSA layers run
-    as dense MLA with the indexer never executed, so the projection that
-    shares indexer K caches across layers is dead weight here.
-    """
-
-    def _filtered(ws):
-        for name, weight in ws:
-            if ".indexers_proj." in name:
-                continue
-            yield name, weight
-
-    return _orig_deepseek_v2_model_load_weights(self, _filtered(weights))
+def _hpu_indexer_cache_init(self, head_dim, dtype, prefix, cache_config):
+    if dtype == torch.uint8:
+        head_dim = head_dim * 128 // (128 + 4)
+        dtype = torch.bfloat16
+    _orig_indexer_cache_init(self, head_dim, dtype, prefix, cache_config)
 
 
-deepseek_v2.DeepseekV2Model.load_weights = _hpu_deepseek_v2_model_load_weights
+DeepseekV32IndexerCache.__init__ = _hpu_indexer_cache_init
+
+
+def _hpu_indexer_cache_get_attn_backend(self):
+    from vllm_gaudi.attention.backends.hpu_attn import HPUMLAAttentionBackend
+    return HPUMLAAttentionBackend
+
+
+DeepseekV32IndexerCache.get_attn_backend = _hpu_indexer_cache_get_attn_backend
+
+
+# --- Indexer.forward: BF16 path, skip FP8 quantization ---------------------
+def _hpu_indexer_forward(self, hidden_states, qr, positions, rotary_emb):
+    q, _ = self.wq_b(qr)
+    q = q.view(-1, self.n_head, self.head_dim)
+    q_pe, q_nope = torch.split(
+        q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
+    kw, _ = self.wk_weights_proj(hidden_states)
+    kw = kw.reshape(-1, kw.shape[-1])
+    k, weights = torch.split(kw, [self.head_dim, self.n_head], dim=-1)
+    k = self.k_norm(k.contiguous())
+    k_pe, k_nope = torch.split(
+        k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
+    q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+    q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+    k_pe = k_pe.reshape(-1, self.rope_dim)
+    k_nope = k_nope.reshape(-1, self.head_dim - self.rope_dim)
+    q = torch.cat([q_pe, q_nope], dim=-1)
+    k = torch.cat([k_pe, k_nope], dim=-1)
+    weights = weights.reshape(-1, self.n_head) * self.softmax_scale * self.n_head_scale
+    return self.indexer_op(hidden_states, q, k, weights)
+
+
+Indexer.forward = _hpu_indexer_forward
+
+
+# --- SparseAttnIndexer: dispatch to HPU forward -----------------------------
+_orig_forward_native = SparseAttnIndexer.forward_native
+
+
+def _hpu_sparse_indexer_forward_native(self, hidden_states, q_quant, k, weights):
+    from vllm_gaudi.ops.hpu_sparse_attn_indexer import forward_hpu
+    return forward_hpu(self, hidden_states, q_quant, k, weights)
+
+
+SparseAttnIndexer.forward_native = _hpu_sparse_indexer_forward_native

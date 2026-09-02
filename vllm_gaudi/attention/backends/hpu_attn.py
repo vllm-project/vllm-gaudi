@@ -353,19 +353,70 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                   kv_lora_rank=self.kv_lora_rank)
         return output
 
+    @torch.compiler.disable
+    def forward_mqa_sparse(self, q, k_cache, attn_metadata, topk_indices):
+        """Sparse MLA decode: attend to only the top-K cache entries."""
+        if isinstance(k_cache, tuple):
+            k_cache = k_cache[0]
+        batch_size = q.shape[0]
+        topk = topk_indices.shape[1]
+
+        # Gather top-K latent KV from cache using physical slot indices
+        flat_idx = topk_indices[:batch_size].reshape(-1)
+        selected = k_cache[flat_idx].view(batch_size, topk, -1)
+
+        # Decompress KV
+        k_c, k_pe = selected.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_nope = self.kv_b_proj(k_c.reshape(-1, self.kv_lora_rank))[0]
+        kv_nope = kv_nope.view(
+            batch_size, topk, self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim)
+        k_nope, v = kv_nope.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k_pe_exp = k_pe.unsqueeze(2).expand(-1, -1, self.num_heads, -1)
+        key = torch.cat([k_nope, k_pe_exp], dim=-1)
+
+        # q: [B, H, D] -> [B, H, 1, D]
+        # key: [B, T, H, D] -> [B, H, T, D]
+        key = key.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        attn = torch.matmul(q.unsqueeze(2), key.transpose(-1, -2))
+
+        seq_lens = getattr(attn_metadata, "seq_lens_tensor", None)
+        if seq_lens is None:
+            context_lens = getattr(attn_metadata, "context_lens_tensor", None)
+            seq_lens = context_lens + 1 if context_lens is not None else None
+        if seq_lens is None:
+            seq_lens = torch.full((batch_size,), topk,
+                                  dtype=torch.long, device=q.device)
+        else:
+            seq_lens = seq_lens[:batch_size]
+        valid_topk = seq_lens.clamp(max=topk)
+        pad_mask = (torch.arange(topk, device=q.device).unsqueeze(0)
+                    >= valid_topk.unsqueeze(1))
+        attn = attn.masked_fill(
+            pad_mask.unsqueeze(1).unsqueeze(2), float("-inf"))
+
+        attn = torch.softmax(attn * self.scale, dim=-1)
+        out = torch.matmul(attn, v).squeeze(2)
+        return out.reshape(-1, self.num_heads * self.v_head_dim)
+
     # NOTE(Xinyu): Make the loaded weight contiguous to avoid the transpose
     # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        # Since vllm#48251 the base process_weights_after_loading registers
-        # W_UV and W_UK_T as nn.Parameter (via replace_parameter), so a plain
-        # tensor reassignment raises TypeError. Route the contiguous/.to("hpu")
-        # update back through replace_parameter to preserve the registration.
-        # When INC CPU-first loading is active the source weights live on CPU,
-        # making these derived tensors CPU-resident too — which then causes a
-        # device mismatch at the bmm calls in forward.  Explicitly place on HPU.
-        replace_parameter(self, "W_UV", self.W_UV.contiguous().to("hpu"))
-        replace_parameter(self, "W_UK_T", self.W_UK_T.contiguous().to("hpu"))
+        # Upstream moved MLA weight packing off the attention impl onto the
+        # MLAAttention module, so the base process_weights_after_loading is now
+        # the AttentionImplBase no-op and W_UV/W_UK_T are no longer registered on
+        # the impl. Only massage them when this impl actually owns them: they are
+        # registered as nn.Parameter, so route through replace_parameter to keep
+        # the registration; .to("hpu") avoids a CPU/HPU bmm device mismatch under
+        # INC CPU-first loading.
+        for name in ("W_UV", "W_UK_T"):
+            weight = getattr(self, name, None)
+            if weight is not None:
+                replace_parameter(self, name, weight.contiguous().to("hpu"))
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
