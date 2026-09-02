@@ -466,9 +466,8 @@ class HpuPlatform(Platform):
         # turn it off on this path. Disabling it may slightly raise peak memory (a
         # persistent input's memory is no longer reused as scratch) but has no
         # compute/latency impact. Never overwrites a user-provided value.
-        if gaudi_envs.VLLM_COMPACT_GDN:
-            if os.environ.get('PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE') is None:
-                os.environ['PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE'] = '0'
+        if gaudi_envs.VLLM_COMPACT_GDN and os.environ.get('PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE') is None:
+            os.environ['PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE'] = '0'
 
     @classmethod
     def adjust_cuda_hooks(cls) -> None:
