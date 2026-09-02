@@ -382,6 +382,22 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         key = key.permute(0, 2, 1, 3)
         v = v.permute(0, 2, 1, 3)
         attn = torch.matmul(q.unsqueeze(2), key.transpose(-1, -2))
+
+        seq_lens = getattr(attn_metadata, "seq_lens_tensor", None)
+        if seq_lens is None:
+            context_lens = getattr(attn_metadata, "context_lens_tensor", None)
+            seq_lens = context_lens + 1 if context_lens is not None else None
+        if seq_lens is None:
+            seq_lens = torch.full((batch_size,), topk,
+                                  dtype=torch.long, device=q.device)
+        else:
+            seq_lens = seq_lens[:batch_size]
+        valid_topk = seq_lens.clamp(max=topk)
+        pad_mask = (torch.arange(topk, device=q.device).unsqueeze(0)
+                    >= valid_topk.unsqueeze(1))
+        attn = attn.masked_fill(
+            pad_mask.unsqueeze(1).unsqueeze(2), float("-inf"))
+
         attn = torch.softmax(attn * self.scale, dim=-1)
         out = torch.matmul(attn, v).squeeze(2)
         return out.reshape(-1, self.num_heads * self.v_head_dim)
