@@ -15,6 +15,7 @@ import os
 
 import torch
 
+import vllm_gaudi.envs as gaudi_envs
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
@@ -33,7 +34,7 @@ _GDN_COMPUTE_DTYPE = torch.float32 if os.getenv("VLLM_GDN_COMPUTE_FP32", "1") ==
 # instead of the Neumann iterative solver.  Exact but ~2.6x slower (127
 # Python-loop iterations for chunk_size=128).  Useful for isolating
 # accuracy issues to the solver vs other sources.
-_USE_EXACT_SOLVE = os.getenv("VLLM_GDN_EXACT_SOLVE", "0") == "1"
+_USE_EXACT_SOLVE = gaudi_envs.VLLM_GDN_EXACT_SOLVE
 
 
 def _preprocess_qk_l2norm(q, k):

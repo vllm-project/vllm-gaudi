@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS: int = 16
     VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY: bool = False
     VLLM_COMPACT_GDN: bool = False
+    VLLM_GDN_EXACT_SOLVE: bool = False
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -94,6 +95,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # it lazily rather than caching it at import time.
     "VLLM_COMPACT_GDN":
     lambda: os.environ.get("VLLM_COMPACT_GDN", "0").strip().lower() in ("1", "true"),
+
+    # Use exact row-by-row forward substitution instead of the Neumann
+    # iterative solver in the gated delta net chunk pipeline. Exact but
+    # significantly slower (one Python-loop iteration per chunk row), so it is
+    # a debug-only toggle for isolating accuracy issues to the solver.
+    "VLLM_GDN_EXACT_SOLVE":
+    lambda: os.environ.get("VLLM_GDN_EXACT_SOLVE", "0").strip().lower() in ("1", "true"),
 }
 
 # end-env-vars-definition
