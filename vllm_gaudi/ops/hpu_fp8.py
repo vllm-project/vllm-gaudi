@@ -2,6 +2,8 @@ from functools import partial
 from typing import Optional
 
 import torch
+from vllm.distributed import get_ep_group
+from vllm.logger import init_logger
 from vllm_gaudi import envs
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
@@ -22,6 +24,69 @@ from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
     PerTensorTorchFP8ScaledMMLinearKernel,
     ChannelWiseTorchFP8ScaledMMLinearKernel,
 )
+
+logger = init_logger(__name__)
+
+# EXPERIMENTAL custom MoE combine: replace the Habana mixture_of_experts op (a
+# fixed per-layer stage pipeline) with a pure-PyTorch gathered-expert path.
+# Default stock. `VLLM_HPU_MOE_GATHER_VERIFY=1` (with VLLM_HPU_MOE_GATHER=1) runs
+# BOTH the custom path and the Habana op on the same inputs and reduces their
+# maximum FP8-ULP over the expert-parallel group in-memory (no files).
+_HPU_MOE_GATHER = envs.VLLM_HPU_MOE_GATHER
+# Only meaningful together with the gather path.
+_HPU_MOE_GATHER_VERIFY = envs.VLLM_HPU_MOE_GATHER_VERIFY and _HPU_MOE_GATHER
+# Correctness bar for the verify path: any element exceeding this many FP8-ULP
+# is an error (matches the archived offline analysis' "no element > 2 ULP" bar).
+_HPU_MOE_GATHER_VERIFY_MAX_ULP = 2
+# Max tokens*topk (== gathered-expert count g) for which the custom gather path
+# is used. The gathered pure-PyTorch path wins below ~g=64 and LOSES to the stock
+# fused op once g approaches E (the dense gather + fp32 bmm path is slower than
+# the Habana op).
+_HPU_MOE_GATHER_MAX_TP = envs.VLLM_HPU_MOE_GATHER_MAX_TP
+if _HPU_MOE_GATHER:
+    from vllm_gaudi.ops.hpu_moe_combine import gather_silu_fp8_moe  # noqa: E402
+else:
+    gather_silu_fp8_moe = None  # type: ignore[assignment]
+
+if _HPU_MOE_GATHER_VERIFY:
+    logger.info("MoE gather combine VERIFY mode enabled: comparing custom vs stock "
+                "per layer (FP8-ULP bar = %d)", _HPU_MOE_GATHER_VERIFY_MAX_ULP)
+
+
+def _fp8_ulp(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Sign-aware FP8-ULP distance (ported from the archived `moe_ulp.fp8_ulp`).
+
+    Same-sign pairs use real E4M3 ulps: |uint8(quantize(a)) - uint8(quantize(b))|.
+    In E4M3FN adjacent same-sign representable values differ by exactly +/-1 in
+    uint8, so this IS the representable-step count. Cross-sign pairs use
+    universal subnormal units |a - b| / 2^-9. Returns elementwise Float32 ulps.
+    """
+    a_fp32 = a.float()
+    b_fp32 = b.float()
+    a_bits = a_fp32.to(torch.float8_e4m3fn).view(torch.uint8).int()
+    b_bits = b_fp32.to(torch.float8_e4m3fn).view(torch.uint8).int()
+    same_sign = (a_bits >= 128) == (b_bits >= 128)
+    same_sign_ulp = (a_bits - b_bits).abs().float()
+    cross_ulp = (a_fp32 - b_fp32).abs() / (2.0**-9)
+    return torch.where(same_sign, same_sign_ulp, cross_ulp)
+
+
+def _verify_moe_combine(stock: torch.Tensor, custom: torch.Tensor) -> torch.Tensor:
+    if not _HPU_MOE_GATHER_VERIFY:
+        return stock
+    max_ulp = _fp8_ulp(stock, custom).amax()
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        ep_group = get_ep_group()
+        if ep_group.world_size > 1:
+            torch.distributed.all_reduce(
+                max_ulp,
+                op=torch.distributed.ReduceOp.MAX,
+                group=ep_group.device_group,
+            )
+    if max_ulp > _HPU_MOE_GATHER_VERIFY_MAX_ULP:
+        logger.warning("MoE gather combine mismatch: max FP8-ULP = %s exceeds %d", max_ulp.item(),
+                       _HPU_MOE_GATHER_VERIFY_MAX_ULP)
+    return max_ulp
 
 
 class HPUPerTensorTorchFP8ScaledMMLinearKernel(PerTensorTorchFP8ScaledMMLinearKernel):
@@ -268,13 +333,31 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
-        output = layer.moe_op(
-            x,
-            topk_ids,
-            topk_weights,
-            permuted_weights=True,
-            activation=_normalize_moe_activation(layer.activation),
-        )
+        activation = _normalize_moe_activation(layer.activation)
+        # Use the custom gathered-expert combine only when it wins: g = tokens*K
+        # must stay small (below the dense crossover). Beyond that (large batch /
+        # long prefill) fall back to the stock fused op, which is faster and keeps
+        # the graph shapes fixed. `tokens`/`K` are static (T, K from x/topk_ids).
+        use_gather = (_HPU_MOE_GATHER and activation == "silu" and self.quant_config.activation_scheme != "static"
+                      and x.shape[0] * topk_ids.shape[-1] <= _HPU_MOE_GATHER_MAX_TP)
+        if use_gather:
+            # EXPERIMENTAL custom combine: gather only the routed experts
+            # (bypasses the Habana op's fixed per-layer stage pipeline).
+            if _HPU_MOE_GATHER_VERIFY:
+                stock = layer.moe_op(x, topk_ids, topk_weights, permuted_weights=True, activation=activation)
+                custom = gather_silu_fp8_moe(layer, x, topk_ids, topk_weights)
+                _verify_moe_combine(stock, custom)
+                output = custom
+            else:
+                output = gather_silu_fp8_moe(layer, x, topk_ids, topk_weights)
+        else:
+            output = layer.moe_op(
+                x,
+                topk_ids,
+                topk_weights,
+                permuted_weights=True,
+                activation=activation,
+            )
         return output.view(*(output.size(0), *input_shape[1:]))
 
 
