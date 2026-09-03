@@ -9,7 +9,6 @@ import habana_frameworks.torch as htorch
 from vllm import envs
 
 from vllm.platforms import Platform, PlatformEnum
-import vllm_gaudi.envs as gaudi_envs
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.logger import logger as init_logger
 
@@ -144,6 +143,7 @@ class HpuPlatform(Platform):
         # a lazy-mode subprocess (GAUDISW-248809) and always respect values the
         # user set explicitly (GAUDISW-249135).
         cls.set_compile_env_defaults()
+        cls._maybe_disable_synapse_input_reuse(vllm_config)
         parallel_config = vllm_config.parallel_config
 
         if parallel_config.worker_cls == "auto":
@@ -455,19 +455,63 @@ class HpuPlatform(Platform):
         # Allow utilization of the Parallel Compilation feature.
         if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
             os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
-        # Compact-GDN: disable Synapse persistent-input reuse.
+
+    @classmethod
+    def _compact_gdn_active(cls, vllm_config: VllmConfig) -> bool:
+        """Whether compact-GDN will be active for this model.
+
+        Mirrors the auto-detection in HPUModelRunner.__init__, which runs later
+        in the worker process (via init_device) and therefore cannot inform env
+        defaults applied here at engine-construction time. An explicitly set
+        VLLM_COMPACT_GDN always takes precedence over auto-detection.
+        """
+        explicit = os.environ.get('VLLM_COMPACT_GDN')
+        if explicit is not None:
+            return explicit.strip().lower() in ('1', 'true')
+        model_config = getattr(vllm_config, 'model_config', None)
+        if model_config is None:
+            return False
+        # granitemoehybrid relabels plain mamba layers as "linear_attention"; the
+        # model runner excludes it explicitly or num_gdn is misdetected as > 0.
+        if getattr(model_config.hf_config, 'model_type', None) == 'granitemoehybrid':
+            return False
+        try:
+            num_gdn = sum(
+                model_config.get_num_layers_by_block_type(vllm_config.parallel_config, bt)
+                for bt in ('gdn_attention', 'linear_attention'))
+        except Exception:
+            return False
+        if num_gdn <= 0:
+            return False
+        # Compact-GDN is auto-disabled for PD-disaggregated serving.
+        return getattr(vllm_config, 'kv_transfer_config', None) is None
+
+    @classmethod
+    def _maybe_disable_synapse_input_reuse(cls, vllm_config: VllmConfig) -> None:
+        # Compact-GDN: disable Synapse persistent-input reuse (torch.compile only).
         # With compact-GDN the recurrent-state (conv/ssm) read and write are split
         # across separate torch.compile recipes. Synapse's per-graph persistent-input
-        # reuse optimization can then reuse a still-live state buffer's memory as
-        # intra-graph scratch (the reading recipe cannot see that another recipe / the
-        # next step still needs it), corrupting the state and producing NaN output.
-        # The optimization is opt-in per input via the bridge; the reuse decision is
-        # made one recipe at a time and cannot detect this cross-recipe reuse, so we
-        # turn it off on this path. Disabling it may slightly raise peak memory (a
-        # persistent input's memory is no longer reused as scratch) but has no
-        # compute/latency impact. Never overwrites a user-provided value.
-        if gaudi_envs.VLLM_COMPACT_GDN and os.environ.get('PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE') is None:
-            os.environ['PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE'] = '0'
+        # reuse can then reuse a still-live state buffer's memory as intra-graph
+        # scratch (the reading recipe cannot see that another recipe / the next step
+        # still needs it), corrupting the state and producing NaN output. The reuse
+        # is opt-in per input and decided one recipe at a time, so it cannot detect
+        # this cross-recipe case; we turn it off on this path. Disabling it may
+        # slightly raise peak memory (a persistent input's memory is no longer reused
+        # as scratch) but has no compute/latency impact.
+        #
+        # Decided from vllm_config here (engine construction), not from the
+        # VLLM_COMPACT_GDN env var: the model runner only sets that later, in the
+        # worker process, where this default would no longer take effect. A
+        # user-provided PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE is never overwritten.
+        if htorch.utils.internal.is_lazy():
+            return
+        if not cls._compact_gdn_active(vllm_config):
+            return
+        if os.environ.get('PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE') is not None:
+            return
+        os.environ['PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE'] = '0'
+        logger.warning("Compact-GDN detected: defaulting PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE=0 "
+                       "to prevent cross-recipe persistent-input reuse from corrupting GDN state.")
 
     @classmethod
     def adjust_cuda_hooks(cls) -> None:

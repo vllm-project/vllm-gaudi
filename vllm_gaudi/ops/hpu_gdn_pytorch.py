@@ -15,7 +15,6 @@ import os
 
 import torch
 
-import vllm_gaudi.envs as gaudi_envs
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
@@ -34,21 +33,12 @@ _GDN_COMPUTE_DTYPE = torch.float32 if os.getenv("VLLM_GDN_COMPUTE_FP32", "1") ==
 # instead of the Neumann iterative solver.  Exact but ~2.6x slower (127
 # Python-loop iterations for chunk_size=128).  Useful for isolating
 # accuracy issues to the solver vs other sources.
-_USE_EXACT_SOLVE = gaudi_envs.VLLM_GDN_EXACT_SOLVE
+_USE_EXACT_SOLVE = os.getenv("VLLM_GDN_EXACT_SOLVE", "0") == "1"
 
 
+@torch._dynamo.disable
 def _preprocess_qk_l2norm(q, k):
-    """L2norm the q/k pair ahead of the chunk pipeline.
-
-    This was previously @torch._dynamo.disable'd to keep l2norm in eager mode.
-    That forced a graph break in the middle of the GDN preprocess stage, and
-    graph breaks are what split the recurrent-state read and write across
-    separate torch.compile recipes — the precondition for Synapse reusing a
-    still-live state buffer as intra-graph scratch. Dropping the break keeps
-    preprocess in one recipe. The op itself compiles correctly: _l2norm_last_dim
-    already runs compiled in the decode path (hpu_fused_recurrent_gated_delta_rule),
-    which no longer disables dynamo.
-    """
+    """L2norm in eager mode — HPU torch.compile miscompiles l2norm."""
     q = _l2norm_last_dim(q.to(torch.float32))
     k = _l2norm_last_dim(k.to(torch.float32))
     return q, k
