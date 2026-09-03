@@ -140,35 +140,75 @@ def test_pt_hpu_enable_lazy_collectives_default_and_respect():
     assert os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] == "false"
 
 
-def test_compact_gdn_disables_synapse_input_reuse_default():
-    """Compact-GDN defaults PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE off."""
-    os.environ["VLLM_COMPACT_GDN"] = "1"
+def _fake_vllm_config(*, model_type="qwen3_next", gdn_layers=0, kv_transfer=None):
+    """Minimal vllm_config stub for the compact-GDN detection helpers."""
+
+    def get_num_layers_by_block_type(parallel_config, block_type):
+        return gdn_layers if block_type == "gdn_attention" else 0
+
+    model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type=model_type),
+        get_num_layers_by_block_type=get_num_layers_by_block_type,
+    )
+    return SimpleNamespace(
+        model_config=model_config,
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=kv_transfer,
+    )
+
+
+def test_compact_gdn_active_auto_detected_from_config():
+    """GDN layers present, single-serving -> active without VLLM_COMPACT_GDN set."""
+    assert HpuPlatform._compact_gdn_active(_fake_vllm_config(gdn_layers=4)) is True
+    assert "VLLM_COMPACT_GDN" not in os.environ
+
+
+def test_compact_gdn_inactive_without_gdn_layers():
+    assert HpuPlatform._compact_gdn_active(_fake_vllm_config(gdn_layers=0)) is False
+
+
+def test_compact_gdn_excludes_granitemoehybrid():
+    cfg = _fake_vllm_config(model_type="granitemoehybrid", gdn_layers=4)
+    assert HpuPlatform._compact_gdn_active(cfg) is False
+
+
+def test_compact_gdn_disabled_for_pd_disaggregation():
+    cfg = _fake_vllm_config(gdn_layers=4, kv_transfer=SimpleNamespace())
+    assert HpuPlatform._compact_gdn_active(cfg) is False
+
+
+def test_compact_gdn_explicit_env_overrides_auto_detection():
+    os.environ["VLLM_COMPACT_GDN"] = "1"  # force on where auto would be off
+    assert HpuPlatform._compact_gdn_active(_fake_vllm_config(gdn_layers=0)) is True
+    os.environ["VLLM_COMPACT_GDN"] = "0"  # force off where auto would be on
+    assert HpuPlatform._compact_gdn_active(_fake_vllm_config(gdn_layers=4)) is False
+
+
+def test_disables_synapse_input_reuse_on_auto_detected_compact_gdn():
+    """The auto path (no VLLM_COMPACT_GDN exported) must still default the flag off."""
     with _set_lazy(False):
-        HpuPlatform.set_compile_env_defaults()
+        HpuPlatform._maybe_disable_synapse_input_reuse(_fake_vllm_config(gdn_layers=4))
     assert os.environ["PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE"] == "0"
+    assert "VLLM_COMPACT_GDN" not in os.environ
 
 
-def test_compact_gdn_respects_user_input_reuse_value():
-    """User-set PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE must not be overwritten."""
-    os.environ["VLLM_COMPACT_GDN"] = "1"
+def test_synapse_input_reuse_respects_user_value():
+    """A user-set PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE must not be overwritten."""
     os.environ["PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE"] = "1"
     with _set_lazy(False):
-        HpuPlatform.set_compile_env_defaults()
+        HpuPlatform._maybe_disable_synapse_input_reuse(_fake_vllm_config(gdn_layers=4))
     assert os.environ["PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE"] == "1"
 
 
-def test_input_reuse_untouched_without_compact_gdn():
-    """Without compact-GDN the Synapse input-reuse default is left alone."""
+def test_synapse_input_reuse_untouched_without_compact_gdn():
     with _set_lazy(False):
-        HpuPlatform.set_compile_env_defaults()
+        HpuPlatform._maybe_disable_synapse_input_reuse(_fake_vllm_config(gdn_layers=0))
     assert "PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE" not in os.environ
 
 
-def test_compact_gdn_input_reuse_lazy_is_noop():
-    """Lazy mode returns early, so the compact-GDN default is not applied."""
-    os.environ["VLLM_COMPACT_GDN"] = "1"
+def test_synapse_input_reuse_lazy_is_noop():
     with _set_lazy(True):
-        HpuPlatform.set_compile_env_defaults()
+        HpuPlatform._maybe_disable_synapse_input_reuse(_fake_vllm_config(gdn_layers=4))
     assert "PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE" not in os.environ
 
 
