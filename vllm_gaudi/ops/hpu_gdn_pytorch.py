@@ -537,6 +537,38 @@ def _eager_read_state(state: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype
     return state.index_select(0, idx).to(dtype)
 
 
+def _read_decayed_state(
+    state: torch.Tensor,
+    sidx: torch.Tensor,
+    g_2d: torch.Tensor,
+) -> torch.Tensor:
+    """Gather hidden state by sidx and apply per-head GDN decay exp(g).
+
+    Equivalent to:
+        h = state[sidx]
+        return h * exp(g_2d).to(state.dtype)[..., None, None]
+
+    state, gates and the kernel output share dtype (fp32 or bf16).  exp is
+    computed in fp32 to preserve precision for decay factors close to 1, then
+    cast to state.dtype once.
+
+    On Gaudi this dispatches to the fused TPC op.  For non-HPU tensors (the
+    CPU-only unit tests, which exercise the decode fast-path logic without
+    requiring hardware) it falls back to the eager gather + decay, which is
+    also the numerical reference the kernel matches.
+    """
+    sidx_i32 = sidx.to(torch.int32)
+    # state and gates must be contiguous: state is typically a non-contiguous
+    # KV-cache view, and the kernel's meta registration declares contiguous
+    # output strides.
+    gates = torch.exp(g_2d.to(torch.float32)).to(state.dtype).contiguous()
+    if state.device.type == "hpu" and hasattr(torch.ops.hpu, "gdn_read_decayed_state"):
+        return torch.ops.hpu.gdn_read_decayed_state(state.contiguous(), sidx_i32, gates)
+    # Eager fallback (CPU / op unavailable): same math as the kernel.
+    h = _eager_read_state(state, sidx_i32.long(), state.dtype)
+    return h * gates[..., None, None]
+
+
 def hpu_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -608,14 +640,20 @@ def hpu_fused_recurrent_gated_delta_rule(
         else:
             sidx = torch.arange(num_seqs, dtype=torch.long, device=device)
 
-        h_batch = _eager_read_state(final_state, sidx, _GDN_COMPUTE_DTYPE)
+        # Fused gather + exp(g) decay.  Output dtype = state.dtype.
+        # g is already fp32 from hpu_fused_gdn_gating.  When the caller
+        # requests _GDN_COMPUTE_DTYPE different from state.dtype, the cast
+        # happens after the kernel call below.
+        g_2d = g.reshape(-1, HV)
+        h_batch = _read_decayed_state(final_state, sidx, g_2d)
+        if h_batch.dtype != _GDN_COMPUTE_DTYPE:
+            h_batch = h_batch.to(_GDN_COMPUTE_DTYPE)
 
         # Flatten token axis.
         # Compute dtype controlled by VLLM_GDN_COMPUTE_FP32 env var (default: bf16)
         qf = q.reshape(-1, H, Kdim).to(_GDN_COMPUTE_DTYPE)
         kf = k.reshape(-1, H, Kdim).to(_GDN_COMPUTE_DTYPE)
         vf = v.reshape(-1, HV, Vdim).to(_GDN_COMPUTE_DTYPE)
-        gf = g.reshape(-1, HV).to(torch.float32)
         bf = beta.reshape(-1, HV).to(_GDN_COMPUTE_DTYPE)
 
         if use_qk_l2norm_in_kernel:
@@ -624,9 +662,7 @@ def hpu_fused_recurrent_gated_delta_rule(
 
         out_full = torch.zeros(num_seqs, HV, Vdim, dtype=v.dtype, device=device)
 
-        # Inline compute (no separate function boundary for this test).
         q_s = qf * scale
-        h_batch = h_batch * torch.exp(gf).to(h_batch.dtype).unsqueeze(-1).unsqueeze(-1)
         proj = torch.matmul(h_batch, kf.unsqueeze(-1)).squeeze(-1)
         v_new = (vf - proj) * bf.unsqueeze(-1)
         h_batch = h_batch + v_new.unsqueeze(-1) * kf.unsqueeze(2)
