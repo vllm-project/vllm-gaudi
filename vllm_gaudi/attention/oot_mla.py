@@ -55,6 +55,21 @@ class HPUMLAAttention(MLAAttention):
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
 
+    def bind_kv_cache(self, kv_cache) -> None:
+        """Store the HPU per-layer KV-cache tuple unchanged.
+
+        vllm#51718 changed ``vllm.v1.worker.utils.bind_kv_cache`` to delegate
+        binding to each layer's own ``bind_kv_cache`` and added
+        ``MLAAttention.bind_kv_cache`` whose body is
+        ``self.kv_cache = kv_cache.squeeze(1)`` — it assumes a single packed
+        ``[B, H=1, N, C]`` tensor. On HPU the model runner allocates a per-layer
+        ``(key_cache, value_cache, key_scales, value_scales)`` tuple for MLA
+        layers and ``forward_impl`` consumes it directly (``kv_cache[0]``), so
+        the upstream ``.squeeze`` raises ``AttributeError: 'tuple' object has no
+        attribute 'squeeze'``. Keep the tuple as-is for the HPU path.
+        """
+        self.kv_cache = kv_cache
+
     def forward(
         self,
         q: torch.Tensor,
@@ -150,11 +165,14 @@ class HPUMLAAttention(MLAAttention):
         if is_prefill:
             output = self.impl.forward_mha(q, latent_vec_k, kv_cache, attn_metadata)
             return output
+        elif self.use_sparse and getattr(self, 'topk_indices_buffer', None) is not None:
+            output = self.impl.forward_mqa_sparse(
+                q, kv_cache, attn_metadata, self.topk_indices_buffer)
+            return output
         else:
             output = self.impl.forward_mqa(decode_ql_nope, q_pe, kv_cache, attn_metadata)
             output = self._v_up_proj(output)
             return output
-            # NOTE(Xinyu): Make the loaded weight contiguous to avoid the transpose
 
     # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -295,10 +313,7 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
         self.g_proj = mla_modules.g_proj
 
-        # DSA sparse attention is not implemented on HPU: sparse layers run as
-        # dense MLA and the indexer must never be invoked (its kernels and the
-        # DeepseekV32IndexerBackend are CUDA-only).
-        self.skip_topk = skip_topk or self.is_sparse
+        self.skip_topk = skip_topk
         # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
         # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
         # we do not override forward) reads and forwards to mla_attn. Because we
@@ -328,8 +343,8 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             quant_config=quant_config,
             prefix=layer_name,
             kv_b_proj=self.kv_b_proj,
-            # Dense-MLA fallback: never request a sparse backend on HPU.
-            use_sparse=False,
+            use_sparse=self.is_sparse,
             indexer=self.indexer,
+            topk_indices_buffer=mla_modules.topk_indices_buffer,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
