@@ -828,6 +828,9 @@ def create_fused_moe_router(
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    # Deepseek V4 vision routing bias parameters
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -875,6 +878,12 @@ def create_fused_moe_router(
     Hash Indices Table:
         hash_indices_table: Used to map input_ids to experts, needed for
             Deepseek V4
+
+    Vision routing bias arguments (upstream vLLM PR 54566+):
+        bias_vl: Vision routing bias for image tokens (Deepseek V4).
+        image_sentinel_lo: First of five consecutive in-vocab image sentinel
+            ids (0 = vision routing disabled). Both are forwarded to
+            FusedTopKBiasRouter, which owns the vision-bias routing path.
 
     Returns:
         An instance of the appropriate FusedMoERouter subclass
@@ -944,6 +953,8 @@ def create_fused_moe_router(
             hash_indices_table=hash_indices_table,
             num_fused_shared_experts=num_fused_shared_experts,
             shared_expert_weight=shared_expert_weight,
+            bias_vl=bias_vl,
+            image_sentinel_lo=image_sentinel_lo,
         )
 
     return FusedTopKRouter(
