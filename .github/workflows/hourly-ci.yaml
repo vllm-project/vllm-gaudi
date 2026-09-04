@@ -8,6 +8,8 @@ on:
   # decides at runtime whether a given tick actually proceeds. Effective cadence:
   #   - last real run PASSED  -> run every 8h (this schedule, every tick)
   #   - last real run FAILED  -> back off to once every 24h (skip 2 of every 3 ticks)
+  # A green manual run counts as a PASS and therefore clears an active back-off,
+  # restoring the 8h cadence at the next tick; a red manual run is ignored.
   schedule:
     # Runs at minute 0, every 8th hour (00:00, 08:00, 16:00 UTC)
     - cron: '0 */8 * * *'
@@ -24,6 +26,8 @@ jobs:
   # JOB 0: (NEW) Decides whether this scheduled tick should proceed.
   # Adaptive cadence: healthy pipeline runs every 8h; a failing pipeline backs
   # off to every 24h so we don't burn HPU runners re-running a known-broken state.
+  # Health is read from the newest run that really produced a verdict: any
+  # scheduled run, or a *green* manual one (which therefore ends the back-off early).
   gate:
     # Runs on a cheap GitHub-hosted runner so a "skip" never locks an HPU runner.
     runs-on: ubuntu-latest
@@ -54,10 +58,11 @@ jobs:
             exit 0
           fi
 
-          # Only *scheduled* runs define the "hourly" health; manual dispatches
-          # always run (handled above) and must not skew the cadence.
+          # Both trigger types are fetched; the filter below decides which of them
+          # may define the cadence. per_page is generous because the list now mixes
+          # scheduled ticks with manual dispatches.
           RUNS=$(curl -fsSL -H "$AUTH" -H "$ACCEPT" \
-            "$API/actions/workflows/hourly-ci.yaml/runs?branch=main&event=schedule&status=completed&per_page=30")
+            "$API/actions/workflows/hourly-ci.yaml/runs?branch=main&status=completed&per_page=50")
 
           # Find the most recent *real* run: one that actually executed the pipeline,
           # i.e. run_unit_tests finished as 'success' or 'failure'. A backed-off tick
@@ -66,9 +71,34 @@ jobs:
           # failing the gate (rather than cancelling the run): the run is marked red in
           # the UI, but the health signal we read here is left untouched, so the gate
           # never mistakes its own skip for a failing pipeline and loops forever.
+          #
+          # Which triggers may define health (deliberately asymmetric):
+          #   - schedule         -> always, pass or fail; these ticks *are* the cadence.
+          #   - workflow_dispatch -> only when green. A green manual run proves the
+          #     pipeline recovered, so it clears an active back-off and the next tick
+          #     runs at the 8h cadence. A red manual run is ignored, so an operator's
+          #     one-off experiment can never *cause* a back-off (this asymmetry is what
+          #     the event=schedule filter from #1750 enforced bluntly).
           LAST_CONCLUSION=""
           LAST_STARTED=""
+          LAST_EVENT=""
           for RUN_ID in $(echo "$RUNS" | jq -r '.workflow_runs[].id'); do
+            # event|conclusion|start, read in one pass. Prefer run_started_at (when the
+            # run actually began); fall back to created_at.
+            META=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | \"\(.event)|\(.conclusion)|\(.run_started_at // .created_at)\"")
+            EVENT=${META%%|*}
+            REST=${META#*|}
+            CONCLUSION=${REST%%|*}
+            STARTED=${REST#*|}
+            case "$EVENT" in
+              schedule) ;;
+              workflow_dispatch)
+                # Green manual runs shorten the wait; red ones are not a health signal.
+                [ "$CONCLUSION" = "success" ] || continue
+                ;;
+              *) continue ;; # any other trigger never defines the cadence
+            esac
+
             JOBS=$(curl -fsSL -H "$AUTH" -H "$ACCEPT" \
               "$API/actions/runs/$RUN_ID/jobs?per_page=100")
             # run_unit_tests conclusion (empty if the job is absent/null). Selected
@@ -77,9 +107,9 @@ jobs:
             case "$UT" in
               success|failure)
                 # A run that actually produced a pass/fail verdict.
-                LAST_CONCLUSION=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | .conclusion")
-                # Prefer run_started_at (when the run actually began); fall back to created_at.
-                LAST_STARTED=$(echo "$RUNS" | jq -r ".workflow_runs[] | select(.id==$RUN_ID) | (.run_started_at // .created_at)")
+                LAST_CONCLUSION=$CONCLUSION
+                LAST_STARTED=$STARTED
+                LAST_EVENT=$EVENT
                 break
                 ;;
             esac
@@ -90,13 +120,13 @@ jobs:
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Last real run: conclusion=$LAST_CONCLUSION started_at=$LAST_STARTED"
+          echo "Last real run: event=$LAST_EVENT conclusion=$LAST_CONCLUSION started_at=$LAST_STARTED"
           # Expose the last real run's start so setup_and_build can scope the
           # commit diff to exactly "since the last time we actually ran".
           echo "last_started=$LAST_STARTED" >> "$GITHUB_OUTPUT"
 
           if [ "$LAST_CONCLUSION" = "success" ]; then
-            echo "Last real run passed -> 8h cadence -> running."
+            echo "Last real run ($LAST_EVENT) passed -> 8h cadence -> running."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
