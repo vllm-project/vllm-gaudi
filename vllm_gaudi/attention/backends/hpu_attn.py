@@ -395,10 +395,15 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         valid_topk = seq_lens.clamp(max=topk)
         pad_mask = (torch.arange(topk, device=q.device).unsqueeze(0)
                     >= valid_topk.unsqueeze(1))
+        # Use finite minimum value to avoid NaN from softmax(-inf / -inf)
+        # when valid_topk == 0 (entire row masked)
         attn = attn.masked_fill(
-            pad_mask.unsqueeze(1).unsqueeze(2), float("-inf"))
+            pad_mask.unsqueeze(1).unsqueeze(2), torch.finfo(attn.dtype).min)
 
         attn = torch.softmax(attn * self.scale, dim=-1)
+        # Zero output for rows where entire sequence was masked (valid_topk == 0)
+        empty_mask = (valid_topk == 0).view(batch_size, 1, 1)
+        attn = attn * (~empty_mask).float()
         out = torch.matmul(attn, v).squeeze(2)
         return out.reshape(-1, self.num_heads * self.v_head_dim)
 
