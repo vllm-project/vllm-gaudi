@@ -7,9 +7,9 @@ from vllm.forward_context import get_forward_context
 
 def _fill_sequential(buf, n, topk_tokens, device):
     """Fill topk_indices_buffer rows 0..n-1 with sequential slot indices."""
-    topk = min(topk_tokens, n)
-    buf[:n, :topk] = torch.arange(
-        topk, device=device, dtype=buf.dtype
+    # Fill entire buffer width to avoid stale/out-of-range indices
+    buf[:n, :topk_tokens] = torch.arange(
+        topk_tokens, device=device, dtype=buf.dtype
     ).unsqueeze(0)
 
 
