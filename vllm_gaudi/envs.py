@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     VLLM_HPU_MOE_GATHER: bool = False
     VLLM_HPU_MOE_GATHER_MAX_TP: int = 64
     VLLM_HPU_MOE_GATHER_VERIFY: bool = False
+    VLLM_COMPACT_GDN: bool = False
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -100,6 +101,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.environ.get("VLLM_HPU_MOE_GATHER_MAX_TP", "64")),
     "VLLM_HPU_MOE_GATHER_VERIFY":
     lambda: os.environ.get("VLLM_HPU_MOE_GATHER_VERIFY", "0").lower() in ("1", "true"),
+
+    # Use the compact recurrent-state (conv/ssm) layout for gated delta net
+    # models. The model runner auto-detects and sets this during init, so read
+    # it lazily rather than caching it at import time.
+    "VLLM_COMPACT_GDN":
+    lambda: os.environ.get("VLLM_COMPACT_GDN", "0").strip().lower() in ("1", "true"),
 }
 
 # end-env-vars-definition

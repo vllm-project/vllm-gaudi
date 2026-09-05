@@ -248,7 +248,7 @@ class MultiModelServingModels(OpenAIServingModels):
         return self.base_model_paths[0].name == model_name
 
     async def show_available_models(self):
-        from vllm.entrypoints.openai.engine.protocol import (
+        from vllm.entrypoints.serve.engine.protocol import (
             ModelCard,
             ModelList,
             ModelPermission,

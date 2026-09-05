@@ -4027,6 +4027,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                       pad_to: Optional[int] = None,
                       logits_requests=None) -> tuple[torch.Tensor, SamplingMetadata]:
         htorch.core.mark_step()
+        # Async scheduling: repair -1 placeholders before penalties read them.
+        self.input_batch.update_async_output_token_ids()
         sampling_metadata = self._prepare_sampling(batch_changed, request_ids, pad_to, logits_requests)
         sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
         htorch.core.mark_step()
@@ -4670,6 +4672,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
             }
+            # Async scheduling: keep output_token_ids the right length with a -1
+            # placeholder while the real id is still copying to CPU; spliced in
+            # next step by update_async_output_token_ids. Unconditional, since
+            # the list is read per-request -- the batch-wide no_penalties flag
+            # only gates the repair, not the append.
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                if i not in invalid_req_indices_set:
+                    self.requests[req_id].output_token_ids.append(-1)
             # For the output, postprocessed_sampled_token_ids will be filled during serialization
         else:
             prefill_sampled_token_ids_device = prefill_sampled_token_ids
@@ -4777,12 +4787,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     finished_sending=finished_sending,
                     finished_recving=finished_recving,
                 ))
-            return AsyncHPUModelRunnerOutput(
+            async_output = AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
                 sampled_token_ids=sampled_token_ids,
                 invalid_req_indices=self.invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
             )
+            # Hand the async CPU copy + ready event to the input batch for the
+            # next step's placeholder splice (see update_async_output_token_ids).
+            self.input_batch.set_async_sampled_token_ids(
+                async_output._sampled_token_ids_cpu,
+                async_output._async_copy_ready_event,
+            )
+            return async_output
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -4968,7 +4985,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._compile_methods()
                 self.regional_compilation_layers_list = [RMSNorm, VocabParallelEmbedding]
                 self._regional_compilation(self.model)
-                self.sampler = self._compile(self.sampler)
+                # Run the logits-processor stage eagerly: it reads the growing
+                # output_token_ids lists, which otherwise recompile the sampler
+                # every decode step once penalties are active. Needs
+                # fullgraph=False (a disabled callee is unsupported under
+                # fullgraph).
+                Sampler.apply_logits_processors = torch.compiler.disable(  # type: ignore[method-assign]
+                    Sampler.apply_logits_processors)
+                self.sampler = self._compile(self.sampler, fullgraph=False)
             else:
                 self.model = self._compile(self.model)
 
@@ -5011,8 +5035,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         module = self._compile(module)
         setattr_nested(model, name, module)
 
-    def _compile(self, module):
-        return torch.compile(module, **self.compile_config.get_compile_args())
+    def _compile(self, module, **config_overrides):
+        """Compile a module with the runner's compile config.
+
+        Args:
+            module: Module to compile.
+            **config_overrides: HPUCompileConfig overrides, for compiling a
+                single submodule under different settings than the model.
+        """
+        config = HPUCompileConfig(**config_overrides) if config_overrides else self.compile_config
+        return torch.compile(module, **config.get_compile_args())
 
     def _use_graphs(self, attn_metadata, batch_size):
         if self.model_config.enforce_eager:

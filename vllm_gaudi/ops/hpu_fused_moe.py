@@ -627,6 +627,44 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             return output.view(*input_shape)
 
 
+def _launch_shared_experts_overlap(runner: MoERunnerBase, shared_experts_input: torch.Tensor | None) -> bool:
+    """Start the shared-expert multi-stream overlap, tolerating either upstream API.
+
+    Upstream keeps flip-flopping on how the aux-stream launch is spelled: vllm#51838
+    added ``SharedExperts.maybe_forward_async`` plus a ``shared_experts_overlapping``
+    kwarg on ``MoERunner._apply_quant_method``, vllm#52024 reverted to
+    ``MoERunner._maybe_sync_shared_experts_stream``, and vllm#52033 re-landed the
+    #51838 shape. Feature-detect so the next flip does not break the HPU fast path.
+
+    On Gaudi every shape is a no-op — upstream gates the multi-stream path on
+    ``current_platform.is_cuda_alike()`` — so falling through to "no overlap" on an
+    unrecognised future shape stays functionally correct.
+
+    Args:
+        runner: The upstream ``MoERunner`` (``self`` of the patched forward).
+        shared_experts_input: Shared-expert input, or None when there are none.
+
+    Returns:
+        True iff the launch was asynchronous, meaning the caller must pass
+        ``shared_experts_overlapping=True`` down to ``_apply_quant_method``.
+    """
+    sync_stream = getattr(runner, "_maybe_sync_shared_experts_stream", None)
+    if sync_stream is not None:
+        # vllm#52024 shape: runner-side sync, overlap decided internally.
+        sync_stream(shared_experts_input)
+        return False
+
+    shared_experts = getattr(runner, "_shared_experts", None)
+    if shared_experts is None or shared_experts_input is None:
+        return False
+
+    # vllm#51838 / vllm#52033 shape: launch on the aux stream, await it later.
+    forward_async = getattr(shared_experts, "maybe_forward_async", None)
+    if forward_async is None:
+        return False
+    return bool(forward_async(shared_experts_input))
+
+
 def patched_fused_moe_forward(
     self,
     hidden_states: torch.Tensor,
@@ -672,15 +710,10 @@ def patched_fused_moe_forward(
         # is initialized on routed_experts (which the runner holds directly), so
         # unlike the old FusedMoE-layer-based init we do NOT need the layer here.
         self.routed_experts._ensure_moe_quant_config_init()
-        # Sync the aux/main stream for shared-expert multi-stream overlap,
-        # mirroring upstream MoERunner._forward_impl. vllm PR #52024 reverted the
-        # dual-stream decode work: SharedExperts.maybe_forward_async was removed
-        # (folded back into maybe_sync_shared_experts_stream, re-exposed on the
-        # runner as _maybe_sync_shared_experts_stream), and _apply_quant_method no
-        # longer takes a shared_experts_overlapping flag — overlap is decided
-        # internally. On HPU (not CUDA-alike) this is a no-op and the shared
-        # experts run synchronously inside _apply_quant_method.
-        self._maybe_sync_shared_experts_stream(shared_experts_input)
+        # Start the shared-expert aux stream before routed dispatch, mirroring
+        # upstream MoERunner._forward_impl. Version-tolerant: see
+        # _launch_shared_experts_overlap.
+        shared_experts_overlapping = _launch_shared_experts_overlap(self, shared_experts_input)
         # Apply the gate if the runner holds it (mirrors _forward_impl).
         if self.gate is not None:
             if self._fse_fuse_gate:
@@ -690,14 +723,16 @@ def patched_fused_moe_forward(
                 router_logits, _ = self.gate(hidden_states)
         # Core MoERunner._apply_quant_method takes no layer argument — it reads
         # everything it needs off the runner (self.routed_experts / self.router).
-        # Call it exactly as upstream _forward_impl does. vllm PR #52024 dropped
-        # the shared_experts_overlapping argument: overlap is decided internally
-        # and the shared-expert output is stashed on self._shared_experts.
+        # Call it exactly as upstream _forward_impl does. Only pass
+        # shared_experts_overlapping when an async launch actually happened: that
+        # is the only case in which the kwarg is guaranteed to exist upstream.
+        extra_quant_kwargs = {"shared_experts_overlapping": True} if shared_experts_overlapping else {}
         shared_output, fused_hidden = self._apply_quant_method(
             hidden_states=hidden_states,
             router_logits=router_logits,
             shared_experts_input=shared_experts_input,
             input_ids=input_ids,
+            **extra_quant_kwargs,
         )
         result = self._maybe_combine(shared_output, fused_hidden)
     else:
@@ -793,6 +828,9 @@ def create_fused_moe_router(
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    # Deepseek V4 vision routing bias parameters
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -840,6 +878,12 @@ def create_fused_moe_router(
     Hash Indices Table:
         hash_indices_table: Used to map input_ids to experts, needed for
             Deepseek V4
+
+    Vision routing bias arguments (upstream vLLM PR 54566+):
+        bias_vl: Vision routing bias for image tokens (Deepseek V4).
+        image_sentinel_lo: First of five consecutive in-vocab image sentinel
+            ids (0 = vision routing disabled). Both are forwarded to
+            FusedTopKBiasRouter, which owns the vision-bias routing path.
 
     Returns:
         An instance of the appropriate FusedMoERouter subclass
@@ -909,6 +953,8 @@ def create_fused_moe_router(
             hash_indices_table=hash_indices_table,
             num_fused_shared_experts=num_fused_shared_experts,
             shared_expert_weight=shared_expert_weight,
+            bias_vl=bias_vl,
+            image_sentinel_lo=image_sentinel_lo,
         )
 
     return FusedTopKRouter(
