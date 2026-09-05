@@ -40,7 +40,9 @@ combine for silu + FP8-per-channel weights, an alternative to the Habana
 `mixture_of_experts` op. It is off by default and intended for low-token
 (small batch / decode) workloads. Verification runs both the custom and stock
 paths and reduces their maximum FP8-ULP over the expert-parallel group in-memory
-without writing model-derived tensors to disk.
+without writing model-derived tensors to disk.  Note that verify mode adds a
+**per-layer host sync** (``max_ulp.item()`` on CPU during every forward pass),
+so it must not be enabled on performance runs.
 
 | Parameter name               | Description                                                                                                                                                        | Default value |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |

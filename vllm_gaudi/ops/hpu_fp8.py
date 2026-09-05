@@ -60,20 +60,27 @@ def _fp8_ulp(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     In E4M3FN adjacent same-sign representable values differ by exactly +/-1 in
     uint8, so this IS the representable-step count. Cross-sign pairs use
     universal subnormal units |a - b| / 2^-9. Returns elementwise Float32 ulps.
+
+    Elements above the E4M3 maximum representable value (448) saturate to
+    ``0x7F`` / ``0xFF`` (NaN/inf codes) during the uint8 cast and would
+    falsely compare as 0 ULP.  An ``out_of_range`` mask flags those positions
+    so callers do not miss large-magnitude divergences.
     """
     a_fp32 = a.float()
     b_fp32 = b.float()
+    e4m3_max = 448.0
+    out_of_range = (a_fp32.abs() > e4m3_max) | (b_fp32.abs() > e4m3_max)
     a_bits = a_fp32.to(torch.float8_e4m3fn).view(torch.uint8).int()
     b_bits = b_fp32.to(torch.float8_e4m3fn).view(torch.uint8).int()
     same_sign = (a_bits >= 128) == (b_bits >= 128)
     same_sign_ulp = (a_bits - b_bits).abs().float()
     cross_ulp = (a_fp32 - b_fp32).abs() / (2.0**-9)
-    return torch.where(same_sign, same_sign_ulp, cross_ulp)
+    ulp = torch.where(same_sign, same_sign_ulp, cross_ulp)
+    ulp = torch.where(out_of_range, torch.full_like(ulp, float('inf')), ulp)
+    return ulp
 
 
-def _verify_moe_combine(stock: torch.Tensor, custom: torch.Tensor) -> torch.Tensor:
-    if not _HPU_MOE_GATHER_VERIFY:
-        return stock
+def _verify_moe_combine(stock: torch.Tensor, custom: torch.Tensor) -> None:
     max_ulp = _fp8_ulp(stock, custom).amax()
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         ep_group = get_ep_group()
@@ -83,10 +90,12 @@ def _verify_moe_combine(stock: torch.Tensor, custom: torch.Tensor) -> torch.Tens
                 op=torch.distributed.ReduceOp.MAX,
                 group=ep_group.device_group,
             )
-    if max_ulp > _HPU_MOE_GATHER_VERIFY_MAX_ULP:
+    if max_ulp == float('inf'):
+        logger.warning("MoE gather combine: out-of-range element(s) detected "
+                       "(value > 448, outside E4M3 finite range)")
+    elif max_ulp > _HPU_MOE_GATHER_VERIFY_MAX_ULP:
         logger.warning("MoE gather combine mismatch: max FP8-ULP = %s exceeds %d", max_ulp.item(),
                        _HPU_MOE_GATHER_VERIFY_MAX_ULP)
-    return max_ulp
 
 
 class HPUPerTensorTorchFP8ScaledMMLinearKernel(PerTensorTorchFP8ScaledMMLinearKernel):
@@ -229,6 +238,14 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         # Snapshot the (static) quant-config flag while the vLLM config context
         # is set; the forward hot path reads this cached value instead.
         self.has_moe_quant_config = model_has_quant_config()
+        # The custom gathered-expert path reads per-channel scales
+        # (w13_weight_scale_inv / w2_weight_scale_inv, shape [E, 2I] / [E, H]),
+        # which exist only when block_quant + force_channel_fp8 are true
+        # (fp8_block_moe_prepare_weights branch in process_weights_after_loading).
+        # Non-block FP8 checkpoints use a per-tensor scale (w13_weight_scale,
+        # shape [E, 2]) and block FP8 without force_channel_fp8 uses block-shaped
+        # scales; both would crash or silently mis-scale in gather_silu_fp8_moe.
+        self._moe_gather_ok = self.block_quant and envs.VLLM_HPU_FORCE_CHANNEL_FP8
 
     @property
     def is_monolithic(self) -> bool:
@@ -339,7 +356,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         # long prefill) fall back to the stock fused op, which is faster and keeps
         # the graph shapes fixed. `tokens`/`K` are static (T, K from x/topk_ids).
         use_gather = (_HPU_MOE_GATHER and activation == "silu" and self.quant_config.activation_scheme != "static"
-                      and x.shape[0] * topk_ids.shape[-1] <= _HPU_MOE_GATHER_MAX_TP)
+                      and self._moe_gather_ok and x.shape[0] * topk_ids.shape[-1] <= _HPU_MOE_GATHER_MAX_TP)
         if use_gather:
             # EXPERIMENTAL custom combine: gather only the routed experts
             # (bypasses the Habana op's fixed per-layer stage pipeline).
@@ -347,6 +364,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
                 stock = layer.moe_op(x, topk_ids, topk_weights, permuted_weights=True, activation=activation)
                 custom = gather_silu_fp8_moe(layer, x, topk_ids, topk_weights)
                 _verify_moe_combine(stock, custom)
+                del stock
                 output = custom
             else:
                 output = gather_silu_fp8_moe(layer, x, topk_ids, topk_weights)
