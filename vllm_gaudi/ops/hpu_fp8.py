@@ -38,11 +38,12 @@ _HPU_MOE_GATHER_VERIFY = envs.VLLM_HPU_MOE_GATHER_VERIFY and _HPU_MOE_GATHER
 # Correctness bar for the verify path: any element exceeding this many FP8-ULP
 # is an error (matches the archived offline analysis' "no element > 2 ULP" bar).
 _HPU_MOE_GATHER_VERIFY_MAX_ULP = 2
-# Max tokens*topk (== gathered-expert count g) for which the custom gather path
-# is used. The gathered pure-PyTorch path wins below ~g=64 and LOSES to the stock
-# fused op once g approaches E (the dense gather + fp32 bmm path is slower than
-# the Habana op).
-_HPU_MOE_GATHER_MAX_TP = envs.VLLM_HPU_MOE_GATHER_MAX_TP
+# Fraction of this rank's local_experts up to which the custom gather path is
+# used. The gathered pure-PyTorch path reads only the routed experts, so it wins
+# while the gathered count g stays well below local_experts (stock must touch all
+# of them); it loses once g approaches local_experts (the dense gather + fp32 bmm
+# path is slower than the Habana op). See envs.py for the default rationale.
+_HPU_MOE_GATHER_RATIO = envs.VLLM_HPU_MOE_GATHER_RATIO
 if _HPU_MOE_GATHER:
     from vllm_gaudi.ops.hpu_moe_combine import gather_silu_fp8_moe  # noqa: E402
 else:
@@ -351,12 +352,16 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
         activation = _normalize_moe_activation(layer.activation)
-        # Use the custom gathered-expert combine only when it wins: g = tokens*K
-        # must stay small (below the dense crossover). Beyond that (large batch /
-        # long prefill) fall back to the stock fused op, which is faster and keeps
-        # the graph shapes fixed. `tokens`/`K` are static (T, K from x/topk_ids).
+        # Use the custom gathered-expert combine only when it wins: the number of
+        # distinct routed experts g = min(local_experts, tokens*K) must stay below
+        # a fraction of this rank's local_experts. Beyond that (large batch / long
+        # prefill, or few local experts) fall back to the stock fused op, which is
+        # faster and keeps the graph shapes fixed. `tokens`/`K` are static (T, K
+        # from x/topk_ids); local_num_experts is fixed per layer.
         use_gather = (_HPU_MOE_GATHER and activation == "silu" and self.quant_config.activation_scheme != "static"
-                      and self._moe_gather_ok and x.shape[0] * topk_ids.shape[-1] <= _HPU_MOE_GATHER_MAX_TP)
+                      and self._moe_gather_ok
+                      and x.shape[0] * topk_ids.shape[-1]
+                      <= layer.local_num_experts * _HPU_MOE_GATHER_RATIO)
         if use_gather:
             # EXPERIMENTAL custom combine: gather only the routed experts
             # (bypasses the Habana op's fixed per-layer stage pipeline).

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS: int = 16
     VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY: bool = False
     VLLM_HPU_MOE_GATHER: bool = False
-    VLLM_HPU_MOE_GATHER_MAX_TP: int = 64
+    VLLM_HPU_MOE_GATHER_RATIO: float = 0.4
     VLLM_HPU_MOE_GATHER_VERIFY: bool = False
     VLLM_COMPACT_GDN: bool = False
 
@@ -93,12 +93,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY", "false").strip().lower() in ("1", "true"),
 
     # EXPERIMENTAL custom gathered-expert FP8 MoE combine (silu only).
-    # Off by default; falls back to the stock Habana fused op when disabled
-    # or when tokens*top_k exceeds VLLM_HPU_MOE_GATHER_MAX_TP.
+    # Off by default; falls back to the stock Habana fused op when disabled or
+    # when the number of gathered experts (min(local_experts, tokens*top_k))
+    # would exceed this fraction of this rank's local_experts. Parameterizing on
+    # the ratio to local_experts (rather than an absolute count) keeps the gate
+    # sane across EP configs, which change local_experts.
+    #
+    # Default rationale (0.4): this optimization has only been observed to help
+    # the Qwen 3.5 MoE family. A crossover sweep across Qwen3.5 35B/122B/397B at
+    # several EP levels shows the custom-gather win/loss cutoff tracks
+    # g/local_experts most closely, and it lands around this ratio.
     "VLLM_HPU_MOE_GATHER":
     lambda: os.environ.get("VLLM_HPU_MOE_GATHER", "0").lower() in ("1", "true"),
-    "VLLM_HPU_MOE_GATHER_MAX_TP":
-    lambda: int(os.environ.get("VLLM_HPU_MOE_GATHER_MAX_TP", "64")),
+    "VLLM_HPU_MOE_GATHER_RATIO":
+    lambda: float(os.environ.get("VLLM_HPU_MOE_GATHER_RATIO", "0.4")),
     "VLLM_HPU_MOE_GATHER_VERIFY":
     lambda: os.environ.get("VLLM_HPU_MOE_GATHER_VERIFY", "0").lower() in ("1", "true"),
 
