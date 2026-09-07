@@ -260,12 +260,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                  f"heads in the layer. Sinks shape: {sinks.shape}, "
                                                  f"num_heads: {num_heads}.")
 
-        # Upstream MLAAttention forwards topk_indices_buffer into extra_impl_args
-        # only for sparse (DSA) layers; it otherwise reaches this impl only via
-        # **kwargs and was previously left unused. Store it so forward_impl can
-        # dispatch to forward_mqa_sparse, and mark this instance sparse to stay
-        # consistent with the base AttentionImpl ClassVar default of False
-        # without affecting non-DSA HPUMLAImpl instances.
+
         self.topk_indices_buffer = kwargs.get('topk_indices_buffer')
         self.is_sparse = self.topk_indices_buffer is not None
 
@@ -408,7 +403,10 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         # Zero output for rows where every top-k slot is the -1 sentinel.
         # `.to(attn.dtype)` (not `.float()`): attn is bf16 here, and
         # torch.matmul below does not type-promote against a bf16 `v`.
-        empty_mask = pad_mask.all(dim=-1).view(batch_size, 1, 1)
+        # 4D view [B, 1, 1, 1] to broadcast correctly against attn's
+        # [B, H, 1, T]; a 3D [B, 1, 1] view would silently misalign against
+        # the heads dim instead of the batch dim.
+        empty_mask = pad_mask.all(dim=-1).view(batch_size, 1, 1, 1)
         attn = attn * (~empty_mask).to(attn.dtype)
         out = torch.matmul(attn, v).squeeze(2)
         return out.reshape(-1, self.num_heads * self.v_head_dim)
