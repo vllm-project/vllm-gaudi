@@ -54,18 +54,20 @@ if _HPU_MOE_GATHER_VERIFY:
                 "per layer (FP8-ULP bar = %d)", _HPU_MOE_GATHER_VERIFY_MAX_ULP)
 
 
-def _fp8_ulp(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Sign-aware FP8-ULP distance (ported from the archived `moe_ulp.fp8_ulp`).
+def _fp8_ulp(a: torch.Tensor, b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sign-aware FP8-ULP distance + out-of-range mask.
 
     Same-sign pairs use real E4M3 ulps: |uint8(quantize(a)) - uint8(quantize(b))|.
     In E4M3FN adjacent same-sign representable values differ by exactly +/-1 in
     uint8, so this IS the representable-step count. Cross-sign pairs use
-    universal subnormal units |a - b| / 2^-9. Returns elementwise Float32 ulps.
+    universal subnormal units |a - b| / 2^-9. Returns elementwise Float32 ulps
+    (set to 0.0 wherever either input is out of range) plus an ``out_of_range``
+    bool mask flagging those positions.
 
     Elements above the E4M3 maximum representable value (448) saturate to
-    ``0x7F`` / ``0xFF`` (NaN/inf codes) during the uint8 cast and would
-    falsely compare as 0 ULP.  An ``out_of_range`` mask flags those positions
-    so callers do not miss large-magnitude divergences.
+    ``0x7F`` / ``0xFF`` (NaN/inf codes) during the uint8 cast and would falsely
+    compare as 0 ULP, so the caller must not fold them into the finite-ULP bar;
+    they are handled separately via ``out_of_range``.
     """
     a_fp32 = a.float()
     b_fp32 = b.float()
@@ -77,25 +79,43 @@ def _fp8_ulp(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     same_sign_ulp = (a_bits - b_bits).abs().float()
     cross_ulp = (a_fp32 - b_fp32).abs() / (2.0**-9)
     ulp = torch.where(same_sign, same_sign_ulp, cross_ulp)
-    ulp = torch.where(out_of_range, torch.full_like(ulp, float('inf')), ulp)
-    return ulp
+    ulp = torch.where(out_of_range, torch.zeros_like(ulp), ulp)
+    return ulp, out_of_range
+
+
+# Relative-error bar for out-of-range elements (|a-b| / (|a|+|b|)). The
+# denominator is at least the E4M3 max (448) out of range, so this cannot
+# false-positive on small in-range values.
+_HPU_MOE_GATHER_VERIFY_REL_ERR = 0.05
 
 
 def _verify_moe_combine(stock: torch.Tensor, custom: torch.Tensor) -> None:
-    max_ulp = _fp8_ulp(stock, custom).amax()
+    ulp, out_of_range = _fp8_ulp(stock, custom)
+    max_in_range_ulp = ulp.amax()
+    # Out-of-range positions cannot be compared in ULP (the fp8 cast saturates
+    # them), so measure their divergence as a relative error instead. Both paths
+    # agreeing out of range (rel_err 0) stays quiet.
+    a_fp32 = stock.float()
+    b_fp32 = custom.float()
+    denom = a_fp32.abs() + b_fp32.abs()
+    rel_err = ((a_fp32 - b_fp32).abs() / denom.clamp(min=1e-9)).where(out_of_range, torch.zeros_like(a_fp32))
+    max_out_of_range_rel = rel_err.amax()
+    reduced = torch.stack([max_in_range_ulp, max_out_of_range_rel])
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         ep_group = get_ep_group()
         if ep_group.world_size > 1:
             torch.distributed.all_reduce(
-                max_ulp,
+                reduced,
                 op=torch.distributed.ReduceOp.MAX,
                 group=ep_group.device_group,
             )
-    if max_ulp == float('inf'):
-        logger.warning("MoE gather combine: out-of-range element(s) detected "
-                       "(value > 448, outside E4M3 finite range)")
-    elif max_ulp > _HPU_MOE_GATHER_VERIFY_MAX_ULP:
-        logger.warning("MoE gather combine mismatch: max FP8-ULP = %s exceeds %d", max_ulp.item(),
+    max_in_range_ulp, max_out_of_range_rel = reduced[0], reduced[1]
+    if max_out_of_range_rel.item() > _HPU_MOE_GATHER_VERIFY_REL_ERR:
+        logger.warning(
+            "MoE gather combine: out-of-range element(s) (value > 448, "
+            "outside E4M3 finite range) diverge by relative error %s", max_out_of_range_rel.item())
+    if max_in_range_ulp.item() > _HPU_MOE_GATHER_VERIFY_MAX_ULP:
+        logger.warning("MoE gather combine mismatch: max FP8-ULP = %s exceeds %d", max_in_range_ulp.item(),
                        _HPU_MOE_GATHER_VERIFY_MAX_ULP)
 
 
@@ -360,8 +380,7 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         # from x/topk_ids); local_num_experts is fixed per layer.
         use_gather = (_HPU_MOE_GATHER and activation == "silu" and self.quant_config.activation_scheme != "static"
                       and self._moe_gather_ok
-                      and x.shape[0] * topk_ids.shape[-1]
-                      <= layer.local_num_experts * _HPU_MOE_GATHER_RATIO)
+                      and x.shape[0] * topk_ids.shape[-1] <= layer.local_num_experts * _HPU_MOE_GATHER_RATIO)
         if use_gather:
             # EXPERIMENTAL custom combine: gather only the routed experts
             # (bypasses the Habana op's fixed per-layer stage pipeline).
