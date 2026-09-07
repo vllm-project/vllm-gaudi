@@ -165,16 +165,14 @@ class HPUMLAAttention(MLAAttention):
         if is_prefill:
             output = self.impl.forward_mha(q, latent_vec_k, kv_cache, attn_metadata)
             return output
-        elif self.use_sparse and getattr(self, 'topk_indices_buffer', None) is not None:
-            output = self.impl.forward_mqa_sparse(
-                q, kv_cache, attn_metadata, self.topk_indices_buffer)
+        elif self.use_sparse and getattr(self.impl, 'topk_indices_buffer', None) is not None:
+            output = self.impl.forward_mqa_sparse(q, kv_cache, attn_metadata, self.impl.topk_indices_buffer)
             return output
         else:
             output = self.impl.forward_mqa(decode_ql_nope, q_pe, kv_cache, attn_metadata)
             output = self._v_up_proj(output)
             return output
 
-    # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # HPU-specific: when VLLM_HPU_FORCE_CHANNEL_FP8=True (default), block-quantized
         # FP8 weights (e.g. kv_b_proj in DeepSeek-R1) are converted to channel-wise FP8.
