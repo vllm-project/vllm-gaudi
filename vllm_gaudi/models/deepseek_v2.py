@@ -3,8 +3,7 @@ from itertools import islice
 
 from vllm.distributed import get_pp_group
 from vllm.model_executor.models import deepseek_v2
-from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekV32IndexerCache, Indexer)
+from vllm.model_executor.models.deepseek_v2 import (DeepseekV32IndexerCache, Indexer)
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.sequence import IntermediateTensors
 
@@ -90,7 +89,6 @@ def _hpu_deepseek_v2_model_forward(
 # Applies to DeepseekV2/V3/Deepseek/GlmMoe/DSA — all share model_cls = DeepseekV2Model.
 deepseek_v2.DeepseekV2Model.forward = _hpu_deepseek_v2_model_forward
 
-
 # ---------------------------------------------------------------------------
 # DSA / Indexer enablement on HPU
 # ---------------------------------------------------------------------------
@@ -121,14 +119,12 @@ DeepseekV32IndexerCache.get_attn_backend = _hpu_indexer_cache_get_attn_backend
 def _hpu_indexer_forward(self, hidden_states, qr, positions, rotary_emb):
     q, _ = self.wq_b(qr)
     q = q.view(-1, self.n_head, self.head_dim)
-    q_pe, q_nope = torch.split(
-        q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
+    q_pe, q_nope = torch.split(q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
     kw, _ = self.wk_weights_proj(hidden_states)
     kw = kw.reshape(-1, kw.shape[-1])
     k, weights = torch.split(kw, [self.head_dim, self.n_head], dim=-1)
     k = self.k_norm(k.contiguous())
-    k_pe, k_nope = torch.split(
-        k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
+    k_pe, k_nope = torch.split(k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
     q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
     q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
     k_pe = k_pe.reshape(-1, self.rope_dim)
@@ -143,9 +139,6 @@ Indexer.forward = _hpu_indexer_forward
 
 
 # --- SparseAttnIndexer: dispatch to HPU forward -----------------------------
-_orig_forward_native = SparseAttnIndexer.forward_native
-
-
 def _hpu_sparse_indexer_forward_native(self, hidden_states, q_quant, k, weights):
     from vllm_gaudi.ops.hpu_sparse_attn_indexer import forward_hpu
     return forward_hpu(self, hidden_states, q_quant, k, weights)

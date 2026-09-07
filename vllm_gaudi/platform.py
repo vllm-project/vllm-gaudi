@@ -99,7 +99,7 @@ class HpuPlatform(Platform):
                 "hpu_attn.HPUAttentionBackendV1")
 
     @classmethod
-    def check_runner_kv_caches_multi_layer(cls):
+    def check_runner_kv_caches_multi_layer(cls) -> None:
         pass  # DSA indexer cache shares layer index with MLA attention
 
     @classmethod
