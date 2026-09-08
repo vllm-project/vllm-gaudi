@@ -22,7 +22,6 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
-    UnquantizedLinearMethod,
 )
 
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
@@ -43,7 +42,6 @@ from vllm_gaudi.ops.granite_causal_conv1d import (
 )
 from vllm_gaudi.ops.ssd_combined import hpu_mamba_chunk_scan_combined_varlen
 from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
-from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
@@ -281,10 +279,6 @@ class HPUMambaMixer2(MambaMixer2):
         self.tped_dt_size = self.num_heads // self.tp_size
 
         self._split_weights_ready = False
-        # True when in_proj is quantized (e.g. FP8 compressed-tensors);
-        # the raw-weight split-GEMM path is invalid there, so forward()
-        # falls back to the quant-aware self.in_proj() call.
-        self._quantized_in_proj = False
 
         self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
             hidden_states_B_C,
@@ -303,21 +297,14 @@ class HPUMambaMixer2(MambaMixer2):
     ):
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
-        if self._quantized_in_proj:
-            # Quantized in_proj: run the standard quant-aware projection and
-            # split its output. gate is the leading tped_intermediate_size
-            # block; the remainder (x, B, C, dt) is the states projection.
-            projected, _ = self.in_proj(hidden_states)
-            gate = projected[..., :self.tped_intermediate_size]
-            states_proj = projected[..., self.tped_intermediate_size:]
-        else:
-            # 1. Split in_proj into two GEMMs for TPC/MME pipelining.
-            #    GEMM 1 (states: x,B,C,dt) is dispatched to the MME first;
-            #    GEMM 2 (gate) is dispatched second.  The Gaudi runtime can
-            #    overlap GEMM 2 on the MME with conv+SSM TPC work that
-            #    depends only on GEMM 1.
-            states_proj = F.linear(hidden_states, self._states_weight, self._states_bias)
-            gate = F.linear(hidden_states, self._gate_weight, self._gate_bias)
+        # 1. Split in_proj into two GEMMs for TPC/MME pipelining.
+        #    GEMM 1 (states: x,B,C,dt) is dispatched to the MME first;
+        #    GEMM 2 (gate) is dispatched second.  The Gaudi runtime can
+        #    overlap GEMM 2 on the MME with conv+SSM TPC work that
+        #    depends only on GEMM 1.
+        states_proj = F.linear(hidden_states, self._states_weight, self._states_bias)
+
+        gate = F.linear(hidden_states, self._gate_weight, self._gate_bias)
 
         if mup_vector is not None:
             gate_size = self.tped_intermediate_size
@@ -343,14 +330,6 @@ class HPUMambaMixer2(MambaMixer2):
         # 5. Final linear projection
         output, _ = self.out_proj(hidden_states_varlen)
 
-        # flatten_input models (e.g. nemotron_h) keep the whole model in the
-        # flattened [num_tokens, hidden] layout, so the surrounding layers
-        # (MoE/MLP) expect a 2D tensor. out_proj already produces that shape,
-        # so return it as-is. Non-flatten mamba models run in the [batch, seq,
-        # hidden] layout and need the leading dims restored below.
-        if get_config().flatten_input:
-            return output
-
         if get_forward_context().attn_metadata.is_prompt:
             output = output.view(1, output.shape[0], output.shape[1])
         else:
@@ -371,17 +350,6 @@ class HPUMambaMixer2(MambaMixer2):
     # Called from apply_model_specific_patches() in hpu_model_runner.
     # ------------------------------------------------------------------
     def _init_split_weights(self):
-        # The split-GEMM optimization slices the raw in_proj weight and calls
-        # a plain F.linear, which is only valid for an unquantized weight whose
-        # logical layout is [out, hidden]. For a quantized in_proj (e.g. FP8
-        # compressed-tensors) the stored weight is packed/scaled and must go
-        # through the quant method's apply(); mark it so forward() uses the
-        # standard self.in_proj() path instead.
-        if not isinstance(self.in_proj.quant_method, UnquantizedLinearMethod):
-            self._quantized_in_proj = True
-            self._split_weights_ready = True
-            return
-
         gate_size = self.tped_intermediate_size
         w = self.in_proj.weight  # [total_out, hidden_size]
         b = self.in_proj.bias  # [total_out] or None

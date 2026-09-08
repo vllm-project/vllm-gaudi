@@ -45,11 +45,6 @@ _MOE_ACTIVATION_ALIASES = {
     "gelu_pytorch_tanh": "gelu",
     "gelu_new": "gelu",
     "quick_gelu": "gelu",
-    # Non-gated squared-ReLU (Nemotron-H). The model's activation config value is
-    # "relu2_no_mul"; the Habana MoeActivationMode_t enum spells it "relu2". The
-    # no-gate/no-multiply behaviour is selected separately via is_gated=False
-    # (see VllmMixtureOfExpertsOpFP8PerChannel), not by this activation name.
-    "relu2_no_mul": "relu2",
 }
 
 
@@ -947,37 +942,3 @@ MoERunnerBase.forward = _patched_default_moe_runner_forward
 vllm.model_executor.layers.fused_moe.layer.get_compressed_expert_map = get_compressed_expert_map
 vllm.model_executor.layers.fused_moe.router.router_factory.create_fused_moe_router = create_fused_moe_router
 vllm.model_executor.layers.fused_moe.layer.create_fused_moe_router = create_fused_moe_router
-
-# Enable non-gated (is_act_and_mul=False) MoE on HPU.
-#
-# vLLM's FusedMoEConfig.__post_init__ ends with a guard that raises
-# NotImplementedError for non-gated activations on any platform that is not
-# CUDA/XPU/ROCm -- that guard lives in vLLM Python core and has no HPU branch,
-# so it fires even though the Habana fused-MoE kernel now handles non-gated
-# experts directly. Relax it: run the original __post_init__ and swallow only
-# that guard. We identify the guard by CONFIG STATE (a non-gated activation),
-# not by the exception message -- the message is prose upstream can reword at
-# will, whereas ``is_act_and_mul`` is a stable public property. The guard is the
-# final statement of __post_init__, so all other configuration has already
-# completed by the time it fires -- swallowing it leaves a fully-initialized
-# config. Drop this once vLLM core adds HPU to the supported-platform list.
-from vllm.model_executor.layers.fused_moe import config as _vllm_moe_config  # noqa: E402
-
-_orig_moe_config_post_init = _vllm_moe_config.FusedMoEConfig.__post_init__
-
-
-def _patched_moe_config_post_init(self):
-    try:
-        _orig_moe_config_post_init(self)
-    except NotImplementedError:
-        # Swallow ONLY vLLM core's non-gated-activation platform guard, which on
-        # HPU (is_cuda_alike()/is_xpu() both False) fires for every non-gated
-        # activation. Identify it by config state, not the exception message: a
-        # non-gated config (is_act_and_mul False) is the exact and only case the
-        # guard targets. Any NotImplementedError from a gated config is unrelated
-        # -- re-raise it untouched.
-        if self.is_act_and_mul:
-            raise
-
-
-_vllm_moe_config.FusedMoEConfig.__post_init__ = _patched_moe_config_post_init

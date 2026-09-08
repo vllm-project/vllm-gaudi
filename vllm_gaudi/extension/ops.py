@@ -1329,12 +1329,6 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         self.w2_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
         self.w13_input_scale = None
         self.w2_input_scale = None
-        # Gated experts (act(gate) * up over a 2*I w13) are the default. Non-gated
-        # experts (y = w2(act(w1 x)) over a single I-wide w13, e.g. Nemotron-H's
-        # squared-ReLU) set this False so forward() tells the fused kernel to skip
-        # its gate split+multiply. Set from layer.moe_config.is_act_and_mul at
-        # build time in process_weights_after_loading.
-        self.is_gated = True
 
         # cached views to avoid rebuilding lists every forward
         self._cached_w13_views = None
@@ -1371,11 +1365,6 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         tokens_num, _ = x.shape
         activation = _as_activation_str(activation)
         kwargs = self._get_extra_kwargs(tokens_num)
-        # Non-gated experts tell the fused kernel to skip the gate split+multiply.
-        # Added only when non-gated so gated layers pass the exact kwargs they did
-        # before and stay compatible with Habana runtimes predating the arg.
-        if not self.is_gated:
-            kwargs["is_gated"] = False
 
         if self._cached_w13_views is None or self._cached_w2_views is None:
             self._cache_weight_lists()

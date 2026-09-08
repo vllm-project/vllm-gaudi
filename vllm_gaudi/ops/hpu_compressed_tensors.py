@@ -54,10 +54,7 @@ from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
                                       VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.ops.hpu_fused_moe import (
-    _normalize_moe_activation,
-    select_experts_from_routed,
-)
+from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation, select_experts_from_routed
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_tensor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase, )
@@ -457,10 +454,6 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
                 experts_max,
                 dispatch_fn=None,
             )
-            # Non-gated experts (is_act_and_mul=False, e.g. Nemotron-H's
-            # squared-ReLU) make the fused kernel skip the gate split+multiply.
-            # Gated layers leave is_gated=True and their kernel call is unchanged.
-            layer.moe_op.is_gated = layer.moe_config.is_act_and_mul
 
         if self.static_input_scales:
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
@@ -568,13 +561,12 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
 
-        activation = _normalize_moe_activation(layer.activation)
         output = layer.moe_op(
             x,
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=True,
-            activation=activation,
+            activation=_normalize_moe_activation(layer.activation),
         )
         if layer.moe_config.is_sequence_parallel:
             return output.view(*(output.size(0), *input_shape[1:]))

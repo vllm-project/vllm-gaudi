@@ -791,7 +791,7 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
 
     mamba_like_arch = [
         "GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration",
-        "Qwen3NextForCausalLM", "NemotronHForCausalLM"
+        "Qwen3NextForCausalLM"
     ]
     if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):
         return
@@ -817,25 +817,14 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
             # Extract layer index from name (e.g., "model.layers.5.mixer" -> 5)
             if not any(pattern in layer_name for pattern in mamba_like_layer):
                 continue
+            parts = layer_name.split('.')
+            layer_idx = int(parts[-2])  # "model.layers.5.mixer" -> 5
+
             # Access the actual layer
             if '.mixer' in layer_name:
-                # Only the mamba state cache registers under a name ending in
-                # ".mixer". Nemotron-H nests attention under the same attribute
-                # ("model.layers.N.mixer.attn"), which must be skipped here (it
-                # would also break the int(parts[-2]) index parsing).
-                if not layer_name.endswith('.mixer'):
-                    continue
-                layer_idx = int(layer_name.split('.')[-2])  # "...layers.5.mixer" -> 5
-                layer = _get_decoder_layer_by_idx(model, layer_idx)
-                # The Mamba block is exposed as ".mamba" (Granite) or ".mixer"
-                # (Nemotron-H) depending on the model.
-                mamba_mixer = getattr(layer, 'mamba', None)
-                if mamba_mixer is None:
-                    mamba_mixer = getattr(layer, 'mixer', None)
-                if mamba_mixer is not None:
-                    mamba_mixer.cache_group_idx = group_idx
+                layer = model.model.layers[layer_idx]
+                layer.mamba.cache_group_idx = group_idx
             elif 'linear_attn' in layer_name:
-                layer_idx = int(layer_name.split('.')[-2])
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
                 if layer is not None and hasattr(layer, "linear_attn"):
                     layer.linear_attn.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
@@ -6667,15 +6656,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     if isinstance(spec, MambaSpec) and \
                             spec.mamba_type in _GDN_MAMBA_TYPES:
                         continue
-                    if isinstance(spec, MambaSpec) and len(set(spec.dtypes)) > 1:
-                        # Mixed-dtype standard Mamba2 (e.g. Nemotron-H: bf16
-                        # conv_state + float32 ssm_state) gets its own
-                        # contiguous tensors below, not as_strided views of the
-                        # shared raw buffer — aot_autograd rejects in-place
-                        # mutation of differently-typed views of one input.
-                        continue
-                    # Standard Mamba2 (uniform dtype) or unknown spec — needs
-                    # raw buffer for the as_strided interleaved layout.
+                    # Standard Mamba2 or unknown spec — needs raw buffer
                     return True
                 return False
 
@@ -6764,31 +6745,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             for shared_layer in kv_cache_tensor.shared_by:
                                 kv_caches[shared_layer] = tuple(state_tensors)
                             break
-                    elif isinstance(kv_cache_spec, MambaSpec) and \
-                            len(set(kv_cache_spec.dtypes)) > 1:
-                        # Mixed-dtype standard Mamba2 (e.g. Nemotron-H: bf16
-                        # conv_state + float32 ssm_state). as_strided views of a
-                        # single raw buffer would alias one storage with two
-                        # dtypes; aot_autograd cannot compile the decode graph
-                        # then ("input mutations on views with different
-                        # dtypes"). Allocate separate contiguous tensors, like
-                        # the GDN path above, so each state is its own input.
-                        if isinstance(kv_caches.get(layer_name), tuple):
-                            continue
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (num_blocks + 1, *shape)
-                            state_tensors.append(torch.zeros(target_shape, dtype=dtype, device=self.device))
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
-                                continue
-                            for shared_layer in kv_cache_tensor.shared_by:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
                     elif isinstance(kv_cache_spec, MambaSpec):
-                        # Standard Mamba2 with uniform dtype: use the original
-                        # as_strided interleaved layout from the raw shared
-                        # buffer (same-dtype view mutations compile fine).
+                        # Standard Mamba2 and other MambaSpec types: use the
+                        # original as_strided interleaved layout from the raw
+                        # shared buffer.
                         raw = kv_caches[layer_name]
                         offset = 0
                         state_tensors = []
