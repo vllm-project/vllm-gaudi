@@ -510,8 +510,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self,
         layer: AttentionLayer,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: Optional[torch.Tensor],
+        value: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: HPUAttentionMetadata,
         output: Optional[torch.Tensor] = None,
@@ -520,8 +520,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
         Args:
             query: shape = [num_tokens, num_heads * head_size]
-            key: shape = [num_tokens, num_kv_heads * head_size]
-            value: shape = [num_tokens, num_kv_heads * head_size]
+            key: shape = [num_tokens, num_kv_heads * head_size], None on
+                KV-shared layers that project Q only
+            value: shape = [num_tokens, num_kv_heads * head_size], None on
+                KV-shared layers that project Q only
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
             attn_metadata: Metadata for attention.
         Returns:
@@ -552,8 +554,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         else:
             batch_size, seq_len, hidden_size = query.shape
 
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
+        # key/value are None on KV-shared (YOCO) layers since vllm#54917: those
+        # layers project Q only and read K/V back from the target layer's cache.
+        if key is not None:
+            key = key.view(-1, self.num_kv_heads, self.head_size)
+        if value is not None:
+            value = value.view(-1, self.num_kv_heads, self.head_size)
         slot_mapping = attn_metadata.slot_mapping.flatten() if attn_metadata.slot_mapping is not None else None
         key_cache = None
         value_cache = None
@@ -562,11 +568,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
-            if key.dtype == torch.float32 and key.dtype != key_cache.dtype:
+            if key is not None and key.dtype == torch.float32 and key.dtype != key_cache.dtype:
                 key = key.to(key_cache.dtype)
-            if value.dtype == torch.float32 and value.dtype != value_cache.dtype:
+            if value is not None and value.dtype == torch.float32 and value.dtype != value_cache.dtype:
                 value = value.to(value_cache.dtype)
-            if query.dtype != key.dtype:
+            if key is not None and query.dtype != key.dtype:
                 query = query.to(key.dtype)
             if self.kv_sharing_target_layer_name is None:
                 # Reshape the input keys and values and store them in the cache.
@@ -584,18 +590,30 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                            scales=v_scales,
                                            block_size=attn_metadata.block_size,
                                            is_prompt=attn_metadata.is_prompt)
-            elif attn_metadata.is_prompt and slot_mapping is not None:
-                # KV sharing (YOCO): the local key/value are intentionally
-                # un-normed/un-RoPE'd (see Gemma4Attention shared-layer path).
-                # Read the target layer's normalized+RoPE'd K/V back from the
-                # shared cache at these slots (it wrote them earlier this pass).
-                key = key_cache.index_select(0, slot_mapping).view(key.shape)
-                value = value_cache.index_select(0, slot_mapping).view(value.shape)
+            elif slot_mapping is not None and (attn_metadata.is_prompt or seq_len > 1):
+                # KV sharing (YOCO): the local key/value are absent (vllm#54917)
+                # or un-normed/un-RoPE'd on older vLLM. Either way read the
+                # target layer's normalized+RoPE'd K/V back from the shared
+                # cache at these slots (it wrote them earlier this pass). The
+                # cache is [num_blocks * block_size, num_kv_heads, head_size],
+                # so the gather already has the per-token K/V layout.
+                key = key_cache.index_select(0, slot_mapping)
+                value = value_cache.index_select(0, slot_mapping)
 
         if attn_metadata.is_prompt or seq_len > 1:
             # Prompt run.
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
             kv_shape = (batch_size, -1, self.num_kv_heads, self.head_size)
+
+            if key is None or value is None:
+                # KV-shared layer with no cache to read back from, i.e. the
+                # memory-profiling run before the KV cache exists. Feed zeros so
+                # the prompt kernel still sees well-shaped K/V.
+                zeros = torch.zeros((batch_size * seq_len, self.num_kv_heads, self.head_size),
+                                    dtype=query.dtype,
+                                    device=query.device)
+                key = zeros if key is None else key
+                value = zeros if value is None else value
 
             attn_bias = attn_metadata.attn_bias
             position_bias = None
