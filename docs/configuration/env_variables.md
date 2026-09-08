@@ -41,8 +41,9 @@ combine for silu + FP8-per-channel weights, an alternative to the Habana
 (small batch / decode) workloads. Verification runs both the custom and stock
 paths and reduces their maximum FP8-ULP over the expert-parallel group in-memory
 without writing model-derived tensors to disk.  Note that verify mode adds a
-**per-layer host sync** (``max_ulp.item()`` on CPU during every forward pass),
-so it must not be enabled on performance runs.
+**per-layer host sync** (two ``.item()`` calls on CPU - ``max_in_range_ulp`` and
+``max_out_of_range_rel`` - during every forward pass), so it must not be enabled
+on performance runs.
 
 The default `VLLM_HPU_MOE_GATHER_RATIO` of `0.4` is based on a crossover sweep
 across the Qwen 3.5 MoE family (35B / 122B / 397B) at several expert-parallel
@@ -56,7 +57,7 @@ higher ratios on your model/config, and lower it for configs where it loses soon
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | `VLLM_HPU_MOE_GATHER`        | Enables the custom gathered-expert FP8 MoE combine (silu only). Falls back to the stock fused op when disabled or when the gather ratio is exceeded.             | `false`       |
 | `VLLM_HPU_MOE_GATHER_RATIO`  | Fraction of this rank's `local_experts` up to which the custom gather path is used. The gathered count is `min(local_experts, tokens * top_k)`; above `ratio * local_experts` the stock fused op is used. | `0.4`         |
-| `VLLM_HPU_MOE_GATHER_VERIFY` | Runs both the custom and stock paths and reduces their maximum FP8-ULP across the EP group in-memory. Logs an info line at startup when enabled and warns if any element exceeds 2 ULP. Requires `VLLM_HPU_MOE_GATHER`. | `false` |
+| `VLLM_HPU_MOE_GATHER_VERIFY` | Runs both the custom and stock paths and reduces their maximum FP8-ULP across the EP group in-memory. Logs an info line at startup when enabled and warns if any in-range element exceeds 2 FP8-ULP or any out-of-range element (magnitude above 448, outside the E4M3 finite range) diverges by more than 5% relative error. Requires `VLLM_HPU_MOE_GATHER`. | `false` |
 
 Use `VLLM_BUCKETING_STRATEGY=exp` for the default exponential warm-up, `VLLM_BUCKETING_STRATEGY=lin` for explicitly configured linear ranges, or `VLLM_BUCKETING_STRATEGY=pad` for padding-aware ranges with absolute and relative padding limits.
 

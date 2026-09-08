@@ -38,6 +38,11 @@ _HPU_MOE_GATHER_VERIFY = envs.VLLM_HPU_MOE_GATHER_VERIFY and _HPU_MOE_GATHER
 # Correctness bar for the verify path: any element exceeding this many FP8-ULP
 # is an error (matches the archived offline analysis' "no element > 2 ULP" bar).
 _HPU_MOE_GATHER_VERIFY_MAX_ULP = 2
+# Relative-error bar for out-of-range elements (|a-b| / (|a|+|b|)). Out-of-range
+# positions saturate during the fp8 cast, so they cannot be compared in ULP; their
+# denominator is at least the E4M3 max (448), so this cannot false-positive on
+# small in-range values.
+_HPU_MOE_GATHER_VERIFY_REL_ERR = 0.05
 # Fraction of this rank's local_experts up to which the custom gather path is
 # used. The gathered pure-PyTorch path reads only the routed experts, so it wins
 # while the gathered count g stays well below local_experts (stock must touch all
@@ -83,12 +88,6 @@ def _fp8_ulp(a: torch.Tensor, b: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
     return ulp, out_of_range
 
 
-# Relative-error bar for out-of-range elements (|a-b| / (|a|+|b|)). The
-# denominator is at least the E4M3 max (448) out of range, so this cannot
-# false-positive on small in-range values.
-_HPU_MOE_GATHER_VERIFY_REL_ERR = 0.05
-
-
 def _verify_moe_combine(stock: torch.Tensor, custom: torch.Tensor) -> None:
     ulp, out_of_range = _fp8_ulp(stock, custom)
     max_in_range_ulp = ulp.amax()
@@ -97,8 +96,12 @@ def _verify_moe_combine(stock: torch.Tensor, custom: torch.Tensor) -> None:
     # agreeing out of range (rel_err 0) stays quiet.
     a_fp32 = stock.float()
     b_fp32 = custom.float()
+    a_finite, b_finite = torch.isfinite(a_fp32), torch.isfinite(b_fp32)
     denom = a_fp32.abs() + b_fp32.abs()
-    rel_err = ((a_fp32 - b_fp32).abs() / denom.clamp(min=1e-9)).where(out_of_range, torch.zeros_like(a_fp32))
+    rel_err = ((a_fp32 - b_fp32).abs() / denom.clamp(min=1e-9)).where(out_of_range & a_finite & b_finite,
+                                                                      torch.zeros_like(a_fp32))
+    # one side finite and the other inf/NaN is a divergence whatever the magnitude
+    rel_err = torch.where(a_finite != b_finite, torch.ones_like(rel_err), rel_err)
     max_out_of_range_rel = rel_err.amax()
     reduced = torch.stack([max_in_range_ulp, max_out_of_range_rel])
     if torch.distributed.is_available() and torch.distributed.is_initialized():
