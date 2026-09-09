@@ -24,7 +24,9 @@ from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launchers.launcher import serve_http
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.openai.api_server import build_app, setup_server
-from vllm.entrypoints.launchers.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.launchers.cli_args import (make_arg_parser, resolve_default_chat_template_kwargs,
+                                                 validate_parsed_serve_args)
+from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.launchers.utils.server_utils import get_uvicorn_log_config
@@ -499,6 +501,13 @@ async def _init_multi_model_state(
     frontend_settings = _resolve_frontend_settings(args, model_frontend_overrides, active_model_name)
     resolved_chat_template = load_chat_template(frontend_settings.chat_template)
 
+    # Upstream vllm#50195 hoisted both of these out of init_generate_state into
+    # the caller: default_chat_template_kwargs is now a required positional
+    # argument (the helper folds --cohere-format into it), and the tool server
+    # is read from state.tool_server instead of being built there.
+    default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
+    state.tool_server = await init_tool_server(args) if "generate" in supported_tasks else None
+
     # Upstream vllm#44285 split OpenAIServingRender into a thin entrypoint
     # (ServingRender) plus an OnlineRenderer that owns the chat-template, tool
     # and reasoning configuration. Mirror that construction here so the
@@ -515,7 +524,7 @@ async def _init_multi_model_state(
         enable_auto_tools=frontend_settings.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=frontend_settings.tool_call_parser,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
     state.online_renderer = OnlineRenderer(**render_kwargs)
@@ -524,6 +533,7 @@ async def _init_multi_model_state(
         state.openai_serving_models,
         state.online_renderer,
         request_logger=request_logger,
+        tool_server=state.tool_server,
     )
 
     state.serving_tokenization = ServingTokenization(
@@ -532,7 +542,7 @@ async def _init_multi_model_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
@@ -543,7 +553,8 @@ async def _init_multi_model_state(
         state_args.enable_auto_tool_choice = frontend_settings.enable_auto_tool_choice
         state_args.tool_call_parser = frontend_settings.tool_call_parser
         state_args.chat_template = frontend_settings.chat_template
-        await init_generate_state(engine_client, state, state_args, request_logger, supported_tasks)
+        await init_generate_state(engine_client, state, state_args, request_logger, supported_tasks,
+                                  default_chat_template_kwargs)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
