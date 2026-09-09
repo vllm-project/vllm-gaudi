@@ -326,15 +326,19 @@ def _hpu_transfer_cache_regions(transfer_topo, cache, layer_spec):
 def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
     """Register HPU KV caches in NIXL, restoring the pre-#44456 K/V split.
 
-    VERBATIM COPY of ``NixlBaseConnectorWorker.register_kv_caches`` at vllm
-    61c9ef98 (base_worker.py:1024), with exactly three logic deviations: the
-    per-layer cache is expanded via :func:`_hpu_transfer_cache_regions` into a
-    ``cache_list`` so K and V register as two separate blocks-first regions
-    instead of the single packed region the upstream inlined loop assumes;
-    ``physical_page_size`` is divided by ``len(cache_list)``; and the region
-    bookkeeping runs in an inner ``for cache in cache_list`` loop. Everything
-    else mirrors upstream. See the DRIFT HAZARD note above — re-sync on the
-    ``_warn_if_upstream_register_drifted`` warning.
+    Originally a verbatim copy of ``NixlBaseConnectorWorker.register_kv_caches``
+    at vllm 61c9ef98 (base_worker.py:1024); since patched forward layer-by-layer
+    as upstream added fields the copied body never populated (block strides,
+    now region block counts) rather than re-synced wholesale. Deviations from
+    that baseline: the per-layer cache is expanded via
+    :func:`_hpu_transfer_cache_regions` into a ``cache_list`` so K and V register
+    as two separate blocks-first regions instead of the single packed region the
+    upstream inlined loop assumes; ``physical_page_size`` is divided by
+    ``len(cache_list)``; the region bookkeeping runs in an inner
+    ``for cache in cache_list`` loop; and ``block_stride_per_layer`` /
+    ``region_num_blocks`` are populated per-region to satisfy later upstream
+    additions to ``_build_fa_local``. See the DRIFT HAZARD note above — re-sync
+    on the ``_warn_if_upstream_register_drifted`` warning.
 
     Args:
         kv_caches: Mapping of layer name to its device KV cache tensor.
@@ -430,6 +434,13 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
             self.block_stride_per_layer.append(block_len)
             is_mla_region = isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
             self._region_is_mla.append(is_mla_region)
+            # Upstream vLLM (base_worker.py:register_kv_caches) now tracks the
+            # per-region block count separately from block_len/block_stride so
+            # _build_fa_local can index self.region_num_blocks[i]; this override
+            # never populated it, leaving the list empty and every access an
+            # IndexError. `num_blocks` here is already the per-region physical
+            # count (logical count for Mamba), matching upstream's semantics.
+            self.region_num_blocks.append(num_blocks)
 
             if not is_mla_region:
                 if tensor_size_bytes is None:
@@ -458,10 +469,15 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
 
     logger.debug("Different block lengths collected: %s", set(self.block_len_per_layer))
     assert len(self.block_len_per_layer) == len(seen_base_addresses) == len(self._region_is_mla) == len(
-        self.block_stride_per_layer)
+        self.block_stride_per_layer) == len(self.region_num_blocks)
 
     self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
     self.num_regions = len(caches_data)
+    if self._has_mamba:
+        # Mirror upstream: every region (including the shared conv/ssm tensor)
+        # reports the PHYSICAL block count here, not the per-layer logical
+        # count some regions were appended with above.
+        self.region_num_blocks = [self.num_blocks] * self.num_regions
 
     if self.pp_size > 1:
         start_layer, end_layer = self.model_config.get_layers_start_end_indices(self.vllm_config.parallel_config)
