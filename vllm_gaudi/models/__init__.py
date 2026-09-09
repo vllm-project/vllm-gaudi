@@ -37,7 +37,14 @@ def register_model():
                                  "vllm_gaudi.models.minimax_m3:HpuMiniMaxM3SparseForCausalLM")
     ModelRegistry.register_model("MiniMaxM3SparseForConditionalGeneration",
                                  "vllm_gaudi.models.minimax_m3:HpuMiniMaxM3SparseForConditionalGeneration")
-    from vllm_gaudi.models.pixtral import HPUPixtralForConditionalGeneration  # noqa: F401
+    # Registered lazily by "module:class" string on purpose: do NOT add an eager
+    # `from vllm_gaudi.models.pixtral import ...` here. That module reaches
+    # vllm.model_executor.models.pixtral, which imports PixtralRotaryEmbedding /
+    # position_ids_in_meshgrid - both removed by transformers 5.17.0
+    # (huggingface/transformers#48105). register_model() runs from
+    # load_general_plugins(), including inside vLLM's model-inspection
+    # subprocess, so an eager import turned that one unimportable upstream
+    # module into a ModelConfig ValidationError for every architecture.
     ModelRegistry.register_model("PixtralForConditionalGeneration",
                                  "vllm_gaudi.models.pixtral:HPUPixtralForConditionalGeneration")
 
