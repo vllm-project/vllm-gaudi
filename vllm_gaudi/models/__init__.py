@@ -37,9 +37,20 @@ def register_model():
                                  "vllm_gaudi.models.minimax_m3:HpuMiniMaxM3SparseForCausalLM")
     ModelRegistry.register_model("MiniMaxM3SparseForConditionalGeneration",
                                  "vllm_gaudi.models.minimax_m3:HpuMiniMaxM3SparseForConditionalGeneration")
-    from vllm_gaudi.models.pixtral import HPUPixtralForConditionalGeneration  # noqa: F401
-    ModelRegistry.register_model("PixtralForConditionalGeneration",
-                                 "vllm_gaudi.models.pixtral:HPUPixtralForConditionalGeneration")
+    # Pixtral import can fail on newer transformers where
+    # vllm.model_executor.models.pixtral references renamed/removed symbols
+    # (e.g. PixtralRotaryEmbedding -> PixtralVisionRotaryEmbedding,
+    # position_ids_in_meshgrid). This is a vision model unrelated to text-only
+    # architectures (e.g. Qwen3MoeForCausalLM), so degrade gracefully instead
+    # of aborting the entire model-registration pass.
+    try:
+        from vllm_gaudi.models.pixtral import HPUPixtralForConditionalGeneration  # noqa: F401
+        ModelRegistry.register_model("PixtralForConditionalGeneration",
+                                     "vllm_gaudi.models.pixtral:HPUPixtralForConditionalGeneration")
+    except ImportError as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Skipping HPU Pixtral registration due to import error: %s", e)
 
     from vllm_gaudi.models.dots_ocr import HpuDotsOCRForCausalLM  # noqa: F401
     ModelRegistry.register_model("DotsOCRForCausalLM", "vllm_gaudi.models.dots_ocr:HpuDotsOCRForCausalLM")
