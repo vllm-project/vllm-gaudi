@@ -11,3 +11,4 @@ tblib==3.2.2
 # trallnag/prometheus-fastapi-instrumentator#370. Remove once it ships a fix.
 fastapi<0.137
 setuptools>=83.0.0,<85.0.0
+transformers<5.17
