@@ -19,6 +19,7 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFuse
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl, AttentionLayer, AttentionMetadata,
                                        AttentionType, MultipleOf)
 from vllm.model_executor.layers.attention.mla_attention import (MLACommonImpl)
+from vllm.model_executor.utils import replace_parameter
 from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPagedAttentionMetadata,
                                                      HPUPagedAttentionMetadataBuilder)
 
@@ -28,6 +29,23 @@ from vllm.v1.attention.backends.registry import (register_backend, AttentionBack
 from vllm._aiter_ops import rocm_aiter_ops
 
 logger = init_logger()
+
+
+def _set_fetch_by_id(kv_cache, value: bool) -> None:
+    """Toggle id-based KV fetch (vs. the contiguous-PA zero-copy slice) on a KV cache.
+
+    GAUDISW-248985: the prefill-context block_list holds raw scattered ids and must be
+    gathered by id, whereas the decode block_list is the contiguous-identity layout and
+    can use the zero-copy slice. We flag the module instead of passing a kwarg because
+    INC's PatchedVLLMKVCache wraps fetch_from_cache with a fixed signature and delegates
+    to orig_mod; set the flag there too so the original method (which INC calls) sees it.
+    """
+    if kv_cache is None:
+        return
+    kv_cache._fetch_by_id = value
+    orig = getattr(kv_cache, "orig_mod", None)
+    if orig is not None:
+        orig._fetch_by_id = value
 
 
 class HPUAttentionBackend(AttentionBackend):
@@ -339,13 +357,17 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
     # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        # W_UV and W_UK_T are plain tensor attributes (not nn.Parameter or
-        # register_buffer), so model.to('hpu') won't move them.  When INC
-        # CPU-first loading is active the source weights live on CPU, making
-        # these derived tensors CPU-resident too — which then causes a device
-        # mismatch at the bmm calls in forward.  Explicitly place on HPU.
-        self.W_UV: torch.Tensor = self.W_UV.contiguous().to("hpu")
-        self.W_UK_T: torch.Tensor = self.W_UK_T.contiguous().to("hpu")
+        # Upstream moved MLA weight packing off the attention impl onto the
+        # MLAAttention module, so the base process_weights_after_loading is now
+        # the AttentionImplBase no-op and W_UV/W_UK_T are no longer registered on
+        # the impl. Only massage them when this impl actually owns them: they are
+        # registered as nn.Parameter, so route through replace_parameter to keep
+        # the registration; .to("hpu") avoids a CPU/HPU bmm device mismatch under
+        # INC CPU-first loading.
+        for name in ("W_UV", "W_UK_T"):
+            weight = getattr(self, name, None)
+            if weight is not None:
+                replace_parameter(self, name, weight.contiguous().to("hpu"))
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
@@ -488,8 +510,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self,
         layer: AttentionLayer,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: Optional[torch.Tensor],
+        value: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: HPUAttentionMetadata,
         output: Optional[torch.Tensor] = None,
@@ -498,8 +520,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
         Args:
             query: shape = [num_tokens, num_heads * head_size]
-            key: shape = [num_tokens, num_kv_heads * head_size]
-            value: shape = [num_tokens, num_kv_heads * head_size]
+            key: shape = [num_tokens, num_kv_heads * head_size], None on
+                KV-shared layers that project Q only
+            value: shape = [num_tokens, num_kv_heads * head_size], None on
+                KV-shared layers that project Q only
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
             attn_metadata: Metadata for attention.
         Returns:
@@ -530,8 +554,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         else:
             batch_size, seq_len, hidden_size = query.shape
 
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
+        # key/value are None on KV-shared (YOCO) layers since vllm#54917: those
+        # layers project Q only and read K/V back from the target layer's cache.
+        if key is not None:
+            key = key.view(-1, self.num_kv_heads, self.head_size)
+        if value is not None:
+            value = value.view(-1, self.num_kv_heads, self.head_size)
         slot_mapping = attn_metadata.slot_mapping.flatten() if attn_metadata.slot_mapping is not None else None
         key_cache = None
         value_cache = None
@@ -540,11 +568,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache, k_scales, v_scales = \
                 HPUPagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
-            if key.dtype == torch.float32 and key.dtype != key_cache.dtype:
+            if key is not None and key.dtype == torch.float32 and key.dtype != key_cache.dtype:
                 key = key.to(key_cache.dtype)
-            if value.dtype == torch.float32 and value.dtype != value_cache.dtype:
+            if value is not None and value.dtype == torch.float32 and value.dtype != value_cache.dtype:
                 value = value.to(value_cache.dtype)
-            if query.dtype != key.dtype:
+            if key is not None and query.dtype != key.dtype:
                 query = query.to(key.dtype)
             if self.kv_sharing_target_layer_name is None:
                 # Reshape the input keys and values and store them in the cache.
@@ -562,11 +590,30 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                            scales=v_scales,
                                            block_size=attn_metadata.block_size,
                                            is_prompt=attn_metadata.is_prompt)
+            elif slot_mapping is not None and (attn_metadata.is_prompt or seq_len > 1):
+                # KV sharing (YOCO): the local key/value are absent (vllm#54917)
+                # or un-normed/un-RoPE'd on older vLLM. Either way read the
+                # target layer's normalized+RoPE'd K/V back from the shared
+                # cache at these slots (it wrote them earlier this pass). The
+                # cache is [num_blocks * block_size, num_kv_heads, head_size],
+                # so the gather already has the per-token K/V layout.
+                key = key_cache.index_select(0, slot_mapping)
+                value = value_cache.index_select(0, slot_mapping)
 
         if attn_metadata.is_prompt or seq_len > 1:
             # Prompt run.
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
             kv_shape = (batch_size, -1, self.num_kv_heads, self.head_size)
+
+            if key is None or value is None:
+                # KV-shared layer with no cache to read back from, i.e. the
+                # memory-profiling run before the KV cache exists. Feed zeros so
+                # the prompt kernel still sees well-shaped K/V.
+                zeros = torch.zeros((batch_size * seq_len, self.num_kv_heads, self.head_size),
+                                    dtype=query.dtype,
+                                    device=query.device)
+                key = zeros if key is None else key
+                value = zeros if value is None else value
 
             attn_bias = attn_metadata.attn_bias
             position_bias = None
@@ -594,6 +641,14 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             block_list = attn_metadata.block_list if attn_metadata \
                 and attn_metadata.block_list is not None else None
 
+            # GAUDISW-248985: prefill context blocks are raw scattered ids, so the
+            # contiguous-PA fetch must gather by id (cache[:n] would read wrong rows).
+            _set_fetch_by_id(self.k_cache, True)
+            _set_fetch_by_id(self.v_cache, True)
+
+            if self.sliding_window and hasattr(attn_metadata, 'window_block_list') \
+                    and attn_metadata.window_block_list is not None:
+                block_list = attn_metadata.window_block_list
             common_args = self.common_attention_args(block_list, key_cache, value_cache, attn_metadata.block_size,
                                                      k_scales, v_scales)
 
@@ -621,8 +676,18 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
+            # GAUDISW-248985: decode block_list is the contiguous-identity layout, so
+            # keep the zero-copy slice fetch (cache[:n]); only prefill needs gather.
+            # Exception: sliding window with contiguous PA needs gather-by-id because
+            # window_block_list contains scattered block IDs (not identity layout).
+            _set_fetch_by_id(self.k_cache, False)
+            _set_fetch_by_id(self.v_cache, False)
+
             if self.sliding_window and \
                 attn_metadata.window_block_list is not None:
+                # Sliding window blocks are not contiguous - need gather-by-id
+                _set_fetch_by_id(self.k_cache, True)
+                _set_fetch_by_id(self.v_cache, True)
                 block_list = attn_metadata.window_block_list
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping

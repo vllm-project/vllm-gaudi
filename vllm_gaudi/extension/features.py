@@ -61,6 +61,9 @@ def get_user_flags():
         Env('VLLM_HPU_FSDPA_SLICE_SEQ_LEN_THLD', int),
         Env('VLLM_HPU_FSDPA_SLICE_CHUNK_SIZE', int),
         Env('VLLM_HPU_FSDPA_SLICE_WITH_GRAPH_BREAKS', boolean),
+
+        # FusedSDPA query tiling flags
+        Env('VLLM_HPU_FSDPA_Q_TILE_ENABLE', boolean),
     ]
     return to_dict(flags)
 
@@ -106,7 +109,10 @@ def get_features():
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
-        Value('flatten_input', Any(ModelType('qwen3_moe'), ModelType('granitemoe'), ModelType('glm4_moe'))),
+        Value(
+            'flatten_input',
+            Any(ModelType('qwen3_moe'), ModelType('qwen3_5'), ModelType('qwen3_5_text'), ModelType('granitemoe'),
+                ModelType('glm4_moe'), ModelType('gemma4'), ModelType('nemotron_h'))),
         Value('high_level_profiler_enabled', False, env_var='VLLM_PROFILER_ENABLED', env_var_type=boolean),
         Value('track_graph_compilation', False, env_var='PT_HPU_METRICS_GC_DETAILS', env_var_type=boolean),
         Value('per_token_kv_scaling_support',
@@ -125,5 +131,9 @@ def get_features():
                   Kernel(fsdpa)),
               env_var='VLLM_HPU_FSDPA_SLICE_ENABLED',
               env_var_type=boolean),
+        # Splits the query dim of prompt attention so no per-call attn_bias reaches 2**31 bytes,
+        # which FusedSDPA cannot index (it silently returns NaN). Off by default: only long
+        # contexts with a wide context bucket can hit the limit.
+        Value('enable_fsdpa_q_tiling', False, env_var='VLLM_HPU_FSDPA_Q_TILE_ENABLE', env_var_type=boolean),
     ]
     return split_values_and_flags(features)

@@ -6,6 +6,7 @@ import yaml
 import gc
 from lm_eval.models.vllm_causallms import VLLM
 import os
+from lm_eval import tasks
 
 
 def launch_lm_eval(eval_config):
@@ -46,6 +47,8 @@ def launch_lm_eval(eval_config):
         model_args["reasoning_parser"] = eval_config["reasoning_parser"]
     if eval_config.get("max_num_batched_tokens") is not None:
         model_args["max_num_batched_tokens"] = eval_config["max_num_batched_tokens"]
+    if eval_config.get("add_bos_token") is not None:
+        model_args["add_bos_token"] = eval_config["add_bos_token"]
 
     if eval_config.get("inc"):
         assert os.environ.get("QUANT_CONFIG", None), "must set QUANT_CONFIG environment variable for using INC"
@@ -60,6 +63,28 @@ def launch_lm_eval(eval_config):
         kwargs["apply_chat_template"] = eval_config["apply_chat_template"]
     if eval_config.get("max_gen_toks") is not None:
         kwargs["gen_kwargs"] = f"max_gen_toks={eval_config['max_gen_toks']}"
+
+    # Handle include_path for custom tasks
+    task_manager = None
+    if eval_config.get("include_path") is not None:
+        include_path = eval_config["include_path"]
+        # Resolve relative path to absolute if needed
+        if not os.path.isabs(include_path):
+            # Get project root (go up 4 levels from this file to vllm-gaudi root)
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            resolved_path = os.path.join(project_root, include_path)
+            if os.path.exists(resolved_path):
+                include_path = resolved_path
+                print(f"Resolved include_path to: {include_path}")
+            elif not os.path.exists(include_path):
+                # Fallback: try from current directory if relative path doesn't exist
+                print(f"Warning: include_path '{include_path}' not found from project root or cwd")
+        print(f"Creating TaskManager with include_path: {include_path}")
+        task_manager = tasks.TaskManager(include_path=include_path)
+        print(f"TaskManager created successfully. \
+            Task 'gsm8k_custom_stop' registered: {'gsm8k_custom_stop' in task_manager.task_index}")
+        kwargs["task_manager"] = task_manager
+
     llm = VLLM(**model_args)
     results = lm_eval.simple_evaluate(
         model=llm,

@@ -9,6 +9,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.model_executor.utils import replace_parameter
 from vllm_gaudi.extension.utils import VLLMKVCache
 from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFusedSDPA, Softmax, VLLMFP8KVCache)
 from vllm_gaudi.attention.backends.hpu_attn import HPUMLAMetadata
@@ -54,15 +55,40 @@ class HPUMLAAttention(MLAAttention):
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
 
+    def bind_kv_cache(self, kv_cache) -> None:
+        """Store the HPU per-layer KV-cache tuple unchanged.
+
+        vllm#51718 changed ``vllm.v1.worker.utils.bind_kv_cache`` to delegate
+        binding to each layer's own ``bind_kv_cache`` and added
+        ``MLAAttention.bind_kv_cache`` whose body is
+        ``self.kv_cache = kv_cache.squeeze(1)`` — it assumes a single packed
+        ``[B, H=1, N, C]`` tensor. On HPU the model runner allocates a per-layer
+        ``(key_cache, value_cache, key_scales, value_scales)`` tuple for MLA
+        layers and ``forward_impl`` consumes it directly (``kv_cache[0]``), so
+        the upstream ``.squeeze`` raises ``AttributeError: 'tuple' object has no
+        attribute 'squeeze'``. Keep the tuple as-is for the HPU path.
+        """
+        self.kv_cache = kv_cache
+
     def forward(
         self,
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        q_dcp_replicated: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
+        # `q_dcp_replicated` was added to the base MLAAttention.forward signature
+        # by vllm#45964 (DCP query replication for MLA decode). Decode-context
+        # parallelism is not enabled on HPU, so the inherited wrapper forward
+        # always passes this as None; accept and ignore it to keep the HPU path
+        # behaviourally identical to pre-#45964.
+        del q_dcp_replicated
+        # NOTE: vllm#49389 removed the deprecated runtime KV-scale calculation
+        # path (the `calculate_kv_scales` attribute and the
+        # `maybe_calc_kv_scales` custom op). Neither exists at the pinned vLLM
+        # SHA, so the OOT MLA forward no longer attempts runtime scale
+        # calculation.
 
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
@@ -203,8 +229,12 @@ class HPUMLAAttention(MLAAttention):
         else:
             # Non-FP8 kv_b_proj: use upstream logic as before.
             MLAAttention.process_weights_after_loading(self, act_dtype)
-            self.W_UV = self.W_UV.contiguous()
-            self.W_UK_T = self.W_UK_T.contiguous()
+            # Since vllm#48251 base registers W_UV/W_UK_T as nn.Parameter (via
+            # replace_parameter), so a plain tensor reassignment raises
+            # TypeError. Route the contiguous() update through replace_parameter
+            # to preserve the registration.
+            replace_parameter(self, "W_UV", self.W_UV.contiguous())
+            replace_parameter(self, "W_UK_T", self.W_UK_T.contiguous())
 
     # NOTE(Chendi): PR25184 using output buffer as default, which can't be used in HPU Graph,
     # so we override and always return a new tensor
@@ -236,6 +266,23 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         quant_config=None,
         prefix: str = "",
         skip_topk: bool = False,
+        # Added upstream by vllm#50000 (Kimi K3). Gates non-causal multi-token
+        # decode; the base MultiHeadLatentAttentionWrapper forwards it to
+        # MLAAttention, which the HPU decode path honours via attn metadata.
+        # Keep it in the constructor signature and pass it through so the HPU
+        # wrapper stays in sync with the base / deepseek_v2 call site.
+        non_causal_multi_token_decode: bool = False,
+        # Added upstream by vllm#48407 (short-prefill sparse-indexer scoring
+        # skip). The optimization it gates is guarded by
+        # current_platform.is_cuda() upstream, so it never applies on HPU. We
+        # accept-and-ignore the kwarg to keep the constructor signature in sync
+        # with the base MultiHeadLatentAttentionWrapper / deepseek_v2 call site.
+        allow_short_prefill_indexer_scoring_skip: bool = False,
+        # Added upstream by vllm#53906 (GLM-5.3-Flash). Opt-in fusion of the q_a
+        # and kv_a RMSNorms into one launch; the kernel behind it
+        # (vllm.models.common.ops.fused_q_kv_rmsnorm) is Triton/CUDA-only, so we
+        # accept-and-ignore the kwarg and keep HPU on the unfused path.
+        fuse_qkv_rmsnorm: bool = False,
     ) -> None:
         # Skip MultiHeadLatentAttentionWrapper.__init__() because it creates
         # MLAAttention → FlashAttnPrefillBackend which crashes on HPU.
@@ -261,8 +308,30 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.indexer = mla_modules.indexer
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
+        # vllm#50000 (Kimi K3) added `self.g_proj = mla_modules.g_proj`, which
+        # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
+        # we do not override forward) reads to gate the attention output. Because
+        # we bypass super().__init__(), replicate the assignment. It defaults to
+        # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
+        self.g_proj = mla_modules.g_proj
 
-        self.skip_topk = skip_topk
+        # DSA sparse attention is not implemented on HPU: sparse layers run as
+        # dense MLA and the indexer must never be invoked (its kernels and the
+        # DeepseekV32IndexerBackend are CUDA-only).
+        self.skip_topk = skip_topk or self.is_sparse
+        # vllm#53906 added `self.fuse_qkv_rmsnorm`, which the base
+        # MultiHeadLatentAttentionWrapper.forward (inherited here, since we do not
+        # override forward) reads to pick the fused RMSNorm path. Because we bypass
+        # super().__init__(), replicate the assignment - pinned False because the
+        # fused kernel is Triton/CUDA-only.
+        self.fuse_qkv_rmsnorm = False
+        # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
+        # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
+        # we do not override forward) reads and forwards to mla_attn. Because we
+        # bypass super().__init__(), replicate the upstream assignment. DCP is
+        # not enabled on HPU, so `qrep_active` is absent and this stays False.
+        q_proj_layer = self.q_b_proj if self.q_lora_rank is not None else self.q_proj
+        self.dcp_q_replicate = getattr(q_proj_layer, "qrep_active", False)
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
@@ -285,6 +354,8 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             quant_config=quant_config,
             prefix=layer_name,
             kv_b_proj=self.kv_b_proj,
-            use_sparse=self.is_sparse,
+            # Dense-MLA fallback: never request a sparse backend on HPU.
+            use_sparse=False,
             indexer=self.indexer,
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
         )

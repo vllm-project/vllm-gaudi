@@ -54,3 +54,4 @@ nav:
         preserve_directory_names: true
   - general/troubleshooting.md
   - general/faq.md
+  - general/security.md

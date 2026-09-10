@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -15,7 +15,7 @@ from tests.unit_tests.kv_offload.utils import (
     create_vllm_config,
 )
 from vllm import SamplingParams
-from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
+from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -25,7 +25,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector, )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
@@ -38,19 +37,20 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
 )
 from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
     GPULoadStoreSpec,
     LoadStoreSpec,
+    LookupResult,
     OffloadingManager,
     OffloadingSpec,
+    OffloadingWorker,
     OffloadKey,
     PrepareStoreOutput,
+    RequestOffloadingContext,
+    TransferResult,
     make_offload_key,
 )
-from vllm.v1.kv_offload.worker.worker import (
-    OffloadingHandler,
-    TransferResult,
-    TransferSpec,
-)
+from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.structured_output import StructuredOutputManager
 
 
@@ -75,10 +75,10 @@ class MockLoadStoreSpec(LoadStoreSpec):
         return repr(self.offload_keys)
 
 
-class MockOffloadingHandler(OffloadingHandler):
+class MockOffloadingWorker(OffloadingWorker):
 
     def __init__(self):
-        self.transfer_specs: dict[int, TransferSpec] = {}
+        self.transfer_specs: dict[int, tuple[LoadStoreSpec, LoadStoreSpec]] = {}
         self.completed_transfers: list[TransferResult] = []
         self.waiting_jobs: set[int] = set()
         self.completed_jobs: list[int] = []
@@ -89,8 +89,13 @@ class MockOffloadingHandler(OffloadingHandler):
         self.completed_transfers = []
         return finished
 
-    def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
-        self.transfer_specs[job_id] = spec
+    def submit_store(self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec) -> bool:
+        self.transfer_specs[job_id] = (src_spec, dst_spec)
+        self.waiting_jobs.add(job_id)
+        return True
+
+    def submit_load(self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec) -> bool:
+        self.transfer_specs[job_id] = (src_spec, dst_spec)
         self.waiting_jobs.add(job_id)
         return True
 
@@ -104,7 +109,6 @@ class MockOffloadingHandler(OffloadingHandler):
                     success=True,
                     transfer_size=None,
                     transfer_time=None,
-                    transfer_type=None,
                 )
                 self.completed_transfers.append(result)
 
@@ -115,26 +119,25 @@ class MockOffloadingHandler(OffloadingHandler):
 
 class MockOffloadingSpec(OffloadingSpec):
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config, kv_cache_config)
+    def __init__(self, config: OffloadingConfig):
+        super().__init__(config)
 
         self.manager = MagicMock(spec=OffloadingManager)
-        self.manager.lookup.return_value = 0
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
-        self.manager.lookup.return_value = False
-        self.handler = MockOffloadingHandler()
+        self.manager.lookup.return_value = LookupResult.MISS
+        self.manager.on_new_request.return_value = RequestOffloadingContext()
+        self.handler = MockOffloadingWorker()
 
     def get_manager(self) -> OffloadingManager:
         return self.manager
 
-    def get_handlers(self, _) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-        yield GPULoadStoreSpec, MockLoadStoreSpec, self.handler
-        yield MockLoadStoreSpec, GPULoadStoreSpec, self.handler
+    def get_worker(self, _: CanonicalKVCaches) -> OffloadingWorker:
+        return self.handler
 
     def complete_transfers(self):
         self.handler.complete_jobs(self.handler.waiting_jobs.copy())
 
-    def get_completed_transfers(self) -> list[TransferSpec]:
+    def get_completed_transfers(self) -> list[tuple[LoadStoreSpec, LoadStoreSpec]]:
         specs = [self.handler.transfer_specs[job_id] for job_id in self.handler.completed_jobs]
         self.handler.completed_jobs.clear()
         return specs
@@ -210,13 +213,24 @@ class RequestRunner:
 
         self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
 
-        # register worker kv_caches to enable OffloadingWorker creations
-        # set_current_vllm_config is needed for get_kv_cache_layout() to work
+        # Register worker kv_caches to enable OffloadingWorker creations. vLLM
+        # PR #51718 removed register_cross_layers_kv_cache; register_kv_caches
+        # (dict[layer_name -> tensor]) is now the sole entry point and coalesces
+        # layers internally. set_current_vllm_config enables get_kv_cache_layout().
+        kv_caches: dict[str, torch.Tensor] = {}
+        for group in kv_cache_config.kv_cache_groups:
+            spec = group.kv_cache_spec
+            for layer_name in group.layer_names:
+                kv_caches[layer_name] = torch.empty(
+                    num_gpu_blocks,
+                    2,
+                    spec.block_size,
+                    spec.num_kv_heads,
+                    spec.head_size,
+                    dtype=spec.dtype,
+                )
         with set_current_vllm_config(vllm_config):
-            self.worker_connector.register_cross_layers_kv_cache(
-                kv_cache=torch.empty(0),
-                attn_backend=FlashAttentionBackend,
-            )
+            self.worker_connector.register_kv_caches(kv_caches)
 
         # extract connector of scheduler
         scheduler_connector = self.scheduler.connector
@@ -233,8 +247,8 @@ class RequestRunner:
 
         assert len(self.connector_scheduler.config.kv_group_configs) == 1
         kv_group_config = self.connector_scheduler.config.kv_group_configs[0]
-        assert kv_group_config.gpu_block_size == gpu_block_size
-        assert kv_group_config.offloaded_block_size == offloaded_block_size
+        assert kv_group_config.tokens_per_block == gpu_block_size
+        assert kv_group_config.tokens_per_chunk == offloaded_block_size
 
         # extract OffloadingSpec of worker_connector
         connector_worker = self.worker_connector.connector_worker

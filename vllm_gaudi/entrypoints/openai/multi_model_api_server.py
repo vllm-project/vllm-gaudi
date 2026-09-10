@@ -21,15 +21,18 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
-from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.launchers.launcher import serve_http
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.openai.api_server import build_app, setup_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.launchers.cli_args import (make_arg_parser, resolve_default_chat_template_kwargs,
+                                                 validate_parsed_serve_args)
+from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.utils.server_utils import get_uvicorn_log_config
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+from vllm.entrypoints.launchers.utils.server_utils import get_uvicorn_log_config
+from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.entrypoints.serve.utils.api_utils import cli_env_setup, process_lora_modules
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -247,7 +250,7 @@ class MultiModelServingModels(OpenAIServingModels):
         return self.base_model_paths[0].name == model_name
 
     async def show_available_models(self):
-        from vllm.entrypoints.openai.engine.protocol import (
+        from vllm.entrypoints.serve.engine.protocol import (
             ModelCard,
             ModelList,
             ModelPermission,
@@ -498,10 +501,22 @@ async def _init_multi_model_state(
     frontend_settings = _resolve_frontend_settings(args, model_frontend_overrides, active_model_name)
     resolved_chat_template = load_chat_template(frontend_settings.chat_template)
 
-    state.openai_serving_render = OpenAIServingRender(
+    # Upstream vllm#50195 hoisted both of these out of init_generate_state into
+    # the caller: default_chat_template_kwargs is now a required positional
+    # argument (the helper folds --cohere-format into it), and the tool server
+    # is read from state.tool_server instead of being built there.
+    default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
+    state.tool_server = await init_tool_server(args) if "generate" in supported_tasks else None
+
+    # Upstream vllm#44285 split OpenAIServingRender into a thin entrypoint
+    # (ServingRender) plus an OnlineRenderer that owns the chat-template, tool
+    # and reasoning configuration. Mirror that construction here so the
+    # multi-model server matches the engine-backed api_server path. vllm#44512
+    # (scale-out consolidation) then dropped the derenderer arg from
+    # ServingRender.__init__; derender now lives in a separate ServingDerender.
+    render_kwargs = dict(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
-        model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -509,18 +524,25 @@ async def _init_multi_model_state(
         enable_auto_tools=frontend_settings.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=frontend_settings.tool_call_parser,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
+    state.online_renderer = OnlineRenderer(**render_kwargs)
 
-    state.openai_serving_tokenization = OpenAIServingTokenization(
-        engine_client,
+    state.openai_serving_render = ServingRender(
         state.openai_serving_models,
-        state.openai_serving_render,
+        state.online_renderer,
+        request_logger=request_logger,
+        tool_server=state.tool_server,
+    )
+
+    state.serving_tokenization = ServingTokenization(
+        state.openai_serving_models,
+        state.online_renderer,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
@@ -531,21 +553,16 @@ async def _init_multi_model_state(
         state_args.enable_auto_tool_choice = frontend_settings.enable_auto_tool_choice
         state_args.tool_call_parser = frontend_settings.tool_call_parser
         state_args.chat_template = frontend_settings.chat_template
-        await init_generate_state(engine_client, state, state_args, request_logger, supported_tasks)
+        await init_generate_state(engine_client, state, state_args, request_logger, supported_tasks,
+                                  default_chat_template_kwargs)
 
-    if "transcription" in supported_tasks:
-        from vllm.entrypoints.openai.speech_to_text.api_router import (
-            init_transcription_state, )
+    if "transcription" in supported_tasks or "realtime" in supported_tasks:
+        from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
 
-        init_transcription_state(engine_client, state, args, request_logger, supported_tasks)
-
-    if "realtime" in supported_tasks:
-        from vllm.entrypoints.openai.realtime.api_router import init_realtime_state
-
-        init_realtime_state(engine_client, state, args, request_logger, supported_tasks)
+        init_speech_to_text_state(engine_client, state, args, request_logger, supported_tasks)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling import init_pooling_state
+        from vllm.entrypoints.pooling.factories import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
@@ -704,7 +721,12 @@ async def _run_multi_model_server_worker(
 async def _run_multi_model_server(args: Namespace) -> None:
     decorate_logs("APIServer")
 
-    listen_address, sock = setup_server(args)
+    # Patch args.model with the actual default model from the multi-model config
+    # so that setup_server logs the correct model name in the banner.
+    config = _load_multi_model_config(_resolve_multi_model_config_path())
+    args.model = config.model_configs[config.default_model].model
+
+    listen_address, sock = setup_server(args, reuse_port=False)
     await _run_multi_model_server_worker(listen_address, sock, args)
 
 

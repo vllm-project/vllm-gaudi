@@ -2,8 +2,6 @@ import os
 import json
 import sys
 
-from vllm_gaudi.platform import HpuPlatform
-
 
 def _uses_lmcache_connector() -> bool:
     """Check if lmcache is configured as the KV connector.
@@ -52,6 +50,14 @@ def _uses_lmcache_connector() -> bool:
 
 def register():
     """Register the HPU platform."""
+    # Import lazily so that `import vllm_gaudi` (performed by vLLM's plugin
+    # loader to obtain this `register` callable) does not pull in
+    # `vllm_gaudi.platform` -> `vllm` at package-import time. Importing `vllm`
+    # eagerly resolves `current_platform` (via torch_utils PIN_MEMORY), which
+    # would re-enter the plugin loader while `vllm_gaudi` is only partially
+    # initialized and `register` is not yet defined.
+    from vllm_gaudi.platform import HpuPlatform
+
     HpuPlatform.set_torch_compile()
     # Monkey patch for LMCache
     # LMCache requires PT_HPU_GPU_MIGRATION=1
@@ -110,6 +116,7 @@ def register_ops():
     import vllm_gaudi.ops.hpu_modelopt  # noqa: F401
     import vllm_gaudi.ops.hpu_compressed_tensors  # noqa: F401
     import vllm_gaudi.ops.hpu_fp8  # noqa: F401
+    import vllm_gaudi.ops.hpu_mxfp4  # noqa: F401
     import vllm_gaudi.ops.hpu_gptq  # noqa: F401
     import vllm_gaudi.ops.hpu_awq  # noqa: F401
     import vllm_gaudi.ops.hpu_conv  # noqa: F401
@@ -140,3 +147,15 @@ def register_models():
     from .models import register_model
 
     register_model()
+
+
+def register_tool_parsers():
+    """Register out-of-tree tool-call parsers for the HPU platform.
+
+    Importing the package runs each parser module's
+    ``ToolParserManager.register_module(...)`` call, so the parsers become
+    selectable via ``--tool-call-parser <name>`` with no
+    ``--tool-parser-plugin`` file. This runs in both the API-server and engine
+    processes (general plugin), matching how vLLM loads tool parsers.
+    """
+    import vllm_gaudi.entrypoints.openai.tool_parsers  # noqa: F401

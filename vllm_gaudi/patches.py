@@ -12,6 +12,14 @@ Currently:
 * ``torch._C._host_emptyCache`` — does not exist on HPU; we install a no-op
   stub to prevent ``AttributeError`` in ``cleanup_dist_env_and_memory``.
 
+* ``torch.accelerator.empty_host_cache`` — vllm PR #51107 switched
+  ``cleanup_dist_env_and_memory`` from ``torch._C._host_emptyCache()`` to
+  ``torch.accelerator.empty_host_cache()``.  On torch>=2.9 the attribute exists,
+  so vllm's ``except AttributeError`` guard no longer catches it; the call
+  dispatches to ``at::accelerator::emptyHostCache()``, which has no HPU host-cache
+  hook and segfaults at teardown.  We replace it with a no-op (sibling of the
+  ``empty_cache`` patch above).
+
 * ``vllm.distributed.parallel_state.cleanup_dist_env_and_memory`` — upstream
   (since vllm PR #34328) calls ``torch.accelerator.empty_cache()``, which
   requires the device's allocator to be a ``c10::DeviceAllocator``.  We
@@ -27,15 +35,91 @@ Currently:
   is deferred to ``load_general_plugins`` time to avoid importing
   ``vllm.v1.sample.sampler`` during early plugin registration, which would
   trigger a heavy import chain that interferes with platform initialisation.
+
+* ``vllm.v1.sample.sampler.Sampler.gather_logprobs`` — upstream PR #38933
+  added two ``mark_unbacked()`` calls inside ``gather_logprobs`` to prevent
+  0->1 batch-size specialization recompiles for ``batched_count_greater_than``
+  on CUDA.  On HPU, ``torch._dynamo`` marks ``mark_unbacked`` as a forbidden
+  callable (``is_forbidden=True``), so tracing a compiled ``Sampler`` raises
+  ``AssertionError: Attempt to trace forbidden callable mark_unbacked`` for
+  any request with ``logprobs=true``.  We replace ``gather_logprobs`` with an
+  identical implementation that omits the two ``mark_unbacked`` calls.  HPU
+  handles dynamic batch shapes without this hint.
+
+* ``vllm.distributed.device_communicators.shm_broadcast.check_shm_free_space``
+  — upstream PR #48879 ("Fail fast when /dev/shm is too small for the shm ring
+  buffer") added a pre-allocation guard that compares the ring buffer's *full
+  nominal* size (default ``24 MiB x 10 = 240 MiB`` per ``MessageQueue``) against
+  the free space on ``/dev/shm`` and raises ``RuntimeError: Insufficient space
+  in /dev/shm`` when it does not fit. HPU CI containers expose the Docker
+  default 64 MiB ``/dev/shm``, where the pre-#48879 code path worked fine: the
+  segment is created with ``SharedMemory(create=True, size=...)`` (an
+  ``ftruncate`` on tmpfs, which allocates pages lazily on write), and the TP2 /
+  DP / multi-proc EngineCore workers only ever touch a small fraction of the
+  nominal ring. The new eager check aborts EngineCore start-up before any page
+  is touched, breaking every shared-memory-broadcast config
+  (``run_data_parallel_test``, ``run_tp2_load_generate_test``,
+  ``run_deepseek_v2_inc_dynamic_tp2_load_generate_test``,
+  ``run_gsm8k_qwen3_30b_test``). Restore the pre-#48879 behaviour on HPU by
+  replacing the guard with a no-op so the lazy tmpfs allocation proceeds.
+
+  Upstream ref: https://github.com/vllm-project/vllm/pull/48879
+
+* ``vllm.v1.core.block_pool.BlockPool.free_blocks`` — upstream PR #42656
+  ("Apply LRU policy only to proper cache entries") made ``free_blocks``
+  partition freed blocks into with-hash / without-hash lists and issue two
+  queue ops (``prepend_n`` + ``append_n``) on every engine step.  When prefix
+  caching is disabled every block's hash is ``None``, so the split is a no-op
+  that only adds per-step CPU overhead — a measurable decode-throughput loss
+  on small/low-batch models.  We restore a single-pass free for the
+  ``enable_caching=False`` case and delegate to the original implementation
+  when prefix caching is on.  Remove once fixed upstream.
+
+* ``vllm.model_executor.layers.mamba.abstract.MambaBase.bind_kv_cache`` —
+  upstream PR #44456 unpacks a single packed int8 page via
+  ``kv_cache.squeeze(dim=(1, 2))``.  The HPU runner allocates a separate
+  tensor per Mamba state and hands the layer a ready-made tuple, so the
+  upstream method raises ``AttributeError: 'tuple' object has no attribute
+  'squeeze'`` at EngineCore init.  We replace it with a variant that assigns
+  the pre-split tuple directly (restoring the pre-#44456 contract).  Regressed
+  when the 0.26.0 sliding-window port dropped the original patch.
+
+* ``transformers.integrations.sdpa_attention.sdpa_attention_forward`` — the
+  transformers library's SDPA attention uses ``F.scaled_dot_product_attention``
+  which routes to suboptimal kernels on HPU. We replace it with an HPU-optimized
+  version that uses FusedSDPA when the ``fsdpa_impl`` attention implementation
+  is configured, providing 1.4-2x performance improvement for models that use
+  transformers SDPA attention (e.g., vision encoders in Gemma4 models).
 """
 
 import gc
+import inspect
+from typing import Callable, Optional
 
 import torch
 
 from vllm import envs
-from vllm.distributed import parallel_state
-from vllm.platforms import current_platform
+
+# NOTE: neither ``vllm.platforms.current_platform`` nor
+# ``vllm.distributed.parallel_state`` is imported at module top level — both
+# force re-entrant platform resolution *while this module is being imported by
+# ``vllm_gaudi.register()``*, leaving ``vllm_gaudi`` partially initialized so
+# the HPU platform plugin is silently dropped and vLLM falls back to
+# ``UnspecifiedPlatform`` ("RuntimeError: Failed to infer device type / Device
+# string must not be empty"). Concretely:
+#
+# * ``current_platform`` is a lazily-resolved attribute (see
+#   ``vllm/platforms/__init__.py.__getattr__``): importing it eagerly runs
+#   ``resolve_current_platform_cls_qualname()`` directly.
+# * ``parallel_state`` transitively imports ``vllm.utils.torch_utils``, whose
+#   module-level ``PIN_MEMORY = is_pin_memory_available()`` (vllm PR #45424)
+#   resolves ``current_platform`` at import time — the same re-entry, one hop
+#   removed.
+#
+# Both are therefore imported lazily inside the functions that use them, and
+# the ``cleanup_dist_env_and_memory`` patch (which needs ``parallel_state``)
+# is deferred to ``load_general_plugins`` time rather than ``apply()``
+# (platform-registration time). See GAUDISW-249622.
 
 
 def _hpu_accelerator_empty_cache() -> None:
@@ -46,9 +130,24 @@ def _hpu_accelerator_empty_cache() -> None:
     ``RuntimeError``.  Route through ``current_platform.empty_cache``
     instead (which is ``None`` on HPU, making this a no-op).
     """
+    from vllm.platforms import current_platform
+
     empty_cache = current_platform.empty_cache
     if empty_cache is not None:
         empty_cache()
+
+
+def _hpu_accelerator_empty_host_cache() -> None:
+    """HPU-safe replacement for ``torch.accelerator.empty_host_cache()``.
+
+    HPU has no host-cache-release hook; the upstream C++ path
+    (``at::accelerator::emptyHostCache()``) segfaults at teardown. vLLM PR
+    #51107 swapped ``torch._C._host_emptyCache()`` for
+    ``torch.accelerator.empty_host_cache()`` in ``cleanup_dist_env_and_memory``,
+    and on torch>=2.9 the attribute exists so the upstream
+    ``except AttributeError`` guard no longer catches it.  Make it a no-op.
+    """
+    return
 
 
 def _patch_hf3fs_mock_client_for_cpu_only() -> None:
@@ -122,6 +221,9 @@ def _hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
     ``torch.accelerator.empty_cache()`` (which is incompatible with the
     HPU allocator).
     """
+    from vllm.distributed import parallel_state
+    from vllm.platforms import current_platform
+
     # Re-apply lazy runtime patches that may depend on import timing.
     _patch_hf3fs_mock_client_for_cpu_only()
 
@@ -146,6 +248,59 @@ def _hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
             torch._C._host_emptyCache()
     except AttributeError:
         parallel_state.logger.warning("torch._C._host_emptyCache() only available in Pytorch >=2.5")
+
+
+def _hpu_gather_logprobs(
+    logprobs: torch.Tensor,
+    num_logprobs: int,
+    token_ids: torch.Tensor,
+):
+    """HPU-safe replacement for ``Sampler.gather_logprobs``.
+
+    Identical logic to the upstream implementation (vllm PR #38933) but with
+    the two ``mark_unbacked()`` calls removed.  On HPU, ``mark_unbacked`` is a
+    forbidden callable in ``torch._dynamo`` (``is_forbidden=True``).  When the
+    compiled ``Sampler`` traces ``gather_logprobs``, hitting ``mark_unbacked``
+    raises ``AssertionError: Attempt to trace forbidden callable``.  HPU does
+    not need this CUDA-specific recompile hint.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/38933
+    """
+    from vllm.v1.outputs import LogprobsTensors
+    import vllm.v1.sample.sampler as _sampler_mod
+
+    assert token_ids.dtype == torch.int64
+    topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
+    token_ids = token_ids.unsqueeze(-1)
+    token_logprobs = logprobs.gather(-1, token_ids)
+    # mark_unbacked calls intentionally omitted — forbidden on HPU dynamo.
+    token_ranks = _sampler_mod.batched_count_greater_than(logprobs, token_logprobs)
+    indices = torch.cat((token_ids, topk_indices), dim=1)
+    logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
+    indices = indices.to(torch.int32)
+    return LogprobsTensors(indices, logprobs, token_ranks)
+
+
+def _patch_gather_logprobs() -> None:
+    """Replace ``Sampler.gather_logprobs`` with the HPU-safe variant.
+
+    Called from the ``load_general_plugins`` hook (same as
+    ``_patch_batched_count_greater_than``) so that ``vllm.v1.sample.*``
+    imports run after platform initialisation.
+
+    Guarded by ``inspect.getsource`` so this is a no-op on vLLM versions
+    that predate PR #38933 (i.e. where ``gather_logprobs`` does not call
+    ``mark_unbacked``).
+    """
+    import inspect
+
+    import vllm.v1.sample.sampler as _sampler_mod
+
+    if "mark_unbacked" not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
+        return  # Not affected — older vLLM without PR #38933.
+
+    _sampler_mod.Sampler.gather_logprobs = staticmethod(  # type: ignore[method-assign]
+        _hpu_gather_logprobs)
 
 
 def _hpu_batched_count_greater_than(x: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
@@ -173,35 +328,586 @@ def _patch_batched_count_greater_than() -> None:
     _sampler_mod.batched_count_greater_than = _hpu_batched_count_greater_than
 
 
+_GRANITE_LEGACY_LAYER_ALIASES = {
+    "full_attention": "attention",
+    "linear_attention": "mamba",
+}
+
+
+def _patch_granite_hybrid_layer_types() -> None:
+    """Accept transformers>=5 remapped hybrid layer-type names for GraniteMoeHybrid.
+
+    transformers>=5 rewrites the legacy hybrid ``layer_types`` values on config
+    load ("attention" -> "full_attention", "mamba" -> "linear_attention"; see
+    ``remap_legacy_layer_types`` in transformers ``configuration_utils.py``).
+    Hub checkpoints still store the legacy names, so the rename happens in
+    memory. vLLM's ``ALL_DECODER_LAYER_TYPES`` in ``granitemoehybrid.py`` only
+    keys the legacy names, so the remapped values raise
+    ``KeyError: 'linear_attention'`` at ``get_layer`` during model construction
+    (before any HPU kernel runs).
+
+    Guarded so this is a no-op once the value is already keyed (e.g. upstream
+    vLLM PR #47634 merged, or the module shape changed).
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/47634
+    """
+    import vllm.model_executor.models.granitemoehybrid as _granite_mod
+
+    layer_types = getattr(_granite_mod, "ALL_DECODER_LAYER_TYPES", None)
+    if not isinstance(layer_types, dict):
+        return  # Module shape changed — nothing to patch.
+    if "linear_attention" in layer_types or "full_attention" in layer_types:
+        return  # Already handles the remapped names (e.g. PR #47634 merged).
+    if "attention" not in layer_types or "mamba" not in layer_types:
+        return  # Legacy keys absent — not the shape this patch targets.
+
+    layer_types["full_attention"] = layer_types["attention"]
+    layer_types["linear_attention"] = layer_types["mamba"]
+
+
+def _hpu_mamba_bind_kv_cache(self, kv_cache) -> None:
+    """HPU-safe replacement for ``MambaBase.bind_kv_cache``.
+
+    Upstream vLLM PR #44456 ("[3/N][KV-Cache Layout Refactor] Standardize
+    Mamba cache") replaced the old direct assignment
+    (``forward_context[layer_name].kv_cache = kv_cache`` in
+    ``vllm.v1.worker.utils.bind_kv_cache``) with a per-layer
+    ``MambaBase.bind_kv_cache`` that unpacks a single packed ``[B, 1, 1, C]``
+    int8 page view via ``kv_cache.squeeze(dim=(1, 2))``.
+
+    The HPU model runner never packs the Mamba state into one int8 page:
+    ``HPUModelRunner.initialize_kv_cache`` allocates a separate tensor per
+    state (conv/ssm) and always stores a ``tuple``/``list`` in the ``kv_caches``
+    dict for every MambaSpec layer (see the standard, hybrid and
+    naive-cache-sharing branches — each ends in ``kv_caches[...] = tuple(...)``
+    or ``= state_tensors``). ``bind_kv_cache`` therefore only ever receives that
+    pre-split sequence on HPU; the upstream ``.squeeze`` path would raise
+    ``AttributeError: 'tuple' object has no attribute 'squeeze'`` at EngineCore
+    init (crashes ``run_granite_4_h_load_generate_test`` for
+    ibm-granite/granite-4.0-h-small).
+
+    Restore the pre-#44456 contract by assigning the pre-split sequence
+    directly. This patch is HPU-only (installed from the HPU plugin), so the
+    single-int8-page allocation never reaches it; ``tuple(kv_cache)`` would
+    silently iterate a raw tensor's leading dim, so guard the contract instead
+    of coercing.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/44456
+    """
+    assert isinstance(
+        kv_cache,
+        (tuple,
+         list)), (f"HPU MambaBase.bind_kv_cache expects a pre-split conv/ssm sequence, got {type(kv_cache).__name__}")
+    self.kv_cache = tuple(kv_cache)
+
+
+def _patch_mamba_bind_kv_cache() -> None:
+    """Install the HPU-safe ``MambaBase.bind_kv_cache`` replacement.
+
+    Guarded so this is a no-op unless the target actually exists and still
+    uses the ``squeeze``-based unpacking introduced by PR #44456:
+
+    * If ``vllm.model_executor.layers.mamba.abstract.MambaBase`` cannot be
+      imported or has no ``bind_kv_cache`` attribute (import-path or API
+      change), skip silently — nothing to patch.
+    * If the upstream method no longer calls ``.squeeze(`` (upstream reverted
+      to a direct assignment), skip — the AttributeError this patch works
+      around can no longer occur, and overwriting would only risk masking a
+      future upstream change.
+
+    Deferred to ``load_general_plugins`` time so the ``vllm.model_executor``
+    import chain runs after the platform is ready.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/44456
+    """
+    try:
+        from vllm.model_executor.layers.mamba.abstract import MambaBase
+    except ImportError:
+        return  # Import path changed/removed upstream — nothing to patch.
+
+    upstream = getattr(MambaBase, "bind_kv_cache", None)
+    if upstream is None:
+        return  # Method dropped upstream — nothing to patch.
+
+    if upstream is _hpu_mamba_bind_kv_cache:
+        return  # Already installed (idempotent within this process).
+
+    # Only patch when the upstream body still does the squeeze-based unpacking
+    # that trips on HPU's pre-split tuple; otherwise leave upstream untouched.
+    try:
+        source = inspect.getsource(upstream)
+    except (OSError, TypeError):
+        source = ""  # Builtin/C or source unavailable — assume it needs the patch.
+    if source and ".squeeze(" not in source:
+        return  # Upstream no longer squeezes — the tuple crash cannot occur.
+
+    MambaBase.bind_kv_cache = _hpu_mamba_bind_kv_cache
+
+
+def _hpu_get_num_layers_by_block_type(self, parallel_config, block_type="attention"):
+    """HPU-safe replacement for ``ModelConfig.get_num_layers_by_block_type``.
+
+    Identical to the upstream implementation, but normalizes both sides of the
+    ``layers_block_type`` comparison so either naming convention matches. Under
+    transformers>=5 ``layers_block_type`` aliases the remapped ``layer_types``
+    ("attention" -> "full_attention", "mamba" -> "linear_attention"), while the
+    HPU model runner queries with the legacy names ("attention", "mamba"). Left
+    unpatched, the counts collapse to zero and the hybrid KV-cache setup breaks.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/47634
+    """
+    attn_block_type = block_type == "attention"
+    is_transformer = not self.is_hybrid and not self.has_noops and not self.is_attention_free
+    start, end = self.get_layers_start_end_indices(parallel_config)
+
+    if is_transformer:
+        return end - start if attn_block_type else 0
+    elif self.is_attention_free:
+        return 0 if attn_block_type else end - start
+    elif self.has_noops:
+        block_configs = self.hf_config.block_configs
+        return sum(not bc.attention.no_op for bc in block_configs[start:end])
+    else:
+        # Hybrid model Jamba
+        layers_block_type_value = getattr(self.hf_text_config, "layers_block_type", None)
+        if layers_block_type_value is not None:
+            if self.model_arch_config.text_model_type == "zamba2":
+                if attn_block_type:
+                    return sum(t == "hybrid" for t in layers_block_type_value[start:end])
+                else:
+                    return self.get_num_layers(parallel_config)
+            aliases = _GRANITE_LEGACY_LAYER_ALIASES
+            normalized_block_type = aliases.get(block_type, block_type)
+            return sum(aliases.get(t, t) == normalized_block_type for t in layers_block_type_value[start:end])
+
+        # Hybrid model Minimax
+        attn_type_list = getattr(self.hf_config, "attn_type_list", None)
+        if attn_type_list:
+            return sum(t == 1 for t in attn_type_list[start:end])
+
+        # Hybrid model Qwen3Next Qwen3.5 Series
+        layer_types_value = getattr(self.hf_text_config, "layer_types", None)
+        if layer_types_value is not None:
+            if block_type == "attention":
+                return sum(t == "full_attention" for t in layer_types_value[start:end])
+            elif block_type == "linear_attention":
+                return sum(t == "linear_attention" for t in layer_types_value[start:end])
+            else:
+                return sum(t == block_type for t in layer_types_value[start:end])
+
+        if layers_block_type_value is None and attn_type_list is None and layer_types_value is None:
+            raise ValueError("The model is an hybrid without a layers_block_type or an "
+                             "attn_type_list, or a layer_types in the hf_config, "
+                             f"cannot determine the num of {block_type} layers")
+        raise AssertionError(f"Unsupported block type: {block_type}")
+
+
+def _patch_get_num_layers_by_block_type() -> None:
+    """Install the HPU-safe ``get_num_layers_by_block_type`` replacement.
+
+    Guarded by ``inspect.getsource`` so this is a no-op once upstream vLLM
+    normalizes the ``layers_block_type`` comparison itself (PR #47634).
+    """
+    import inspect
+
+    from vllm.config import ModelConfig
+
+    try:
+        source = inspect.getsource(ModelConfig.get_num_layers_by_block_type)
+    except (OSError, TypeError):
+        return  # Source unavailable — leave upstream in place.
+
+    if "get_num_layers_by_block_type" not in source or "layers_block_type" not in source:
+        return  # Method shape changed — do not risk an incompatible override.
+    if "_GRANITE_LEGACY_LAYER_ALIASES" in source or "normalized_block_type" in source:
+        return  # Already normalizes (e.g. PR #47634 merged).
+
+    ModelConfig.get_num_layers_by_block_type = _hpu_get_num_layers_by_block_type
+
+
+def _patch_use_sequence_parallel_moe() -> None:
+    """Restore the ``data_parallel_size > 1`` guard on ``use_sequence_parallel_moe``.
+
+    vllm PR #48036 removed ``and self.data_parallel_size > 1`` from
+    ``ParallelConfig.use_sequence_parallel_moe`` to enable SP-MoE for DSv3.2 +
+    MTP on a single node. On HPU that flips SP-MoE on for plain EP + TP>1 +
+    DP==1 setups (e.g. Kimi-K2.6 / DeepSeek MLA), whose reduce_scatter /
+    sequence_parallel_chunk reshaping the HPU MLA rotary and RMSNorm ops cannot
+    yet handle, crashing the forward pass. Until those ops support the SP-MoE
+    layout, re-add the DP>1 guard so single-node EP behaves as before.
+
+    Guarded by ``inspect.getsource`` so this becomes a no-op if upstream
+    restores the guard or the property's shape changes.
+    """
+    import inspect
+
+    from vllm.config.parallel import ParallelConfig
+
+    prop = ParallelConfig.__dict__.get("use_sequence_parallel_moe")
+    if not isinstance(prop, property) or prop.fget is None:
+        return  # Not a property anymore — do not risk an incompatible override.
+
+    try:
+        source = inspect.getsource(prop.fget)
+    except (OSError, TypeError):
+        return  # Source unavailable — leave upstream in place.
+
+    if "use_sequence_parallel_moe" not in source or "enable_expert_parallel" not in source:
+        return  # Shape changed — do not risk an incompatible override.
+    if "data_parallel_size" in source:
+        return  # Guard already present (upstream restored it) — no-op.
+
+    _original_fget = prop.fget
+
+    def _hpu_use_sequence_parallel_moe(self) -> bool:
+        return _original_fget(self) and self.data_parallel_size > 1
+
+    ParallelConfig.use_sequence_parallel_moe = property(_hpu_use_sequence_parallel_moe)
+
+
+def _patch_cleanup_dist_env_and_memory() -> None:
+    """Install the HPU-safe ``cleanup_dist_env_and_memory`` replacement.
+
+    Deferred to ``load_general_plugins`` time (rather than ``apply()`` at
+    platform-registration time) so the ``vllm.distributed.parallel_state``
+    import chain runs *after* the platform is initialised and *after*
+    ``vllm.utils.torch_utils`` has finished importing (see ``apply()`` and
+    the module-level NOTE — GAUDISW-249622).
+    """
+    from vllm.distributed import parallel_state
+    import vllm.distributed as _vllm_distributed
+
+    parallel_state.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
+    _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
+
+
+def _hpu_check_shm_free_space(*args, **kwargs) -> None:
+    """No-op replacement for ``shm_broadcast.check_shm_free_space``.
+
+    Upstream vLLM PR #48879 added an eager guard that rejects creating the shm
+    ring buffer when its *nominal* size (default 240 MiB per ``MessageQueue``)
+    exceeds the free space on ``/dev/shm``. HPU CI containers expose the Docker
+    default 64 MiB ``/dev/shm``, on which the pre-#48879 path worked: the
+    segment is backed by tmpfs and only the pages actually written are
+    allocated, and the broadcast workers touch a small fraction of the ring.
+    The guard aborts EngineCore start-up before any page is touched, so restore
+    the prior behaviour by skipping the check on HPU.
+
+    Accepts ``*args, **kwargs`` rather than mirroring the upstream signature so
+    that a future signature change (an added positional/keyword parameter) does
+    not raise ``TypeError`` at the (single, bare-name) call site in
+    ``ShmRingBuffer.__init__``. All arguments are ignored.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/48879
+    """
+    return None
+
+
+def _patch_check_shm_free_space() -> None:
+    """Neutralize the eager ``/dev/shm`` size guard added by vLLM PR #48879.
+
+    ``ShmRingBuffer.__init__`` calls ``check_shm_free_space`` by bare name, so
+    replacing the module-level attribute intercepts every ring-buffer creation.
+
+    We always override the symbol when it exists, rather than inspecting its
+    source to confirm it still raises: the no-op is harmless even if upstream
+    later softens the guard to size-to-fit (nothing would have raised anyway),
+    whereas a source-string heuristic is brittle — upstream could keep failing
+    fast while raising a different exception type, wrapping the logic in a
+    helper, or rewording the message, any of which would silently stop the
+    patch from applying and reintroduce the ``Insufficient space in /dev/shm``
+    startup crash on HPU. The attribute-presence check below still self-retires
+    the patch if upstream removes or renames the function (e.g. lands a proper
+    fix).
+
+    Deferred to ``load_general_plugins`` time so the
+    ``vllm.distributed.device_communicators`` import chain runs after platform
+    initialisation.
+
+    Upstream ref: https://github.com/vllm-project/vllm/pull/48879
+    """
+    try:
+        import vllm.distributed.device_communicators.shm_broadcast as _shm_mod
+    except ImportError:
+        return  # Import path changed/removed upstream — nothing to patch.
+
+    upstream = getattr(_shm_mod, "check_shm_free_space", None)
+    if upstream is None:
+        return  # Guard absent (pre-#48879 or renamed) — nothing to patch.
+
+    if upstream is _hpu_check_shm_free_space:
+        return  # Already installed (idempotent within this process).
+
+    _shm_mod.check_shm_free_space = _hpu_check_shm_free_space
+
+
+def _hpu_free_blocks(self, ordered_blocks) -> None:
+    """Single-pass ``BlockPool.free_blocks`` for ``enable_caching=False``.
+
+    Upstream vLLM PR #42656 rewrote ``free_blocks`` to partition freed blocks
+    into with-hash / without-hash lists and issue two queue ops
+    (``prepend_n`` + ``append_n``) on every engine step.  When prefix caching
+    is disabled, every block's hash is ``None``, so that split is a no-op that
+    only adds per-step CPU work; on short decode steps (small model / low
+    batch) it is a measurable fixed overhead (~3.5% output-token throughput on
+    llama-3.1-8B FP8, 1 card, 4096/1024, mc=8 — see GAUDISW-250180).  Free in
+    a single pass in that case; delegate to the original (upstream)
+    implementation when prefix caching is enabled so #42656's LRU ordering is
+    preserved.  Remove this patch once the fix lands upstream.
+    """
+    if self.enable_caching:
+        assert _ORIGINAL_FREE_BLOCKS is not None  # set by _patch_free_blocks before install
+        return _ORIGINAL_FREE_BLOCKS(self, ordered_blocks)
+
+    freed_blocks = []
+    for block in ordered_blocks:
+        block.ref_cnt -= 1
+        if block.ref_cnt == 0 and not block.is_null:
+            freed_blocks.append(block)
+    self.free_block_queue.append_n(freed_blocks)
+
+
+_ORIGINAL_FREE_BLOCKS: Optional[Callable] = None
+
+
+def _patch_free_blocks() -> None:
+    """Install the single-pass ``free_blocks`` fast path for APC-disabled runs.
+
+    Deferred to ``load_general_plugins`` time (same as the other patches) so
+    the ``vllm.v1.core`` import runs after platform initialisation.
+    Idempotent: only wraps the original ``free_blocks`` once.
+    """
+    global _ORIGINAL_FREE_BLOCKS
+    from vllm.v1.core.block_pool import BlockPool
+
+    if _ORIGINAL_FREE_BLOCKS is not None:
+        return  # already patched
+    _ORIGINAL_FREE_BLOCKS = BlockPool.free_blocks
+    BlockPool.free_blocks = _hpu_free_blocks
+
+
+# Global cache for FusedSDPA operator to avoid recreation overhead
+_CACHED_FSDPA_OP = None
+
+
+def _ensure_fsdpa_cached() -> None:
+    """Eagerly initialize the FusedSDPA operator cache.
+
+    Must be called BEFORE torch.compile traces _hpu_sdpa_attention_forward,
+    otherwise dynamo creates a guard on `_CACHED_FSDPA_OP is None` which
+    fails at runtime and triggers recompilation.
+
+    Called from hpu_model_runner.py during model initialization.
+    """
+    global _CACHED_FSDPA_OP
+    if _CACHED_FSDPA_OP is not None:
+        return
+    try:
+        from vllm_gaudi.extension.utils import ModuleFusedSDPA
+        import vllm_gaudi.extension.kernels as kernels
+        HPUFusedSDPA = kernels.fsdpa()
+        _CACHED_FSDPA_OP = ModuleFusedSDPA(HPUFusedSDPA)
+    except Exception:
+        pass
+
+
+def _hpu_sdpa_attention_forward(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    dropout: float = 0.0,
+    scaling: float | None = None,
+    is_causal: bool | None = None,
+    position_bias: torch.Tensor | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, None]:
+    """HPU-optimized replacement for transformers' ``sdpa_attention_forward``.
+
+    Based on ``transformers.integrations.sdpa_attention.sdpa_attention_forward``
+    from transformers v5.14.1. Uses HPU FusedSDPA kernel when running on HPU
+    with fsdpa_impl config, providing better performance for models that use
+    transformers SDPA attention (e.g., vision encoders in multimodal models).
+
+    The FusedSDPA operator is cached globally to avoid recreation overhead
+    on each call, which would otherwise cause significant slowdown.
+    """
+    from transformers.integrations.sdpa_attention import (repeat_kv, use_gqa_in_sdpa, create_position_bias_mask,
+                                                          _is_torch_npu_available, logger)
+
+    if kwargs.get("output_attentions", False):
+        logger.warning_once("`sdpa` attention does not support `output_attentions=True`."
+                            " Please set your attention to `eager` if you want any of these features.")
+    sdpa_kwargs = {}
+    if hasattr(module, "num_key_value_groups") and module.num_key_value_groups > 1:
+        if not use_gqa_in_sdpa(attention_mask, key, value):
+            key = repeat_kv(key, module.num_key_value_groups)
+            value = repeat_kv(value, module.num_key_value_groups)
+        else:
+            sdpa_kwargs = {"enable_gqa": True}
+
+    q_length = query.shape[2]
+    kv_length = key.shape[2]
+
+    is_causal = is_causal if is_causal is not None else getattr(module, "is_causal", True)
+    is_causal = q_length > 1 and attention_mask is None and is_causal
+
+    if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
+        is_causal = is_causal.item()
+
+    if _is_torch_npu_available and attention_mask is not None and attention_mask.dtype != torch.bool:
+        attention_mask = torch.logical_not(attention_mask.bool()).to(query.device)
+
+    if is_causal and attention_mask is None and q_length > 1 and kv_length > q_length:
+        key = key[:, :, :q_length, :]
+        value = value[:, :, :q_length, :]
+        if position_bias is not None:
+            position_bias = position_bias[:, :, :, :q_length]
+
+    if position_bias is not None:
+        attention_mask = create_position_bias_mask(position_bias, attention_mask, is_causal, query, key)
+        is_causal = False
+
+    # Check if we should use HPU FusedSDPA
+    _use_hpu_fsdpa = False
+    _config = None
+    if query.device.type == "hpu":
+        try:
+            from vllm_gaudi.extension.runtime import get_config
+            _config = get_config()
+            if _config.prompt_attn_impl == "fsdpa_impl":
+                _use_hpu_fsdpa = True
+        except Exception:
+            pass
+
+    if _use_hpu_fsdpa and _config is not None:
+        # _CACHED_FSDPA_OP is initialized eagerly by _ensure_fsdpa_cached()
+        # before torch.compile traces this function. This avoids the dynamo
+        # guard on `_CACHED_FSDPA_OP is None` that would trigger recompilation.
+        _ensure_fsdpa_cached()
+        if _CACHED_FSDPA_OP is None:
+            raise RuntimeError("FSDPA op failed to initialize")
+
+        softmax_mode = "fp32" if _config.fp32_softmax else "fast"
+        attn_output = _CACHED_FSDPA_OP(
+            query,
+            key,
+            value,
+            attention_mask,
+            dropout_p=dropout,
+            is_causal=is_causal,
+            scale=scaling,
+            softmax_mode=softmax_mode,
+            recompute_mode=True,
+            valid_sequence_lengths=None,
+        )
+    else:
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attention_mask,
+            dropout_p=dropout,
+            scale=scaling,
+            is_causal=is_causal,
+            **sdpa_kwargs,
+        )
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    return attn_output, None
+
+
+def _patch_sdpa_attention_forward() -> None:
+    """Replace transformers' ``sdpa_attention_forward`` with HPU-optimized version.
+
+    This patch enables the HPU FusedSDPA kernel for models that use transformers
+    SDPA attention, providing 1.4-2x performance improvement.
+
+    The patch is only applied when running on HPU and when the fsdpa_impl
+    attention implementation is configured.
+    """
+    try:
+        import transformers.integrations.sdpa_attention as _sdpa_mod
+        _sdpa_mod.sdpa_attention_forward = _hpu_sdpa_attention_forward
+
+        # Also update ALL_ATTENTION_FUNCTIONS which caches function references
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+        if "sdpa" in ALL_ATTENTION_FUNCTIONS:
+            ALL_ATTENTION_FUNCTIONS["sdpa"] = _hpu_sdpa_attention_forward
+    except ImportError:
+        pass  # transformers version without this module
+
+    # Eagerly initialize the operator cache at patch-registration time,
+    # before torch.compile traces the function. Same pattern as hpu_attn.py
+    # which calls kernels.fsdpa() in __init__.
+    _ensure_fsdpa_cached()
+
+
+def _patch_inc_quantization_config() -> None:
+    """Register the HPU ``_FakeINCConfig`` as the resolver for ``inc``.
+
+    The Gaudi runtime-INC (Intel Neural Compressor) flow calibrates fp8 scales
+    at runtime and ships no on-disk config, so resolving ``inc`` to vLLM's
+    native ``INCConfig`` (whose ``get_config_filenames()`` expects
+    ``quantization_config.json``) makes ``get_quant_config`` raise ``Cannot find
+    the config file for inc`` — surfacing as a ``VllmConfig`` ValidationError
+    during ``create_engine_config`` (exposed by upstream vllm#51695). The
+    existing ``ops`` shim on ``get_quantization_config`` is order-sensitive;
+    registering via the public ``register_quantization_config`` API is immune to
+    import order because ``get_quantization_config`` merges the registry on
+    every call. ``inc`` is already in ``QUANTIZATION_METHODS``, so this only
+    overrides the config class and does not touch ``current_platform``.
+    """
+    from vllm.model_executor.layers.quantization import register_quantization_config
+
+    from vllm_gaudi.extension.quant import _FakeINCConfig
+
+    register_quantization_config("inc")(_FakeINCConfig)
+
+
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
     # --- torch.accelerator.empty_cache ---
     torch.accelerator.empty_cache = _hpu_accelerator_empty_cache
 
+    # --- torch.accelerator.empty_host_cache ---
+    if hasattr(torch.accelerator, "empty_host_cache"):
+        torch.accelerator.empty_host_cache = _hpu_accelerator_empty_host_cache
+
     # --- torch._C._host_emptyCache ---
     if not hasattr(torch._C, "_host_emptyCache"):
         torch._C._host_emptyCache = lambda: None
 
-    # --- cleanup_dist_env_and_memory ---
-    parallel_state.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
-    import vllm.distributed as _vllm_distributed
-
-    _vllm_distributed.cleanup_dist_env_and_memory = _hpu_cleanup_dist_env_and_memory
     _patch_hf3fs_mock_client_for_cpu_only()
 
-    # --- batched_count_greater_than (deferred) ---
-    # We cannot import the sampler modules here because the import chain
-    # triggers platform re-initialisation ("Device string must not be
-    # empty").  Instead we hook into ``load_general_plugins`` which runs
-    # in every process (parent + EngineCore subprocess) after the platform
-    # is ready.
+    # --- Deferred patches (cleanup_dist_env_and_memory + sampler) ---
+    # We cannot import ``vllm.distributed.parallel_state`` or the sampler
+    # modules here, at platform-registration time.  Their import chain
+    # re-enters ``vllm.utils.torch_utils`` while it is still initialising
+    # (vllm PR #45424 made ``PIN_MEMORY`` resolve the current platform at
+    # ``torch_utils`` import time, and that platform resolution is exactly
+    # what triggers this plugin's registration).  The re-entry aborts HPU
+    # platform detection ("Failed to infer device type").  Instead we hook
+    # into ``load_general_plugins`` which runs in every process (parent +
+    # EngineCore subprocess) after the platform is ready.
     import vllm.plugins as _plugins_mod
 
     _original_load_general = _plugins_mod.load_general_plugins
 
     def _load_general_with_hpu_patches():
         _original_load_general()
+        _patch_cleanup_dist_env_and_memory()
         _patch_batched_count_greater_than()
+        _patch_gather_logprobs()
+        _patch_granite_hybrid_layer_types()
+        _patch_get_num_layers_by_block_type()
+        _patch_use_sequence_parallel_moe()
+        _patch_check_shm_free_space()
+        _patch_mamba_bind_kv_cache()
+        _patch_free_blocks()
+        _patch_sdpa_attention_forward()
+        _patch_inc_quantization_config()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 

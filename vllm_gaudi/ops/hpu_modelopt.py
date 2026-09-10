@@ -17,7 +17,17 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization import modelopt
 from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
 from torch.nn.parameter import Parameter
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+try:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+except ImportError:
+    # Optional/moved upstream symbol (see PR #41184). When absent, the
+    # RoutedExperts (FusedMoE) branch in get_quant_method is simply
+    # unreachable; use a sentinel that no layer will ever be an instance of
+    # so isinstance(layer, RoutedExperts) safely evaluates to False.
+    class RoutedExperts:  # type: ignore[no-redef]
+        pass
+
+
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 
 logger = init_logger(__name__)
@@ -65,7 +75,9 @@ class HPUModelOptFp8Config(ModelOptFp8Config):
         if isinstance(layer, LinearBase):
             quant_method = HPUModelOptFp8LinearMethod(self)
             return quant_method
-        elif isinstance(layer, FusedMoE):
+        # After upstream PR #41184, FusedMoE is a factory function (not a class)
+        # and the object passed here is a RoutedExperts expert container.
+        elif isinstance(layer, RoutedExperts):
             raise ValueError("FP8 modelopt quantization not yet supported on Gaudi")
 
         return None

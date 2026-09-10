@@ -10,6 +10,7 @@ from vllm import envs
 
 from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.extension.logger import logger as init_logger
 
 if TYPE_CHECKING:
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -19,9 +20,18 @@ else:
     ModelConfig = None
     VllmConfig = None
 
-from vllm_gaudi.extension.logger import logger as init_logger
-
 logger = init_logger()
+
+
+# Monkey-patch torch.accelerator.get_memory_info for HPU compatibility.
+# torch.accelerator.get_memory_info() is not implemented for HPU and raises
+# RuntimeError. We patch it to use torch.hpu.mem_get_info() instead.
+def _hpu_get_memory_info(device=None) -> tuple[int, int]:
+    """Get (free, total) memory in bytes for HPU."""
+    return torch.hpu.mem_get_info()
+
+
+torch.accelerator.get_memory_info = _hpu_get_memory_info
 
 QWEN3_5_HYBRID_ARCHS = frozenset({
     "Qwen3_5ForConditionalGeneration",
@@ -53,7 +63,9 @@ class HpuPlatform(Platform):
     dispatch_key: str = "HPU"
     ray_device_key: str = "HPU"
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
-    supported_quantization: list[str] = ["compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu", "modelopt"]
+    supported_quantization: list[str] = [
+        "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu", "modelopt", "gpt_oss_mxfp4"
+    ]
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
@@ -73,7 +85,10 @@ class HpuPlatform(Platform):
             return AttentionBackendEnum.CPU_ATTN.get_path()
 
         if attn_selector_config.use_sparse:
-            raise NotImplementedError("Sparse Attention is not supported on HPU.")
+            if not attn_selector_config.use_mla:
+                raise NotImplementedError("Sparse Attention is not supported on HPU.")
+            logger.warning("Sparse attention (DSA) is not implemented on HPU; running DSA layers as dense MLA "
+                           "(exact for sequences up to index_topk tokens, approximate beyond).")
 
         if attn_selector_config.use_mla:
             logger.info("Using HPUAttentionMLA backend.")
@@ -128,6 +143,7 @@ class HpuPlatform(Platform):
         # a lazy-mode subprocess (GAUDISW-248809) and always respect values the
         # user set explicitly (GAUDISW-249135).
         cls.set_compile_env_defaults()
+        cls._maybe_disable_synapse_input_reuse(vllm_config)
         parallel_config = vllm_config.parallel_config
 
         if parallel_config.worker_cls == "auto":
@@ -158,8 +174,19 @@ class HpuPlatform(Platform):
         # size (block_size * per-token KV bytes).  Without this the upstream
         # unify_kv_cache_spec_page_size() fails because the two page sizes
         # are not divisible.
-        if (cache_config and cache_config.block_size is not None and vllm_config.model_config is not None
-                and vllm_config.model_config.is_hybrid and cache_config.mamba_page_size_padded is not None):
+        #
+        # Exception: granitemoehybrid models skip this rescaling here because
+        # update_block_size_for_backend() computes the correct block_size
+        # (528 or 768 tokens) and re-aligns mamba_page_size_padded to that
+        # larger attention page.  If we rescaled here with block_size=128 we
+        # would corrupt the value already set by update_block_size_for_backend
+        # (e.g. 2162688 → 2621440) on every subsequent check_and_update_config
+        # call (config deserialization, reconfigure path, etc.).
+        _is_granitemoehybrid = (vllm_config.model_config is not None and getattr(
+            getattr(vllm_config.model_config, "hf_config", None), "model_type", None) == "granitemoehybrid")
+        if (not _is_granitemoehybrid and cache_config and cache_config.block_size is not None
+                and vllm_config.model_config is not None and vllm_config.model_config.is_hybrid
+                and cache_config.mamba_page_size_padded is not None):
             # Recompute mamba_page_size_padded so it is a multiple of
             # the HPU attention page size.
             from vllm.utils.torch_utils import get_dtype_size
@@ -215,6 +242,9 @@ class HpuPlatform(Platform):
         if get_config().VLLM_CONTIGUOUS_PA:
             logger.warning("Using Contiguous PA, disabling prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
+            if vllm_config.model_config.get_sliding_window():
+                logger.info("Contiguous paged attention is enabled; sliding-window layers "
+                            "will use indexed KV-cache fetches.")
 
         if (vllm_config.cache_config.enable_prefix_caching and vllm_config.cache_config.mamba_cache_mode == "all"):
             vllm_config.cache_config.mamba_cache_mode = "align"
@@ -310,12 +340,31 @@ class HpuPlatform(Platform):
                     mamba_page_size,
                     cache_config.enable_prefix_caching,
                 )
-            if not cache_config.user_specified_block_size:
-                cache_config.user_specified_block_size = True
-                super().update_block_size_for_backend(vllm_config)
-                cache_config.user_specified_block_size = False
-            else:
-                super().update_block_size_for_backend(vllm_config)
+                # Re-align mamba_page_size_padded to the final HPU block size.
+                # check_and_update_config aligns mamba_page_size_padded to
+                # the HPU default block_size=128, but update_block_size_for_backend
+                # then changes block_size to attn_block_size (e.g. 528).
+                new_attn_page = attn_1tok * attn_block_size
+                if new_attn_page > 0:
+                    old_padded = getattr(cache_config, "mamba_page_size_padded", None)
+                    new_padded = cdiv(mamba_page_size, new_attn_page) * new_attn_page
+                    if old_padded != new_padded:
+                        cache_config.mamba_page_size_padded = new_padded
+                        logger.info(
+                            "Re-aligned mamba_page_size_padded from %s to %d "
+                            "to match granitemoehybrid block_size=%d "
+                            "(new_attn_page=%d).",
+                            old_padded,
+                            new_padded,
+                            attn_block_size,
+                            new_attn_page,
+                        )
+            # Set user_specified_block_size=True permanently so that
+            # check_and_update_config (which runs again on every
+            # VllmConfig.__post_init__, including pickle deserialization in
+            # MultiprocExecutor IPC) will not reset block_size.
+            cache_config.user_specified_block_size = True
+            super().update_block_size_for_backend(vllm_config)
         else:
             super().update_block_size_for_backend(vllm_config)
 
@@ -406,6 +455,63 @@ class HpuPlatform(Platform):
         # Allow utilization of the Parallel Compilation feature.
         if os.environ.get('FUSER_ENABLE_MULTI_THREADED_INVOCATIONS') is None:
             os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
+
+    @classmethod
+    def _compact_gdn_active(cls, vllm_config: VllmConfig) -> bool:
+        """Whether compact-GDN will be active for this model.
+
+        Mirrors the auto-detection in HPUModelRunner.__init__, which runs later
+        in the worker process (via init_device) and therefore cannot inform env
+        defaults applied here at engine-construction time. An explicitly set
+        VLLM_COMPACT_GDN always takes precedence over auto-detection.
+        """
+        explicit = os.environ.get('VLLM_COMPACT_GDN')
+        if explicit is not None:
+            return explicit.strip().lower() in ('1', 'true')
+        model_config = getattr(vllm_config, 'model_config', None)
+        if model_config is None:
+            return False
+        # granitemoehybrid relabels plain mamba layers as "linear_attention"; the
+        # model runner excludes it explicitly or num_gdn is misdetected as > 0.
+        if getattr(model_config.hf_config, 'model_type', None) == 'granitemoehybrid':
+            return False
+        try:
+            num_gdn = sum(
+                model_config.get_num_layers_by_block_type(vllm_config.parallel_config, bt)
+                for bt in ('gdn_attention', 'linear_attention'))
+        except Exception:
+            return False
+        if num_gdn <= 0:
+            return False
+        # Compact-GDN is auto-disabled for PD-disaggregated serving.
+        return getattr(vllm_config, 'kv_transfer_config', None) is None
+
+    @classmethod
+    def _maybe_disable_synapse_input_reuse(cls, vllm_config: VllmConfig) -> None:
+        # Compact-GDN: disable Synapse persistent-input reuse (torch.compile only).
+        # With compact-GDN the recurrent-state (conv/ssm) read and write are split
+        # across separate torch.compile recipes. Synapse's per-graph persistent-input
+        # reuse can then reuse a still-live state buffer's memory as intra-graph
+        # scratch (the reading recipe cannot see that another recipe / the next step
+        # still needs it), corrupting the state and producing NaN output. The reuse
+        # is opt-in per input and decided one recipe at a time, so it cannot detect
+        # this cross-recipe case; we turn it off on this path. Disabling it may
+        # slightly raise peak memory (a persistent input's memory is no longer reused
+        # as scratch) but has no compute/latency impact.
+        #
+        # Decided from vllm_config here (engine construction), not from the
+        # VLLM_COMPACT_GDN env var: the model runner only sets that later, in the
+        # worker process, where this default would no longer take effect. A
+        # user-provided PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE is never overwritten.
+        if htorch.utils.internal.is_lazy():
+            return
+        if not cls._compact_gdn_active(vllm_config):
+            return
+        if os.environ.get('PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE') is not None:
+            return
+        os.environ['PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE'] = '0'
+        logger.warning("Compact-GDN detected: defaulting PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE=0 "
+                       "to prevent cross-recipe persistent-input reuse from corrupting GDN state.")
 
     @classmethod
     def adjust_cuda_hooks(cls) -> None:

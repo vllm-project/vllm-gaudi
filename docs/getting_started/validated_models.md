@@ -14,10 +14,14 @@ The following configurations have been validated to function with IntelÂ® GaudiÂ
 | [bielik-4.5b-v3.0-instruct](https://huggingface.co/speakleash/Bielik-4.5B-v3.0-Instruct) | 1 | BF16 | Gaudi 3 |
 | [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR)     | 1    | BF16    | Gaudi 3|
 | [deepseek-ai/DeepSeek-R1-Distill-Llama-70B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-70B)  | 8    | FP8    | Gaudi 3|
+| [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it)     | 4    | BF16    | Gaudi 3|
+| [google/gemma-4-31B-it](https://huggingface.co/google/gemma-4-31B-it)     | 4    | BF16    | Gaudi 3|
+| [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it)     | 1    | BF16    | Gaudi 3|
 | [ibm-granite/granite-8b-code-instruct-4k](https://huggingface.co/ibm-granite/granite-8b-code-instruct-4k)     | 1  | BF16    | Gaudi 3|
 | [lmsys/gpt-oss-20b-bf16](https://huggingface.co/lmsys/gpt-oss-20b-bf16)     | 1, 2, 4    | BF16    | Gaudi 3|
 | [lmsys/gpt-oss-120b-bf16](https://huggingface.co/lmsys/gpt-oss-120b-bf16)     | 4    | BF16    | Gaudi 3|
 | [MiniMaxAI/MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2)     | 8    | BF16    | Gaudi 3|
+| [MiniMaxAI/MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3)     | 8    | BF16    | Gaudi 3|
 | [meta-llama/CodeLlama-34b-Instruct-hf](https://huggingface.co/meta-llama/CodeLlama-34b-Instruct-hf)     | 1    | BF16    |Gaudi 3|
 | [ibm-granite/Granite-3.1-8B-instruct](https://huggingface.co/ibm-granite/granite-3.1-8b-instruct)     | 1  | BF16    | Gaudi 3|
 | [ibm-granite/Granite-3B-code-instruct-128k](https://huggingface.co/ibm-granite/granite-3b-code-instruct-128k)     | 1  | BF16    | Gaudi 3|
@@ -54,6 +58,8 @@ The following configurations have been validated to function with IntelÂ® GaudiÂ
 | [Qwen/Qwen3-VL-235B-A22B-Instruct-FP8](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8)     | 4    |  FP8    | Gaudi 3|
 | [Qwen/Qwen3-VL-235B-A22B-Thinking](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Thinking)     | 8    |  BF16    | Gaudi 3|
 | [Qwen/Qwen3-VL-235B-A22B-Thinking-FP8](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Thinking-FP8)     | 4    |  FP8    | Gaudi 3|
+| [Qwen/Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B)     | 1    | BF16    | Gaudi 3|
+| [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)     | 1    | BF16    | Gaudi 3|
 | [ibm-granite/granite-4.0-h-small](https://huggingface.co/ibm-granite/granite-4.0-h-small)     | 1    |  BF16    | Gaudi 3|
 | [tencent/Hunyuan-7B-Instruct](https://huggingface.co/tencent/Hunyuan-7B-Instruct)     | 1    | BF16, FP8    | Gaudi 3|
 | [tencent/Hunyuan-A13B-Instruct](https://huggingface.co/tencent/Hunyuan-A13B-Instruct)     | 1    | BF16, FP8    | Gaudi 3|

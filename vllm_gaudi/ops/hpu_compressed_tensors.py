@@ -5,7 +5,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
-from vllm.model_executor.layers.fused_moe.layer import (FusedMoE, FusedMoEConfig)
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
@@ -25,7 +26,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors import (compress
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
     compressed_tensors_moe_w8a8_fp8,
     compressed_tensors_moe_wna16,
-    compressed_tensors_moe_wna16_marlin,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (  # noqa: E501
     CompressedTensorsScheme, CompressedTensorsWNA16)
@@ -34,8 +34,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (find_matched_target)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
     CompressedTensorsW8A8Fp8MoEMethod)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_marlin import (  # noqa: E501
-    CompressedTensorsWNA16MarlinMoEMethod)
+# PR #44941 removed the dedicated WNA16 Marlin MoE method/module; the OOT HPU
+# method now derives from the unified ``CompressedTensorsWNA16MoEMethod``.
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+    CompressedTensorsWNA16MoEMethod as CompressedTensorsWNA16MarlinMoEMethod)
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import WNA16MoEBackend
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -52,7 +55,11 @@ from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
                                       VllmMixtureOfExpertsOpWNA16)
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
+from vllm_gaudi.ops.hpu_fused_moe import (
+    _normalize_moe_activation,
+    select_experts_from_routed,
+)
+from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_tensor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase, )
 import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
@@ -329,8 +336,6 @@ class HPUCompressedTensorsW8A8Int8_BF16Fallback(CompressedTensorsScheme):
                        input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
 
         weight_loader = extra_weight_attrs.get("weight_loader")
-        if hpu_ops.is_hpu_gaudi2:
-            weight_loader = hpu_ops.gaudi_weight_wrapper(weight_loader)
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
@@ -433,7 +438,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         # super().process_weights_after_loading(layer)
         # custom handling for HPU
         num_experts = layer.local_num_experts
-        ep_shift = layer.ep_rank * num_experts
+        ep_shift = layer.moe_config.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
 
@@ -453,6 +458,10 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
                 experts_max,
                 dispatch_fn=None,
             )
+            # Non-gated experts (is_act_and_mul=False, e.g. Nemotron-H's
+            # squared-ReLU) make the fused kernel skip the gate split+multiply.
+            # Gated layers leave is_gated=True and their kernel call is unchanged.
+            layer.moe_op.is_gated = layer.moe_config.is_act_and_mul
 
         if self.static_input_scales:
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
@@ -531,23 +540,45 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
             topk_weights, topk_ids = torch.topk(topk_weights, layer.top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
+
+        if layer.moe_config.is_sequence_parallel:
+            # Sequence-parallel MoE without data parallelism (TP>1 + EP with the
+            # allgather_reducescatter backend => use_sequence_parallel_moe). The
+            # model block chunks tokens by tp_size before the experts and
+            # all-gathers afterwards, expecting `self.experts` to be
+            # token-neutral. Upstream MoERunner._maybe_combine (mirrored in
+            # patched_fused_moe_forward) reduce-scatters the expert output over
+            # the EP group whenever is_sequence_parallel is set, regardless of
+            # dp_size. The paired dispatch all-gather is set up via dispatch_fn
+            # only for dp_size > 1, so at dp_size == 1 the combine is unpaired
+            # and halves the token count -> the block's final reshape fails.
+            # All-gather x / topk over the EP group here to restore the
+            # dispatch/combine symmetry (dp_metadata is None at dp_size == 1, so
+            # dispatch_tensor allocates its own EP-sized output).
+            x = dispatch_tensor(x, None, is_sequence_parallel=True)
+            topk_ids = dispatch_tensor(topk_ids, None, is_sequence_parallel=True)
+            topk_weights = dispatch_tensor(topk_weights, None, is_sequence_parallel=True)
+
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
 
+        activation = _normalize_moe_activation(layer.activation)
         output = layer.moe_op(
             x,
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=True,
-            activation=_normalize_moe_activation(layer.activation),
+            activation=activation,
         )
+        if layer.moe_config.is_sequence_parallel:
+            return output.view(*(output.size(0), *input_shape[1:]))
         return output.view(*input_shape)
 
 
@@ -770,10 +801,16 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         self.actorder = weight_quant.actorder
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
         self.layer_name = layer_name
+        # The bypassed base __init__ normally sets self.wna16_backend from the
+        # WNA16 backend oracle. The HPU path supplies its own MoE op and never
+        # uses a CUDA backend, but inherited methods (get_fused_moe_quant_config,
+        # supports_eplb) still read this attribute. Pin it to the non-accelerated
+        # EMULATION sentinel so those inherited paths take the generic branch.
+        self.wna16_backend = WNA16MoEBackend.EMULATION
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
-        extra_weight_attrs["intermediate_size_full"] = intermediate_size_per_partition * layer.tp_size
+        extra_weight_attrs["intermediate_size_full"] = intermediate_size_per_partition * layer.moe_config.tp_size
 
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
@@ -925,7 +962,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
         # Initialize HPU MoE op
         num_experts = layer.local_num_experts
-        ep_shift = layer.ep_rank * num_experts
+        ep_shift = layer.moe_config.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
         layer.moe_op = VllmMixtureOfExpertsOpWNA16(
@@ -958,7 +995,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         x = x.view(-1, x.shape[-1])
 
         if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
-            topk_weights, topk_ids = layer.router.select_experts(hidden_states=x, router_logits=router_logits)
+            topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
@@ -1162,8 +1199,6 @@ compressed_tensors_moe.CompressedTensorsWNA16MarlinMoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod # Override default WNA16 MoE method
 compressed_tensors_moe_wna16.CompressedTensorsWNA16MoEMethod = \
     HPUCompressedTensorsWNA16MoEMethod
-compressed_tensors_moe_wna16_marlin.CompressedTensorsWNA16MarlinMoEMethod = \
-    HPUCompressedTensorsWNA16MoEMethod
 compressed_tensors.CompressedTensorsConfig = HPUCompressedTensorsConfig
 
 # support weight_loader_v2
@@ -1187,6 +1222,14 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
              if no remapping is needed.
         None: If the remapped name is not found in params_dict.
     """
+
+    # Already in vLLM's expected form. Upstream `base_config.get_cache_scale_mapper`
+    # (activated in vllm #44589) now pre-maps raw checkpoint scales to their
+    # `.attn.` form in `AutoWeightsLoader` before this OOT remap runs, so for
+    # regular attention the pre-mapped name already matches a param. Skip the
+    # regex remap, which would otherwise double-apply the `.attn` prefix.
+    if name in params_dict:
+        return name
 
     if name.endswith(".kv_scale"):
         logger.warning_once("DEPRECATED. Found kv_scale in the checkpoint. "
@@ -1213,6 +1256,18 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         attn_str = "attn"
     # Define scale name mapping patterns in order of precedence
     scale_mapping_patterns = [
+        # Pre-mapped format (vllm #44589): upstream
+        # `base_config.get_cache_scale_mapper` already rewrites raw checkpoint
+        # `.self_attn.{q,k,v}_scale` -> `.self_attn.attn.{q,k,v}_scale` in
+        # `AutoWeightsLoader` before this OOT remap runs. On HPU the real MLA
+        # param lives under `mla_attn.mla_attn`, so redirect the pre-mapped
+        # `.attn.` form to `.{attn_str}.`. For regular attention the pre-mapped
+        # name is already a param and is short-circuited by the
+        # `if name in params_dict` guard above, so this never fires there.
+        (
+            r"\.self_attn\.attn\.([qkv])_scale$",
+            rf".self_attn.{attn_str}.\1_scale",
+        ),
         # LLMC format:  .self_attn.{q,k,v}_scale ->
         #   .attn.{attn_str}.{q,k,v}_scale
         (
@@ -1235,8 +1290,8 @@ def oot_maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
-        # Default format: .{k,v}_scale -> .attn.{k,v}_scale
-        (r"\.([kv])_scale$", r".attn.\1_scale"),
+        # Default format: .{q,k,v}_scale -> .attn.{q,k,v}_scale
+        (r"\.([qkv])_scale$", r".attn.\1_scale"),
     ]
 
     # Check if name ends with k_scale or v_scale

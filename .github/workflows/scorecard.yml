@@ -1,0 +1,94 @@
+# OpenSSF Scorecard – automated supply-chain security posture checks.
+# Runs the ossf/scorecard-action, uploads results as SARIF to the
+# GitHub code-scanning dashboard, and publishes them to the public
+# OpenSSF REST API (which backs the README badge).
+name: Scorecard supply-chain security
+
+on:
+  # Weekly full scan; branch-protection and other repo-level checks only
+  # produce meaningful results on a schedule against the default branch.
+  schedule:
+    - cron: '32 4 * * 1'
+  # Re-scan when this workflow itself changes.
+  push:
+    branches: [main]
+
+# Least-privilege default; jobs opt in to what they need.
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to upload the SARIF results to the code-scanning dashboard.
+      security-events: write
+      # Needed to publish results and get a badge (id-token) and read OIDC.
+      id-token: write
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc  # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publish results to the OpenSSF API so the README badge resolves.
+          # Uses the workflow's OIDC token; no secret (PAT) required for a
+          # public repository.
+          publish_results: true
+
+      # Retain the raw SARIF as a build artifact. This is ALSO the hand-off to
+      # the filter-and-upload job below: scorecard-action's publish_results
+      # requires its job to contain only `uses:` steps (no `run:`), so the jq
+      # filtering and code-scanning upload must live in a separate job.
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+  # Separate job so the analysis job stays `uses:`-only (a hard requirement of
+  # scorecard-action's publish step). Here we may freely use `run:` steps.
+  filter-and-upload:
+    name: Filter and upload to code-scanning
+    needs: analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to upload the (filtered) SARIF to the code-scanning dashboard.
+      security-events: write
+    steps:
+      - name: Download SARIF artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: SARIF file
+
+      # Drop non-actionable rules from the code-scanning view only. The base
+      # images and pip installs flagged by Pinned-Dependencies are
+      # parameterized / internal-registry / VCS installs that cannot be
+      # hash-pinned, so those alerts are pure noise in the Security tab. This
+      # filters the dashboard copy ONLY -- the full result was already sent to
+      # the OpenSSF API by the analysis job's publish_results, so the Scorecard
+      # score and badge are unaffected.
+      - name: Filter non-actionable rules from dashboard SARIF
+        env:
+          DROP_RULES: '["PinnedDependenciesID"]'
+        run: |
+          set -euo pipefail
+          jq --argjson drop "$DROP_RULES" '
+            .runs[].results |= map(select(.ruleId as $r | ($drop | index($r)) | not))
+          ' results.sarif > results.filtered.sarif
+          echo "Filtered out rules: $DROP_RULES"
+
+      # Surface findings in the Security > Code scanning tab.
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938  # v4.37.9
+        with:
+          sarif_file: results.filtered.sarif

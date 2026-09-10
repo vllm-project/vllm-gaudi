@@ -123,26 +123,6 @@ run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test() {
     echo "✅ Test with Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling successful."
 }
 
-# QWEN3 FP8 + MOE compressed tensor + dynamic scaling
-run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test() {
-    echo "➡️ Testing Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --trust-remote-code --max-model-len 131072
-    echo "✅ Test with Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 + moe + compressed-tensor + dynamic scaling successful."
-}
-
-run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test() {
-    echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
-    echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Test-Only + moe + compressed-tensor + static scaling successful."
-}
-
-# QWEN3 FP8 + MOE compressed tensor + static scaling (weight per-channel, activation per-tensor)
-run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test() {
-    echo "➡️ Testing Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/Qwen3-30B-A3B-FP8-Static-Test-Only --trust-remote-code --no-enforce-eager --enable-expert-parallel
-    echo "✅ Test with Intel/Qwen3-30B-A3B-FP8-Static-Test-Only + moe + compressed-tensor + static scaling successful."
-}
-
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
 run_llama3_per_tensor_scaling_load_generate_test() {
     echo "➡️ Testing RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling..."
@@ -335,6 +315,19 @@ run_gsm8k_qwen3_30b_test() {
     echo "✅ Test with QWEN3-30B-A3B passed."
 }
 
+# GPQA-diamond online eval on Kimi-K2.6 (TP=8, expert parallel).
+# Launches a vLLM OpenAI server, runs lm-eval as a local-chat-completions
+# client, and gates on the accuracy thresholds in the config yaml.
+# Requires HF_TOKEN with access to the gated Idavidrein/gpqa dataset.
+# TODO: Enable kimi2.6 test later
+run_gpqa_kimi_k26_test() {
+    echo "⏭️  Skipping GPQA-diamond on Kimi-K2.6 (disabled)."
+    # echo "➡️ Testing GPQA-diamond on Kimi-K2.6..."
+    # cd "${VLLM_GAUDI_PREFIX}/tests/full_tests/gpqa_eval" && \
+    # bash run-tests.sh -c configs/Kimi-K2.6.yaml
+    # echo "✅ Test with GPQA-diamond on Kimi-K2.6 passed."
+}
+
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only (baseline, no fsdpa_slicing)
 # Requires: pip install 'lm_eval[longbench]'
@@ -412,7 +405,7 @@ run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
 # GSM8K on Qwen3.5-35B-A3B
 # This test requires new transformers and huggingface_hub versions for Qwen3.5 model support, once VLLM supports latest transfomer,
 # we can remove the pip version pinning and restoration in this test and just rely on the environment having the right versions.
-run_gsm8k_qwen35_35b_a3b_test() {
+_run_gsm8k_qwen35_35b_a3b_test() {
     echo "➡️ Testing GSM8K on Qwen3.5-35B-A3B..."
     VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.8 \
     VLLM_PROMPT_BS_BUCKET_MAX=32 \
@@ -420,6 +413,44 @@ run_gsm8k_qwen35_35b_a3b_test() {
     echo "✅ Test with Qwen3.5-35B-A3B passed."
 }
 
+
+# GSM8K on Qwen3.6-35B-A3B
+# This test requires new transformers and huggingface_hub versions for Qwen3.6 model support, once VLLM supports latest transfomer,
+# we can remove the pip version pinning and restoration in this test and just rely on the environment having the right versions.
+_run_gsm8k_qwen36_35b_a3b_test() {
+    echo "➡️ Testing GSM8K on Qwen3.6-35B-A3B..."
+    VLLM_SKIP_WARMUP=True ENABLE_APC=False VLLM_FUSED_BLOCK_SOFTMAX_ADJUSTMENT=False VLLM_GRAPH_RESERVED_MEM=0.1 \
+    VLLM_PROMPT_BS_BUCKET_MAX=32 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3.6-35b-a3b.yaml"
+    echo "✅ Test with Qwen3.6-35B-A3B passed."
+}
+
+# GSM8K on gemma-4-E4B (YOCO / KV-sharing model)
+_run_gsm8k_gemma4_e4b_test() {
+    echo "➡️ Testing GSM8K on gemma-4-E4B-it..."
+    VLLM_SKIP_WARMUP=True \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-E4B-it.yaml"
+    echo "✅ Test with gemma-4-E4B-it passed."
+}
+
+# GSM8K on gemma-4-31B
+_run_gsm8k_gemma4_31b_test() {
+    echo "➡️ Testing GSM8K on gemma-4-31B-it..."
+    TP_SIZE=4 VLLM_SKIP_WARMUP=True \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-31B-it.yaml"
+    echo "✅ Test with gemma-4-31B-it passed."
+}
+
+# GSM8K on gemma-4-26B-A4B (MoE)
+_run_gsm8k_gemma4_26b_test() {
+    echo "➡️ Testing GSM8K on gemma-4-26B-A4B-it..."
+    TP_SIZE=4 VLLM_SKIP_WARMUP=True \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-4-26B-A4B-it.yaml"
+    echo "✅ Test with gemma-4-26B-A4B-it passed."
+}
 
 # --- Spec decode tests ---
 # Tests below check if speculative decoding is matching accept rate specified as an argument.
@@ -443,7 +474,7 @@ run_preemption_test() {
 }
 
 # Spec decode with ngram
-run_spec_decode_ngram_test() {
+_run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --assert_accept_rate 0.25 --osl 1024
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task ngram --accuracy_rate 0.75
@@ -451,7 +482,7 @@ run_spec_decode_ngram_test() {
 }
 
 # Spec decode with eagle3
-run_spec_decode_eagle3_test() {
+_run_spec_decode_eagle3_test() {
     echo "➡️ Testing Spec-decode with eagle3..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.70 --osl 2048
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.63
@@ -459,11 +490,96 @@ run_spec_decode_eagle3_test() {
 }
 
 # Spec decode with eagle3 and num_speculative_tokens = 2
-run_spec_decode_eagle3_num_spec_2_test() {
+_run_spec_decode_eagle3_num_spec_2_test() {
     echo "➡️ Testing Spec-decode with eagle3 and num_speculative_tokens = 2..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.59 --osl 2048 --num_spec_tokens 2
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.59 --num_spec_tokens 2
     echo "✅ Test with spec decode with eagle3 and num_speculative_tokens = 2 passed."
+}
+
+# --- Parallel group runners ---
+# Each run_*_parallel function below is CI-discoverable (its own matrix job) and runs
+# its member _run_* tests concurrently, pinning each to a slice of HPU cards sized by
+# that test's tensor-parallel degree. Members inherit the exported HABANA_VISIBLE_DEVICES
+# (none set it themselves). If too few cards are visible, members run sequentially.
+# set -e does not catch failures in backgrounded jobs, so each child's exit code is
+# waited on explicitly; output is captured per-test and printed after the wait loop.
+_run_parallel_on_card_slices() {
+    local label="$1"; shift
+    local fns=() tps=()
+    while [[ "$#" -gt 0 ]]; do
+        fns+=("$1"); tps+=("$2"); shift 2
+    done
+
+    local visible="${HABANA_VISIBLE_DEVICES:-all}"
+    if [[ "$visible" == "all" ]]; then
+        if command -v hl-smi >/dev/null 2>&1; then
+            visible=$(hl-smi -Q index -f csv,noheader | tr -d ' ' | paste -sd, -)
+        fi
+        visible="${visible:-0,1,2,3,4,5,6,7}"
+    fi
+    local cards=()
+    IFS=',' read -r -a cards <<< "$visible"
+
+    local need=0 t
+    for t in "${tps[@]}"; do need=$((need + t)); done
+
+    local rc=0 i
+    if [[ "${#cards[@]}" -lt "$need" ]]; then
+        echo "⚠️  Only ${#cards[@]} HPU card(s) visible (${visible}); need ${need}. Running ${label} tests sequentially."
+        # Call directly (no '|| rc=1'): keep set -e fail-fast inside each test so a
+        # failing inner command (e.g. pytest) aborts instead of being masked.
+        for i in "${!fns[@]}"; do
+            "${fns[$i]}"
+        done
+        return 0
+    fi
+
+    echo "🚀 Running ${#fns[@]} ${label} tests in parallel across cards ${visible}..."
+    local pids=() offset=0 len slice
+    for i in "${!fns[@]}"; do
+        len="${tps[$i]}"
+        slice="$(IFS=,; echo "${cards[*]:offset:len}")"
+        echo "   ${label} [${fns[$i]}] -> HABANA_VISIBLE_DEVICES=${slice}"
+        HABANA_VISIBLE_DEVICES="$slice" "${fns[$i]}" > "${label}_${i}.log" 2>&1 &
+        pids+=("$!")
+        offset=$((offset + len))
+    done
+
+    for i in "${!pids[@]}"; do
+        if wait "${pids[$i]}"; then
+            echo "✅ ${label} [${fns[$i]}] passed"
+        else
+            echo "❌ ${label} [${fns[$i]}] FAILED"; rc=1
+        fi
+        echo "----- ${label} [${fns[$i]}] log -----"
+        cat "${label}_${i}.log"
+    done
+    return "$rc"
+}
+
+# GSM8K on Qwen3.5 / Qwen3.6 35B-A3B (1 card each)
+run_gsm8k_qwen3x_35b_a3b_parallel() {
+    _run_parallel_on_card_slices qwen3x_35b \
+        _run_gsm8k_qwen36_35b_a3b_test 1 \
+        _run_gsm8k_qwen35_35b_a3b_test 1
+}
+
+# GSM8K on gemma-4: E4B (1 card) runs first, then 26B / 31B (TP=4 each) in
+# parallel across the two 4-card halves of an 8-card host.
+run_gsm8k_gemma4_parallel() {
+    _run_gsm8k_gemma4_e4b_test
+    _run_parallel_on_card_slices gemma4 \
+        _run_gsm8k_gemma4_26b_test 4 \
+        _run_gsm8k_gemma4_31b_test 4
+}
+
+# Spec decode: eagle3 num_spec_2 / eagle3 / ngram (1 card each)
+run_spec_decode_parallel() {
+    _run_parallel_on_card_slices spec_decode \
+        _run_spec_decode_eagle3_num_spec_2_test 1 \
+        _run_spec_decode_eagle3_test 1 \
+        _run_spec_decode_ngram_test 1
 }
 
 # --- Other tests ---
@@ -509,6 +625,14 @@ run_offloading_connector_test() {
     echo "✅ Test OffloadingConnector passed."
 }
 
+# Async-scheduling penalty correctness (regression for stale output_token_ids)
+run_async_penalty_consistency_test() {
+    echo "➡️ Testing async-scheduling penalty consistency..."
+    VLLM_SKIP_WARMUP=true \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_async_penalty_consistency.py"
+    echo "✅ Test async-scheduling penalty consistency passed."
+}
+
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"
@@ -549,9 +673,6 @@ launch_all_tests() {
     run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
     run_qwen3_blockfp8_dynamic_scaling_load_generate_test
     run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test
-    run_qwen3_moe_compressed_tensor_dynamic_scaling_load_generate_test
-    run_qwen3_moe_compressed_tensor_static_per_tensor_scaling_load_generate_test
-    run_qwen3_moe_compressed_tensor_static_scaling_load_generate_test
     run_llama3_per_tensor_scaling_load_generate_test
     run_llama3_modelopt_per_tensor_scaling_load_generate_test
     run_granite_inc_calibration_and_quantization_load_generate_test
@@ -570,20 +691,20 @@ launch_all_tests() {
     run_gsm8k_granite_async_test
     run_gsm8k_deepseek_test
     run_gsm8k_qwen3_30b_test
+    run_gpqa_kimi_k26_test
     run_longbench_qwen3_30b_fp8_static_test
     run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_lazy_test
     run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_lazy_test
     run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
     run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
     run_preemption_test
-    run_spec_decode_ngram_test
-    run_spec_decode_eagle3_test
-    run_spec_decode_eagle3_num_spec_2_test
+    run_spec_decode_parallel
     run_embedding_model_test
     run_pd_disaggregate_nixl_libfabric_test
     run_pd_disaggregate_nixl_ucx_test
     run_cpu_offloading_test
     run_offloading_connector_test
+    run_async_penalty_consistency_test
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test

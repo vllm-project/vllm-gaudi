@@ -8,6 +8,19 @@ if TYPE_CHECKING:
     VLLM_HPU_FORCE_CHANNEL_FP8: bool = True
     VLLM_HPU_HETERO_KV_LAYOUT: bool = False
     VLLM_HPU_MULTI_MODEL_CONFIG: Optional[str] = None
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: float = 300.0
+    VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
+    VLLM_HPU_NIXL_JOINT_KV: bool = False
+    VLLM_HPU_NIXL_STAGING_SLOTS: int = 0
+    VLLM_MINIMAX_M3_MOE_TOKEN_TILE: int = 512
+    VLLM_MINIMAX_M3_MOE_DECODE_GATHER: bool = True
+    VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS: int = 16
+    VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY: bool = False
+    VLLM_HPU_MOE_GATHER: bool = False
+    VLLM_HPU_MOE_GATHER_RATIO: float = 0.4
+    VLLM_HPU_MOE_GATHER_VERIFY: bool = False
+    VLLM_COMPACT_GDN: bool = False
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -35,6 +48,73 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # When unset, multi-model mode is disabled.
     "VLLM_HPU_MULTI_MODEL_CONFIG":
     lambda: os.environ.get("VLLM_HPU_MULTI_MODEL_CONFIG", None),
+
+    # Timeout in seconds for NIXL abort request handling
+    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
+    lambda: float(os.environ.get("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "300")),
+
+    # NIXL side channel host and port for KV transfer
+    "VLLM_NIXL_SIDE_CHANNEL_HOST":
+    lambda: os.environ.get("VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"),
+    "VLLM_NIXL_SIDE_CHANNEL_PORT":
+    lambda: int(os.environ.get("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")),
+
+    # Enable joint-KV staging so an HPU prefill instance can serve a GPU
+    # (FLASH_ATTN, blocks-first) decode instance over NIXL. When the remote
+    # decode registers ONE joint [K|V] region per layer (block_len covering
+    # both K and V, V at block_len // 2), the HPU must advertise the same
+    # region model. Leave false for HPU<->HPU disagg (separate K/V regions).
+    "VLLM_HPU_NIXL_JOINT_KV":
+    lambda: os.environ.get("VLLM_HPU_NIXL_JOINT_KV", "false").lower() in ("1", "true"),
+
+    # Number of joint-KV staging slots for heterogeneous (HPU prefill ->
+    # GPU decode) NIXL transfer. Each slot holds one on-save block for all
+    # layers laid out blocks-first [2, n_kv_heads, block_size_on_save,
+    # head_size] so the GPU can read K and V from one contiguous region
+    # (V at block_len // 2). 0 (default) auto-sizes to the full concurrent
+    # workload: max_num_seqs * ceil(max_model_len / block_size_on_save), which
+    # guarantees every schedulable request gets a reservation. Registration
+    # fails fast if that pool does not fit device memory. Only set a smaller
+    # value if you are certain peak concurrent transfer demand stays under it.
+    "VLLM_HPU_NIXL_STAGING_SLOTS":
+    lambda: int(os.environ.get("VLLM_HPU_NIXL_STAGING_SLOTS", "0")),
+
+    # MiniMax-M3 SwiGLU-OAI expert execution tuning.
+    "VLLM_MINIMAX_M3_MOE_TOKEN_TILE":
+    lambda: int(os.environ.get("VLLM_MINIMAX_M3_MOE_TOKEN_TILE", "512")),
+    "VLLM_MINIMAX_M3_MOE_DECODE_GATHER":
+    lambda: os.environ.get("VLLM_MINIMAX_M3_MOE_DECODE_GATHER", "1").lower() in ("1", "true"),
+    "VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS":
+    lambda: int(os.environ.get("VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS", "16")),
+
+    # Run multimodal warmup outside PT_COMPILE_ONLY_MODE for models with
+    # data-dependent output shapes that must be materialized during warmup.
+    "VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY":
+    lambda: os.environ.get("VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY", "false").strip().lower() in ("1", "true"),
+
+    # EXPERIMENTAL custom gathered-expert FP8 MoE combine (silu only).
+    # Off by default; falls back to the stock Habana fused op when disabled or
+    # when the number of gathered experts (min(local_experts, tokens*top_k))
+    # would exceed this fraction of this rank's local_experts. Parameterizing on
+    # the ratio to local_experts (rather than an absolute count) keeps the gate
+    # sane across EP configs, which change local_experts.
+    #
+    # Default rationale (0.4): this optimization has only been observed to help
+    # the Qwen 3.5 MoE family. A crossover sweep across Qwen3.5 35B/122B/397B at
+    # several EP levels shows the custom-gather win/loss cutoff tracks
+    # g/local_experts most closely, and it lands around this ratio.
+    "VLLM_HPU_MOE_GATHER":
+    lambda: os.environ.get("VLLM_HPU_MOE_GATHER", "0").lower() in ("1", "true"),
+    "VLLM_HPU_MOE_GATHER_RATIO":
+    lambda: float(os.environ.get("VLLM_HPU_MOE_GATHER_RATIO", "0.4")),
+    "VLLM_HPU_MOE_GATHER_VERIFY":
+    lambda: os.environ.get("VLLM_HPU_MOE_GATHER_VERIFY", "0").lower() in ("1", "true"),
+
+    # Use the compact recurrent-state (conv/ssm) layout for gated delta net
+    # models. The model runner auto-detects and sets this during init, so read
+    # it lazily rather than caching it at import time.
+    "VLLM_COMPACT_GDN":
+    lambda: os.environ.get("VLLM_COMPACT_GDN", "0").strip().lower() in ("1", "true"),
 }
 
 # end-env-vars-definition

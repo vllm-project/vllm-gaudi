@@ -1,0 +1,169 @@
+###############################################################################
+# Copyright (C) 2024-2025 Intel Corporation
+#
+# This source code is licensed under the Apache 2.0 license found in the
+# LICENSE file in the root directory of this source tree.
+###############################################################################
+"""Unit tests for explicit multimodal warmup resolutions.
+
+VLLM_MULTIMODAL_RESOLUTIONS lets a deployment pin the raw image resolutions
+warmup should compile graphs for. The parsed WxH pairs are fed as raw images
+through the model's own processor at warmup time, so the compiled vision grid
+matches what real traffic at the same resolution produces (see
+HPUModelRunner._build_raw_image_processor_inputs). These tests cover the env
+parsing contract; grid-invariance across resolutions is exercised by the
+multimodal e2e warmup tests on HPU.
+"""
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from vllm_gaudi.extension.bucketing.vision import HPUVisionBucketManager
+from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        ("", []),
+        # Each entry is a (width, height, count_spec) triple. The count_spec
+        # is how the operator declares which vision-tower item counts warmup
+        # compiles graphs for; the runner never enumerates counts on its own.
+        ("1024x768", [(1024, 768, None)]),
+        ("1024x768,768x1024", [(1024, 768, None), (768, 1024, None)]),
+        # tolerate surrounding whitespace and a trailing comma
+        (" 1024x768 , 768x1024 ", [(1024, 768, None), (768, 1024, None)]),
+        ("1024x768,", [(1024, 768, None)]),
+        # uppercase separator
+        ("1024X768", [(1024, 768, None)]),
+        # non-square / portrait / extreme-wide are preserved verbatim
+        ("1920x1080,1080x1920,3440x1440", [(1920, 1080, None), (1080, 1920, None), (3440, 1440, None)]),
+    ],
+)
+def test_parse_resolutions(env_value, expected):
+    assert HPUVisionBucketManager._parse_resolutions(env_value) == expected
+
+
+# The three operator-controlled count-spec forms, one case each.
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        # 1. "WxH"     -> count_spec None: warm ONE graph at the limit-mm
+        #    ceiling (user_max_count). Resolution axis only.
+        ("864x480", [(864, 480, None)]),
+        # 2. "WxHxN"   -> count_spec int N: pin exactly the count-N graph. Use
+        #    when traffic always sends N items and caching is off.
+        ("864x480x20", [(864, 480, 20)]),
+        # 3. "WxHxN-M" -> count_spec (N, M): warm the contiguous count range
+        #    [N, M]. Use when the per-call uncached count varies (mixed
+        #    request sizes, or prefix/image caching).
+        ("864x480x1-20", [(864, 480, (1, 20))]),
+    ],
+)
+def test_parse_resolutions_count_spec_forms(env_value, expected):
+    assert HPUVisionBucketManager._parse_resolutions(env_value) == expected
+
+
+def test_parse_resolutions_discrete_counts_via_comma():
+    # Discrete (non-contiguous) counts are expressed by listing pinned entries,
+    # NOT by the range form. This is the customer's real workload: count-1
+    # captioning screenshots and count-20 video frames, nothing in between --
+    # 2 graphs, not 20.
+    assert HPUVisionBucketManager._parse_resolutions("864x480x1,864x480x20") == [
+        (864, 480, 1),
+        (864, 480, 20),
+    ]
+
+
+def test_parse_resolutions_mixed_forms_in_one_env():
+    # A single env value may mix all three forms across comma-separated entries.
+    assert HPUVisionBucketManager._parse_resolutions("1024x768, 768x1024x5, 640x480x1-4") == [
+        (1024, 768, None),
+        (768, 1024, 5),
+        (640, 480, (1, 4)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "bad_env",
+    [
+        "864x480x20-1",  # hi < lo
+        "864x480x0-5",  # lo < 1
+        "864x480x1-2-3",  # malformed range
+        "864x480x1x2x3",  # too many x-parts
+        "864",  # missing height
+    ],
+)
+def test_parse_resolutions_rejects_invalid(bad_env):
+    with pytest.raises(ValueError):
+        HPUVisionBucketManager._parse_resolutions(bad_env)
+
+
+def test_parse_resolutions_none_env_is_empty():
+    # A model with no explicit resolutions must fall back to bucket-derived
+    # warmup shapes, i.e. an empty list here rather than an error.
+    assert HPUVisionBucketManager._parse_resolutions(None or "") == []
+
+
+def _call_build_raw_image_processor_inputs(processor, modality, count, width, height):
+    """Call HPUModelRunner._build_raw_image_processor_inputs via unbound
+    method, mirroring how other unit tests exercise HPUModelRunner methods
+    without constructing a full runner (see test_decode_bucket_hybrid.py)."""
+    return HPUModelRunner._build_raw_image_processor_inputs(MagicMock(), processor, modality, count, width, height)
+
+
+def _make_mock_processor():
+    """A processor stub whose parse_mm_data/get_dummy_text just record what
+    they were called with, so tests can assert on the raw mm_data shape
+    _build_raw_image_processor_inputs hands them."""
+    processor = MagicMock()
+    processor.dummy_inputs.get_dummy_text.return_value = "<dummy>"
+    processor.info.parse_mm_data.side_effect = lambda mm_data, **kw: mm_data
+    return processor
+
+
+@pytest.mark.parametrize("modality", ["image", "vision_chunk"])
+def test_build_raw_image_processor_inputs_resolution(modality):
+    # Regardless of modality, the raw WxH must reach the image(s) unchanged --
+    # this is what lets the model's own resize (smart_resize / navit_resize)
+    # derive the same grid at warmup as it would for a real request at the
+    # same resolution.
+    processor = _make_mock_processor()
+
+    result = _call_build_raw_image_processor_inputs(processor, modality, count=1, width=1024, height=768)
+
+    items = result.mm_data_items[modality]
+    assert len(items) == 1
+    image = items[0]["image"] if modality == "vision_chunk" else items[0]
+    assert image.size == (1024, 768)
+
+
+def test_build_raw_image_processor_inputs_vision_chunk_wraps_image():
+    # Kimi-K2.5/K2.6's vision_chunk parser rejects bare PIL images -- it
+    # expects VisionChunkImage dicts ({"type": "image", "image": PIL}).
+    # Without this wrapping, warmup for vision_chunk raises instead of
+    # reaching the raw-WxH path at all.
+    processor = _make_mock_processor()
+
+    result = _call_build_raw_image_processor_inputs(processor, "vision_chunk", count=2, width=864, height=480)
+
+    items = result.mm_data_items["vision_chunk"]
+    assert len(items) == 2
+    for item in items:
+        assert item["type"] == "image"
+        assert item["image"].size == (864, 480)
+
+
+def test_build_raw_image_processor_inputs_image_is_not_wrapped():
+    # The generic 'image' modality takes raw PIL images directly -- no dict
+    # wrapping. Asserting this alongside the vision_chunk case above pins the
+    # branch that distinguishes them.
+    processor = _make_mock_processor()
+
+    result = _call_build_raw_image_processor_inputs(processor, "image", count=1, width=864, height=480)
+
+    items = result.mm_data_items["image"]
+    assert len(items) == 1
+    assert not isinstance(items[0], dict)
+    assert items[0].size == (864, 480)

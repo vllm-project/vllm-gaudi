@@ -1,7 +1,13 @@
 # Dependencies for HPU code
-pandas>=2.2.3
-numba>=0.58.0
+pandas>=2.3.3
+numba>=0.67.0
 numpy>=1.26.0
-kaldi-native-fbank >= 1.18.7
-tblib==3.1.0
-transformers==5.9.0
+kaldi-native-fbank >= 1.22.3
+tblib==3.2.2
+# Cap FastAPI below 0.137: that release made include_router() build a route
+# tree (_IncludedRouter nodes in app.routes) instead of a flat APIRoute list,
+# which prometheus-fastapi-instrumentator (<=8.0.0) chokes on while resolving
+# route.path -> 500 on every request. Upstream bug:
+# trallnag/prometheus-fastapi-instrumentator#370. Remove once it ships a fix.
+fastapi<0.137
+setuptools>=83.0.0,<85.0.0

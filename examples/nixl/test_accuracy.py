@@ -15,6 +15,9 @@ RTOL = 0.03
 EXPECTED_VALUES = {
     "Qwen/Qwen3-0.6B": 0.41,
     "deepseek-ai/deepseek-vl2-small": 0.59,
+    # No-PD standalone gsm8k baseline (limit=128), used to assert PD paths
+    # (cpu/hpu buffer, hetero) don't degrade accuracy.
+    "meta-llama/Llama-3.1-8B": 0.47,
 }
 
 SIMPLE_PROMPT = "The best part about working on vLLM is that I got to meet so many people across various different organizations like UCB, Google, and Meta which means"  # noqa: E501

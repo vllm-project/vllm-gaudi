@@ -25,14 +25,14 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, set_random_seed)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.utils import is_fake_hpu
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, _GDN_MAMBA_TYPES
+from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, _GDN_MAMBA_TYPES, _rebind_moe_expert_weights)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -497,7 +497,17 @@ class HPUWorker(WorkerBase):
                     mamba_state_per_block, ratio)
                 available = adjusted
 
-        return available
+        # Core vLLM's determine_available_memory contract returns an int
+        # (bytes). Most models route through get_num_blocks() which casts to
+        # int, but gemma4's heterogeneous KV layout (interleaved sliding/full
+        # layers with different page_size_bytes) collapses into a single
+        # UniformTypeKVCacheSpecs group whose num_blocks math
+        # (`available_memory // page_size_bytes`) does NOT cast. A float
+        # available_memory then yields a float num_blocks, which the
+        # scheduler's BlockPool rejects via `isinstance(num_gpu_blocks, int)`.
+        # Coerce to int here so every downstream path (uniform AND
+        # heterogeneous) receives an integer byte budget.
+        return int(available)
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -598,6 +608,17 @@ class HPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)  # type: ignore[union-attr]
 
+    def synchronize_device(self) -> None:
+        """Block until in-flight HPU work completes.
+
+        Overrides WorkerBase, whose default calls torch.accelerator.synchronize(). HPU registers as a
+        torch accelerator but rejects a device-wide multi-stream wait, so the base default raises
+        RuntimeError once EngineCore broadcasts "synchronize_device" on every pause (e.g. LLM.sleep()).
+        """
+        if is_fake_hpu():
+            return
+        torch.hpu.synchronize()
+
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
 
@@ -610,8 +631,13 @@ class HPUWorker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
+        # Upstream now consumes handshake metadata via
+        # set_xfer_handshake_metadata_pp_aware(), which expects keys to be
+        # (pp_rank, tp_rank) tuples. Returning a flat {tp_rank: metadata} dict
+        # made it unpack an int and raise TypeError during EngineCore init.
+        pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        return {(pp_rank, tp_rank): metadata}
 
     def get_hpu_used_memory_mb(self) -> float | None:
         """Return currently used HPU memory in MB for this worker."""
@@ -644,6 +670,8 @@ class HPUWorker(WorkerBase):
         else:
             with HabanaMemoryProfiler() as m:
                 self.model_runner.model.to("cpu")
+                # Re-derive MoeMatmul.weight slices from the now-CPU params
+                _rebind_moe_expert_weights(self.model_runner.model)
                 gc.collect()
                 torch.hpu.synchronize()
             msg = f"Moving model to CPU for sleep mode took {m.get_summary_string()}"
@@ -692,6 +720,9 @@ class HPUWorker(WorkerBase):
             else:
                 with HabanaMemoryProfiler() as m:
                     self.model_runner.model.to(self.vllm_config.device_config.device)
+                    # Re-derive MoeMatmul.weight slices from the now-moved
+                    # parent FusedMoE registered params (w13_weight/w2_weight).
+                    _rebind_moe_expert_weights(self.model_runner.model)
                     gc.collect()
                     torch.hpu.synchronize()
                 msg = f"Waking up model, moving it back to HPU took {m.get_summary_string()}"

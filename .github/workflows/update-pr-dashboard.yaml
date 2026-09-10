@@ -5,13 +5,16 @@ on:
     - cron: '0 */2 * * *' # Every 2 hours
   workflow_dispatch:
 
+# Least-privilege default; the dashboard job opts into its write scope below.
 permissions:
-  issues: write
-  pull-requests: read
+  contents: read
 
 jobs:
   update-dashboard:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write        # Required to create/update the dashboard issue
+      pull-requests: read  # Required to read open PRs for the dashboard
     steps:
       - name: Generate Dashboard Content
         id: dashboard
@@ -94,13 +97,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Find Previous Comment
-        uses: peter-evans/find-comment@v3
+        uses: peter-evans/find-comment@b30e6a3c0ed37e7c023ccd3f1db5c6c0b0c23aad  # v4.0.0
         id: fc
         with:
           issue-number: 701
           body-includes: 
       - name: Create or Update Comment
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9  # v5.0.0
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
           issue-number: 701

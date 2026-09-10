@@ -61,6 +61,7 @@ class GPTQHPUConfig(QuantizationConfig):
         desc_act: bool,
         lm_head_quantized: bool,
     ) -> None:
+        super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act

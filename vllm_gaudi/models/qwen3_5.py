@@ -123,14 +123,18 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         """HPU compile-friendly GDN forward.
 
         Bypasses the upstream ``gdn_attention_core`` custom-op and
         drives the HPU conv1d + GDN kernels directly with
         ``HPUAttentionMetadataV1``.
+
+        Return-based since upstream vLLM #46998 (300e33797f) dropped the
+        ``output`` in-place buffer; caller now does
+        ``hidden_states = self.linear_attn(hidden_states=...)``.
         """
+        orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         num_tokens = hidden_states.size(0)
 
@@ -289,8 +293,10 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)
 
-        output_flat = output.view(-1, output.size(-1))
-        output_flat[:num_tokens], _ = self.out_proj(core_attn_out)
+        output, _ = self.out_proj(core_attn_out)
+        # Restore caller's original layout (2-D flat or 3-D [B, L, H]) so
+        # the residual add in the decoder layer stays shape-consistent.
+        return output.view(orig_shape)
 
 
 # Replace the class in the upstream modules so that both Qwen3-Next and

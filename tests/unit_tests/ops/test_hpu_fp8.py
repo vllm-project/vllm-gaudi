@@ -62,24 +62,24 @@ def test_fp8_moe_method(default_vllm_config: None, dist_init, monkeypatch):
 
     # Prepare FusedMoE layer with oot HPUFp8MoEMethod
     oot_op = create_fused_moe(oot_quant_config).to("hpu")
-    assert isinstance(oot_op.quant_method, HPUFp8MoEMethod)
+    assert isinstance(oot_op.routed_experts.quant_method, HPUFp8MoEMethod)
 
     # Weights were extracted from first FusedMoE layer of Qwen/Qwen3-30B-A3B-FP8
     # (with adjusted shapes, to make tensors smaller)
     with safe_open(get_data_path("data/fp8/moe.safetensors"), framework="pt", device="hpu") as f:
         w13_weight = f.get_tensor("w13_weight")
-        oot_op.w13_weight.copy_(w13_weight.repeat(128, 1, 1))
+        oot_op.routed_experts.w13_weight.copy_(w13_weight.repeat(128, 1, 1))
 
         w13_weight_scale_inv = f.get_tensor("w13_weight_scale_inv")
-        oot_op.w13_weight_scale_inv.copy_(w13_weight_scale_inv.repeat(128, 1, 1))
+        oot_op.routed_experts.w13_weight_scale_inv.copy_(w13_weight_scale_inv.repeat(128, 1, 1))
 
         w2_weight = f.get_tensor("w2_weight")
-        oot_op.w2_weight.copy_(w2_weight.repeat(128, 1, 1))
+        oot_op.routed_experts.w2_weight.copy_(w2_weight.repeat(128, 1, 1))
 
         w2_weight_scale_inv = f.get_tensor("w2_weight_scale_inv")
-        oot_op.w2_weight_scale_inv.copy_(w2_weight_scale_inv.repeat(128, 1, 1))
+        oot_op.routed_experts.w2_weight_scale_inv.copy_(w2_weight_scale_inv.repeat(128, 1, 1))
 
-    oot_op.quant_method.process_weights_after_loading(oot_op)
+    oot_op.routed_experts.quant_method.process_weights_after_loading(oot_op.routed_experts)
 
     if not htorch.utils.internal.is_lazy():
         compile_config = HPUCompileConfig()

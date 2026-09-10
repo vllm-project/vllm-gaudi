@@ -31,8 +31,10 @@ def patched_attention_forward(
     if not self.use_direct_call:
         return layer.Attention._vllm_gaudi_original_forward(self, query, key, value, output_shape=output_shape)
 
-    if self.calculate_kv_scales:
-        torch.ops.vllm.maybe_calc_kv_scales(query, key, value, self.layer_name)
+    # NOTE: vllm#49389 removed the deprecated runtime KV-scale calculation path
+    # (the `calculate_kv_scales` attribute and the `maybe_calc_kv_scales` custom
+    # op). Neither exists at the pinned vLLM SHA, so the OOT forward no longer
+    # attempts runtime scale calculation.
     if self.query_quant is not None:
         # quantizing with a simple torch operation enables
         # torch.compile to fuse this into previous ops

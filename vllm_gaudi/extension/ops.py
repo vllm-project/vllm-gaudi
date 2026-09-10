@@ -41,12 +41,27 @@ except ValueError:
     logger.warning("Invalid MAX_EXPERTS_PER_SLICE value, using default -1")
     MAX_EXPERTS_PER_SLICE = -1
 
+# Map model activation-config strings to the activation names the HPU fused-MoE
+# op's MoeActivationMode_t enum accepts. The Gaudi gelu TPC kernel already uses
+# the tanh approximation (see tpc_kernels .../gelu_f16.c: UNROLLED_KERNEL(..,
+# tanh_f16, ..)), so HF's "gelu_pytorch_tanh" / "gelu_tanh" map to the op's
+# plain "gelu" (numerically the tanh-approx GELU Gemma expects). Without this the
+# fused-MoE op rejects the unknown activation string and the kernel cannot launch
+# (Gemma4 MoE). The exact-vs-tanh GELU difference is ~1e-3 and does not affect
+# inference correctness.
+_MOE_ACTIVATION_ALIASES = {
+    "gelu_pytorch_tanh": "gelu",
+    "gelu_tanh": "gelu",
+    "gelu_new": "gelu",
+    "quick_gelu": "gelu",
+}
+
 
 def _as_activation_str(activation):
     """Normalize activation to string for HPU custom op."""
     if isinstance(activation, MoEActivation):
-        return activation.value
-    return activation
+        activation = activation.value
+    return _MOE_ACTIVATION_ALIASES.get(activation, activation)
 
 
 def get_inc_quant_method(layer):
@@ -173,7 +188,7 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping, block_
 
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
-    block_bias = block_bias.view(key.size(0), 1, 1, -1)
+    block_bias = block_bias.unsqueeze(1).unsqueeze(2)
     if kv_heads != q_heads:
         block_bias = block_bias.unsqueeze(1)
         query = query.unflatten(1, (kv_heads, -1))
@@ -225,7 +240,7 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
                           **get_kv_fetch_extra_args(blocks=block_list, scales=k_scales_uf)).transpose(1, 2)
     value = values_fetch_func(value_cache.unflatten(0, (-1, block_size)),
                               **get_kv_fetch_extra_args(blocks=block_list, scales=v_scales_uf)).transpose(1, 2)
-    block_bias = block_bias.view(key.size(0), 1, 1, -1)
+    block_bias = block_bias.unsqueeze(1).unsqueeze(2)
     sink = None
     if sinks is not None:
         sinks = sinks.reshape(sinks.shape[0], 1)
@@ -376,6 +391,49 @@ def _naive_prompt_attention(query: torch.Tensor,
 
 USING_INC = os.getenv("QUANT_CONFIG") is not None
 
+# FusedSDPA indexes each q x kv plane of the attention bias with a 32-bit signed byte offset, so at
+# 2**31 bytes the offset wraps and the forward silently returns NaN instead of raising. Measured on
+# Gaudi3: a [1, 1, 8192, 130944] bf16 plane (2,145,386,496 B) is clean, [1, 1, 8192, 131072] (2**31 B)
+# is not. The offset resets per plane, so batch size does not enter (a bs=2 tensor of 2.02 GiB whose
+# planes are 1.01 GiB each runs clean).
+_FSDPA_PLANE_MAX_BYTES = 2**31
+
+
+def _fsdpa_num_q_tiles(attn_bias: Optional[torch.Tensor]) -> int:
+    """Number of query tiles that keep each indexed q x kv plane under _FSDPA_PLANE_MAX_BYTES.
+
+    Returns 1 (no tiling) when enable_fsdpa_q_tiling is off or the plane already fits, so shapes
+    that are not at risk keep taking a byte-identical path through the kernel.
+
+    The overflow is a signed-int32 byte offset the kernel forms while striding the bias plane, so
+    the limit is byte-based on the bias's own element size and independent of the softmax precision
+    (fp32 softmax upcasts internally but still strides the 2 B/elem bias -- confirmed no overflow at
+    a 1.06 GiB bf16 plane under fp32 softmax).
+    """
+    if attn_bias is None or not get_config().enable_fsdpa_q_tiling:
+        return 1
+    plane_elem_bytes = attn_bias.element_size()
+    # bias is [bs, 1, q_len, kv_len]; the kernel indexes one q_len x kv_len plane at a time.
+    q_len = attn_bias.size(-2)
+    kv_len = attn_bias.size(-1)
+    plane_bytes = q_len * kv_len * plane_elem_bytes
+    if plane_bytes < _FSDPA_PLANE_MAX_BYTES or q_len <= 1:
+        return 1
+    # tiling splits q_len, so the cost per query row is fixed.
+    row_bytes = plane_bytes // q_len
+    num_tiles = math.ceil(plane_bytes / _FSDPA_PLANE_MAX_BYTES)
+    # Guard the rounding: ceil(q_len / num_tiles) can exceed the even split, so confirm the
+    # resulting tile really fits and grow the count if it does not.
+    while num_tiles < q_len and math.ceil(q_len / num_tiles) * row_bytes >= _FSDPA_PLANE_MAX_BYTES:
+        num_tiles += 1
+
+    # logger.warning(
+    #     "Q-tiling FusedSDPA prompt attention: bias %s indexed plane is %d bytes (%dB/elem, "
+    #     ">= %d, the 32-bit FusedSDPA limit); splitting the query dim into %d tiles.",
+    #     tuple(attn_bias.shape), plane_bytes, plane_elem_bytes, _FSDPA_PLANE_MAX_BYTES, num_tiles)
+
+    return num_tiles
+
 
 def _fsdpa_prompt_attention(query: torch.Tensor,
                             key: torch.Tensor,
@@ -406,18 +464,40 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
         is_causal = False
         valid_seq_lengths = None
 
-    args = [
-        query, key, value, attn_bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths,
-        padding_side
-    ]
-    if sinks is not None:
-        args += [window_size] if window_size else [None]
+    def call_fsdpa(q, bias):
+        args = [
+            q, key, value, bias, 0.0, is_causal, scale, softmax_mode, recompute_mode, valid_seq_lengths, padding_side
+        ]
+        if sinks is not None:
+            args += [window_size] if window_size else [None]
+        else:
+            args += [window_size] if window_size else []
+        # use sinks in fsdpa
+        if sinks is not None:
+            args += [sinks]
+        return fsdpa_op(*args)
+
+    # The kernel overflows a signed-int32 *byte* offset while striding the bias plane, so the limit
+    # tracks the bias element size regardless of softmax precision (fp32 softmax upcasts internally
+    # but still strides the 2 B/elem bias). No fp32 special-casing needed.
+    num_q_tiles = _fsdpa_num_q_tiles(attn_bias)
+    # Without a bias there is no plane to tile; _fsdpa_num_q_tiles already returns 1 for that case.
+    if attn_bias is None or num_q_tiles == 1:
+        attn_weights = call_fsdpa(query, attn_bias)
     else:
-        args += [window_size] if window_size else []
-    # use sinks in fsdpa
-    if sinks is not None:
-        args += [sinks]
-    attn_weights = fsdpa_op(*args)
+        # Attention rows are independent: a query tile attends to the full K/V, so its softmax is
+        # already complete and the tiles simply concatenate. No online rescaling is needed, unlike
+        # the KV chunking done by SlicedFusedSDPA. The explicit bias carries the causal structure,
+        # so each tile only needs the matching rows of it.
+        q_len = query.size(-2)
+        tile = math.ceil(q_len / num_q_tiles)
+        tiles = []
+        for start in range(0, q_len, tile):
+            end = min(start + tile, q_len)
+            # Views, not copies: the bias slice is already contiguous (the trailing dim is whole),
+            # and the untiled path likewise hands the kernel a transposed, non-contiguous query.
+            tiles.append(call_fsdpa(query[..., start:end, :], attn_bias[..., start:end, :]))
+        attn_weights = torch.cat(tiles, dim=-2)
 
     attn_weights = attn_weights.transpose(1, 2)
     if sinks is not None:
@@ -820,6 +900,8 @@ def dequant_block_fp8_weight_naive(weight,
                                    do_unpad=False):
     if weight_scale is None:
         return weight
+    if weight_scale.device != weight.device:
+        weight_scale = weight_scale.to(weight.device)
     assert len(block_size) == 2
 
     weight_shape_len = len(weight.shape)
@@ -953,17 +1035,27 @@ def gaudi_weight_wrapper(weight_loader):
 
     def wrapper(*args, **kwargs):
         if get_config().scale_adjustment:
-            # args[0] is parameter, args[1] is loaded_weight
+            # loaded_weight may be passed positionally (args[1]) or as a
+            # keyword. Upstream FusedMoE (vllm#47197) now calls
+            # param.weight_loader(param=..., loaded_weight=..., ...) with
+            # keyword-only args, so probe both.
             # weights will be always in fp8, but scales will be in fp32,
             # so we can detect it by dtype
-            loaded_weight = args[1]
+            in_kwargs = "loaded_weight" in kwargs
+            if in_kwargs:
+                loaded_weight = kwargs["loaded_weight"]
+            else:
+                loaded_weight = args[1]
             if loaded_weight.dtype == torch.float8_e4m3fn:
                 loaded_weight = (loaded_weight.float() * 0.5).to(torch.float8_e4m3fn)
             else:
                 loaded_weight = (loaded_weight.data * 2.0)
-            args = (args[0], loaded_weight) + args[2:]
+            if in_kwargs:
+                kwargs["loaded_weight"] = loaded_weight
+            else:
+                args = (args[0], loaded_weight) + args[2:]
 
-        weight_loader(*args, **kwargs)
+        return weight_loader(*args, **kwargs)
 
     return wrapper
 
@@ -1132,7 +1224,8 @@ class MoeFP8Matmul(torch.nn.Module):
             )
         elif self.quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
             scale_dtype = self.scale_inv_fp8.dtype
-            return (self.weight.to(scale_dtype) * self.scale_inv_fp8).to(self.high_precision)
+            scale_inv_fp8 = self.scale_inv_fp8.to(self.weight.device)
+            return (self.weight.to(scale_dtype) * scale_inv_fp8).to(self.high_precision)
         else:
             raise NotImplementedError(f"Dequantize weights for {self.quant_method} strategy is not supported. \
                 Currently support block-wise and channel-wise strategy.")
@@ -1236,6 +1329,12 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         self.w2_list = torch.nn.ModuleList([MoeFP8Matmul() for _ in range(num_experts)])
         self.w13_input_scale = None
         self.w2_input_scale = None
+        # Gated experts (act(gate) * up over a 2*I w13) are the default. Non-gated
+        # experts (y = w2(act(w1 x)) over a single I-wide w13, e.g. Nemotron-H's
+        # squared-ReLU) set this False so forward() tells the fused kernel to skip
+        # its gate split+multiply. Set from layer.moe_config.is_act_and_mul at
+        # build time in process_weights_after_loading.
+        self.is_gated = True
 
         # cached views to avoid rebuilding lists every forward
         self._cached_w13_views = None
@@ -1272,6 +1371,11 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         tokens_num, _ = x.shape
         activation = _as_activation_str(activation)
         kwargs = self._get_extra_kwargs(tokens_num)
+        # Non-gated experts tell the fused kernel to skip the gate split+multiply.
+        # Added only when non-gated so gated layers pass the exact kwargs they did
+        # before and stay compatible with Habana runtimes predating the arg.
+        if not self.is_gated:
+            kwargs["is_gated"] = False
 
         if self._cached_w13_views is None or self._cached_w2_views is None:
             self._cache_weight_lists()
@@ -1520,6 +1624,204 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
             else:
                 final_hidden_states += slice_final_hidden_states
         return final_hidden_states
+
+
+class MoeMXFP4Matmul(torch.nn.Module):
+    """Weight holder for packed MXFP4 weights + E8M0 scales (+ optional bias)."""
+
+    def __init__(self):
+        super().__init__()
+        self.bias = None
+
+    def set_weight(self, w: torch.Tensor):
+        """w: packed uint8 tensor, shape (rows, ceil(cols/2))."""
+        self.weight = w
+
+    def set_scale(self, s: torch.Tensor):
+        """s: uint8 E8M0 scale tensor, shape (rows, ceil(cols/32))."""
+        self.scale = s
+
+    def set_bias(self, b: torch.Tensor):
+        """b: bf16 per-expert bias (GPT-OSS SwiGLU-OAI), shape (out_features,)."""
+        self.bias = b
+
+
+class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
+    """Native MXFP4 MOE op using torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights.
+
+    Weights are stored in packed uint8 MXFP4 format (2 FP4 E2M1 values per byte)
+    with uint8 E8M0 scales (one per group of 32 elements). The native TPC kernel
+    performs dequantization on-the-fly during the MOE computation.
+
+    IMPORTANT: The mxfp4 ops have frontend_blocklist: [eager], meaning they can
+    only execute through the graph compilation path (torch.compile with hpu_backend).
+    The forward() method is decorated accordingly.
+    """
+
+    def __init__(self,
+                 global_num_experts: int,
+                 num_total_experts: int,
+                 experts_min: int = 0,
+                 experts_max: int = 8,
+                 block_size: int = 32,
+                 has_bias: bool = False,
+                 alpha: float = 1.702,
+                 limit: float = 7.0,
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
+        super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, None, dispatch_fn)
+        self.block_size = block_size
+        # GPT-OSS SwiGLU-OAI: per-expert bias on both projections + alpha/limit.
+        # When has_bias is set, the op applies gpt_swiglu (clamp ±limit, alpha-silu)
+        # internally and the "activation" string is ignored.
+        self.has_bias = has_bias
+        self.alpha = alpha
+        self.limit = limit
+        self.w13_list = torch.nn.ModuleList([MoeMXFP4Matmul() for _ in range(num_total_experts)])
+        self.w2_list = torch.nn.ModuleList([MoeMXFP4Matmul() for _ in range(num_total_experts)])
+
+        self._cached_w13_views = None
+        self._cached_w2_views = None
+        self._cached_w13_scale_views = None
+        self._cached_w2_scale_views = None
+        self._cached_w13_bias_views = None
+        self._cached_w2_bias_views = None
+        self._compiled_forward = None
+
+    def _cache_weight_lists(self):
+        experts_range = range(self.num_experts)
+        self._cached_w13_views = tuple(self.w13_list[i].weight for i in experts_range)
+        self._cached_w2_views = tuple(self.w2_list[i].weight for i in experts_range)
+        self._cached_w13_scale_views = tuple(self.w13_list[i].scale for i in experts_range)
+        self._cached_w2_scale_views = tuple(self.w2_list[i].scale for i in experts_range)
+        if self.has_bias:
+            self._cached_w13_bias_views = tuple(self.w13_list[i].bias for i in experts_range)
+            self._cached_w2_bias_views = tuple(self.w2_list[i].bias for i in experts_range)
+        else:
+            self._cached_w13_bias_views = None
+            self._cached_w2_bias_views = None
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
+                              error_msgs):
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
+                                      error_msgs)
+        self._cache_weight_lists()
+
+    def _apply(self, fn):
+        ret = super()._apply(fn)
+        self._cache_weight_lists()
+        return ret
+
+    def _get_compiled_forward(self):
+        if self._compiled_forward is None:
+            if self.has_bias:
+
+                @torch.compile(backend="hpu_backend")
+                def _mxfp4_bias_fused_fwd(hidden_states, expert_routing_table, router_weights, w12_list, w3_list,
+                                          w12_bias, w3_bias, d_scale_w12, d_scale_w3, block_size, experts_min,
+                                          experts_max, chunk_size, total_experts, alpha, limit):
+                    return torch.ops.hpu.mixture_of_experts.bias_mxfp4_fused_weights(
+                        hidden_states,
+                        expert_routing_table,
+                        router_weights,
+                        w12_list,
+                        w3_list,
+                        w12_bias,
+                        w3_bias,
+                        d_scale_w12,
+                        d_scale_w3,
+                        block_size=block_size,
+                        permuted_weights=True,
+                        experts_min=experts_min,
+                        experts_max=experts_max,
+                        is_fp4=True,
+                        chunk_size=chunk_size,
+                        total_experts=total_experts,
+                        alpha=alpha,
+                        limit=limit,
+                    )
+
+                self._compiled_forward = _mxfp4_bias_fused_fwd
+            else:
+
+                @torch.compile(backend="hpu_backend")
+                def _mxfp4_fused_fwd(hidden_states, expert_routing_table, router_weights, w12_list, w3_list,
+                                     d_scale_w12, d_scale_w3, block_size, activation, experts_min, experts_max,
+                                     chunk_size, total_experts):
+                    return torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights(
+                        hidden_states,
+                        expert_routing_table,
+                        router_weights,
+                        w12_list,
+                        w3_list,
+                        d_scale_w12,
+                        d_scale_w3,
+                        block_size=block_size,
+                        permuted_weights=True,
+                        activation=activation,
+                        experts_min=experts_min,
+                        experts_max=experts_max,
+                        is_fp4=True,
+                        chunk_size=chunk_size,
+                        total_experts=total_experts,
+                    )
+
+                self._compiled_forward = _mxfp4_fused_fwd
+        return self._compiled_forward
+
+    def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
+        tokens_num, _ = hidden_states.shape
+        activation = _as_activation_str(activation)
+        kwargs = self._get_extra_kwargs(tokens_num)
+        chunk_size = kwargs.get("chunk_size", 0)
+        total_experts = kwargs.get("total_experts", 0)
+
+        if self._cached_w13_views is None or self._cached_w2_views is None:
+            self._cache_weight_lists()
+
+        w13_list = self._cached_w13_views
+        w2_list = self._cached_w2_views
+        w13_scale = self._cached_w13_scale_views
+        w2_scale = self._cached_w2_scale_views
+
+        # expert_routing_table must be int32 for the mxfp4 op
+        if expert_routing_table.dtype != torch.int32:
+            expert_routing_table = expert_routing_table.to(torch.int32)
+
+        compiled_fwd = self._get_compiled_forward()
+        if self.has_bias:
+            return compiled_fwd(
+                hidden_states,
+                expert_routing_table,
+                router_weights,
+                w13_list,
+                w2_list,
+                self._cached_w13_bias_views,
+                self._cached_w2_bias_views,
+                w13_scale,
+                w2_scale,
+                self.block_size,
+                self.experts_min,
+                self.experts_max,
+                chunk_size,
+                total_experts,
+                self.alpha,
+                self.limit,
+            )
+        return compiled_fwd(
+            hidden_states,
+            expert_routing_table,
+            router_weights,
+            w13_list,
+            w2_list,
+            w13_scale,
+            w2_scale,
+            self.block_size,
+            activation,
+            self.experts_min,
+            self.experts_max,
+            chunk_size,
+            total_experts,
+        )
 
 
 def oot_get_quantization_config(quantization: str) -> QuantizationConfig:

@@ -14,6 +14,7 @@ This document lists the supported diagnostic and profiling, as well as performan
 | `VLLM_T_COMPILE_FULLGRAPH`                | Forces the PyTorch compile function to raise an error if any graph breaks happen during compilation. This allows for the easy detection of existing graph breaks, which usually reduce performance.                                                                                                                                                                                                                     | `false`       |
 | `VLLM_T_COMPILE_DYNAMIC_SHAPES`           | Forces PyTorch to compile graphs with disabled dynamic options to use dynamic shapes only when needed.                                                                                                                                                                                                                                                                                                                  | `false`       |
 | `VLLM_FULL_WARMUP`                        | Forces PyTorch to assume that the warm-up phase fully covers all possible tensor sizes, preventing further compilation. If compilation occurs after warm-up, PyTorch will crash (with this message: `Recompilation triggered with skip_guard_eval_unsafe stance. This usually means that you have not warmed up your model with enough inputs such that you can guarantee no more recompilations.`) and must be disabled. | `false`       |
+| `VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY`     | Runs multimodal warmup outside `PT_COMPILE_ONLY_MODE`. Enable this for multimodal paths with data-dependent output shapes that must be materialized during warmup, such as Gemma4. Enabling it increases warmup time because recipes are compiled and executed.                                                                                                                                                | `false`       |
 
 ## Performance Tuning Parameters
 
@@ -26,6 +27,37 @@ This document lists the supported diagnostic and profiling, as well as performan
 | `VLLM_ROW_PARALLEL_CHUNKS`   | Number of chunks to split input into for pipelining matmul with all-reduce in RowParallelLinear layers. Setting to a value greater than 1 enables chunking. See [Row-Parallel Chunking](../features/row_parallel_chunking.md). | `1` (disabled) |
 | `VLLM_ROW_PARALLEL_CHUNK_THRESHOLD` | Minimum number of tokens required to activate row-parallel chunking. Inputs below this threshold use the standard non-chunked path. | `8192` |
 | `VLLM_PROMPT_BS_BUCKET_MAX`  | Sets prefill batch size | `1` |
+| `VLLM_MULTIMODAL_BUCKETS`    | Overrides the per-model patch-count buckets used to warm up native-resolution vision towers (models where `is_batch_based=False`, e.g. Gemma4, Kimi-K2.5/K2.6, Qwen2.5/3/3.5-VL). Comma-separated list of integers. Set to `None` to disable bucketing for these models. | model-specific |
+| `VLLM_MULTIMODAL_RESOLUTIONS` | Pins explicit raw pixel resolutions (comma-separated, e.g. `1024x768,768x1024`) to warm up for native-resolution vision towers. Each entry is `WxH`, `WxHxN` (pin the count-`N` graph), or `WxHxN-M` (warm the item-count range `[N, M]`); `WxH` alone warms one graph at the `--limit-mm-per-prompt` ceiling. See [Warm-up](../features/warmup.md#multimodal-warm-up). | `None` |
+| `VLLM_MINIMAX_M3_MOE_TOKEN_TILE` | Maximum number of tokens processed per tile by the MiniMax-M3 dense SwiGLU-OAI expert path. Non-positive values disable tiling. | `512` |
+| `VLLM_MINIMAX_M3_MOE_DECODE_GATHER` | Enables the MiniMax-M3 routed-expert gather path for low-token decode. Set to `0` or `false` to use the dense expert path. | `true` |
+| `VLLM_MINIMAX_M3_MOE_GATHER_MAX_TOKENS` | Maximum token count for the MiniMax-M3 routed-expert gather path. Larger batches use the dense expert path. | `16` |
+
+## Experimental: Custom FP8 MoE Gather Combine
+
+These variables control an **experimental** pure-PyTorch gathered-expert MoE
+combine for silu + FP8-per-channel weights, an alternative to the Habana
+`mixture_of_experts` op. It is off by default and intended for low-token
+(small batch / decode) workloads. Verification runs both the custom and stock
+paths and reduces their maximum FP8-ULP over the expert-parallel group in-memory
+without writing model-derived tensors to disk.  Note that verify mode adds a
+**per-layer host sync** (two ``.item()`` calls on CPU - ``max_in_range_ulp`` and
+``max_out_of_range_rel`` - during every forward pass), so it must not be enabled
+on performance runs.
+
+The default `VLLM_HPU_MOE_GATHER_RATIO` of `0.4` is based on a crossover sweep
+across the Qwen 3.5 MoE family (35B / 122B / 397B) at several expert-parallel
+levels; this optimization has only been observed to help that family. The win/loss
+cutoff most closely tracks the gathered-to-local-experts ratio and lands around
+this value, so raise it only if you have measured the gather path to still win at
+higher ratios on your model/config, and lower it for configs where it loses sooner
+(e.g. high-EP deployments with wide experts).
+
+| Parameter name               | Description                                                                                                                                                        | Default value |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `VLLM_HPU_MOE_GATHER`        | Enables the custom gathered-expert FP8 MoE combine (silu only). Falls back to the stock fused op when disabled or when the gather ratio is exceeded.             | `false`       |
+| `VLLM_HPU_MOE_GATHER_RATIO`  | Fraction of this rank's `local_experts` up to which the custom gather path is used. The gathered count is `min(local_experts, tokens * top_k)`; above `ratio * local_experts` the stock fused op is used. | `0.4`         |
+| `VLLM_HPU_MOE_GATHER_VERIFY` | Runs both the custom and stock paths and reduces their maximum FP8-ULP across the EP group in-memory. Logs an info line at startup when enabled and warns if any in-range element exceeds 2 FP8-ULP or any out-of-range element (magnitude above 448, outside the E4M3 finite range) diverges by more than 5% relative error. Requires `VLLM_HPU_MOE_GATHER`. | `false` |
 
 Use `VLLM_BUCKETING_STRATEGY=exp` for the default exponential warm-up, `VLLM_BUCKETING_STRATEGY=lin` for explicitly configured linear ranges, or `VLLM_BUCKETING_STRATEGY=pad` for padding-aware ranges with absolute and relative padding limits.
 
@@ -45,7 +77,18 @@ To enter developer mode use `VLLM_DEVELOPER_MODE`:
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | `VLLM_HANDLE_TOPK_DUPLICATES` | Handles duplicates outside top-k.                                                                                                                                                             | `false`       |
 | `VLLM_CONFIG_HIDDEN_LAYERS`   | Sets the number of hidden layers to run per HPUGraph for model splitting among hidden layers when TP is 1. It improves throughput by reducing inter-token latency limitations in some models. | `1`           |
+| `VLLM_COMPACT_GDN`            | Uses the compact recurrent-state (conv/ssm) layout for gated delta net models. Auto-detected per model during engine init, so setting it explicitly overrides that detection. When enabled in `torch.compile` mode, `PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE` is defaulted to `0` (see below).                                            | auto-detected (`0` when not applicable) |
+| `PT_HPU_ENABLE_SYNAPSE_INPUT_REUSE` | Synapse bridge flag controlling per-graph persistent-input reuse. With `VLLM_COMPACT_GDN` enabled in `torch.compile` mode, the recurrent-state read and write can land in separate recipes, where this optimization may reuse a still-live state buffer as intra-graph scratch and corrupt the state (NaN output). On that path vllm-gaudi therefore defaults it to `0`, which can slightly raise peak memory but has no compute or latency impact. A user-provided value is never overwritten. | `0` on the compact-GDN `torch.compile` path; otherwise left to the bridge default |
 | `VLLM_WORKER_MULTIPROC_METHOD` | Sets the Python `multiprocessing` start method used by the `mp` distributed executor backend when launching worker processes. The upstream default is `fork`. On HPU, it is automatically overridden to `spawn` with a warning because forked child processes inherit HPU driver state and can hang on exit. The override is applied when `--distributed-executor-backend` is `mp` or `uni`. With `uni`, no subprocess is created, so the value has no practical effect. With `external_launcher` and `ray`, workers are not started through Python `multiprocessing`, so the value is irrelevant. Set `VLLM_WORKER_MULTIPROC_METHOD=spawn` explicitly to suppress the auto-override warning, or set it to `fork` to opt out of the override, which is not recommended. | `spawn` on HPU (auto-overridden from upstream `fork`) |
+
+## Heterogeneous KV Transfer (NIXL)
+
+These variables control the NIXL KV-cache transfer path when an HPU prefill instance serves a GPU decode instance (disaggregated prefill/decode across different accelerators). They apply on the HPU prefill side and require `VLLM_HPU_HETERO_KV_LAYOUT=true` plus `enable_permute_local_kv` in the KV transfer config.
+
+| Parameter name                | Description                                                                                                                                                                                                                                                                                                                                                                     | Default value  |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `VLLM_HPU_NIXL_JOINT_KV`      | Enables joint-KV staging so an HPU prefill instance can serve a GPU (FLASH_ATTN, blocks-first) decode instance. The GPU registers one joint `[K\|V]` region per layer and reads V at `block_len // 2`; when enabled, the HPU stages transferred blocks into a matching joint buffer and advertises the same region model. Leave `false` for HPU-to-HPU disaggregation (separate K/V regions). | `false`        |
+| `VLLM_HPU_NIXL_STAGING_SLOTS` | Number of joint-KV staging slots (each holds one on-save block for all layers). `0` auto-sizes from `min(max_num_seqs * ceil(max_model_len / block_size_on_save), fraction_of_total_HPU_memory / per_slot_bytes)`. Set a positive value to override; must be identical on prefill scheduler and worker (same process, so a single value applies). | `0` (auto)     |
 
 ## Distributed Executor Backend on HPU
 
@@ -151,3 +194,23 @@ The slicing is only activated if all the following additional conditions are sat
 - It's a causal attention model.
 - The padding side is 'right'.
 - No sliding window nor sinks (BF16 only; FP8 does not support sinks).
+
+## Query Tiling for Large Prompt Attention Biases
+
+FusedSDPA addresses the attention bias with a 32-bit signed byte offset, so a dense prompt bias of
+2 GiB or more (`batch_size * query_len * (context_blocks * block_size + query_len) * itemsize >=
+2**31`) makes the offset wrap and the kernel silently returns `NaN` instead of raising. Long
+contexts combined with a wide context bucket can reach this, for example a
+`[1, 1, 8192, 131072]` bf16 bias, which is exactly `2**31` bytes.
+
+Query tiling splits the query dimension of prompt attention into the smallest number of tiles that
+keeps every per-call bias below the limit. Attention rows are independent, so each tile attends the
+full K/V and the results simply concatenate; the output is unchanged apart from the tiling itself.
+
+| Parameter name                    | Description                                                                | Default value |
+| --------------------------------- | -------------------------------------------------------------------------- | ------------- |
+| `VLLM_HPU_FSDPA_Q_TILE_ENABLE`    | Enable query tiling when the prompt attention bias would reach `2**31` bytes. | `false`     |
+
+!!! note
+    This is independent of `VLLM_HPU_FSDPA_SLICE_ENABLED` and works with any bucketing strategy.
+    When enabled, shapes whose bias already fits below the limit take the untiled path unchanged.

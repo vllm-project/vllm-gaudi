@@ -20,8 +20,14 @@ class HpuCommunicator(DeviceCommunicatorBase):
                  cpu_group: ProcessGroup,
                  device: Optional[torch.device] = None,
                  device_group: Optional[ProcessGroup] = None,
-                 unique_name: str = ""):
-        super().__init__(cpu_group, device, device_group, unique_name)
+                 unique_name: str = "",
+                 **kwargs):
+        # Forward any extra keyword arguments (e.g. ``global_ranks``,
+        # ``global_world_size``, ``use_all2all``) to the upstream base
+        # constructor. Upstream repeatedly churns this signature, so we
+        # capture the trailing params via ``**kwargs`` rather than pinning a
+        # fixed list that breaks whenever vLLM adds or removes one.
+        super().__init__(cpu_group, device, device_group, unique_name, **kwargs)
 
         self.dp_group: Optional[GroupCoordinator] = None
         self.dp_rank = 0

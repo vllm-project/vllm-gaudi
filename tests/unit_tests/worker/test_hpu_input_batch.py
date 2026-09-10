@@ -328,3 +328,50 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
     ref_input_batch.refresh_sampling_metadata()
 
     _compare_objs(input_batch, ref_input_batch)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_no_token_bleed_across_requests_in_input_batch(device: str):
+    """
+    Cross-request isolation: two concurrent requests in the same batch must not
+    see each other's tokens. Each request's row in ``token_ids_cpu`` must hold
+    only its own prompt tokens.
+    """
+    input_batch: InputBatch = InputBatch(
+        max_num_reqs=2,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        pin_memory=is_pin_memory_available(),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        kernel_block_sizes=[1],
+    )
+
+    prompt_a = [1, 2, 3, 4]
+    prompt_b = [10, 20, 30]
+    for req_id, prompt in (("req_a", prompt_a), ("req_b", prompt_b)):
+        input_batch.add_request(
+            CachedRequestState(
+                req_id=req_id,
+                prompt_token_ids=prompt,
+                sampling_params=_create_sampling_params(),
+                pooling_params=None,
+                mm_features=[],
+                block_ids=([], ),
+                generator=None,
+                num_computed_tokens=0,
+                output_token_ids=[],
+            ))
+
+    idx_a = input_batch.req_id_to_index["req_a"]
+    idx_b = input_batch.req_id_to_index["req_b"]
+
+    row_a = input_batch.token_ids_cpu[idx_a, :len(prompt_a)].tolist()
+    row_b = input_batch.token_ids_cpu[idx_b, :len(prompt_b)].tolist()
+
+    assert row_a == prompt_a
+    assert row_b == prompt_b
+    # No token from one request appears in the other's slot.
+    assert not (set(prompt_a) & set(row_b))
+    assert not (set(prompt_b) & set(row_a))

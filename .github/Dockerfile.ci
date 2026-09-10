@@ -22,6 +22,11 @@ RUN git checkout ${VLLM_COMMIT_ARG}
 # Test dependencies
 RUN pip install pytest pytest_asyncio pytest-timeout
 RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
+# decord: video-decoding backend required by the ERNIE-4.5-VL trust_remote_code
+# modeling file (run_ernie4.5_vl_test). Upstream vLLM pins it in
+# requirements/test/cuda.in (x86_64); vllm-gaudi does not install that file, so
+# declare it explicitly here to keep the e2e multimodal test running.
+RUN pip install decord==0.6.0
 
 ENV no_proxy=localhost,127.0.0.1
 ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true

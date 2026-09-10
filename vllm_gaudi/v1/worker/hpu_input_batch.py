@@ -13,6 +13,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils.collection_utils import swap_dict_values
+from vllm.utils.math_utils import cdiv
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -114,13 +115,18 @@ class InputBatch:
             self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
+        # vLLM #40996 dropped max_model_len from MultiGroupBlockTable and now
+        # requires the caller to pass the per-group block count. HPU does not
+        # use DCP (cp_world_size == 1), so max_num_blocks reduces to
+        # cdiv(max_model_len, block_size) per KV cache group.
+        max_num_blocks = [cdiv(max_model_len, block_size) for block_size in block_sizes]
         self.block_table = MultiGroupBlockTable(max_num_reqs=max_num_reqs,
-                                                max_model_len=max_model_len,
                                                 max_num_batched_tokens=max_num_batched_tokens,
                                                 pin_memory=pin_memory,
                                                 device=device,
                                                 block_sizes=block_sizes,
-                                                kernel_block_sizes=kernel_block_sizes)
+                                                kernel_block_sizes=kernel_block_sizes,
+                                                max_num_blocks=max_num_blocks)
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ), dtype=torch.float32, device=device)
@@ -224,6 +230,11 @@ class InputBatch:
         self.prev_sampled_token_ids: Optional[torch.Tensor] = None
         self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
+
+        # Async-scheduling penalty repair (see update_async_output_token_ids):
+        # prior step's sampled ids copied to CPU, plus the copy-ready event.
+        self.sampled_token_ids_cpu: Optional[torch.Tensor] = None
+        self.async_copy_ready_event: Optional[torch.hpu.Event] = None
 
         self.req_type: dict[str, str] = {}
 
@@ -593,9 +604,9 @@ class InputBatch:
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
-            frequency_penalties=self.frequency_penalties[:num_reqs],
-            presence_penalties=self.presence_penalties[:num_reqs],
-            repetition_penalties=self.repetition_penalties[:num_reqs],
+            frequency_penalties=None if self.no_penalties else self.frequency_penalties[:num_reqs],
+            presence_penalties=None if self.no_penalties else self.presence_penalties[:num_reqs],
+            repetition_penalties=None if self.no_penalties else self.repetition_penalties[:num_reqs],
             output_token_ids=cast(list[list[int]], self.req_output_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
@@ -692,6 +703,76 @@ class InputBatch:
             logitsprocs=self.logitsprocs,
         )
 
+    def set_async_sampled_token_ids(
+        self,
+        sampled_token_ids_cpu: torch.Tensor,
+        async_copy_ready_event: "torch.hpu.Event",
+    ) -> None:
+        """Stash the prior step's sampled tokens for async penalty repair.
+
+        Ported from the identically named method in vLLM's GPU runner
+        (vllm/v1/worker/gpu_input_batch.py). Async scheduling copies the
+        sampled ids to CPU without a blocking sync; keep the CPU tensor and its
+        copy-ready event so update_async_output_token_ids can splice the real
+        ids in later. Cleared when no consumer reads output_token_ids (no
+        penalties and no bad_words), so the fast path skips the per-step sync.
+
+        Args:
+            sampled_token_ids_cpu: prior step's sampled ids, shape (num_reqs, 1).
+            async_copy_ready_event: event recorded after the non-blocking
+                device-to-host copy was enqueued.
+        """
+        if self.needs_output_token_ids:
+            self.sampled_token_ids_cpu = sampled_token_ids_cpu
+            self.async_copy_ready_event = async_copy_ready_event
+        else:
+            self.sampled_token_ids_cpu = None
+            self.async_copy_ready_event = None
+
+    def update_async_output_token_ids(self) -> None:
+        """Splice the prior step's real sampled ids over the -1 placeholders.
+
+        Ported from the identically named method in vLLM's GPU runner
+        (vllm/v1/worker/gpu_input_batch.py). Under async scheduling the runner
+        appends a -1 to each request's output_token_ids after sampling, because
+        the real id is still being copied to CPU. Called right before the
+        sampler reads output_token_ids for penalties: synchronize on the
+        copy-ready event and replace the placeholders. No-op when no consumer
+        reads output_token_ids (sampled_token_ids_cpu left None by
+        set_async_sampled_token_ids) or there is no prior step to repair.
+        """
+        if self.sampled_token_ids_cpu is None or self.prev_req_id_to_index is None:
+            # Output token ids not needed or not async scheduling.
+            return
+
+        sampled_token_ids = None
+        for index, req_id in enumerate(self.req_ids):
+            prev_index = self.prev_req_id_to_index.get(req_id)
+            if prev_index is None:
+                continue
+            req_output_token_ids = self.req_output_token_ids[index]
+            if not req_output_token_ids or req_output_token_ids[-1] != -1:
+                # Final output id is not a placeholder; nothing to repair
+                # (e.g. a freshly resumed request re-synced from the scheduler).
+                continue
+            if sampled_token_ids is None:
+                assert self.async_copy_ready_event is not None
+                self.async_copy_ready_event.synchronize()
+                sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+            new_ids: list[int] = sampled_token_ids[prev_index]
+            if not new_ids:
+                continue
+            num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
+            # Account for a differing number of placeholders vs sampled ids
+            # (tokens can be discarded after a kv-load failure).
+            first_placeholder = len(req_output_token_ids)
+            while (first_placeholder > 0 and req_output_token_ids[first_placeholder - 1] == -1):
+                first_placeholder -= 1
+            num_placeholders = len(req_output_token_ids) - first_placeholder
+            num_to_replace = min(num_sampled_ids, num_placeholders)
+            del new_ids[num_to_replace:]
+            req_output_token_ids[first_placeholder:] = new_ids
+
     def get_pooling_params(self) -> list[PoolingParams]:
         assert len(self.req_ids) == len(self.pooling_params)
         return [self.pooling_params[req_id] for req_id in self.req_ids]
@@ -779,6 +860,19 @@ class InputBatch:
     def no_penalties(self) -> bool:
         return (len(self.presence_penalties_reqs) == 0 and len(self.frequency_penalties_reqs) == 0
                 and len(self.repetition_penalties_reqs) == 0)
+
+    @property
+    def needs_output_token_ids(self) -> bool:
+        """Whether any sampler consumer reads output_token_ids this batch.
+
+        Both penalties and bad_words read it, so the -1 placeholders must be
+        repaired before sampling if either is active for any request.
+
+        Upstream also ORs in a custom-logitsprocs flag; unreachable here because
+        batch_update_builder is never populated on HPU (see the PR#16728 TODO in
+        _make_sampling_metadata). Add it back when batch_update is enabled.
+        """
+        return not self.no_penalties or bool(self.bad_words_token_ids)
 
     @property
     def max_num_logprobs(self) -> Optional[int]:

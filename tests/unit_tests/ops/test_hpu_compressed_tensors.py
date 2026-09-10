@@ -345,34 +345,34 @@ def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_ini
 
     # Prepare FusedMoE layer with oot HPUCompressedTensorsWNA16MoEMethod
     oot_op = create_fused_moe(oot_quant_config).to("hpu")
-    assert isinstance(oot_op.quant_method, HPUCompressedTensorsWNA16MoEMethod)
+    assert isinstance(oot_op.routed_experts.quant_method, HPUCompressedTensorsWNA16MoEMethod)
 
     # Weights were extracted from first FusedMoE layer of RedHatAI/Qwen3-30B-A3B-quantized.w4a16
     # (with adjusted shapes, to make tensors smaller)
     with safe_open(get_data_path("data/compressed_tensors/moe_wna16.safetensors"), framework="pt", device="hpu") as f:
         w2_weight_packed = f.get_tensor("w2_weight_packed")
         w2_weight_packed = torch.swapaxes(w2_weight_packed, 0, 1).repeat(128, 1, 1)
-        oot_op.w2_weight_packed.copy_(w2_weight_packed)
+        oot_op.routed_experts.w2_weight_packed.copy_(w2_weight_packed)
 
         w13_weight_packed = f.get_tensor("w13_weight_packed")
         w13_weight_packed = torch.swapaxes(w13_weight_packed, 0, 1).repeat(128, 1, 1)
-        oot_op.w13_weight_packed.copy_(w13_weight_packed)
+        oot_op.routed_experts.w13_weight_packed.copy_(w13_weight_packed)
 
         w2_weight_scale = f.get_tensor("w2_weight_scale")
         w2_weight_scale = torch.swapaxes(w2_weight_scale, 0, 1).repeat(128, 1, 1)
-        oot_op.w2_weight_scale.copy_(w2_weight_scale)
+        oot_op.routed_experts.w2_weight_scale.copy_(w2_weight_scale)
 
         w13_weight_scale = f.get_tensor("w13_weight_scale")
         w13_weight_scale = torch.swapaxes(w13_weight_scale, 0, 1).repeat(128, 1, 1)
-        oot_op.w13_weight_scale.copy_(w13_weight_scale)
+        oot_op.routed_experts.w13_weight_scale.copy_(w13_weight_scale)
 
         w2_weight_shape = torch.tensor([512, 256], dtype=torch.bfloat16, device="hpu")
-        oot_op.w2_weight_shape.copy_(w2_weight_shape.repeat(128, 1))
+        oot_op.routed_experts.w2_weight_shape.copy_(w2_weight_shape.repeat(128, 1))
 
         w13_weight_shape = torch.tensor([256, 512], dtype=torch.bfloat16, device="hpu")
-        oot_op.w13_weight_shape.copy_(w13_weight_shape.repeat(128, 1))
+        oot_op.routed_experts.w13_weight_shape.copy_(w13_weight_shape.repeat(128, 1))
 
-    oot_op.quant_method.process_weights_after_loading(oot_op)
+    oot_op.routed_experts.quant_method.process_weights_after_loading(oot_op.routed_experts)
 
     if not htorch.utils.internal.is_lazy():
         compile_config = HPUCompileConfig()
@@ -388,12 +388,12 @@ def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_ini
 
     # Execute layer
     ctx = ForwardContext(
-        no_compile_layers={oot_op.runner.layer_name: oot_op},
+        no_compile_layers={oot_op.layer_name: oot_op},
         attn_metadata={},
         slot_mapping={},
     )
     with override_forward_context(ctx):
-        out = oot_op.runner.forward(hidden_states, router_logits)
+        out = oot_op.forward(hidden_states, router_logits)
 
     # Check correctness
     torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
@@ -454,8 +454,11 @@ def test_compressed_tensors_linear_method_w8a8int8_bf16fallback_static_per_chann
     with safe_open(get_data_path("data/compressed_tensors/linear_w8a8int8_bf16fallback_static_per_channel.safetensors"),
                    framework="pt",
                    device="hpu") as f:
-        oot_op.weight.copy_(f.get_tensor("weight"))
-        oot_op.weight_scale.copy_(f.get_tensor("weight_scale"))
+        # Load through the real weight_loader (not param.copy_()) so the full
+        # served-model path is exercised. See issue #1612: the INT8 scheme must
+        # not wrap this loader with the FP8-only gaudi_weight_wrapper.
+        oot_op.weight.weight_loader(oot_op.weight, f.get_tensor("weight"))
+        oot_op.weight_scale.weight_loader(oot_op.weight_scale, f.get_tensor("weight_scale"))
         input = f.get_tensor("input")
         ref_output = f.get_tensor("ref_output")
 
@@ -464,6 +467,70 @@ def test_compressed_tensors_linear_method_w8a8int8_bf16fallback_static_per_chann
     sut_output = oot_op(input)
 
     torch.testing.assert_close(ref_output, sut_output.float(), atol=1e-3, rtol=1e-3)
+
+
+def test_compressed_tensors_w8a8int8_weight_loader_does_not_corrupt_int8(default_vllm_config: None, dist_init):
+    """Regression test for #1612.
+
+    Load INT8 weights and their fp32 scales through the *real* `weight_loader`
+    stored on each parameter (the path a served model actually takes), not via
+    `param.copy_()`. On Gaudi2 the INT8 scheme used to wrap that loader with the
+    FP8-only `gaudi_weight_wrapper`, which doubled every non-fp8 tensor (INT8
+    weight overflowed +/-127, fp32 scale scaled by 2x) -> garbage output.
+
+    Prior unit tests missed this because they copied straight into the params,
+    bypassing the wrapper entirely.
+    """
+    config = {
+        "config_groups": {
+            "group_0": {
+                "input_activations": {
+                    "dynamic": True,
+                    "num_bits": 8,
+                    "strategy": "token",
+                    "symmetric": True,
+                    "type": "int"
+                },
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": {
+                    "dynamic": False,
+                    "num_bits": 8,
+                    "observer": "mse",
+                    "strategy": "channel",
+                    "symmetric": True,
+                    "type": "int"
+                }
+            }
+        },
+        "format": "int-quantized",
+        "ignore": ["lm_head"],
+        "kv_cache_scheme": None,
+        "quant_method": "compressed-tensors",
+        "quantization_status": "compressed"
+    }
+
+    oot_quant_config = CompressedTensorsConfig.from_config(config)
+    oot_op = create_row_parallel_linear(input_size=128, output_size=64, quant_config=oot_quant_config).to("hpu")
+    assert isinstance(oot_op.scheme, HPUCompressedTensorsW8A8Int8_BF16Fallback)
+
+    # Deliberately include a near-int8-max value: if the loader doubles the
+    # weight it overflows int8 and wraps around, which torch.int8.copy_ would
+    # also clamp -> the corruption is unmistakable.
+    src_weight = torch.zeros(64, 128, dtype=torch.int8)
+    src_weight.fill_(3)
+    src_weight[0, 0] = 100  # 100 * 2 = 200 overflows int8 (max 127)
+    src_weight[1, 1] = -100
+    src_weight = src_weight.to("hpu")
+    src_scale = torch.full((64, 1), 0.02093, dtype=torch.float32, device="hpu")
+
+    # Drive the real loader bound to each param.
+    oot_op.weight.weight_loader(oot_op.weight, src_weight)
+    oot_op.weight_scale.weight_loader(oot_op.weight_scale, src_scale)
+
+    # The loader must not mutate INT8 weights or fp32 scales.
+    torch.testing.assert_close(oot_op.weight.data.cpu(), src_weight.cpu())
+    torch.testing.assert_close(oot_op.weight_scale.data.cpu(), src_scale.cpu())
 
 
 def test_compressed_tensors_linear_method_w8a8fp8_block(default_vllm_config: None, dist_init):
@@ -589,7 +656,7 @@ def test_compressed_tensors_w8a8fp8_block_moe_method(default_vllm_config: None, 
     oot_quant_config = CompressedTensorsConfig.from_config(config)
 
     oot_op = create_fused_moe(oot_quant_config).to("hpu")
-    assert isinstance(oot_op.quant_method, HPUCompressedTensorsW8A8Fp8MoEMethod)
+    assert isinstance(oot_op.routed_experts.quant_method, HPUCompressedTensorsW8A8Fp8MoEMethod)
 
     num_experts = 128
     hidden_size = 512
@@ -610,18 +677,19 @@ def test_compressed_tensors_w8a8fp8_block_moe_method(default_vllm_config: None, 
     w13_weight_scale = torch.ones(num_experts, w13_scale_rows, w13_scale_cols, dtype=torch.float32, device="hpu")
     w2_weight_scale = torch.ones(num_experts, w2_scale_rows, w2_scale_cols, dtype=torch.float32, device="hpu")
 
-    oot_op.w13_weight.data.copy_(w13_weight)
-    oot_op.w2_weight.data.copy_(w2_weight)
-    oot_op.w13_weight_scale.data.copy_(w13_weight_scale)
-    oot_op.w2_weight_scale.data.copy_(w2_weight_scale)
+    oot_op.routed_experts.w13_weight.data.copy_(w13_weight)
+    oot_op.routed_experts.w2_weight.data.copy_(w2_weight)
+    oot_op.routed_experts.w13_weight_scale.data.copy_(w13_weight_scale)
+    oot_op.routed_experts.w2_weight_scale.data.copy_(w2_weight_scale)
 
-    oot_op.quant_method.process_weights_after_loading(oot_op)
+    oot_op.routed_experts.quant_method.process_weights_after_loading(oot_op.routed_experts)
 
     # Verify blockwise post-processing created the expected attributes
-    assert hasattr(oot_op, "w13_weight_scale_inv"), "w13_weight_scale_inv should be created for block MoE"
-    assert hasattr(oot_op, "w2_weight_scale_inv"), "w2_weight_scale_inv should be created for block MoE"
-    assert not hasattr(oot_op, "w13_weight_scale"), "w13_weight_scale should be removed after aliasing"
-    assert not hasattr(oot_op, "w2_weight_scale"), "w2_weight_scale should be removed after aliasing"
+    assert hasattr(oot_op.routed_experts,
+                   "w13_weight_scale_inv"), ("w13_weight_scale_inv should be created for block MoE")
+    assert hasattr(oot_op.routed_experts, "w2_weight_scale_inv"), "w2_weight_scale_inv should be created for block MoE"
+    assert not hasattr(oot_op.routed_experts, "w13_weight_scale"), "w13_weight_scale should be removed after aliasing"
+    assert not hasattr(oot_op.routed_experts, "w2_weight_scale"), "w2_weight_scale should be removed after aliasing"
 
     # Execute layer with synthetic input
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16, device="hpu")
@@ -630,7 +698,7 @@ def test_compressed_tensors_w8a8fp8_block_moe_method(default_vllm_config: None, 
     mock_ctx = MagicMock(spec=["dp_metadata"])
     mock_ctx.dp_metadata = None
     with override_forward_context(mock_ctx):
-        out = oot_op.runner._forward_impl(oot_op, hidden_states, router_logits, hidden_states)
+        out = oot_op._forward_impl(hidden_states, router_logits, hidden_states)
 
     assert out.shape == hidden_states.shape
     assert out.dtype == torch.bfloat16

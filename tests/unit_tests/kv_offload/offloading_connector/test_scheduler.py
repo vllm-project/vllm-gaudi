@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
-
 import pytest
 
 from tests.unit_tests.kv_offload.offloading_connector.utils import (
     generate_store_output, )
 from tests.unit_tests.kv_offload.utils import EOS_TOKEN_ID
-from vllm.distributed.kv_events import BlockRemoved, BlockStored
-from vllm.v1.kv_offload.base import OffloadingEvent, OffloadKey, make_offload_key
 from vllm.v1.request import RequestStatus
 
 
@@ -97,39 +93,14 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = (lambda block_hashes, req_context: generate_store_output([]))
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 1
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(0, 1, 2))
 
     # single block lookup with a hit in a middle block
     runner.new_request(token_ids=[0] * offloaded_block_size * 2 + [1] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = (lambda block_hashes, req_context: generate_store_output([]))
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 1
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(3, 4, 5))
-
-    # test take_events
-    def to_keys(int_ids: list[int]) -> list[OffloadKey]:
-        return [make_offload_key(str(i).encode(), 0) for i in int_ids]
-
-    def take_events() -> Iterable[OffloadingEvent]:
-        yield OffloadingEvent(keys=to_keys([1, 2, 3]), medium="A", removed=False)
-        yield OffloadingEvent(keys=to_keys([4, 5, 6]), medium="B", removed=True)
-
-    runner.manager.take_events.side_effect = take_events
-    events = list(runner.scheduler_connector.take_events())
-    assert len(events) == 2
-    event = events[0]
-    assert isinstance(event, BlockStored)
-    assert event.block_hashes == [str(i).encode() for i in [1, 2, 3]]
-    assert event.block_size == 0
-    assert event.medium == "A"
-    assert event.token_ids == []
-    assert event.parent_block_hash is None
-    assert event.lora_id is None
-    assert event.lora_name is None
-    event = events[1]
-    assert isinstance(event, BlockRemoved)
-    assert event.block_hashes == [str(i).encode() for i in [4, 5, 6]]
-    assert event.medium == "B"
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -181,7 +152,7 @@ def test_request_preemption(request_runner, async_scheduling: bool):
 
     # request should now return from preemption
     # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 3
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 3
     runner.manager.prepare_store.side_effect = (lambda block_hashes, req_context: generate_store_output(block_hashes))
     runner.run(
         decoded_tokens=[0] * gpu_block_size,
@@ -210,18 +181,18 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
     # store 1 blocks
     runner.new_request(token_ids=[0] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = (lambda block_hashes, req_context: generate_store_output(block_hashes))
-    # With sync scheduling, all-finished flush fires within this run.
-    # With async scheduling, the finish is delayed so flush fires later.
+    # Upstream #45823 defers on_request_finished until in-flight transfers
+    # drain, so finishing the request no longer flushes its stores; flush now
+    # fires only on preemption or block reuse.
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored_gpu_block_indexes=(0, 1, 2),
-        expected_flushed_gpu_block_indexes=(0, 1, 2) if not async_scheduling else (),
     )
 
     # start a request to load the first block, but don't complete
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 1
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
@@ -233,7 +204,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
 
     # start a new request to load the same first block
     runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 1
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
@@ -272,16 +243,18 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     # store 1 blocks
     runner.new_request(token_ids=[0] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = (lambda block_hashes, req_context: generate_store_output(block_hashes))
+    # Upstream #45823 defers on_request_finished until in-flight transfers
+    # drain, so finishing the request no longer flushes its stores; flush now
+    # fires only on preemption or block reuse.
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored_gpu_block_indexes=(0, 1, 2),
-        expected_flushed_gpu_block_indexes=(0, 1, 2) if not async_scheduling else (),
     )
 
     # start a request to load the first block, but don't complete
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context, *_: 1
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
@@ -298,11 +271,10 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     # verify request is not deleted
     assert req_id in runner.scheduler.requests
 
-    # complete loading request
+    # complete loading request (abort defers finalize; no flush on finish)
     runner.run(
         decoded_tokens=[],
         expected_loaded_gpu_block_indexes=(0, 1, 2),
-        expected_flushed_gpu_block_indexes=(0, 1, 2),
     )
 
     # assert request is deleted

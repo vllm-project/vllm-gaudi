@@ -27,12 +27,13 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 import torch.nn as nn
+import vllm_gaudi.envs as gaudi_envs
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
-from vllm_gaudi.extension.runtime import finalize_config, get_config
+from vllm_gaudi.extension.runtime import clear_config, finalize_config, get_config
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
@@ -48,7 +49,7 @@ from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_pa
 from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer_group)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
@@ -56,7 +57,7 @@ from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.platforms import current_platform
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem)
-from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
@@ -91,7 +92,6 @@ from vllm.distributed.parallel_state import get_pp_group, get_dp_group
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.transformers_utils.config import is_interleaved
 from vllm.v1.worker.utils import (AttentionGroup, prepare_kernel_block_sizes, sanity_check_mm_encoder_outputs)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -132,6 +132,27 @@ from vllm.model_executor.models.bert import _encode_token_type_ids
 
 logger = init_logger()
 
+
+def is_interleaved(config: Any) -> bool:
+    """Detect if the model with this config uses interleaved attention.
+
+    Restores the helper removed from ``vllm.transformers_utils.config`` by
+    upstream vLLM PR #49803 (commit ``26d725c334``), which inlined the check
+    at its former call sites. vllm-gaudi still relies on it in three places.
+
+    Args:
+        config: A ``PretrainedConfig`` (or any config exposing
+            ``get_text_config``).
+
+    Returns:
+        True if the text config declares more than one distinct layer type.
+    """
+    text_config = config.get_text_config()
+    if layer_types := getattr(text_config, "layer_types", None):
+        return len(set(layer_types)) > 1
+    return False
+
+
 try:
     from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 except ImportError:
@@ -155,6 +176,11 @@ HPU_TORCH_DTYPE_TO_STR_DTYPE = {
 }
 
 shutdown_inc_called = False
+
+# Warn once if a single modality's multimodal warmup will compile more than
+# this many vision-tower graphs (one per item count per resolution). Wide
+# VLLM_MULTIMODAL_RESOLUTIONS count ranges multiply the total quickly.
+_MM_WARMUP_GRAPH_WARN_THRESHOLD = 25
 
 
 @contextlib.contextmanager
@@ -280,6 +306,227 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
                 mod.__dict__[attr_name] = new_obj
     if moved:
         logger.info("Moved %d stray tensors to %s", moved, device)
+
+
+def _model_has_moe_experts(model: torch.nn.Module) -> bool:
+    """Return True if the model has any fused-MoE op with per-expert weight views.
+
+    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase``) whose
+    per-expert ``MoeMatmul.weight`` attributes are plain-tensor views that go
+    stale after ``model.to(device)`` and must be rebound. Dense models (e.g.
+    Llama-3.3-70B) have none, so the INC pre-stage ``model.to('hpu')`` + rebind
+    is pure overhead for them -- and worse, it eagerly materializes the full
+    (pre-quantization) weights on a single card, OOMing large dense models
+    before ``convert()`` can shrink them.
+    """
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
+    return any(isinstance(getattr(module, "moe_op", None), VllmMixtureOfExpertsOpBase) for module in model.modules())
+
+
+def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
+    """Re-derive MoeMatmul.weight slices from the parent layer's registered weights.
+
+    MoeMatmul.weight is a plain tensor attribute (set via set_weight()) that
+    holds a view/slice of the parent FusedMoE layer's w13_weight / w2_weight
+    registered parameters.  After model.to(device), the registered params are
+    on the new device but MoeMatmul.weight still points to the OLD device's
+    storage, making it stale.  If the stray scan runs before rebinding, it
+    would move these stale views independently, creating duplicate copies of
+    the expert weights on the target device.
+
+    Call this AFTER model.to(device) and BEFORE
+    _move_remaining_tensors_to_device so that the stray scan finds all
+    MoeMatmul.weight tensors already on the correct device and skips them.
+    """
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if not isinstance(moe_op, VllmMixtureOfExpertsOpBase):
+            continue
+        n = moe_op.num_experts
+        w13_weight = getattr(module, "w13_weight", None)
+        w2_weight = getattr(module, "w2_weight", None)
+        # Rebind per-expert weight views only when the parent contiguous
+        # parameter is intact (non-empty, shape[0] matches expert count).
+        # After _dedup_moe_op_weights() the param is emptied to
+        # torch.empty(0, ...) and the real weights live as registered
+        # Parameters inside moe_op (FP8 convert path); model.to() moves
+        # those correctly so only the cache refresh below is needed.
+        if (w13_weight is not None and w2_weight is not None and w13_weight.dim() > 0 and w13_weight.shape[0] == n
+                and w2_weight.dim() > 0 and w2_weight.shape[0] == n):
+            for i in range(n):
+                moe_op.w13_list[i].set_weight(w13_weight[i])
+                moe_op.w2_list[i].set_weight(w2_weight[i])
+            w13_bias = getattr(module, "w13_bias", None)
+            w2_bias = getattr(module, "w2_bias", None)
+            if w13_bias is not None and w2_bias is not None:
+                for i in range(n):
+                    if hasattr(moe_op.w13_list[i], "set_bias"):
+                        moe_op.w13_list[i].set_bias(w13_bias[i])
+                    if hasattr(moe_op.w2_list[i], "set_bias"):
+                        moe_op.w2_list[i].set_bias(w2_bias[i])
+            # Rebuild cache only when we rebound the plain-attr views, because
+            # model.to() → _apply() left the cache pointing at the old device's
+            # storage.
+            if hasattr(moe_op, "_cache_weight_lists"):
+                moe_op._cache_weight_lists()
+
+
+def _rebind_moe_op_weights_to_device(model: torch.nn.Module, device: str) -> None:
+    """Rebind ``moe_op`` expert-weight views onto the moved on-device Parameters.
+
+    ``nn.Module.to(device)`` moves only registered Parameters/buffers, so after
+    INC's ``model.to('hpu')`` the ``w13_weight`` / ``w2_weight`` Parameters live
+    on device while the ``moe_op`` per-expert ``MoeMatmul.weight`` attributes
+    (plain-attribute *views* built during ``process_weights_after_loading``) and
+    the ``_cached_w*_views`` tuples still point at the old host storage.
+
+    If left alone, ``_move_remaining_tensors_to_device`` materializes each stale
+    view as a *fresh* device allocation — one copy for the per-expert weights
+    and another for the cached-view tuple — producing two extra full copies of
+    every expert weight that starve the KV cache. (Upstream PR #41184 moved the
+    weights onto a ``RoutedExperts`` child, changing the ``.to()`` traversal
+    order so these views are no longer rebound automatically.)
+
+    Re-slice each per-expert weight from the moved Parameter so it becomes a
+    device view (single storage) and drop the stale caches so ``forward``
+    rebuilds them lazily from the on-device weights. Only stale (off-device)
+    views are rebound, so the FP8 convert path — where ``moe_op`` holds genuine
+    freshly registered quantized Parameters — is left untouched.
+    """
+    target_type = torch.device(device).type
+    rebound_ops = 0
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if moe_op is None:
+            continue
+        touched = False
+        for param_name, list_name in (("w13_weight", "w13_list"), ("w2_weight", "w2_list")):
+            param = getattr(module, param_name, None)
+            weight_list = getattr(moe_op, list_name, None)
+            if not isinstance(param, torch.Tensor) or weight_list is None:
+                continue
+            if param.device.type != target_type:
+                continue
+            if param.dim() == 0 or param.shape[0] != len(weight_list):
+                continue
+            for expert_id, item in enumerate(weight_list):
+                w = getattr(item, "weight", None)
+                # Only rebind stale host-side views; on-device quantized
+                # Parameters (FP8 convert path) are left as-is.
+                if isinstance(w, torch.Tensor) and w.device.type != target_type:
+                    item.weight = param.data[expert_id]
+                    touched = True
+        if touched:
+            # Drop stale cached view tuples so forward() rebuilds them as views
+            # of the rebound on-device weights instead of them being copied.
+            for cache_attr in ("_cached_w13_views", "_cached_w2_views", "_cached_w13_bias_views",
+                               "_cached_w2_bias_views"):
+                if hasattr(moe_op, cache_attr):
+                    setattr(moe_op, cache_attr, None)
+            rebound_ops += 1
+    if rebound_ops:
+        logger.info("Rebound MoE expert weights to on-device views on %d ops", rebound_ops)
+
+
+def _detach_moe_op_weights_to_independent(model: torch.nn.Module, device: str) -> None:
+    """Give each ``moe_op`` expert weight independent storage before FP8 convert.
+
+    After upstream PR #41184 every local expert lives inside a single contiguous
+    ``w13_weight`` / ``w2_weight`` Parameter and the ``moe_op`` per-expert
+    ``MoeMatmul.weight`` attributes are *slices* into it. A slice keeps the whole
+    parent storage alive, so during INC's ``convert`` the full bf16 parent cannot
+    be released as experts are quantized — bf16 (full) and the growing fp8 copies
+    coexist and OOM on large EP models (e.g. Llama-4 Maverick TP8/EP8).
+
+    Restore the pre-#41184 layout: replace each slice with an independent clone
+    and drop the contiguous parent. INC then frees each bf16 expert as soon as it
+    produces its fp8 replacement (incremental, never full bf16 + full fp8). Work
+    one layer at a time and free the parent immediately so the transient overhead
+    is bounded to a single layer rather than a second full model copy.
+    """
+    target_type = torch.device(device).type
+    detached_ops = 0
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if moe_op is None:
+            continue
+        touched = False
+        for param_name, list_name in (("w13_weight", "w13_list"), ("w2_weight", "w2_list")):
+            param = getattr(module, param_name, None)
+            weight_list = getattr(moe_op, list_name, None)
+            if not isinstance(param, torch.Tensor) or weight_list is None:
+                continue
+            if param.device.type != target_type:
+                continue
+            if param.dim() == 0 or param.shape[0] != len(weight_list):
+                continue
+            for expert_id, item in enumerate(weight_list):
+                w = getattr(item, "weight", None)
+                if isinstance(w, torch.Tensor):
+                    # Clone breaks the slice->parent storage link so the parent
+                    # can be freed; the clone owns its own storage.
+                    item.weight = param.data[expert_id].clone()
+                    touched = True
+            # Drop the contiguous parent; with every slice now independent its
+            # storage refcount hits zero and the bf16 block is released.
+            param.data = torch.empty(0, dtype=param.dtype, device=param.device)
+        if touched:
+            for cache_attr in ("_cached_w13_views", "_cached_w2_views", "_cached_w13_bias_views",
+                               "_cached_w2_bias_views"):
+                if hasattr(moe_op, cache_attr):
+                    setattr(moe_op, cache_attr, None)
+            detached_ops += 1
+            htorch.core.mark_step()
+    if detached_ops:
+        logger.info("Detached MoE expert weights to independent storage on %d ops", detached_ops)
+
+
+def _dedup_moe_op_weights(model: torch.nn.Module) -> None:
+    """Release the dead duplicate device copy of MoE expert weights after INC.
+
+    For FP8 MoE, INC's ``fp8_quant`` conversion re-registers each per-expert
+    weight as a fresh (transposed, contiguous) Parameter inside the patched
+    ``moe_op`` (copy B). The original ``w13_weight`` / ``w2_weight`` Parameter
+    (copy A) is then dead — the forward runs entirely through ``moe_op`` — yet
+    it is still moved to device, doubling expert-weight memory and starving the
+    KV cache.
+
+    Free copy A only when every expert weight is accounted for in ``moe_op`` and
+    none of them share storage with the Parameter (i.e. INC made a genuine
+    second copy). It is a no-op when the op still aliases the Parameter
+    (non-INC / measure path), detected via storage identity.
+    """
+
+    def _storage_id(t: torch.Tensor) -> int:
+        try:
+            return t.untyped_storage().data_ptr()
+        except Exception:
+            return t.data_ptr()
+
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if moe_op is None:
+            continue
+        for param_name, list_name in (("w13_weight", "w13_list"), ("w2_weight", "w2_list")):
+            param = getattr(module, param_name, None)
+            weight_list = getattr(moe_op, list_name, None)
+            if not isinstance(param, torch.Tensor) or weight_list is None:
+                continue
+            if param.dim() == 0 or param.shape[0] != len(weight_list):
+                continue
+            op_storages = set()
+            op_tensors = 0
+            for item in weight_list:
+                w = getattr(item, "weight", None)
+                if isinstance(w, torch.Tensor):
+                    op_tensors += 1
+                    op_storages.add(_storage_id(w))
+            if op_tensors != len(weight_list):
+                continue
+            if _storage_id(param) in op_storages:
+                continue
+            param.data = torch.empty(0, dtype=param.dtype, device=param.device)
 
 
 class BucketingFailedException(Exception):
@@ -544,7 +791,7 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
 
     mamba_like_arch = [
         "GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration",
-        "Qwen3NextForCausalLM"
+        "Qwen3NextForCausalLM", "NemotronHForCausalLM"
     ]
     if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):
         return
@@ -570,14 +817,25 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
             # Extract layer index from name (e.g., "model.layers.5.mixer" -> 5)
             if not any(pattern in layer_name for pattern in mamba_like_layer):
                 continue
-            parts = layer_name.split('.')
-            layer_idx = int(parts[-2])  # "model.layers.5.mixer" -> 5
-
             # Access the actual layer
             if '.mixer' in layer_name:
-                layer = model.model.layers[layer_idx]
-                layer.mamba.cache_group_idx = group_idx
+                # Only the mamba state cache registers under a name ending in
+                # ".mixer". Nemotron-H nests attention under the same attribute
+                # ("model.layers.N.mixer.attn"), which must be skipped here (it
+                # would also break the int(parts[-2]) index parsing).
+                if not layer_name.endswith('.mixer'):
+                    continue
+                layer_idx = int(layer_name.split('.')[-2])  # "...layers.5.mixer" -> 5
+                layer = _get_decoder_layer_by_idx(model, layer_idx)
+                # The Mamba block is exposed as ".mamba" (Granite) or ".mixer"
+                # (Nemotron-H) depending on the model.
+                mamba_mixer = getattr(layer, 'mamba', None)
+                if mamba_mixer is None:
+                    mamba_mixer = getattr(layer, 'mixer', None)
+                if mamba_mixer is not None:
+                    mamba_mixer.cache_group_idx = group_idx
             elif 'linear_attn' in layer_name:
+                layer_idx = int(layer_name.split('.')[-2])
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
                 if layer is not None and hasattr(layer, "linear_attn"):
                     layer.linear_attn.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
@@ -618,8 +876,18 @@ def apply_model_specific_patches(model_runner):
     patch_llama4_get_attn_scale(model_runner.model)
     _init_mamba_split_weights(model_runner.model)
     from vllm_gaudi.models.llama4 import (apply_hpu_llama4_post_load_patches, is_hpu_llama4_model)
-    model_runner._has_heterogeneous_layers = is_hpu_llama4_model(model_runner.model)
-    apply_hpu_llama4_post_load_patches(model_runner.model)
+    from vllm_gaudi.models.qwen3_next import apply_hpu_qwen3_residual_fix
+
+    is_llama4 = is_hpu_llama4_model(model_runner.model)
+    model_type = getattr(model_runner.vllm_config.model_config.hf_config, "model_type", "")
+    is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5", "qwen3_5_text", "qwen3_5_moe")
+    is_gemma4 = model_type in ("gemma4", )
+
+    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe or is_gemma4
+    if is_llama4:
+        apply_hpu_llama4_post_load_patches(model_runner.model)
+    if is_qwen_moe:
+        apply_hpu_qwen3_residual_fix(model_runner.model)
 
 
 def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num_scheduled_tokens,
@@ -983,6 +1251,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # TODO: use ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         environment.set_vllm_config(vllm_config)
 
+        clear_config()
         finalize_config()
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -1101,8 +1370,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.model_config.get_num_layers_by_block_type(self.parallel_config, block_type)
             for block_type in mamba_like)
 
+        # Models whose mamba layers get relabeled "linear_attention" by
+        # transformers>=5's remap_legacy_layer_types (config.get_text_config()
+        # normalizes legacy "mamba"/"attention" hybrid layer_types to
+        # "linear_attention"/"full_attention"), but which are plain mamba
+        # hybrids, not true GDN/linear-attention models. Left unguarded,
+        # get_num_layers_by_block_type(..., "linear_attention") matches these
+        # relabeled mamba layers, so num_gdn is misdetected as >0 below. That
+        # skips the block_size=528 alignment for Granite 4.0-H (see
+        # initialize_kv_cache) and re-triggers "not warmed-up" recompilations /
+        # non-deterministic tool-calling output.
         self.num_gdn = 0
-        if self.num_mamba_like_layers > 0:
+        if (self.num_mamba_like_layers > 0 and self.model_config.hf_config.model_type != "granitemoehybrid"):
             # Auto-enable hybrid cache for GDN/mamba-like models.
             gdn_types = ["gdn_attention", "linear_attention"]
             self.num_gdn = sum(
@@ -1423,7 +1702,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             device,
             model.embedding_modules,
         )
-        return self.lora_manager.create_lora_manager(model)
+        return self.lora_manager.create_lora_manager(model, vllm_config)
 
     def set_active_loras(self, lora_requests: set[LoRARequest], lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
@@ -1463,7 +1742,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     logger.error("KV sharing validation failed for %s -> %s: %s", layer_name,
                                  kv_sharing_target_layer_name, e)
                 continue
-            if isinstance(attn_module, FusedMoE):
+            if isinstance(attn_module, MoERunner):
                 continue
 
             # TODO: Support other attention modules, e.g., sliding window,
@@ -1731,7 +2010,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
                 # Input all modalities at once
                 mm_kwargs_combined: BatchedTensorInputs = {}
-                for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+                for _, _, mm_kwargs_group in group_and_batch_mm_kwargs(
                         mm_kwargs,
                         device=self.device,
                         pin_memory=self.pin_memory,
@@ -1774,7 +2053,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         encoder_outputs = []
-        for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
+        for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs,
                 device=self.device,
                 pin_memory=self.pin_memory,
@@ -2144,7 +2423,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                               skip_copy=not batch_changed)
         return sampling_metadata
 
-    def get_habana_paged_attn_buffers(self, block_tables, slot_mapping, batch_size, block_size=None):
+    def get_habana_paged_attn_buffers(self,
+                                      block_tables,
+                                      slot_mapping,
+                                      batch_size,
+                                      block_size=None,
+                                      force_non_contiguous=False):
+        """Build paged attention buffers for decode.
+
+        Args:
+            force_non_contiguous: If True, use non-contiguous mode even when
+                use_contiguous_pa is enabled. Required for sliding window blocks
+                which have scattered block IDs that don't work with contiguous PA's
+                slice-based fetch.
+        """
         block_size = self.attn_block_size if block_size is None else block_size
         last_block_usage = [slot[0] % block_size + 1 for slot in slot_mapping]
         block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
@@ -2157,7 +2449,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         padding_fn = None
         block_bucket_size: int
-        if self.use_contiguous_pa:
+        use_contiguous = self.use_contiguous_pa and not force_non_contiguous
+        if use_contiguous:
             actual_blocks_needed = max(block_list) + 1 if block_list else 0
 
             block_bucket_size = \
@@ -2165,6 +2458,28 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                           actual_blocks_needed)[2]
             block_bucket_size += self.get_dp_padding(block_bucket_size)
             block_bucket_size = max(block_bucket_size, actual_blocks_needed)
+            # After a model stash-restore the KV cache may be reinitialized with
+            # fewer blocks than the bucket table was built for.  Cap so that
+            # block_bucket_size never exceeds the allocated KV cache size
+            # (PAD_BLOCK_ID + 1 = total_blocks including the pad block), which
+            # keeps narrow()/shape checks in flat_pa valid and prevents OOB reads.
+            kv_total_blocks = self._PAD_BLOCK_ID + 1
+            if block_bucket_size > kv_total_blocks:
+                # Fail fast if actual requests need more blocks than are
+                # allocated.
+                if actual_blocks_needed > kv_total_blocks:
+                    raise RuntimeError(f"actual_blocks_needed ({actual_blocks_needed}) "
+                                       f"exceeds total KV blocks ({kv_total_blocks}). "
+                                       "The KV cache is under-provisioned for the current "
+                                       "batch; cannot proceed safely after stash-restore.")
+                if not getattr(self, '_block_bucket_cap_warned', False):
+                    logger.warning(
+                        "block_bucket_size (%d) exceeds total KV blocks "
+                        "(%d); capping to prevent OOB after stash-restore. "
+                        "This is expected on a model swap with a smaller "
+                        "KV cache.", block_bucket_size, kv_total_blocks)
+                    self._block_bucket_cap_warned = True
+                block_bucket_size = kv_total_blocks
 
             indices: list[Any]
             indices = [None] * block_bucket_size
@@ -2280,6 +2595,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return self._bucketize_2d_prompt
 
     def _can_merge_prefill_contents(self, lhs, rhs):
+        # Mamba/hybrid models require single-request prefill batches on HPU: the
+        # mamba2 prefill path is built around single-sequence chunks (see the
+        # "Chunks contain tokens from a *single* sequence only" invariant in
+        # _form_prefill_batch). Merging >=2 co-scheduled fresh prefills breaks
+        # that invariant in two ways:
+        #   * with prefix caching, _form_prefill_batch asserts
+        #     len(contents.req_ids) == 1 and the merged batch trips it;
+        #   * without prefix caching, granite_causal_conv1d_fn asserts
+        #     padded_batch == 1 and the merged batch trips it downstream.
+        # Neither is prefix-caching-specific, so gate on the model type, not on
+        # use_prefix_caching (which would also wrongly block merges for plain
+        # attention models that CAN merge under prefix caching).
+        if self.num_mamba_like_layers > 0:
+            return False
         # --- Logic to handle chunked prefill/prefix caching for HPU ---
         # 1. Check basic states of LHS (accumulated batch) and RHS (incoming request).
         # lhs_is_not_empty: Check if the accumulated batch actually contains any requests.
@@ -2432,6 +2761,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks: list = [blocks[:num] for blocks, num in zip(contents.blocks, num_context_blocks)]
         num_context_blocks = [len(b) for b in context_blocks]
         context_groups = [[i] * b for i, b in enumerate(num_context_blocks)]
+        if self.interleaved_sliding_window and self._get_model_type() == "gemma4":
+            # Keep one extra block: a `sliding_window`-token window that ends at an
+            # arbitrary (non-block-aligned) context boundary straddles
+            # `sliding_window // block_size + 1` blocks.
+            # Dropping it would silently mask real in-window tokens for
+            # chunked prefill with a non-block-aligned context_len.
+            sliding_block_size = self.sliding_window // self.attn_block_size + 1
+            window_context_blocks_raw = [blocks[-sliding_block_size:] for blocks in context_blocks]
         # Bucketing uses self.block_size so that file-based buckets
         # (generated at the original block_size) continue to match.
         bucketing_ctx_blocks = [round_up(ctx_len, self.block_size) // self.block_size for ctx_len in context_lens]
@@ -2686,7 +3023,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_lens = async_h2d_copy(context_lens, dtype=torch.int32)
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
-
+        window_context_blocks_t = None
+        # Only keep the last window_size // block_size context blocks per sequence.
+        # window_context_blocks_raw was sliced from the UNPADDED per-request block
+        # lists (before align_and_pad appended -1 sentinels), so it holds each
+        # request's real last-window blocks. Pad it to (target_bs, sliding_block_size)
+        # -- a fixed-width bucket independent of target_blocks -- rather than reusing
+        # context_blocks' batch-wide target_blocks shape.
+        if self.interleaved_sliding_window and self._get_model_type() == "gemma4" and target_blocks > 0:
+            window_context_blocks = align_and_pad(window_context_blocks_raw, (target_bs, sliding_block_size),
+                                                  itertools.repeat(-1))
+            window_context_blocks_t = async_h2d_copy(window_context_blocks, dtype=torch.int32).flatten()
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=query_lens,
             context_lens_tensor=context_lens,
@@ -2703,7 +3050,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             padding_mask_flat=padding_mask_flat,
             blocks_caching_range=blocks_caching_range,
             mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
-            seqlens_offsets_for_blocks=seqlens_offsets_for_blocks)
+            seqlens_offsets_for_blocks=seqlens_offsets_for_blocks,
+            window_block_list=window_context_blocks_t)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -2917,11 +3265,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 sliding_block_size += 1
 
             window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]
+            # Sliding window blocks have scattered IDs (not identity layout),
+            # so force non-contiguous mode to use gather-by-id fetch
             window_block_list, window_block_groups, window_block_usage = \
                 self.get_habana_paged_attn_buffers(
                     window_block_tables, slot_mapping.tolist(),
                     padded_batch_size * num_tokens,
-                    block_size=decode_block_size)
+                    block_size=decode_block_size,
+                    force_non_contiguous=True)
 
         if self.model_has_chunked_attention:
             chunk_size_in_blocks = (self.model.model.config.text_config.attention_chunk_size // decode_block_size)
@@ -3676,6 +4027,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                       pad_to: Optional[int] = None,
                       logits_requests=None) -> tuple[torch.Tensor, SamplingMetadata]:
         htorch.core.mark_step()
+        # Async scheduling: repair -1 placeholders before penalties read them.
+        self.input_batch.update_async_output_token_ids()
         sampling_metadata = self._prepare_sampling(batch_changed, request_ids, pad_to, logits_requests)
         sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
         htorch.core.mark_step()
@@ -4319,6 +4672,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
             }
+            # Async scheduling: keep output_token_ids the right length with a -1
+            # placeholder while the real id is still copying to CPU; spliced in
+            # next step by update_async_output_token_ids. Unconditional, since
+            # the list is read per-request -- the batch-wide no_penalties flag
+            # only gates the repair, not the append.
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                if i not in invalid_req_indices_set:
+                    self.requests[req_id].output_token_ids.append(-1)
             # For the output, postprocessed_sampled_token_ids will be filled during serialization
         else:
             prefill_sampled_token_ids_device = prefill_sampled_token_ids
@@ -4426,12 +4787,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     finished_sending=finished_sending,
                     finished_recving=finished_recving,
                 ))
-            return AsyncHPUModelRunnerOutput(
+            async_output = AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
                 sampled_token_ids=sampled_token_ids,
                 invalid_req_indices=self.invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
             )
+            # Hand the async CPU copy + ready event to the input batch for the
+            # next step's placeholder splice (see update_async_output_token_ids).
+            self.input_batch.set_async_sampled_token_ids(
+                async_output._sampled_token_ids_cpu,
+                async_output._async_copy_ready_event,
+            )
+            return async_output
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -4480,11 +4848,41 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 config = FP8Config.from_json_file(os.getenv("QUANT_CONFIG", ""))
                 disable_mark_scales_as_const = os.getenv("VLLM_DISABLE_MARK_SCALES_AS_CONST", "false") in ("1", "true")
                 self._inc_preprocess()
+                # Pre-stage weights on HPU with single-copy MoE expert views BEFORE
+                # INC patching. Both prepare() (measure) and convert() (quantize)
+                # end by calling model.to('hpu') on the whole model; if the plugin's
+                # moe_op per-expert views are still stale host tensors at that point,
+                # that move materializes a *second* on-device copy of every expert
+                # weight and OOMs on large EP models (e.g. Llama-4 Maverick TP8/EP8,
+                # ~2x per-card weights > HBM). Moving here first and rebinding the
+                # moe_op views onto the on-device Parameters keeps a single copy, so
+                # INC's internal move is a no-op. (Regressed by upstream PR #41184
+                # moving the weights onto a RoutedExperts child, which changed the
+                # .to() traversal order.)
+                #
+                # Restrict this pre-stage to MoE models only. Dense models have no
+                # moe_op views to rebind, so the pre-stage move is pure overhead --
+                # and for a large dense model (e.g. Llama-3.3-70B FP8 on 1 card) it
+                # eagerly materializes the full pre-quantization weights on device
+                # BEFORE convert() can shrink them, OOMing on model.to('hpu').
+                # Leaving dense models on host until the post-INC move restores the
+                # pre-#1590 behavior that convert() shrinks them first.
+                if not is_fake_hpu() and _model_has_moe_experts(self.model):
+                    self.model = self.model.to("hpu")
+                    _rebind_moe_expert_weights(self.model)
+                    htorch.core.mark_step()
                 if config.measure:
                     assert self.parallel_config.data_parallel_size == 1, \
                         "Data parallelism is not supported during the calibration stage."
                     self.model = prepare(self.model, config)
                 elif config.quantize:
+                    # Break the contiguous bf16 expert parent into independent
+                    # per-expert tensors so INC frees each bf16 expert as it emits
+                    # the fp8 copy; otherwise the full bf16 parent stays resident
+                    # (slices pin it) alongside the growing fp8 weights and OOMs.
+                    if not is_fake_hpu():
+                        _detach_moe_op_weights_to_independent(self.model, "hpu")
+                        htorch.core.mark_step()
                     self.model = convert(self.model, config)
                 else:
                     raise ValueError("Unknown quantization config mode,"
@@ -4492,7 +4890,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._sync_shared_moe_gates()
                 if not is_fake_hpu():
                     self.model = self.model.to("hpu")
+                    _rebind_moe_expert_weights(self.model)
                     _move_remaining_tensors_to_device(self.model, "hpu")
+                    _dedup_moe_op_weights(self.model)
                     htorch.core.mark_step()
                 if not disable_mark_scales_as_const:
                     htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
@@ -4585,7 +4985,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._compile_methods()
                 self.regional_compilation_layers_list = [RMSNorm, VocabParallelEmbedding]
                 self._regional_compilation(self.model)
-                self.sampler = self._compile(self.sampler)
+                # Run the logits-processor stage eagerly: it reads the growing
+                # output_token_ids lists, which otherwise recompile the sampler
+                # every decode step once penalties are active. Needs
+                # fullgraph=False (a disabled callee is unsupported under
+                # fullgraph).
+                Sampler.apply_logits_processors = torch.compiler.disable(  # type: ignore[method-assign]
+                    Sampler.apply_logits_processors)
+                self.sampler = self._compile(self.sampler, fullgraph=False)
             else:
                 self.model = self._compile(self.model)
 
@@ -4628,8 +5035,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         module = self._compile(module)
         setattr_nested(model, name, module)
 
-    def _compile(self, module):
-        return torch.compile(module, **self.compile_config.get_compile_args())
+    def _compile(self, module, **config_overrides):
+        """Compile a module with the runner's compile config.
+
+        Args:
+            module: Module to compile.
+            **config_overrides: HPUCompileConfig overrides, for compiling a
+                single submodule under different settings than the model.
+        """
+        config = HPUCompileConfig(**config_overrides) if config_overrides else self.compile_config
+        return torch.compile(module, **config.get_compile_args())
 
     def _use_graphs(self, attn_metadata, batch_size):
         if self.model_config.enforce_eager:
@@ -4739,6 +5154,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 and runner._modules.get('gate', None) is block_gate):
                             del runner._modules['gate']
                             object.__setattr__(runner, 'gate', block_gate)
+                        # After upstream vLLM PR #41184, FusedMoE is a factory
+                        # that returns a MoERunner directly, so `mlp.experts`
+                        # *is* the MoERunner: there is no experts.runner child
+                        # and the shared gate is registered straight on
+                        # experts._modules['gate'] (not experts._gate). INC's
+                        # generate_model_info() then sees the gate under both
+                        # mlp and mlp.experts and (last-seen parent wins)
+                        # patches experts.gate, leaving mlp.gate as a stale
+                        # module whose weight is mutated in-place to fp8 -> the
+                        # unpatched mlp.gate(hs) forward hits a bf16/fp8 shape
+                        # mismatch. Detach the gate from the runner so INC
+                        # patches only the block-level mlp.gate;
+                        # _sync_shared_moe_gates() clears experts.gate after.
+                        elif (isinstance(experts, torch.nn.Module)
+                              and experts._modules.get('gate', None) is block_gate):
+                            del experts._modules['gate']
+                            object.__setattr__(experts, 'gate', block_gate)
+                            self._detached_moe_gates.add(id(experts))
 
     def _sync_shared_moe_gates(self):
         """Apply SharedFusedMoE post-INC synchronization and compatibility.
@@ -4774,33 +5207,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if orig_mod is not None:
                     _sync_moe_kernel_flags(orig_mod)
 
-                # Force external router path: the model's forward checks
-                # experts.is_internal_router to decide the gate path.
-                if isinstance(experts, FusedMoE):
-                    # is_internal_router is a read-only property backed
-                    # by _gate; setting _gate=None makes it return False.
-                    experts._gate = None
-                else:
+                # Re-point the runner at the post-INC block-level gate.
+                # _remove_duplicate_submodules() detached the gate from the
+                # runner so INC would patch it only under mlp; the reference
+                # kept there is the pre-INC module, whose weight was mutated
+                # in place to fp8. The runner still owns gate application
+                # (upstream removed the external-router path together with
+                # is_internal_router), and models pass router_logits as a
+                # placeholder equal to hidden_states, so leaving the runner
+                # without a gate sends hidden_states into expert selection.
+                # object.__setattr__ keeps the gate out of _modules so INC's
+                # module->parent map still sees mlp as the sole parent.
+                if isinstance(experts, MoERunner):
+                    object.__setattr__(experts, "gate", block_gate)
+                elif not isinstance(
+                        getattr(type(experts), "is_internal_router", None),
+                        property,
+                ):
                     # INC wrappers (e.g. PatchedMixtralMoE) may inherit
-                    # is_internal_router as a read-only @property;
-                    # runner.gate = None below handles that case.
-                    if not isinstance(
-                            getattr(type(experts), "is_internal_router", None),
-                            property,
-                    ):
-                        experts.is_internal_router = False
+                    # is_internal_router as a read-only @property.
+                    experts.is_internal_router = False
                 runner = getattr(experts, "runner", None)
                 if runner is not None and hasattr(runner, "gate"):
-                    runner.gate = None
-                    # Refresh the cached gate ref captured at
-                    # FusedMoE.__init__ to the post-INC block-level gate.
-                    # The dp_size==1 fast path (patched_fused_moe_forward)
-                    # falls back to runner._hpu_gate_ref when runner.gate
-                    # is None; the pre-INC reference points at the now-
-                    # replaced module and produced shape/dtype mismatches
-                    # under fp8.
-                    if block_gate is not None:
-                        object.__setattr__(runner, "_hpu_gate_ref", block_gate)
+                    object.__setattr__(runner, "gate", block_gate)
 
                 if id(experts) in self._detached_moe_gates:
                     self._detached_moe_gates.remove(id(experts))
@@ -4826,7 +5255,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 setattr(module, name, bool(getattr(moe_config, name, False)))
 
         for mod in self.model.modules():
-            if isinstance(mod, FusedMoE):
+            if isinstance(mod, MoERunner):
                 _sync_moe_kernel_flags(mod)
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
@@ -5286,13 +5715,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # causing warmup to record wrong num_blocks otherwise.
             decode_block_size = self.attn_block_size
             if self.use_contiguous_pa:
-                decode_seq_lengths = [decode_block_size] * decode_bs
+                # For sliding window models, each dummy sequence needs at least
+                # sliding_block_size blocks to properly warmup the window_block_list
+                # bucket sizes. With force_non_contiguous=True, the bucket is based
+                # on len(block_list) not max(block_list)+1, so we need enough blocks
+                # per sequence to match runtime window sizes.
+                if self.interleaved_sliding_window:
+                    sw_blocks = self.sliding_window // decode_block_size + 1
+                    min_tokens_per_seq = sw_blocks * decode_block_size
+                else:
+                    min_tokens_per_seq = decode_block_size
+                decode_seq_lengths = [min_tokens_per_seq] * decode_bs
                 # Cap block_id at physical pool — contiguous PA uses
                 # block_id as the allocation base which must be valid.
                 block_id = min(decode_num_blocks - 1, self.kv_cache_config.num_blocks - 1)
             else:
                 decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
                 block_id = 0
+
             for dsl in decode_seq_lengths:
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
@@ -5380,10 +5820,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return prompt_cfg, decode_cfg
 
     def get_patch_size_from_model(self):
-        """Get patch_size from the loaded vision model."""
-        # For Qwen2.5-VL and similar models
-        if hasattr(self.model.model, 'visual'):
-            return self.model.model.visual.patch_size
+        """Get patch_size from the loaded vision model.
+
+        Different vision models expose the tower at different attribute names
+        and nesting depths, so probe the known layouts:
+          * Qwen2.5-VL and similar: ``model.model.visual.patch_size``
+          * Kimi-K2.5/K2.6 (MoonViT): ``vision_tower.patch_size``
+        Falls back to 1 only when no known vision tower is found.
+        """
+        model = self.get_model()
+        candidates = [
+            getattr(getattr(model, 'model', None), 'visual', None),
+            getattr(model, 'visual', None),
+            getattr(model, 'vision_tower', None),
+        ]
+        for vision_model in candidates:
+            patch_size = getattr(vision_model, 'patch_size', None)
+            if patch_size is not None:
+                # Some towers store patch_size as a (h, w) tuple/list.
+                if isinstance(patch_size, (tuple, list)):
+                    return int(patch_size[0])
+                return int(patch_size)
         return 1
 
     def _get_dummy_mm_inputs_with_options(
@@ -5396,10 +5853,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     ):
         """Helper to get dummy multimodal inputs with custom options."""
 
+        # Modalities whose items are single still images at a raw WxH and can
+        # therefore be warmed through the raw-image path below. 'image' is the
+        # generic case; 'vision_chunk' is Kimi-K2.5/K2.6's unified image/video
+        # modality, whose image items are still PIL images (wrapped in a
+        # VisionChunkImage dict) that resize per-resolution in the tower.
+        image_like_modalities = ('image', 'vision_chunk')
+
         # Create custom mm_options with specific width/height
         mm_options = None
         if width is not None and height is not None:
-            if modality == 'image':
+            if modality in image_like_modalities:
+                # Keyed as "image" only to mark the raw path as active; the raw
+                # branch below does not read mm_options, so the key/modality
+                # mismatch for vision_chunk is harmless.
                 mm_options = {"image": ImageDummyOptions(count=count, width=width, height=height)}
             elif modality == 'video':
                 mm_options = {
@@ -5416,11 +5883,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Use the registry's API with custom mm_options
         if mm_options is not None:
             processor = self._get_mm_warmup_processor()
-            processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
-                seq_len=self.model_config_copy.max_model_len,
-                mm_counts={modality: count},
-                mm_options=mm_options,
-            )
+            if modality in image_like_modalities:
+                # Build the dummy image at the requested raw WxH directly and
+                # run it through the model's own processor. The upstream
+                # DummyInputsBuilder._get_dummy_images clamps width/height
+                # independently against the model's max-feature size, which
+                # distorts the aspect ratio (e.g. 1770x1180 -> 1120x1180 ->
+                # wrong grid) so the warmed grid no longer matches what a real
+                # image of that resolution produces at serving time. Feeding a
+                # raw image straight through processor.apply lets the model's
+                # resize (smart_resize / navit_resize / ...) pick the exact
+                # same grid as real traffic, guaranteeing a warmup cache hit.
+                processor_inputs = self._build_raw_image_processor_inputs(processor, modality, count, width, height)
+            else:
+                processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                    seq_len=self.model_config_copy.max_model_len,
+                    mm_counts={modality: count},
+                    mm_options=mm_options,
+                )
             from vllm.multimodal.processing import TimingContext
             dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
         else:
@@ -5432,6 +5912,55 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             )
 
         return dummy_mm_inputs
+
+    def _build_raw_image_processor_inputs(self, processor, modality, count, width, height):
+        """Build ProcessorInputs from raw WxH images, bypassing the upstream
+        per-dimension clamp in DummyInputsBuilder._get_dummy_images.
+
+        Mirrors get_dummy_processor_inputs (dummy_text + parse_mm_data +
+        ProcessorInputs) but supplies our own solid image at the requested raw
+        WxH. The upstream builder clamps width and height *independently*
+        against the model's max-feature size, distorting the aspect ratio so
+        the warmed grid stops matching real traffic. Feeding the raw image
+        straight through processor.apply lets the model's own resize
+        (smart_resize / navit_resize / ...) pick exactly the same grid it
+        would for a real image of that resolution -- including scaling an
+        oversized image down -- so warmup and serving grids are identical by
+        construction.
+        """
+        from PIL import Image
+        from vllm.multimodal.processing.inputs import ProcessorInputs
+
+        images = [Image.new("RGB", (width, height), color=255)] * count
+
+        # vision_chunk (Kimi-K2.5/K2.6) does not accept bare PIL images: its
+        # parser expects VisionChunkImage dicts ({"type": "image", "image":
+        # PIL}). 'image' takes the raw PIL directly. Wrap accordingly so the
+        # raw WxH still flows through the model's own resize (navit_resize) and
+        # the warmed grid matches real serving traffic.
+        mm_items = ([{"type": "image", "image": img} for img in images] if modality == 'vision_chunk' else images)
+
+        dummy_builder = processor.dummy_inputs
+        dummy_text = dummy_builder.get_dummy_text({modality: count})
+        mm_data_items = processor.info.parse_mm_data({modality: mm_items}, validate=False)
+
+        # Upstream vllm#53093 removed the text components (str prompt +
+        # tokenization_kwargs) from ProcessorInputs; the prompt is now a
+        # pre-tokenized list[int] and tokenization happens in the caller.
+        # Mirror get_dummy_processor_inputs' tokenization exactly.
+        tokenizer = processor.info.ctx.tokenizer
+        if tokenizer is None:
+            dummy_prompt: list[int] = []
+        else:
+            dummy_prompt = tokenizer.encode(
+                dummy_text,
+                **processor.info.default_tok_params.get_encode_kwargs(),
+            )
+
+        return ProcessorInputs(
+            prompt=dummy_prompt,
+            mm_data_items=mm_data_items,
+        )
 
     def _get_mm_warmup_processor(self):
         if self._mm_warmup_processor is None:
@@ -5445,6 +5974,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         image_args: int,
         width: int,
         height: int,
+        count_override: int | None = None,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         assert self.mm_budget is not None
@@ -5452,8 +5982,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             batch = image_args
             count = 1
         else:
-            mm_options = self.model_config.get_multimodal_config().limit_per_prompt.get(modality)
+            mm_options = self._resolve_mm_limit_options(self.model_config.get_multimodal_config(), modality)
             count = mm_options.count if mm_options and hasattr(mm_options, 'count') else 1
+            if count_override is not None:
+                count = count_override
             batch = count
 
         # Get num_frames for video modality
@@ -5477,11 +6009,41 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # but not read from the cache
         assert dummy_mm_item is not None, "Item should not already be cached"
 
-        return next(mm_kwargs_group for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+        return next(mm_kwargs_group for _, _, mm_kwargs_group in group_and_batch_mm_kwargs(
             [(modality, dummy_mm_item)] * batch,
             device=self.device,
             pin_memory=self.pin_memory,
         ))
+
+    def _resolve_mm_limit_options(self, mm_config, modality):
+        """limit_per_prompt options for `modality`, with a generic-key fallback.
+
+        Native-resolution towers report their own modality (Kimi:
+        'vision_chunk'), but operators usually configure the per-prompt count
+        under the generic CLI key 'image'/'video'
+        (--limit-mm-per-prompt '{"image": {"count": 20}}'). Without the
+        fallback, limit_per_prompt.get('vision_chunk') returns None and count
+        silently defaults to 1 -> warmup compiles only the 1-item graph and
+        every real (N-item) request recompiles. Prefer the exact-modality
+        entry; fall back to 'image'/'video' only when it is absent.
+        """
+        if mm_config is None:
+            return None
+        mm_options = mm_config.limit_per_prompt.get(modality)
+        if mm_options is not None:
+            return mm_options
+        fallback_keys: tuple[str, ...]
+        if modality in ('image', 'vision_chunk'):
+            fallback_keys = ('image', 'video')
+        elif modality == 'video':
+            fallback_keys = ('video', 'image')
+        else:
+            fallback_keys = ()
+        for key in fallback_keys:
+            mm_options = mm_config.limit_per_prompt.get(key)
+            if mm_options is not None:
+                return mm_options
+        return None
 
     def warmup_multimodal_graphs(self, buckets):
 
@@ -5502,54 +6064,125 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Get width/height from config if available for warmup_lists
         warmup_lists = []
 
-        if not is_batch_based and mm_config:
-            # Try to get dimensions from enabled modality config
-            for modality in ["image", "video"]:
-                if modality == "image" and not is_image_warmup:
-                    continue
-                if modality == "video" and not is_video_warmup:
-                    continue
-                mm_options = mm_config.limit_per_prompt.get(modality)
-                if mm_options:
+        # Collect explicit warmup resolutions (raw pixel WxH) from both
+        # sources and union them:
+        #   - VLLM_MULTIMODAL_RESOLUTIONS="1024x768,768x1024" (multi-res)
+        #   - limit_mm_per_prompt.<modality>.{width,height}    (single res)
+        explicit_resolutions: list[tuple[int, int, int | tuple[int, int] | None]] = []
+        if not is_batch_based:
+            explicit_resolutions.extend(getattr(vision_bucket_manager, 'multimodal_resolutions', []))
+
+            if mm_config:
+                for modality in self.mm_budget.mm_limits:
+                    mm_options = mm_config.limit_per_prompt.get(modality)
+                    if mm_options is None:
+                        continue
                     width = getattr(mm_options, 'width', None)
                     height = getattr(mm_options, 'height', None)
                     if width is not None and height is not None:
-                        warmup_lists.append((width, height))
-                        break
+                        explicit_resolutions.append((width, height, None))
 
-        if not is_batch_based and len(buckets) > 0:
-            patch_size = int(self.get_patch_size_from_model())
-            warmup_lists = warmup_lists + \
-                vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
+        # Non-batch models warm the guessed aspect-ratio shapes (count 1) from
+        # vision.py buckets, plus the explicit operator resolutions on top.
+        if not is_batch_based:
+            guessed_resolutions: list[tuple[int, int, int | tuple[int, int] | None]] = []
+            if len(buckets) > 0:
+                patch_size = int(self.get_patch_size_from_model())
+                guessed_resolutions = [
+                    (w, h, 1) for (w, h) in vision_bucket_manager.bucket_to_image_resolution(patch_size=patch_size)
+                ]
+            # Dedupe, guessed shapes first.
+            warmup_lists = list(dict.fromkeys(guessed_resolutions + explicit_resolutions))
+            if explicit_resolutions:
+                logger.info(
+                    "Using explicit multimodal warmup resolutions (width, "
+                    "height, count[None=max|N=pin|(lo,hi)=range]): %s", explicit_resolutions)
+            elif not warmup_lists:
+                # Native-resolution tower with empty patch-count buckets (e.g.
+                # Gemma4/Kimi/Qwen3.5) and no operator-supplied resolutions:
+                # nothing gets warmed and every resolution recompiles on its
+                # first real request. Make this visible rather than silent.
+                logger.warning("No multimodal warmup resolutions for this "
+                               "native-resolution vision tower: patch-count buckets are "
+                               "empty and neither VLLM_MULTIMODAL_RESOLUTIONS nor "
+                               "limit-mm-per-prompt width/height is set. The vision-tower "
+                               "graph will recompile on the first request at each "
+                               "resolution. Set VLLM_MULTIMODAL_RESOLUTIONS (e.g. "
+                               "\"1024x768,864x480x1-20\") to precompile your production "
+                               "resolutions.")
         for modality, max_items in self.mm_budget.mm_limits.items():
             if modality == 'image' and not is_image_warmup or modality == 'video' \
                 and not is_video_warmup:
                 continue
             phase = f'Graph/Multimodal({modality})'
             candidates = buckets if is_batch_based else warmup_lists
+            explicit_set = set(explicit_resolutions)
+            mm_options = self._resolve_mm_limit_options(mm_config, modality)
+            user_max_count = mm_options.count if mm_options and hasattr(mm_options, 'count') else 1
+
+            # Count graphs as we go (one per item count per resolution) and warn
+            # once when the running total crosses the threshold. Wide count
+            # ranges in VLLM_MULTIMODAL_RESOLUTIONS multiply this quickly, so
+            # this lets an operator who set e.g. "...x1-50" know why warmup is
+            # taking a while.
+            graph_count = 0
+            warned_graph_count = False
             for idx in range(len(candidates)):
+                counts_to_warm: list[int | None]
                 if is_batch_based:
                     image_args = candidates[idx]
                     width = 896  # pixels as in gemma3 config
                     height = 896  # pixels as in gemma3 config
+                    counts_to_warm = [None]
                 else:
                     image_args = None
-                    width, height = candidates[idx]
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
-                                                                   image_args=image_args,
-                                                                   width=width,
-                                                                   height=height)
-                dummy_encoder_outputs = \
-                    self.model.embed_multimodal(
-                    **batched_dummy_mm_inputs)
-                if is_batch_based:
-                    sanity_check_mm_encoder_outputs(
-                        dummy_encoder_outputs,
-                        expected_num_items=candidates[idx],
-                    )
-                    self.graphed_buckets.add(candidates[idx])
-                self.log_warmup_multimodal(phase, idx, len(candidates), candidates[idx] if is_batch_based else 1, 0,
-                                           width, height)
+                    width, height, count_spec = candidates[idx]
+                    if isinstance(count_spec, tuple):
+                        lo, hi = count_spec
+                        counts_to_warm = list(range(lo, min(hi, user_max_count) + 1))
+                    elif count_spec is not None:
+                        counts_to_warm = [min(count_spec, user_max_count)]
+                    else:
+                        counts_to_warm = [user_max_count]
+                    # Warn only for operator resolutions; guessed shapes are
+                    # intentionally count-1.
+                    if candidates[idx] in explicit_set \
+                            and len(counts_to_warm) == 1 and user_max_count > 1 \
+                            and self.cache_config.enable_prefix_caching:
+                        logger.warning(
+                            "VLLM_MULTIMODAL_RESOLUTIONS warms a single item "
+                            "count (%d) for %dx%d, but prefix caching is "
+                            "enabled: cached image embeds make the per-call "
+                            "uncached count vary in [1, %d], so other counts "
+                            "will recompile at runtime. Declare a range "
+                            "(e.g. \"%dx%dx1-%d\") to warm them.", counts_to_warm[0], width, height, user_max_count,
+                            width, height, user_max_count)
+                graph_count += len(counts_to_warm)
+                if not warned_graph_count and graph_count > _MM_WARMUP_GRAPH_WARN_THRESHOLD:
+                    warned_graph_count = True
+                    logger.warning(
+                        "Multimodal warmup will compile over %d %s graphs (one "
+                        "per item count per resolution). Wide count ranges in "
+                        "VLLM_MULTIMODAL_RESOLUTIONS multiply this and can make "
+                        "warmup slow and memory-heavy; declare only the counts "
+                        "your traffic actually sends.", _MM_WARMUP_GRAPH_WARN_THRESHOLD, modality)
+                for count in counts_to_warm:
+                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(modality,
+                                                                       image_args=image_args,
+                                                                       width=width,
+                                                                       height=height,
+                                                                       count_override=count)
+                    dummy_encoder_outputs = \
+                        self.model.embed_multimodal(
+                        **batched_dummy_mm_inputs)
+                    if is_batch_based:
+                        sanity_check_mm_encoder_outputs(
+                            dummy_encoder_outputs,
+                            expected_num_items=candidates[idx],
+                        )
+                        self.graphed_buckets.add(candidates[idx])
+                    batch_size = candidates[idx] if is_batch_based else count
+                    self.log_warmup_multimodal(phase, idx, len(candidates), batch_size, 0, width, height)
 
     @torch.inference_mode()
     def warmup_model(self) -> None:
@@ -5565,6 +6198,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # attn_block_size.  Scope the mutation to avoid affecting prompt
             # fallback paths that still need the original block_size.
             saved_block_size = self.bucketing_manager.block_size
+            # Skip the 3x-physical clamp on the decode block range (keeping the
+            # full, still-finite worst-case ceiling) for models whose decode
+            # block references can reach that worst case, otherwise those
+            # references miss the warmed buckets and recompile at runtime.
+            # This covers:
+            #   - inflated KV-cache block_size (Granite-4.0-H, attn != block),
+            #   - GDN hybrids (e.g. Qwen3.5) whose virtual block splitting
+            #     inflates the per-sequence block table,
+            #   - mamba hybrids, and
+            #   - interleaved sliding-window models (e.g. Gemma4) whose global
+            #     layers keep full-context block tables.
+            # attn_block_size == block_size for GDN/interleaved-SWA models, so
+            # this must not be detected via the block_size mismatch alone.
+            # Plain dense models keep the clamp, which bounds first-decode
+            # warmup memory.
+            self.bucketing_manager.skip_decode_block_clamp = (self.attn_block_size != self.block_size
+                                                              or self.num_gdn > 0 or self.num_mamba_like_layers > 0
+                                                              or self.interleaved_sliding_window)
             if self.attn_block_size != self.block_size:
                 self.bucketing_manager.block_size = self.attn_block_size
             try:
@@ -5627,11 +6278,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
 
-        # In lazy mode, run MM warmup outside PT_COMPILE_ONLY_MODE
-        # to avoid GC errors. In torch.compile mode, run it inside
-        # for faster recipe-only compilation.
         use_torch_compile = (not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager)
-        if self.supports_mm_inputs and not use_torch_compile:
+        mm_warmup_outside = gaudi_envs.VLLM_MM_WARMUP_OUTSIDE_COMPILE_ONLY
+        if self.supports_mm_inputs and (not use_torch_compile or mm_warmup_outside):
             self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
         compile_only_mode_context = functools.partial(bc.env_setting, "PT_COMPILE_ONLY_MODE", True)
@@ -5646,7 +6295,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            'Warmup time will be negatively impacted. '
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context() if can_use_compile_only_mode else contextlib.nullcontext():
-            if self.supports_mm_inputs and use_torch_compile:
+            if self.supports_mm_inputs and use_torch_compile and not mm_warmup_outside:
                 self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
             if not self.model_config.enforce_eager and not self.is_pooling_model:
@@ -5679,14 +6328,26 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Running validation warmup to trigger guard specializations...")
             saved_graphed = self.graphed_buckets.copy()
             self.graphed_buckets.clear()
+
+            # Re-run only the LARGEST seq_len buckets (all num_blocks variants).
+            # During initial warmup, max seq_len  is processed FIRST, creating
+            # recipes in early compilations. Later, smaller seq_lens cause guard
+            # failures → NEW compilations with symbolic guards that shadow the
+            # earlier ones at inference.
+            #
+            # By re-running max seq_len buckets at the END of warmup, we ensure
+            # the NEWEST dynamo compilations (which will be selected first at
+            # inference) have Synapse recipes for the max seq_len shapes.
             prompt_buckets = self.bucketing_manager.prompt_buckets
             if prompt_buckets:
-                validation_prompt_buckets = [prompt_buckets[0]]
-                if len(prompt_buckets) > 1:
-                    validation_prompt_buckets.append(prompt_buckets[-1])
-                self.warmup_graphs(validation_prompt_buckets, True, kv_caches)
+                max_seq_len = max(b[1] for b in prompt_buckets)
+                max_seq_buckets = [b for b in prompt_buckets if b[1] == max_seq_len]
+                logger.info("Validation warmup: %s prompt buckets (seq_len=%s)", len(max_seq_buckets), max_seq_len)
+                self.warmup_graphs(max_seq_buckets, True, kv_caches)
+
             if self.bucketing_manager.decode_buckets:
                 self.warmup_graphs([self.bucketing_manager.decode_buckets[0]], False, kv_caches)
+
             self.graphed_buckets = saved_graphed
             logger.info("Validation warmup complete.")
 
@@ -5820,7 +6481,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    if layer_name in layer_kv_cache_spec.kv_cache_specs:
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    elif layer_name in self.shared_kv_cache_layers:
+                        # Shared layer: use the target layer's spec
+                        target = self.shared_kv_cache_layers[layer_name]
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[target]
+                    else:
+                        raise KeyError(f"No KV cache spec for layer {layer_name}")
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
@@ -5912,19 +6580,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         if self.num_mamba_like_layers > 0:
-            # NOTE: Do NOT reassign self.block_size or
-            # bucketing_manager.block_size from cache_config here.
-            # For hybrid models the upstream HybridAttentionMambaModelConfig
-            # inflates cache_config.block_size to align mamba pages (e.g.
-            # 1152 for Qwen3.5), but the HPU attention kernel operates at
-            # 128-token granularity.  _create_decode_input_data computes
-            # num_blocks using self.attn_block_size (set below from
-            # prepare_kernel_block_sizes), so the bucketing manager must
-            # also use that same granularity.  Overwriting block_size with
-            # the inflated KV-manager page size caused decode buckets to be
-            # generated at 1152-token granularity while runtime used
-            # 128-token granularity, leading to permanent "not warmed-up"
-            # warnings and recompilations.
+            if self.num_gdn == 0:
+                # Granite 4.0-H (non-GDN mamba hybrid): the platform inflates
+                # cache_config.block_size to 528 (no prefix caching) for mamba
+                # page alignment, and the attention kernel runs at that size.
+                # Align self.block_size and the bucketing manager to the same
+                # value so decode bucketing matches the kernel granularity.
+                # Without this they stay at 128 (split-brain: 528 kernel vs
+                # 128 bucketing), causing "not warmed-up" recompilations and
+                # non-deterministic tool-calling output.
+                # GDN hybrids (e.g. Qwen3.5) are intentionally left untouched:
+                # their KV-manager block_size is inflated (e.g. 1152) but the
+                # HPU kernel operates at 128-token granularity via virtual
+                # block splitting, so self.block_size must stay at 128.
+                self.block_size = self.vllm_config.cache_config.block_size
+                if self.enable_bucketing:
+                    self.bucketing_manager.block_size = self.block_size
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
 
@@ -5982,6 +6653,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 profile_bs = max(profile_bs, int(cfg.split(",")[0]))
         self._gdn_max_reqs = max(self._original_max_num_seqs, profile_bs)
 
+        # Mamba/GDN state tensors, keyed by (spec, position within the group).
+        # Before vLLM #51718 a KVCacheTensor.shared_by listed at most one layer
+        # per group, so propagating one state tensor across it gave every layer
+        # of a group its own storage while layers at the same position in
+        # different groups shared one. #51718 turned that field into `.layers`,
+        # which coalesces *all* of a group's layers at distinct byte offsets, so
+        # propagating across it now collapses a whole group onto one state.
+        # State slots are selected per group (compact GDN:
+        # base_slot * num_gdn_groups + g_offset + 1; otherwise the group's own
+        # block table), so only the tensor identity can separate layers inside a
+        # group. Key by position to restore the pre-#51718 sharing.
+        mamba_state_cache: dict[tuple, tuple[torch.Tensor, ...]] = {}
+
+        def _mamba_state_tensors(spec: MambaSpec, layer_pos: int, num_slots: int) -> tuple[torch.Tensor, ...]:
+            key = (spec, layer_pos, num_slots)
+            tensors = mamba_state_cache.get(key)
+            if tensors is None:
+                tensors = tuple(
+                    torch.zeros((num_slots, *shape), dtype=dtype, device=self.device)
+                    for shape, dtype in zip(spec.shapes, spec.dtypes))
+                mamba_state_cache[key] = tensors
+            return tensors
+
         if self.use_hybrid_cache and self.num_mamba_like_layers > 0:
             # Build layer_name -> spec lookup for skipping raw buffer
             # allocation for GDN/linear_attention groups (they use
@@ -6001,36 +6695,46 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 torch.compile's aot_autograd does not support input mutations
                 on views with different dtypes (the raw buffer is bf16 but
                 GDN states may be float32)."""
-                for ln in kv_cache_tensor.shared_by:
+                for ln in kv_cache_tensor.layers:
                     spec = _layer_spec.get(ln)
                     if isinstance(spec, FullAttentionSpec):
                         continue
                     if isinstance(spec, MambaSpec) and \
                             spec.mamba_type in _GDN_MAMBA_TYPES:
                         continue
-                    # Standard Mamba2 or unknown spec — needs raw buffer
+                    if isinstance(spec, MambaSpec) and len(set(spec.dtypes)) > 1:
+                        # Mixed-dtype standard Mamba2 (e.g. Nemotron-H: bf16
+                        # conv_state + float32 ssm_state) gets its own
+                        # contiguous tensors below, not as_strided views of the
+                        # shared raw buffer — aot_autograd rejects in-place
+                        # mutation of differently-typed views of one input.
+                        continue
+                    # Standard Mamba2 (uniform dtype) or unknown spec — needs
+                    # raw buffer for the as_strided interleaved layout.
                     return True
                 return False
 
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                 if not _needs_raw_buffer(kv_cache_tensor):
                     continue
-                # taking into account dummy block
-                size = (kv_cache_tensor.size + kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes)
+                # Pad by one dummy block sized to THIS tensor's spec. Its
+                # coalesced layers share one (standard Mamba2) spec; group 0 may
+                # be a smaller attention spec in hybrid models and under-pad the
+                # buffer, letting the last as_strided view run past the end.
+                raw_spec = _layer_spec[kv_cache_tensor.layers[0]]
+                size = kv_cache_tensor.size + raw_spec.page_size_bytes
                 tensor = torch.zeros(size // 2, dtype=torch.bfloat16, device=self.device)
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in kv_cache_tensor.layers:
                     kv_caches[layer_name] = tensor
 
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
                 kv_cache_spec = group.kv_cache_spec
-                for layer_name in group.layer_names:
+                for layer_pos, layer_name in enumerate(group.layer_names):
                     kv_cache_spec = group.kv_cache_spec
-                    for kk in kv_cache_config.kv_cache_tensors:
-                        if layer_name in kk.shared_by:
-                            kv_cache_tensor_size = kk.size
-                            break
-                    num_blocks = \
-                        kv_cache_tensor_size // kv_cache_spec.page_size_bytes
+                    # PR #51718: KVCacheTensor.size is now the total backing
+                    # allocation across all layers (num_blocks * bytes_per_block),
+                    # not a per-layer size. Use the engine block count directly.
+                    num_blocks = kv_cache_config.num_blocks
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         attn_kernel_block_size = kernel_block_size_by_gid[group_idx]
                         # Virtual block splitting: each scheduler block of
@@ -6062,45 +6766,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         # Total slots: max_num_reqs * num_gdn_groups + 2
                         # (slot 0 unused, last slot for -1 padding).
                         self._compact_gdn_group_ids.add(group_idx)
-                        if isinstance(kv_caches.get(layer_name), tuple):
-                            continue
                         gdn_max_reqs = self._gdn_max_reqs
                         compact_total = gdn_max_reqs * self._num_gdn_groups + 2
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (compact_total, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
                         logger.debug("GDN compact tensor: %d slots (max_reqs=%d * groups=%d + 2) vs baseline %d",
                                      compact_total, gdn_max_reqs, self._num_gdn_groups, num_blocks + 1)
-                        # Propagate to all layers sharing the same kv_cache_tensor.
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
-                                continue
-                            for shared_layer in kv_cache_tensor.shared_by:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, compact_total)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
                         # GDN/linear_attention: non-compact (baseline) allocation
                         # using contiguous tensors with num_blocks+1 slots.
-                        if isinstance(kv_caches.get(layer_name), tuple):
-                            continue
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (num_blocks + 1, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
-                                continue
-                            for shared_layer in kv_cache_tensor.shared_by:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, num_blocks + 1)
+                    elif isinstance(kv_cache_spec, MambaSpec) and \
+                            len(set(kv_cache_spec.dtypes)) > 1:
+                        # Mixed-dtype standard Mamba2 (e.g. Nemotron-H: bf16
+                        # conv_state + float32 ssm_state). as_strided views of a
+                        # single raw buffer would alias one storage with two
+                        # dtypes; aot_autograd cannot compile the decode graph
+                        # then ("input mutations on views with different
+                        # dtypes"). Allocate separate contiguous tensors, like
+                        # the GDN path above, so each state is its own input.
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, num_blocks + 1)
                     elif isinstance(kv_cache_spec, MambaSpec):
-                        # Standard Mamba2 and other MambaSpec types: use the
-                        # original as_strided interleaved layout from the raw
-                        # shared buffer.
+                        # Standard Mamba2 with uniform dtype: use the original
+                        # as_strided interleaved layout from the raw shared
+                        # buffer (same-dtype view mutations compile fine).
                         raw = kv_caches[layer_name]
                         offset = 0
                         state_tensors = []
@@ -6129,14 +6818,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         elif self.use_naive_mamba_cache_sharing and self.num_mamba_like_layers > 0:
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
                 kv_cache_spec = group.kv_cache_spec
-                for layer_name in group.layer_names:
+                for layer_pos, layer_name in enumerate(group.layer_names):
                     kv_cache_spec = group.kv_cache_spec
-                    for kk in kv_cache_config.kv_cache_tensors:
-                        if layer_name in kk.shared_by:
-                            kv_cache_tensor_size = kk.size
-                            break
-                    num_blocks = \
-                        kv_cache_tensor_size // kv_cache_spec.page_size_bytes
+                    # PR #51718: KVCacheTensor.size is now the total backing
+                    # allocation across all layers (num_blocks * bytes_per_block),
+                    # not a per-layer size. Use the engine block count directly.
+                    num_blocks = kv_cache_config.num_blocks
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
@@ -6150,59 +6837,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             self._compact_gdn_enabled:
                         # GDN/linear_attention: compact allocation.
                         self._compact_gdn_group_ids.add(group_idx)
-                        if isinstance(kv_caches.get(layer_name), tuple):
-                            continue
                         gdn_max_reqs = self._gdn_max_reqs
                         compact_total = gdn_max_reqs * self._num_gdn_groups + 2
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (compact_total, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
-                                continue
-                            for shared_layer in kv_cache_tensor.shared_by:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, compact_total)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
                         # GDN/linear_attention: non-compact (baseline) allocation.
-                        if isinstance(kv_caches.get(layer_name), tuple):
-                            continue
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (num_blocks + 1, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
-                                continue
-                            for shared_layer in kv_cache_tensor.shared_by:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, num_blocks + 1)
                     elif isinstance(kv_cache_spec, MambaSpec):
-                        # skip if already created by another layer sharing the same kv cache tensor
-                        if layer_name in kv_caches:
-                            continue
-                        state_tensors = []
-                        for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                            target_shape = (num_blocks + 1, *shape)
-                            tensor = torch.zeros(target_shape, dtype=dtype, device=self.device)
-                            state_tensors.append(tensor)
-                        # find other layers sharing the same kv cache tensor and
-                        # populate all of them with the same tensor pair
-                        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                            if layer_name not in kv_cache_tensor.shared_by:
-                                continue
-                            for shared_layer in kv_cache_tensor.shared_by:
-                                kv_caches[shared_layer] = tuple(state_tensors)
-                            break
+                        kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, num_blocks + 1)
                     else:
                         pass
         else:  # non-hybrid scenario
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in kv_cache_tensor.layers:
                     # Get the correct spec for this layer
                     kv_cache_spec = None
                     for group in kv_cache_config.kv_cache_groups:
@@ -6210,17 +6858,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             kv_cache_spec = group.kv_cache_spec
                             break
                     assert kv_cache_spec is not None, f"No spec found for {layer_name}"
-                    assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = \
-                        kv_cache_tensor.size // kv_cache_spec.page_size_bytes
-                    # `num_blocks` is the number of blocks the model runner can use.
-                    # `kv_cache_config.num_blocks` is the number of blocks that
-                    # KVCacheManager may allocate.
-                    # Since different GPUs may have different number of layers and
-                    # different memory capacities, `num_blocks` can be different on
-                    # different GPUs, and `kv_cache_config.num_blocks` is set to
-                    # the min of all `num_blocks`. Verify it here.
-                    assert num_blocks >= kv_cache_config.num_blocks
+
+                    # Heterogeneous models (e.g. Gemma4 with interleaved
+                    # sliding/full attention, asymmetric head_dim 256/512 and
+                    # kv_heads 8/2) are grouped by core vLLM under a single
+                    # UniformTypeKVCacheSpecs wrapper rather than one spec per
+                    # group.  Unwrap it to the concrete per-layer spec so each
+                    # layer allocates KV storage sized to its OWN head_size /
+                    # num_kv_heads / page_size_bytes.  Symmetric siblings
+                    # (gemma3/qwen) never produce this wrapper type, so this
+                    # branch is inert for them.
+                    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                        per_layer_spec = kv_cache_spec.kv_cache_specs.get(layer_name)
+                        assert per_layer_spec is not None, (
+                            f"UniformTypeKVCacheSpecs has no per-layer spec for {layer_name}")
+                        kv_cache_spec = per_layer_spec
+
+                    # PR #51718: KVCacheTensor.size is now the total backing
+                    # allocation across all layers, so the old per-tensor
+                    # `size // page_size_bytes` over-counts blocks by the layer
+                    # count and OOMs. Use the engine block count directly; it is
+                    # the authoritative per-layer block count for every model
+                    # (including heterogeneous ones like Gemma4).
+                    num_blocks = kv_cache_config.num_blocks
                     if isinstance(kv_cache_spec, FullAttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
@@ -6273,7 +6933,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 layer_names.add(layer_name)
         # Set up cross-layer KV cache sharing
         if self.shared_kv_cache_layers:
-            logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
+            #logger.info("[KV sharing] Setting up tensor sharing for %s layers", len(self.shared_kv_cache_layers))
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
                 kv_caches[layer_name] = kv_caches[target_layer_name]
         assert layer_names == set(kv_caches.keys()), "Some layers are not correctly initialized"
@@ -6639,7 +7299,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
+        # vLLM PR #32374 (Dynamic SD) added a leading num_speculative_tokens
+        # positional arg to NgramProposer.propose(). Pass the statically
+        # configured count to match the new signature.
+        num_speculative_tokens = self.speculative_config.num_speculative_tokens
         draft_token_ids = self.drafter.propose(
+            num_speculative_tokens,
             sampled_token_ids,
             self.input_batch.num_tokens_no_spec,
             self.input_batch.token_ids_cpu,
@@ -6746,6 +7411,36 @@ class TensorTuple(tuple):
     def dtype(self):
         """Returns the torch.dtype of the tensors within the tuple."""
         return self._dtype
+
+    def _first_tensor(self) -> torch.Tensor:
+        """Return the first contained torch.Tensor.
+
+        Raises:
+            ValueError: If the tuple holds no tensors.
+        """
+        for item in self:
+            if isinstance(item, torch.Tensor):
+                return item
+        raise ValueError("TensorTuple contains no torch.Tensor")
+
+    def untyped_storage(self):
+        """Delegate to the first contained tensor's untyped storage.
+
+        Upstream NIXL ``register_kv_caches`` (vLLM #44577) probes each cache
+        value with ``untyped_storage()``/``data_ptr()`` to detect DSv4-style
+        packed allocations. HPU returns a :class:`TensorTuple` of (K, V) per
+        layer; each layer is independently allocated, so exposing the first
+        tensor's storage yields distinct per-layer storage pointers and makes
+        the packed-path detection fall through to regular registration.
+        """
+        return self._first_tensor().untyped_storage()
+
+    def data_ptr(self) -> int:
+        """Delegate to the first contained tensor's data pointer.
+
+        See :meth:`untyped_storage` for why this is needed.
+        """
+        return self._first_tensor().data_ptr()
 
 
 class HPUAttentionMetadataProcessor:
@@ -6867,15 +7562,29 @@ class HPUAttentionMetadataProcessor:
             context_lens_t = prefill_metadata.context_lens_tensor
             assert context_lens_t is not None, "context_lens_tensor is required to build attn_bias"
 
-            block_list = attn_metadata.block_list
-            max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
+            window_block_list = getattr(attn_metadata, 'window_block_list', None)
+            block_list_for_mask = window_block_list if window_block_list is not None \
+                else attn_metadata.block_list
+            max_context_len = (block_list_for_mask.size(-1) // batch_size if block_list_for_mask is not None else 0)
             block_size = getattr(prefill_metadata, "block_size", self.block_size)
             max_context_len = max_context_len * block_size
 
-            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-            past_indices = torch.arange(max_context_len, device=device)
-            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+            if window_block_list is not None:
+                # Re-anchor ctx_len to the block-aligned gather frame so a
+                # non-block-aligned ctx_len doesn't misalign the sliding-window mask.
+                round_up_ctx = ((context_lens_t + block_size - 1) // block_size) * block_size
+                frame_base = torch.clamp(round_up_ctx - max_context_len, min=0)
+                context_lens_trimmed = context_lens_t - frame_base
+                invalid_lens_t = context_lens_trimmed - window_size + torch.arange(seq_len, device=device) - 1
+                past_indices = torch.arange(max_context_len, device=device)
+                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices.unsqueeze(0) < context_lens_trimmed.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+            else:
+                # Full block list: use absolute coordinate frame with window lower bound
+                invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
+                past_indices = torch.arange(max_context_len, device=device)
+                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
 
             # Create boolean sliding window mask
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)

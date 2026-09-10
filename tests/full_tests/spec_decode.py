@@ -116,8 +116,29 @@ def create_error_result(e: Exception) -> dict:
     }
 
 
+def shutdown_llm(llm) -> None:
+    """Shut the vLLM v1 engine down so the worker process can exit cleanly.
+
+    vLLM v1 runs the EngineCore in a non-daemon child process. If the worker
+    returns without shutting the engine down, multiprocessing's atexit handler
+    joins that still-running process and the worker hangs forever. Calling
+    ``EngineCoreClient.shutdown()`` detaches the atexit finalizer and reaps the
+    EngineCore (freeing the HPU device). The v1 ``LLMEngine`` exposes no
+    ``shutdown()`` itself, so reach the client at ``llm_engine.engine_core``.
+    """
+    if llm is None:
+        return
+    # LLM keeps the engine at .llm_engine; the lm_eval VLLM wrapper nests it at
+    # .model.llm_engine.
+    engine = getattr(llm, "llm_engine", None) or getattr(getattr(llm, "model", None), "llm_engine", None)
+    engine_core = getattr(engine, "engine_core", None)
+    if engine_core is not None:
+        engine_core.shutdown()
+
+
 def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
+    llm = None
     kwargs = {"model":"Qwen/Qwen3-4B",} if prompts is not None \
         else {"pretrained":"Qwen/Qwen3-4B","batch_size":"16"}
     try:
@@ -148,12 +169,14 @@ def test_ngram(is_enable, args, prompts, sampling_params, task_key, result_queue
     except Exception as e:
         logging.exception("Task %s failed: %s", task_key, e)
         result_dict = create_error_result(e)
-
+    finally:
+        shutdown_llm(llm)
     result_queue.put((task_key, result_dict))
 
 
 def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
+    llm = None
     kwargs = {"model":"meta-llama/Meta-Llama-3-8B-Instruct"} if prompts is not None \
         else {"pretrained":"meta-llama/Meta-Llama-3-8B-Instruct","batch_size":"16"}
     try:
@@ -185,11 +208,14 @@ def test_eagle_model(is_enable, args, prompts, sampling_params, task_key, result
     except Exception as e:
         logging.exception("Task %s failed: %s", task_key, e)
         result_dict = create_error_result(e)
+    finally:
+        shutdown_llm(llm)
     result_queue.put((task_key, result_dict))
 
 
 def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
+    llm = None
     kwargs = {"model":"meta-llama/Meta-Llama-3-8B-Instruct",} if prompts is not None \
         else {"pretrained":"meta-llama/Meta-Llama-3-8B-Instruct","batch_size":"16"}
     try:
@@ -222,11 +248,14 @@ def test_eagle3_model(is_enable, args, prompts, sampling_params, task_key, resul
     except Exception as e:
         logging.exception("Task %s failed: %s", task_key, e)
         result_dict = create_error_result(e)
+    finally:
+        shutdown_llm(llm)
     result_queue.put((task_key, result_dict))
 
 
 def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
+    llm = None
     kwargs = {"model":"JackFram/llama-68m",} if prompts is not None \
         else {"pretrained":"JackFram/llama-68m",}
     try:
@@ -258,11 +287,14 @@ def test_medusa_model(is_enable, args, prompts, sampling_params, task_key, resul
     except Exception as e:
         logging.exception("Task %s failed: %s", task_key, e)
         result_dict = create_error_result(e)
+    finally:
+        shutdown_llm(llm)
     result_queue.put((task_key, result_dict))
 
 
 def test_eaglemtp_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
+    llm = None
     kwargs = {"model":"eagle618/deepseek-v3-random",} if prompts is not None \
         else {"pretrained":"eagle618/deepseek-v3-random",}
     try:
@@ -292,11 +324,14 @@ def test_eaglemtp_model(is_enable, args, prompts, sampling_params, task_key, res
     except Exception as e:
         logging.exception("Task %s failed: %s", task_key, e)
         result_dict = create_error_result(e)
+    finally:
+        shutdown_llm(llm)
     result_queue.put((task_key, result_dict))
 
 
 def test_mtp_model(is_enable, args, prompts, sampling_params, task_key, result_queue):
     VLLM_CLS = LLM if prompts is not None else VLLM
+    llm = None
     kwargs = {"model":"/mnt/weka/data/pytorch/DeepSeek-R1",} if prompts is not None \
         else {"pretrained":"/mnt/weka/data/pytorch/DeepSeek-R1",}
     try:
@@ -342,6 +377,8 @@ def test_mtp_model(is_enable, args, prompts, sampling_params, task_key, result_q
     except Exception as e:
         logging.exception("Task %s failed: %s", task_key, e)
         result_dict = create_error_result(e)
+    finally:
+        shutdown_llm(llm)
     result_queue.put((task_key, result_dict))
 
 

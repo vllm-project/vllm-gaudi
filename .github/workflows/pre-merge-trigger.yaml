@@ -12,6 +12,11 @@ on:
       - main
       - releases/**
 
+# Least-privilege default; execute_pre_merge opts into the actions/PR/issues
+# scopes it needs at the job level.
+permissions:
+  contents: read
+
 concurrency:
   group: pre-merge-trigger-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: true
@@ -33,7 +38,7 @@ jobs:
     steps:
       - name: Dispatch, find run, and wait for result
         id: dispatch
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
             const pr         = context.payload.pull_request;
@@ -260,7 +265,7 @@ jobs:
 
       - name: Cancel dispatched run if trigger was cancelled or failed
         if: always() && steps.dispatch.outputs.run_id != ''
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           RUN_ID: ${{ steps.dispatch.outputs.run_id }}
           TRIGGER_STATUS: ${{ job.status }}
