@@ -336,8 +336,12 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
     upstream inlined loop assumes; ``physical_page_size`` is divided by
     ``len(cache_list)``; the region bookkeeping runs in an inner
     ``for cache in cache_list`` loop; and ``block_stride_per_layer`` /
-    ``region_num_blocks`` are populated per-region to satisfy later upstream
-    additions to ``_build_fa_local``. See the DRIFT HAZARD note above — re-sync
+    ``region_num_blocks`` / ``region_mem_types`` / ``region_group_ids`` /
+    ``region_names`` are populated per-region to satisfy later upstream
+    additions to ``_build_fa_local``, ``_compute_desc_ids`` and
+    ``register_local_xfer_handler``. Every region is registered with the single
+    ``self.nixl_memory_type`` rather than upstream's per-memory-type
+    ``registration_ranges`` grouping. See the DRIFT HAZARD note above: re-sync
     on the ``_warn_if_upstream_register_drifted`` warning.
 
     Args:
@@ -410,6 +414,9 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
             # When cross-layers blocks are used, multiply by number of layers.
             physical_page_size = physical_page_size * len(self.kv_cache_config.kv_cache_tensors)
         num_blocks = (self._logical_num_blocks if isinstance(layer_spec, MambaSpec) else self.num_blocks)
+        # Every region carved out of this layer belongs to the layer's transfer
+        # group (vLLM #53780 per-region transfer geometry).
+        group_id = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
         # `page_size` accounts for physical blocks, st KVCache is always
         # [`num_blocks` * `page_size`].
         curr_tensor_size_bytes = num_blocks * physical_page_size
@@ -441,6 +448,16 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
             # IndexError. `num_blocks` here is already the per-region physical
             # count (logical count for Mamba), matching upstream's semantics.
             self.region_num_blocks.append(num_blocks)
+            # vLLM #53780 also made the memory type, transfer group and name
+            # per-region: register_local_xfer_handler reads
+            # self.region_mem_types[0] and _compute_desc_ids asserts
+            # len(region_group_ids) == self.num_regions. This override
+            # registers every region in one get_reg_descs() call below with
+            # self.nixl_memory_type, so that IS each region's memory type; the
+            # K and V halves of a layer share its transfer group and name.
+            self.region_mem_types.append(self.nixl_memory_type)
+            self.region_group_ids.append(group_id)
+            self.region_names.append(layer_name)
 
             if not is_mla_region:
                 if tensor_size_bytes is None:
@@ -469,10 +486,13 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
 
     logger.debug("Different block lengths collected: %s", set(self.block_len_per_layer))
     assert len(self.block_len_per_layer) == len(seen_base_addresses) == len(self._region_is_mla) == len(
-        self.block_stride_per_layer) == len(self.region_num_blocks)
+        self.block_stride_per_layer) == len(self.region_num_blocks) == len(self.region_mem_types) == len(
+            self.region_group_ids) == len(self.region_names)
 
     self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
     self.num_regions = len(caches_data)
+    self._uses_region_group_mapping = len(set(self.region_group_ids)) > 1
+    self._mixed_mem_types = len(set(self.region_mem_types)) > 1
     if self._has_mamba:
         # Mirror upstream: every region (including the shared conv/ssm tensor)
         # reports the PHYSICAL block count here, not the per-layer logical
@@ -497,6 +517,13 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
 
     self.device_kv_caches = kv_caches
     self.dst_num_blocks[self.engine_id] = self.num_blocks
+    # Local engine's own per-region geometry; the remote side's copy is filled
+    # in add_remote_agent, which falls back to these uniform values when a peer
+    # omits them from its NixlAgentMetadata.
+    self.dst_region_num_blocks[self.engine_id] = self.region_num_blocks
+    self.dst_region_group_ids[self.engine_id] = self.region_group_ids
+    self.dst_uses_region_group_mapping[self.engine_id] = self._uses_region_group_mapping
+    self.dst_region_mem_types[self.engine_id] = self.region_mem_types
 
     if self._has_mamba:
         logger.info(
