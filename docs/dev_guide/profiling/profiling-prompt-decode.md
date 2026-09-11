@@ -25,6 +25,20 @@ To execute the profiling, follow these steps:
     VLLM_PT_PROFILE=decode_256_2048_t
     ``` 
 
+    Alternatively, define the scope per phase. These take a comma-separated
+    list and always use HPU graphs, so they must not be combined with
+    `--enforce-eager`:
+
+    ```
+    VLLM_PROFILE_PROMPT=<batch_size>,<query_len>,<ctx_blocks>
+    VLLM_PROFILE_DECODE=<batch_size>,<num_blocks>
+    ```
+
+    `<num_blocks>` is the total block count across the batch, in kernel block
+    units, i.e. `batch_size * ceil(context / block_size)`. The equivalent of the
+    example above is `VLLM_PROFILE_DECODE=256,2048`. When either variable is
+    set, `VLLM_PT_PROFILE` is ignored.
+
 2. Run the inference command with the appropriate profiling flag, as in the following example.
 
     ```bash
