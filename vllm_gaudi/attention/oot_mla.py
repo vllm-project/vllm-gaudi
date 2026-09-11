@@ -165,13 +165,14 @@ class HPUMLAAttention(MLAAttention):
         if is_prefill:
             output = self.impl.forward_mha(q, latent_vec_k, kv_cache, attn_metadata)
             return output
+        elif self.use_sparse and getattr(self.impl, 'topk_indices_buffer', None) is not None:
+            output = self.impl.forward_mqa_sparse(q, kv_cache, attn_metadata, self.impl.topk_indices_buffer)
+            return output
         else:
             output = self.impl.forward_mqa(decode_ql_nope, q_pe, kv_cache, attn_metadata)
             output = self._v_up_proj(output)
             return output
-            # NOTE(Xinyu): Make the loaded weight contiguous to avoid the transpose
 
-    # during each graph execution
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # HPU-specific: when VLLM_HPU_FORCE_CHANNEL_FP8=True (default), block-quantized
         # FP8 weights (e.g. kv_b_proj in DeepSeek-R1) are converted to channel-wise FP8.
@@ -314,11 +315,7 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # we bypass super().__init__(), replicate the assignment. It defaults to
         # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
         self.g_proj = mla_modules.g_proj
-
-        # DSA sparse attention is not implemented on HPU: sparse layers run as
-        # dense MLA and the indexer must never be invoked (its kernels and the
-        # DeepseekV32IndexerBackend are CUDA-only).
-        self.skip_topk = skip_topk or self.is_sparse
+        self.skip_topk = skip_topk
         # vllm#53906 added `self.fuse_qkv_rmsnorm`, which the base
         # MultiHeadLatentAttentionWrapper.forward (inherited here, since we do not
         # override forward) reads to pick the fused RMSNorm path. Because we bypass
@@ -354,8 +351,8 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             quant_config=quant_config,
             prefix=layer_name,
             kv_b_proj=self.kv_b_proj,
-            # Dense-MLA fallback: never request a sparse backend on HPU.
-            use_sparse=False,
+            use_sparse=self.is_sparse,
             indexer=self.indexer,
+            topk_indices_buffer=mla_modules.topk_indices_buffer,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
