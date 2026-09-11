@@ -605,10 +605,10 @@ def hpu_fused_recurrent_gated_delta_rule(
             sidx_raw = ssm_state_indices.reshape(-1).to(dtype=torch.long, device=device)
             num_slots = final_state.shape[0]
             sidx = torch.remainder(sidx_raw, num_slots)
+            h_batch = _eager_read_state(final_state, sidx, _GDN_COMPUTE_DTYPE)
         else:
-            sidx = torch.arange(num_seqs, dtype=torch.long, device=device)
-
-        h_batch = _eager_read_state(final_state, sidx, _GDN_COMPUTE_DTYPE)
+            sidx = None
+            h_batch = final_state[:num_seqs].to(_GDN_COMPUTE_DTYPE)
 
         # Flatten token axis.
         # Compute dtype controlled by VLLM_GDN_COMPUTE_FP32 env var (default: bf16)
@@ -632,8 +632,11 @@ def hpu_fused_recurrent_gated_delta_rule(
         h_batch = h_batch + v_new.unsqueeze(-1) * kf.unsqueeze(2)
         out_batch = torch.matmul(h_batch, q_s.unsqueeze(-1)).squeeze(-1)
 
-        # Direct index_copy_ (no eager wrapper for this test).
-        final_state.index_copy_(0, sidx, h_batch.to(final_state.dtype))
+        # Write state back.
+        if sidx is not None:
+            final_state.index_copy_(0, sidx, h_batch.to(final_state.dtype))
+        else:
+            final_state[:num_seqs] = h_batch.to(final_state.dtype)
         out_full = out_batch.to(v.dtype)
 
         out_result = out_full.unsqueeze(0) if cu_seqlens is not None else out_full.view(B, T, HV, Vdim)
