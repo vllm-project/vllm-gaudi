@@ -481,7 +481,8 @@ def _fsdpa_prompt_attention(query: torch.Tensor,
     # tracks the bias element size regardless of softmax precision (fp32 softmax upcasts internally
     # but still strides the 2 B/elem bias). No fp32 special-casing needed.
     num_q_tiles = _fsdpa_num_q_tiles(attn_bias)
-    if num_q_tiles == 1:
+    # Without a bias there is no plane to tile; _fsdpa_num_q_tiles already returns 1 for that case.
+    if attn_bias is None or num_q_tiles == 1:
         attn_weights = call_fsdpa(query, attn_bias)
     else:
         # Attention rows are independent: a query tile attends to the full K/V, so its softmax is

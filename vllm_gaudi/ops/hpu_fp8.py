@@ -2,6 +2,8 @@ from functools import partial
 from typing import Optional
 
 import torch
+from vllm.distributed import get_ep_group
+from vllm.logger import init_logger
 from vllm_gaudi import envs
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
@@ -22,6 +24,102 @@ from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
     PerTensorTorchFP8ScaledMMLinearKernel,
     ChannelWiseTorchFP8ScaledMMLinearKernel,
 )
+
+logger = init_logger(__name__)
+
+# EXPERIMENTAL custom MoE combine: replace the Habana mixture_of_experts op (a
+# fixed per-layer stage pipeline) with a pure-PyTorch gathered-expert path.
+# Default stock. `VLLM_HPU_MOE_GATHER_VERIFY=1` (with VLLM_HPU_MOE_GATHER=1) runs
+# BOTH the custom path and the Habana op on the same inputs and reduces their
+# maximum FP8-ULP over the expert-parallel group in-memory (no files).
+_HPU_MOE_GATHER = envs.VLLM_HPU_MOE_GATHER
+# Only meaningful together with the gather path.
+_HPU_MOE_GATHER_VERIFY = envs.VLLM_HPU_MOE_GATHER_VERIFY and _HPU_MOE_GATHER
+# Correctness bar for the verify path: any element exceeding this many FP8-ULP
+# is an error (matches the archived offline analysis' "no element > 2 ULP" bar).
+_HPU_MOE_GATHER_VERIFY_MAX_ULP = 2
+# Relative-error bar for out-of-range elements (|a-b| / (|a|+|b|)). Out-of-range
+# positions saturate during the fp8 cast, so they cannot be compared in ULP; their
+# denominator is at least the E4M3 max (448), so this cannot false-positive on
+# small in-range values.
+_HPU_MOE_GATHER_VERIFY_REL_ERR = 0.05
+# Fraction of this rank's local_experts up to which the custom gather path is
+# used. The gathered pure-PyTorch path reads only the routed experts, so it wins
+# while the gathered count g stays well below local_experts (stock must touch all
+# of them); it loses once g approaches local_experts (the dense gather + fp32 bmm
+# path is slower than the Habana op). See envs.py for the default rationale.
+_HPU_MOE_GATHER_RATIO = envs.VLLM_HPU_MOE_GATHER_RATIO
+if _HPU_MOE_GATHER:
+    from vllm_gaudi.ops.hpu_moe_combine import gather_silu_fp8_moe  # noqa: E402
+else:
+    gather_silu_fp8_moe = None  # type: ignore[assignment]
+
+if _HPU_MOE_GATHER_VERIFY:
+    logger.info("MoE gather combine VERIFY mode enabled: comparing custom vs stock "
+                "per layer (FP8-ULP bar = %d)", _HPU_MOE_GATHER_VERIFY_MAX_ULP)
+
+
+def _fp8_ulp(a: torch.Tensor, b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sign-aware FP8-ULP distance + out-of-range mask.
+
+    Same-sign pairs use real E4M3 ulps: |uint8(quantize(a)) - uint8(quantize(b))|.
+    In E4M3FN adjacent same-sign representable values differ by exactly +/-1 in
+    uint8, so this IS the representable-step count. Cross-sign pairs use
+    universal subnormal units |a - b| / 2^-9. Returns elementwise Float32 ulps
+    (set to 0.0 wherever either input is out of range) plus an ``out_of_range``
+    bool mask flagging those positions.
+
+    Elements above the E4M3 maximum representable value (448) saturate to
+    ``0x7F`` / ``0xFF`` (NaN/inf codes) during the uint8 cast and would falsely
+    compare as 0 ULP, so the caller must not fold them into the finite-ULP bar;
+    they are handled separately via ``out_of_range``.
+    """
+    a_fp32 = a.float()
+    b_fp32 = b.float()
+    e4m3_max = 448.0
+    out_of_range = (a_fp32.abs() > e4m3_max) | (b_fp32.abs() > e4m3_max)
+    a_bits = a_fp32.to(torch.float8_e4m3fn).view(torch.uint8).int()
+    b_bits = b_fp32.to(torch.float8_e4m3fn).view(torch.uint8).int()
+    same_sign = (a_bits >= 128) == (b_bits >= 128)
+    same_sign_ulp = (a_bits - b_bits).abs().float()
+    cross_ulp = (a_fp32 - b_fp32).abs() / (2.0**-9)
+    ulp = torch.where(same_sign, same_sign_ulp, cross_ulp)
+    ulp = torch.where(out_of_range, torch.zeros_like(ulp), ulp)
+    return ulp, out_of_range
+
+
+def _verify_moe_combine(stock: torch.Tensor, custom: torch.Tensor) -> None:
+    ulp, out_of_range = _fp8_ulp(stock, custom)
+    max_in_range_ulp = ulp.amax()
+    # Out-of-range positions cannot be compared in ULP (the fp8 cast saturates
+    # them), so measure their divergence as a relative error instead. Both paths
+    # agreeing out of range (rel_err 0) stays quiet.
+    a_fp32 = stock.float()
+    b_fp32 = custom.float()
+    a_finite, b_finite = torch.isfinite(a_fp32), torch.isfinite(b_fp32)
+    denom = a_fp32.abs() + b_fp32.abs()
+    rel_err = ((a_fp32 - b_fp32).abs() / denom.clamp(min=1e-9)).where(out_of_range & a_finite & b_finite,
+                                                                      torch.zeros_like(a_fp32))
+    # one side finite and the other inf/NaN is a divergence whatever the magnitude
+    rel_err = torch.where(a_finite != b_finite, torch.ones_like(rel_err), rel_err)
+    max_out_of_range_rel = rel_err.amax()
+    reduced = torch.stack([max_in_range_ulp, max_out_of_range_rel])
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        ep_group = get_ep_group()
+        if ep_group.world_size > 1:
+            torch.distributed.all_reduce(
+                reduced,
+                op=torch.distributed.ReduceOp.MAX,
+                group=ep_group.device_group,
+            )
+    max_in_range_ulp, max_out_of_range_rel = reduced[0], reduced[1]
+    if max_out_of_range_rel.item() > _HPU_MOE_GATHER_VERIFY_REL_ERR:
+        logger.warning(
+            "MoE gather combine: out-of-range element(s) (value > 448, "
+            "outside E4M3 finite range) diverge by relative error %s", max_out_of_range_rel.item())
+    if max_in_range_ulp.item() > _HPU_MOE_GATHER_VERIFY_MAX_ULP:
+        logger.warning("MoE gather combine mismatch: max FP8-ULP = %s exceeds %d", max_in_range_ulp.item(),
+                       _HPU_MOE_GATHER_VERIFY_MAX_ULP)
 
 
 class HPUPerTensorTorchFP8ScaledMMLinearKernel(PerTensorTorchFP8ScaledMMLinearKernel):
@@ -164,6 +262,14 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         # Snapshot the (static) quant-config flag while the vLLM config context
         # is set; the forward hot path reads this cached value instead.
         self.has_moe_quant_config = model_has_quant_config()
+        # The custom gathered-expert path reads per-channel scales
+        # (w13_weight_scale_inv / w2_weight_scale_inv, shape [E, 2I] / [E, H]),
+        # which exist only when block_quant + force_channel_fp8 are true
+        # (fp8_block_moe_prepare_weights branch in process_weights_after_loading).
+        # Non-block FP8 checkpoints use a per-tensor scale (w13_weight_scale,
+        # shape [E, 2]) and block FP8 without force_channel_fp8 uses block-shaped
+        # scales; both would crash or silently mis-scale in gather_silu_fp8_moe.
+        self._moe_gather_ok = self.block_quant and envs.VLLM_HPU_FORCE_CHANNEL_FP8
 
     @property
     def is_monolithic(self) -> bool:
@@ -268,13 +374,35 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
-        output = layer.moe_op(
-            x,
-            topk_ids,
-            topk_weights,
-            permuted_weights=True,
-            activation=_normalize_moe_activation(layer.activation),
-        )
+        activation = _normalize_moe_activation(layer.activation)
+        # Use the custom gathered-expert combine only when it wins: the number of
+        # distinct routed experts g = min(local_experts, tokens*K) must stay below
+        # a fraction of this rank's local_experts. Beyond that (large batch / long
+        # prefill, or few local experts) fall back to the stock fused op, which is
+        # faster and keeps the graph shapes fixed. `tokens`/`K` are static (T, K
+        # from x/topk_ids); local_num_experts is fixed per layer.
+        use_gather = (_HPU_MOE_GATHER and activation == "silu" and self.quant_config.activation_scheme != "static"
+                      and self._moe_gather_ok
+                      and x.shape[0] * topk_ids.shape[-1] <= layer.local_num_experts * _HPU_MOE_GATHER_RATIO)
+        if use_gather:
+            # EXPERIMENTAL custom combine: gather only the routed experts
+            # (bypasses the Habana op's fixed per-layer stage pipeline).
+            if _HPU_MOE_GATHER_VERIFY:
+                stock = layer.moe_op(x, topk_ids, topk_weights, permuted_weights=True, activation=activation)
+                custom = gather_silu_fp8_moe(layer, x, topk_ids, topk_weights)
+                _verify_moe_combine(stock, custom)
+                del stock
+                output = custom
+            else:
+                output = gather_silu_fp8_moe(layer, x, topk_ids, topk_weights)
+        else:
+            output = layer.moe_op(
+                x,
+                topk_ids,
+                topk_weights,
+                permuted_weights=True,
+                activation=activation,
+            )
         return output.view(*(output.size(0), *input_shape[1:]))
 
 

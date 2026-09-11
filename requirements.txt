@@ -10,3 +10,11 @@ tblib==3.2.2
 # route.path -> 500 on every request. Upstream bug:
 # trallnag/prometheus-fastapi-instrumentator#370. Remove once it ships a fix.
 fastapi<0.137
+# Cap transformers below 5.17: huggingface/transformers#48105 removed
+# position_ids_in_meshgrid and renamed PixtralRotaryEmbedding to
+# PixtralVisionRotaryEmbedding, both imported at the top of upstream vLLM's
+# vllm/model_executor/models/pixtral.py. That module then fails to import, so
+# PixtralForConditionalGeneration cannot be inspected and every Mistral-Small-3.1
+# run dies in ModelConfig validation. vLLM's own CI pins transformers==5.16.1, so
+# it does not see this. Remove once vLLM adopts the new transformers API.
+transformers<5.17

@@ -39,9 +39,9 @@ class HPURotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: Optional[torch.Tensor],
         offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
         # Prepare cos-sin caches for long-context + LoRA with offsets for every
@@ -63,13 +63,18 @@ class HPURotaryEmbedding(RotaryEmbedding):
         sin = self.sin
         cos = self.cos
         query_shape = query.shape
-        key_shape = key.shape
         query = query.view(num_tokens, -1, self.head_size)
-        key = key.view(num_tokens, -1, self.head_size)
+        # key is None on KV-shared (YOCO) layers, which rotate Q only - Gemma4 /
+        # Gemma4 MTP / Gemma3n. Upstream forward_static guards it the same way.
+        key_shape = key.shape if key is not None else None
+        if key is not None:
+            key = key.view(num_tokens, -1, self.head_size)
 
         if self.head_size == self.rotary_dim:
             # Avoid unnecessary slicing and concatenation
             query = apply_rotary_pos_emb(query, cos, sin, None, 0, rope_mode)
+            if key is None:
+                return query.reshape(query_shape), None
             key = apply_rotary_pos_emb(key, cos, sin, None, 0, rope_mode)
             return query.reshape(query_shape), key.reshape(key_shape)
 
@@ -77,6 +82,9 @@ class HPURotaryEmbedding(RotaryEmbedding):
         query_pass = query[..., self.rotary_dim:]
         query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        if key is None:
+            return query, None
 
         key_rot = key[..., :self.rotary_dim]
         key_pass = key[..., self.rotary_dim:]
