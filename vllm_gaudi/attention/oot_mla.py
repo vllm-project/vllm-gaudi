@@ -279,6 +279,11 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # accept-and-ignore the kwarg to keep the constructor signature in sync
         # with the base MultiHeadLatentAttentionWrapper / deepseek_v2 call site.
         allow_short_prefill_indexer_scoring_skip: bool = False,
+        # Added upstream by vllm#53906 (GLM-5.3-Flash). Opt-in fusion of the q_a
+        # and kv_a RMSNorms into one launch; the kernel behind it
+        # (vllm.models.common.ops.fused_q_kv_rmsnorm) is Triton/CUDA-only, so we
+        # accept-and-ignore the kwarg and keep HPU on the unfused path.
+        fuse_qkv_rmsnorm: bool = False,
     ) -> None:
         # Skip MultiHeadLatentAttentionWrapper.__init__() because it creates
         # MLAAttention → FlashAttnPrefillBackend which crashes on HPU.
@@ -310,8 +315,13 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # we bypass super().__init__(), replicate the assignment. It defaults to
         # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
         self.g_proj = mla_modules.g_proj
-
         self.skip_topk = skip_topk
+        # vllm#53906 added `self.fuse_qkv_rmsnorm`, which the base
+        # MultiHeadLatentAttentionWrapper.forward (inherited here, since we do not
+        # override forward) reads to pick the fused RMSNorm path. Because we bypass
+        # super().__init__(), replicate the assignment - pinned False because the
+        # fused kernel is Triton/CUDA-only.
+        self.fuse_qkv_rmsnorm = False
         # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
         # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
         # we do not override forward) reads and forwards to mla_attn. Because we

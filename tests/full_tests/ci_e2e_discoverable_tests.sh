@@ -201,12 +201,12 @@ run_compressed_w4a16_channelwise_load_generate_test() {
     echo "✅ Test with compressed w4a16 (channelwise) passed."
 }
 
-# Compressed w4a16 MoE with g_idx
-run_compressed_w4a16_moe_gidx_load_generate_test() {
-    echo "➡️ Testing compressed w4a16 MoE with g_idx inference..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nm-testing/test-w4a16-mixtral-actorder-group --dtype bfloat16
-    echo "✅ Test with compressed w4a16 MoE with g_idx passed."
-}
+# Compressed w4a16 MoE with g_idx (nm-testing/test-w4a16-mixtral-actorder-group)
+# retired: vllm#54809 permanently removed GPTQ group/dynamic activation
+# ordering support on every backend, not just HPU. Any checkpoint declaring
+# actorder=group/dynamic (this model's checkpoint) is now rejected upstream
+# during compressed-tensors config parsing before hardware dispatch, so this
+# test can no longer pass on CUDA either. No HPU-side fix is possible.
 
 # Llama-3.3-70B-Instruct-FP8-dynamic + INC dynamic quant
 run_llama3_70b_inc_dynamic_quant_load_generate_test() {
@@ -680,7 +680,8 @@ launch_all_tests() {
     run_awq_load_generate_test
     run_gptq_load_generate_test
     run_compressed_w4a16_channelwise_load_generate_test
-    run_compressed_w4a16_moe_gidx_load_generate_test
+    # run_compressed_w4a16_moe_gidx_load_generate_test retired: see comment above
+    # its (removed) definition -- vllm#54809 killed actorder=group upstream.
     run_llama3_70b_inc_dynamic_quant_load_generate_test
     run_qwen2_5_vl_load_generate_test
     run_qwen2_5_vl_compile_warmup_test
