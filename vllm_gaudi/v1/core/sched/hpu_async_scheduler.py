@@ -165,19 +165,17 @@ class HPUAsyncScheduler(AsyncScheduler):
         # (request, new_token_ids). Capturing extra keywords and forwarding
         # them verbatim to super() lets a single override work against both.
         #
-        # is_stale=True marks the in-flight frame of a request preempted while
-        # that frame was on the device. #48245 zeroes num_output_placeholders at
-        # preemption, so such a frame now matches the condition below even
-        # though upstream intends to DELIVER it. Swallowing it forces a
-        # regenerate, and under KV pressure the request is re-preempted the step
-        # it resumes: preemptions went 75 to 254 on an 8-card TP=8 run, for the
-        # same delivered output.
-        # So deliver a frame that is stale AND not from a partial prefill chunk.
-        # Requiring both keeps the case above narrow: the partial chunk is what
-        # 89eef8fb4 was written for, so it stays discarded either way, and
-        # pre-#48245 branches never pass the keyword, making this a no-op there.
-        deliver_stale_frame = kwargs.get("is_stale", False) and not request.is_prefill_chunk
-        if request.num_output_placeholders == 0 and len(new_token_ids) > 0 and not deliver_stale_frame:
+        # is_stale=True marks the in-flight output frame of a request that was
+        # preempted while that frame was on the device. #48245 zeroes
+        # num_output_placeholders at preemption, so such a frame now matches the
+        # condition below even though upstream intends to deliver it. Swallowing
+        # it forces a regenerate, and under KV pressure the request is
+        # re-preempted the step it resumes, multiplying preemptions for the same
+        # delivered output. The spurious partial-chunk token above is not a stale
+        # delivery, so it stays discarded, and pre-#48245 branches never pass the
+        # keyword, making this a no-op there.
+        is_stale = kwargs.get("is_stale", False)
+        if request.num_output_placeholders == 0 and len(new_token_ids) > 0 and not is_stale:
             # If the discard flag was set (e.g. from preemption), reset it here
             # since we are effectively discarding the token anyway.
             #
