@@ -633,6 +633,15 @@ run_async_penalty_consistency_test() {
     echo "✅ Test async-scheduling penalty consistency passed."
 }
 
+# Preemption under async scheduling: the HPU guard must not swallow the stale
+# in-flight output frame that vllm-project/vllm#48245 delivers on purpose.
+run_async_preemption_stale_frame_test() {
+    echo "➡️ Testing async-scheduling preemption stale-frame delivery..."
+    VLLM_SKIP_WARMUP=true \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_async_preemption_no_stale_swallow.py"
+    echo "✅ Test async-scheduling preemption stale-frame delivery passed."
+}
+
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"
@@ -706,6 +715,7 @@ launch_all_tests() {
     run_cpu_offloading_test
     run_offloading_connector_test
     run_async_penalty_consistency_test
+    run_async_preemption_stale_frame_test
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test
