@@ -288,14 +288,22 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         # =========================== #
 
         k_c_normed, k_pe = latent_vec_k.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
+        # MLA variants without a RoPE component (qk_rope_head_dim == 0) leave
+        # k_pe empty; view(-1, 1, 0) is ambiguous because a zero in the shape
+        # makes the element count 0 and -1 unsolvable.
+        if self.qk_rope_head_dim > 0:
+            k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
 
         kv_nope = self.kv_b_proj(k_c_normed)[0]\
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv_nope\
             .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+        if self.qk_rope_head_dim > 0:  # noqa: SIM108
+            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+        else:
+            # No RoPE part: qk_head_dim == qk_nope_head_dim, k is k_nope as-is.
+            k = k_nope
 
         if not self.use_merged_prefill:
             assert attn_metadata.seq_lens_tensor is not None, \
