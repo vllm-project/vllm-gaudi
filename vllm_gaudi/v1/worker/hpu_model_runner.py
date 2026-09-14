@@ -1293,10 +1293,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
         # Gemma4 makes tokens within one image's span attend bidirectionally
-        # (prefix-LM).
-        _hf_text_config = vllm_config.model_config.hf_text_config
+        # (prefix-LM). `is_mm_prefix_lm` is upstream's own predicate, which for
+        # Gemma4 resolves to use_bidirectional_attention == "vision". Still
+        # scoped to gemma4: the mask below hardcodes Gemma4's semantics
+        # (sliding layers only, clamped to the window), which do not hold for
+        # the other prefix-LM models that predicate also covers.
         self._gemma4_mm_prefix = (self._get_model_type() == "gemma4"
-                                  and getattr(_hf_text_config, "use_bidirectional_attention", None) == "vision")
+                                  and getattr(model_config, "is_mm_prefix_lm", False))
         self.block_size = cache_config.block_size
         # Preferred Gaudi paged-attention kernel granularity.
         # Final kernel block size is selected per KV group during
@@ -7578,6 +7581,22 @@ class HPUAttentionMetadataProcessor:
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
         return attn_metadata
 
+    def _mm_bidirectional_block(self, image_seg_ids: torch.Tensor, batch_size: int, seq_len: int, window_size: int,
+                                shift: int, device: torch.device) -> torch.Tensor:
+        """Boolean [batch, 1, seq_len, seq_len] term the Gemma4 image mask adds.
+
+        Upstream's compute_kv_seq_mask with MM_PREFIX_CLAMP_SW keeps
+        ``(causal AND sw_left) OR (mm_block AND sw_left)``; this is the second
+        disjunct. ``sw_left`` is one-sided ((i - j) < window_size), so forward
+        attention within an image is unrestricted while reaching back past the
+        window is clamped.
+        """
+        sw_left = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device),
+                             diagonal=shift - window_size + 1).view(1, 1, seq_len, seq_len)
+        seg_q = image_seg_ids.view(batch_size, 1, seq_len, 1)
+        seg_k = image_seg_ids.view(batch_size, 1, 1, seq_len)
+        return (seg_q > 0) & (seg_q == seg_k) & sw_left
+
     def _set_attn_bias_for_sliding_window(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
                                           window_size: int, device: torch.device,
                                           dtype: torch.dtype) -> HPUAttentionMetadataV1:
@@ -7646,6 +7665,16 @@ class HPUAttentionMetadataProcessor:
             causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
             causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
 
+            if image_seg_ids is not None:
+                # The bidirectional term only ever opens forward pairs (j > i),
+                # and for a query in this chunk every such key is also in this
+                # chunk, so it never has to reach into the context columns:
+                # past_mask is by construction strictly backward (j < i) and
+                # already permitted by causal. Correct for chunk 2..N and for a
+                # prefix-cache hit landing mid-image.
+                causal_mask = causal_mask | self._mm_bidirectional_block(image_seg_ids, batch_size, seq_len,
+                                                                         window_size, shift, device)
+
             # TODO: Investigate further - Removing Padding cause accuracy issue
             # seq_lens_t = prefill_metadata.seq_lens_tensor
             # len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).lt(
@@ -7663,21 +7692,13 @@ class HPUAttentionMetadataProcessor:
             mask = torch.triu(mask, diagonal=shift - window_size + 1)
             attn_bias = torch.log(mask)
         else:
-            # Gemma4 bidirectional image mask, matching upstream
-            # compute_kv_seq_mask with MM_PREFIX_CLAMP_SW:
-            #   allowed = (causal AND sw_left) OR (mm_block AND sw_left)
-            # sw_left is one-sided ((i - j) < window_size), so forward
-            # attention within an image is unrestricted while reaching back
-            # past the window is clamped. Full-attn layers stay pure causal.
+            # Gemma4 bidirectional image mask on a fresh prefill.
+            # Full-attn layers stay pure causal.
             ones = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device)
-            causal = torch.tril(ones, diagonal=shift)
-            sw_left = torch.triu(ones, diagonal=shift - window_size + 1)
-            window_causal = (causal & sw_left).view(1, 1, seq_len, seq_len)
-            sw_left = sw_left.view(1, 1, seq_len, seq_len)
-            seg_q = image_seg_ids.view(batch_size, 1, seq_len, 1)
-            seg_k = image_seg_ids.view(batch_size, 1, 1, seq_len)
-            mm_block = (seg_q > 0) & (seg_q == seg_k)
-            allowed = window_causal | (mm_block & sw_left)
+            window_causal = (torch.tril(ones, diagonal=shift)
+                             & torch.triu(ones, diagonal=shift - window_size + 1)).view(1, 1, seq_len, seq_len)
+            allowed = window_causal | self._mm_bidirectional_block(image_seg_ids, batch_size, seq_len, window_size,
+                                                                   shift, device)
             attn_bias = torch.where(allowed, torch.tensor(0.0, dtype=dtype, device=device),
                                     torch.tensor(float('-inf'), dtype=dtype, device=device))
 
