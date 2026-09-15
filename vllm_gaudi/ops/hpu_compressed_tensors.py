@@ -13,7 +13,7 @@ from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrat
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise, all_close_1d
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter, ModelWeightParameter, PerTensorScaleParameter,
                                            BasevLLMParameter, GroupQuantScaleParameter, PackedColumnParameter,
-                                           PackedvLLMParameter, RowvLLMParameter, BlockQuantScaleParameter)
+                                           PackedvLLMParameter, BlockQuantScaleParameter)
 from vllm.model_executor.layers.quantization.compressed_tensors import (compressed_tensors)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod as OrigCompressedTensorsLinearMethod)
@@ -139,11 +139,14 @@ class HPUCompressedTensorsLinearMethod(OrigCompressedTensorsLinearMethod):
             scheme_dict = self.quantization_config.target_scheme_map[matched_target]
             weight_quant = scheme_dict.get("weights")
 
+            # vllm#54809 removed GPTQ group/dynamic activation ordering (and the
+            # `actorder` constructor kwarg) from CompressedTensorsWNA16 upstream;
+            # any checkpoint still declaring actorder=group/dynamic is now
+            # rejected earlier during config parsing, so this kwarg is dead.
             hpu_scheme = HPUCompressedTensorsWNA16(num_bits=weight_quant.num_bits,
                                                    strategy=scheme.strategy,
                                                    symmetric=scheme.symmetric,
-                                                   group_size=scheme.group_size,
-                                                   actorder=weight_quant.actorder)
+                                                   group_size=scheme.group_size)
         else:
             raise ValueError(f"{scheme_classname} compressed format is not supported on HPU")
         return hpu_scheme
@@ -594,6 +597,10 @@ class HPUCompressedTensorsWNA16(CompressedTensorsWNA16):
                        weight_loader: Callable, **kwargs):
         output_size_per_partition = sum(output_partition_sizes)
 
+        # vllm#54809 dropped `has_g_idx` from MPLinearLayerConfig (and the
+        # `weight_g_idx` param from CompressedTensorsWNA16) along with GPTQ
+        # group/dynamic activation ordering support; that checkpoint shape is
+        # rejected upstream during config parsing before it ever reaches here.
         mp_linear_kernel_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
             partition_weight_shape=\
@@ -602,7 +609,6 @@ class HPUCompressedTensorsWNA16(CompressedTensorsWNA16):
             act_type=params_dtype,
             group_size=self.group_size,
             zero_points=not self.symmetric,
-            has_g_idx=self.has_g_idx
         )
 
         kernel_type = HPUMPLinearKernel
@@ -614,7 +620,7 @@ class HPUCompressedTensorsWNA16(CompressedTensorsWNA16):
         # If group_size is -1, we are in channelwise case.
         group_size = self.group_size if self.group_size != -1 else input_size
         row_parallel = (input_size != input_size_per_partition)
-        partition_scales = not marlin_repeat_scales_on_all_ranks(self.has_g_idx, self.group_size, row_parallel)
+        partition_scales = not marlin_repeat_scales_on_all_ranks(self.group_size, row_parallel)
 
         scales_and_zp_size = input_size // group_size
 
@@ -676,21 +682,10 @@ class HPUCompressedTensorsWNA16(CompressedTensorsWNA16):
         if not self.symmetric:
             layer.register_parameter("weight_zero_point", qzeros)
 
-        # group index (for activation reordering)
-        if self.has_g_idx:
-            weight_g_idx = RowvLLMParameter(data=torch.empty(
-                input_size_per_partition,
-                dtype=torch.int32,
-            ),
-                                            input_dim=0,
-                                            weight_loader=weight_loader)
-            layer.register_parameter("weight_g_idx", weight_g_idx)
-
         self.kernel = kernel_type(mp_linear_kernel_config,
                                   w_q_param_name="weight_packed",
                                   w_s_param_name="weight_scale",
-                                  w_zp_param_name="weight_zero_point",
-                                  w_gidx_param_name="weight_g_idx")
+                                  w_zp_param_name="weight_zero_point")
 
 
 class HPUMPLinearKernel(MPLinearKernel):
@@ -755,12 +750,15 @@ class HPUMPLinearKernel(MPLinearKernel):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         c = self.config
-        w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
+        # vllm#54809 dropped w_gidx from _get_weight_params; group/dynamic
+        # activation-ordering checkpoints are rejected upstream before
+        # reaching this kernel, so there is no g_idx tensor to pass here.
+        w_q, w_s, w_zp = self._get_weight_params(layer)
 
         reshaped_x = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1], )
 
-        weight = torch.ops.hpu.convert_from_uint4(w_q, w_s, w_zp, x.dtype, w_gidx)
+        weight = torch.ops.hpu.convert_from_uint4(w_q, w_s, w_zp, x.dtype, None)
         output = torch.matmul(reshaped_x, weight)
 
         if bias is not None:
