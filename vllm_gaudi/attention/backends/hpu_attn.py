@@ -357,16 +357,11 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                   kv_lora_rank=self.kv_lora_rank)
         return output
 
-    @torch.compiler.disable
     def forward_mqa_sparse(self, q, k_cache, attn_metadata, topk_indices):
-        """Sparse MLA decode: attend to only the top-K cache entries.
+        """Attend with an absorbed query to top-k physical latent-cache slots.
 
-        topk_indices uses -1 as the "no token" sentinel (matching upstream's
-        SparseAttnIndexer convention: see vllm.model_executor.layers.
-        sparse_attn_indexer). Rows/slots equal to -1 are padding: their cache
-        read is discarded and their attention score is masked out below,
-        instead of relying on seq_lens_tensor/context_lens_tensor, which are
-        always None on HPU decode for models without mamba-like layers.
+        q contains [q_nope @ W_UK_T, q_rope]. Return latent values for the
+        owning MLA layer's W_UV projection. A slot of -1 denotes padding.
         """
         if isinstance(k_cache, tuple):
             k_cache = k_cache[0]
@@ -375,41 +370,14 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         topk_indices = topk_indices[:batch_size]
         pad_mask = topk_indices == -1
 
-        # Gather top-K latent KV from cache using physical slot indices.
-        # Clamp the -1 sentinel to a safe index; the gathered content for
-        # padded slots is discarded by the mask below.
         flat_idx = topk_indices.clamp(min=0).reshape(-1)
-        selected = k_cache[flat_idx].view(batch_size, topk, -1)
-
-        # Decompress KV
-        k_c, k_pe = selected.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_nope = self.kv_b_proj(k_c.reshape(-1, self.kv_lora_rank))[0]
-        kv_nope = kv_nope.view(batch_size, topk, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k_pe_exp = k_pe.unsqueeze(2).expand(-1, -1, self.num_heads, -1)
-        key = torch.cat([k_nope, k_pe_exp], dim=-1)
-
-        # q: [B, H, D] -> [B, H, 1, D]
-        # key: [B, T, H, D] -> [B, H, T, D]
-        key = key.permute(0, 2, 1, 3)
-        v = v.permute(0, 2, 1, 3)
-        attn = torch.matmul(q.unsqueeze(2), key.transpose(-1, -2))
-
-        # Use finite minimum value to avoid NaN from softmax(-inf / -inf)
-        # when an entire row is masked (empty/padded request).
-        attn = attn.masked_fill(pad_mask.unsqueeze(1).unsqueeze(2), torch.finfo(attn.dtype).min)
-
-        attn = torch.softmax(attn * self.scale, dim=-1)
-        # Zero output for rows where every top-k slot is the -1 sentinel.
-        # `.to(attn.dtype)` (not `.float()`): attn is bf16 here, and
-        # torch.matmul below does not type-promote against a bf16 `v`.
-        # 4D view [B, 1, 1, 1] to broadcast correctly against attn's
-        # [B, H, 1, T]; a 3D [B, 1, 1] view would silently misalign against
-        # the heads dim instead of the batch dim.
-        empty_mask = pad_mask.all(dim=-1).view(batch_size, 1, 1, 1)
-        attn = attn * (~empty_mask).to(attn.dtype)
-        out = torch.matmul(attn, v).squeeze(2)
-        return out.reshape(-1, self.num_heads * self.v_head_dim)
+        selected = k_cache[flat_idx].view(batch_size, topk, self.kv_lora_rank + self.qk_rope_head_dim)
+        selected = selected.masked_fill(pad_mask.unsqueeze(-1), 0)
+        logits = torch.bmm(q, selected.transpose(1, 2)).float() * self.scale
+        logits = logits.masked_fill(pad_mask.unsqueeze(1), torch.finfo(torch.float32).min)
+        attn = logits.softmax(dim=-1).masked_fill(pad_mask.unsqueeze(1), 0).to(q.dtype)
+        out = torch.bmm(attn, selected[..., :self.kv_lora_rank])
+        return out.reshape(batch_size, self.num_heads * self.kv_lora_rank)
 
     # NOTE(Xinyu): Make the loaded weight contiguous to avoid the transpose
     # during each graph execution

@@ -166,7 +166,10 @@ class HPUMLAAttention(MLAAttention):
             output = self.impl.forward_mha(q, latent_vec_k, kv_cache, attn_metadata)
             return output
         elif self.use_sparse and getattr(self.impl, 'topk_indices_buffer', None) is not None:
-            output = self.impl.forward_mqa_sparse(q, kv_cache, attn_metadata, self.impl.topk_indices_buffer)
+            query = torch.cat((decode_ql_nope, q_pe), dim=-1)
+            output = self.impl.forward_mqa_sparse(query, kv_cache, attn_metadata,
+                                                  self.impl.topk_indices_buffer)
+            output = self._v_up_proj(output)
             return output
         else:
             output = self.impl.forward_mqa(decode_ql_nope, q_pe, kv_cache, attn_metadata)

@@ -115,6 +115,23 @@ def _hpu_indexer_cache_get_attn_backend(self):
 DeepseekV32IndexerCache.get_attn_backend = _hpu_indexer_cache_get_attn_backend
 
 
+def _hpu_indexer_cache_bind_kv_cache(self, kv_cache) -> None:
+    """Store the HPU per-layer indexer-cache tuple unchanged.
+
+    Upstream ``DeepseekV32IndexerCache.bind_kv_cache`` does
+    ``self.kv_cache = kv_cache.squeeze(1)``, assuming a single packed
+    ``[B, H=1, N, C]`` tensor. On HPU the model runner allocates a per-layer
+    ``(key_cache, value_cache, key_scales, value_scales)`` tuple for this cache
+    group too (same as ``HPUMLAAttention``, see ``oot_mla.py``), so ``.squeeze``
+    raises ``AttributeError: 'tuple' object has no attribute 'squeeze'``. Keep
+    the tuple as-is for the HPU path.
+    """
+    self.kv_cache = kv_cache
+
+
+DeepseekV32IndexerCache.bind_kv_cache = _hpu_indexer_cache_bind_kv_cache
+
+
 # --- Indexer.forward: BF16 path, skip FP8 quantization ---------------------
 def _hpu_indexer_forward(self, hidden_states, qr, positions, rotary_emb):
     q, _ = self.wq_b(qr)
@@ -131,7 +148,7 @@ def _hpu_indexer_forward(self, hidden_states, qr, positions, rotary_emb):
     k_nope = k_nope.reshape(-1, self.head_dim - self.rope_dim)
     q = torch.cat([q_pe, q_nope], dim=-1)
     k = torch.cat([k_pe, k_nope], dim=-1)
-    weights = weights.reshape(-1, self.n_head) * self.softmax_scale * self.n_head_scale
+    weights = weights.reshape(-1, self.n_head) * (self.softmax_scale * self.n_head_scale)
     return self.indexer_op(hidden_states, q, k, weights)
 
 

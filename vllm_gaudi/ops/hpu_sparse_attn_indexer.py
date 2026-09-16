@@ -13,9 +13,8 @@ def _fill_invalid(buf, n, device):
     buf[:n, :].fill_(-1)
 
 
-@torch.compiler.disable
 def forward_hpu(self, hidden_states, q, k, weights):
-    """HPU SparseAttnIndexer: per-request QK BF16 scoring + torch.topk."""
+    """HPU indexer with FP32 weighted ReLU scoring and physical-slot top-k."""
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     kv_cache = self.k_cache.kv_cache
@@ -41,48 +40,32 @@ def forward_hpu(self, hidden_states, q, k, weights):
     block_usage = attn_metadata.block_usage
 
     if block_list is None or block_groups is None or block_usage is None:
-        # No block-table metadata available for decode (unexpected); fall back
-        # to the sentinel fill so shapes stay valid instead of crashing.
+        raise ValueError("Sparse decode requires block_list, block_groups, and block_usage")
+
+    block_count = block_list.shape[0]
+    if batch_size == 0 or block_count == 0:
         _fill_invalid(self.topk_indices_buffer, batch_size, q.device)
         return self.topk_indices_buffer
 
-    pos_range = torch.arange(block_size, device=block_list.device)
-    # block_usage is stored in model dtype (see hpu_model_runner.py); round to
-    # get an exact per-block valid-token count.
-    block_usage_long = block_usage.round().long()
+    positions = torch.arange(block_size, device=block_list.device)
+    slots = block_list[:, None] * block_size + positions[None, :]
+    valid = positions[None, :] < block_usage.round().long()[:, None]
+    valid = valid & ((block_groups >= 0) & (block_groups < batch_size))[:, None]
+    keys = kv_cache[slots.reshape(-1)].reshape(block_count, block_size, -1).float()
+    owners = block_groups.clamp(0, batch_size - 1)
+    block_query = q[owners].float()
+    block_weights = weights[owners].float()
+    logits = torch.bmm(block_query, keys.transpose(1, 2))
+    scores = (logits.relu() * block_weights[:, :, None]).sum(1)
+    rows = torch.arange(batch_size, device=block_list.device)
+    mask = (block_groups[None, :, None] == rows[:, None, None]) & valid[None, :, :]
+    scores = scores[None, :, :].expand(batch_size, -1, -1).masked_fill(~mask, -torch.inf)
+    topk = min(self.topk_tokens, slots.numel())
+    selected_scores, indices = scores.flatten(1).topk(topk, dim=-1)
+    selected_slots = slots.flatten()[indices].masked_fill(selected_scores == -torch.inf, -1)
 
-    for i in range(batch_size):
-        # Select this request's physical blocks directly via block_groups
-        # rather than assuming block_list is an unpadded per-request
-        # concatenation: with contiguous PA, blocks are scattered/reordered by
-        # physical block id, not laid out sequentially per request.
-        request_mask = block_groups == i
-        request_blocks = block_list[request_mask]
-        if request_blocks.numel() == 0:
-            self.topk_indices_buffer[i] = -1
-            continue
-        request_usage = block_usage_long[request_mask]
-
-        all_slots = (request_blocks.unsqueeze(1) * block_size + pos_range.unsqueeze(0)).reshape(-1)
-        valid_mask = (pos_range.unsqueeze(0) < request_usage.unsqueeze(1)).reshape(-1)
-        valid_slots = all_slots[valid_mask]
-        seq_len = valid_slots.shape[0]
-
-        if seq_len == 0:
-            self.topk_indices_buffer[i] = -1
-            continue
-
-        if seq_len <= self.topk_tokens:
-            self.topk_indices_buffer[i, :seq_len] = valid_slots
-            if seq_len < self.topk_tokens:
-                self.topk_indices_buffer[i, seq_len:] = -1
-            continue
-
-        k_all = kv_cache[valid_slots].to(torch.float32)
-        q_i = q[i].to(torch.float32)
-        logits = torch.mm(q_i.reshape(q_i.shape[0], -1), k_all.T)
-        scores = (torch.sigmoid(logits) * weights[i].to(torch.float32).unsqueeze(-1)).sum(0)
-        _, local_indices = torch.topk(scores, self.topk_tokens)
-        self.topk_indices_buffer[i] = valid_slots[local_indices]
+    self.topk_indices_buffer[:batch_size, :topk] = selected_slots
+    if topk < self.topk_tokens:
+        self.topk_indices_buffer[:batch_size, topk:] = -1
 
     return self.topk_indices_buffer
