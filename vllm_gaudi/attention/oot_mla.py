@@ -167,8 +167,7 @@ class HPUMLAAttention(MLAAttention):
             return output
         elif self.use_sparse and getattr(self.impl, 'topk_indices_buffer', None) is not None:
             query = torch.cat((decode_ql_nope, q_pe), dim=-1)
-            output = self.impl.forward_mqa_sparse(query, kv_cache, attn_metadata,
-                                                  self.impl.topk_indices_buffer)
+            output = self.impl.forward_mqa_sparse(query, kv_cache, attn_metadata, self.impl.topk_indices_buffer)
             output = self._v_up_proj(output)
             return output
         else:
@@ -318,9 +317,8 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # we bypass super().__init__(), replicate the assignment. It defaults to
         # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
         self.g_proj = mla_modules.g_proj
-
-    self.skip_topk = skip_topk
-    # vllm#53906 added `self.fuse_qkv_rmsnorm`, which the base
+        self.skip_topk = skip_topk
+        # vllm#53906 added `self.fuse_qkv_rmsnorm`, which the base
         # MultiHeadLatentAttentionWrapper.forward (inherited here, since we do not
         # override forward) reads to pick the fused RMSNorm path. Because we bypass
         # super().__init__(), replicate the assignment - pinned False because the

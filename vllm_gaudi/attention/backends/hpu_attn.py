@@ -260,9 +260,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                  f"heads in the layer. Sinks shape: {sinks.shape}, "
                                                  f"num_heads: {num_heads}.")
 
-
         self.topk_indices_buffer = kwargs.get('topk_indices_buffer')
         self.is_sparse = self.topk_indices_buffer is not None
+        if self.is_sparse:
+            if kv_cache_dtype == 'fp8_inc':
+                raise NotImplementedError("fp8 kv cache is not supported with DSA attention backend")
+            if get_config().use_contiguous_pa or get_config().defrag:
+                raise NotImplementedError("Contiguous PA and defragmenter are not supported with DSA attention backend, rerun with VLLM_CONTIGUOUS_PA=0.")
 
     def forward_mha(  # type: ignore
             self, q: torch.Tensor, latent_vec_k: torch.Tensor, k_cache: torch.Tensor,

@@ -87,7 +87,7 @@ class HpuPlatform(Platform):
         if attn_selector_config.use_sparse:
             if not attn_selector_config.use_mla:
                 raise NotImplementedError("Sparse Attention is not supported on HPU.")
-            logger.info("Using HPU DSA (Dynamic Sparse Attention) with BF16 indexer.")
+            logger.info("Using HPU DSA (DeepSeek Sparse Attention) with BF16 indexer.")
 
         if attn_selector_config.use_mla:
             logger.info("Using HPUAttentionMLA backend.")
@@ -100,7 +100,7 @@ class HpuPlatform(Platform):
 
     @classmethod
     def check_runner_kv_caches_multi_layer(cls) -> None:
-        pass  # DSA indexer cache shares layer index with MLA attention
+        pass  # DSA (DeepSeek Sparse Attention) indexer cache shares layer index with MLA attention
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:

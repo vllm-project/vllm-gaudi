@@ -4,7 +4,7 @@ import torch
 from vllm.forward_context import get_forward_context
 
 
-def _fill_invalid(buf, n, device):
+def _fill_invalid(buf, n):
     """Fill topk_indices_buffer rows 0..n-1 with the upstream -1 sentinel.
 
     -1 means "no token" (see vllm.model_executor.layers.sparse_attn_indexer),
@@ -24,14 +24,14 @@ def forward_hpu(self, hidden_states, q, k, weights):
     slot_mapping = attn_metadata.slot_mapping.flatten()
 
     if kv_cache is None or kv_cache.numel() == 0:
-        _fill_invalid(self.topk_indices_buffer, q.shape[0], q.device)
+        _fill_invalid(self.topk_indices_buffer, q.shape[0])
         return self.topk_indices_buffer
 
     if not self.skip_k_cache_insert:
         kv_cache.index_copy_(0, slot_mapping[:k.shape[0]], k)
 
     if attn_metadata.is_prompt:
-        _fill_invalid(self.topk_indices_buffer, q.shape[0], q.device)
+        _fill_invalid(self.topk_indices_buffer, q.shape[0])
         return self.topk_indices_buffer
 
     batch_size = q.shape[0]
@@ -44,13 +44,12 @@ def forward_hpu(self, hidden_states, q, k, weights):
 
     block_count = block_list.shape[0]
     if batch_size == 0 or block_count == 0:
-        _fill_invalid(self.topk_indices_buffer, batch_size, q.device)
+        _fill_invalid(self.topk_indices_buffer, batch_size)
         return self.topk_indices_buffer
 
     positions = torch.arange(block_size, device=block_list.device)
     slots = block_list[:, None] * block_size + positions[None, :]
     valid = positions[None, :] < block_usage.round().long()[:, None]
-    valid = valid & ((block_groups >= 0) & (block_groups < batch_size))[:, None]
     keys = kv_cache[slots.reshape(-1)].reshape(block_count, block_size, -1).float()
     owners = block_groups.clamp(0, batch_size - 1)
     block_query = q[owners].float()
