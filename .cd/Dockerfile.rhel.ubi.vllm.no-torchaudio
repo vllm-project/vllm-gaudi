@@ -13,13 +13,14 @@ ARG SYNAPSE_VERSION=1.24.1
 ARG SYNAPSE_REVISION=482
 ARG BASE_NAME=rhel9.6
 ARG OS_VERSION=9.6
+ARG OS_VERSION_MAJOR=9
 ARG OS_STRING=rhel96
 ARG PT_VERSION=2.11.0
 ARG PT_MODULES_REPO_NAME=gaudi-pt-modules
 # for internal use - to support a different package name for RHEL 9.4 with Python 3.12
 ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING=
 ARG PYPI_INDEX_URL="https://pypi.org/simple/"
-ARG HABANA_RPM_REPO_PATH="rhel/9/${OS_VERSION}"
+ARG HABANA_RPM_REPO_PATH="rhel/${OS_VERSION_MAJOR}/${OS_VERSION}"
 ARG VLLM_GAUDI_COMMIT=main
 ARG VLLM_PROJECT_COMMIT=
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
@@ -28,13 +29,14 @@ ARG VLLM_GAUDI_REPO="https://github.com/vllm-project/vllm-gaudi.git"
 # ============================================================================
 # Stage 1: gaudi-base - Base system setup with Habana drivers
 # ============================================================================
-FROM registry.access.redhat.com/ubi9/ubi:${OS_VERSION} AS gaudi-base
+FROM registry.access.redhat.com/ubi${OS_VERSION_MAJOR}/ubi:${OS_VERSION} AS gaudi-base
 
 # Re-declare global ARGs to use them in this stage
 ARG ARTIFACTORY_URL
 ARG SYNAPSE_VERSION
 ARG SYNAPSE_REVISION
 ARG OS_VERSION
+ARG OS_VERSION_MAJOR
 ARG OS_STRING
 ARG PT_VERSION
 ARG PYPI_INDEX_URL
@@ -64,13 +66,13 @@ RUN dnf install -y --allowerasing python3-dnf-plugin-versionlock && \
     dnf -y update && \
     # '|| true' is added to support RHEL 9.4 in which openssl-fips-provider-so is not installed
     rpm -e --nodeps openssl-fips-provider-so || true && \
-    dnf install -y --allowerasing https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
+    dnf install -y --allowerasing https://dl.fedoraproject.org/pub/epel/epel-release-latest-${OS_VERSION_MAJOR}.noarch.rpm && \
     dnf clean all
 
 # Add CentOS repositories for additional packages
-RUN printf "[BaseOS]\\nname=CentOS Linux 9 - BaseOS\\nbaseurl=https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-BaseOS.repo && \
-    printf "[centos9]\\nname=CentOS Linux 9 - AppStream\\nbaseurl=https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-AppStream.repo && \
-    printf "[CRB]\\nname=CentOS Linux 9 - CRB\\nbaseurl=https://mirror.stream.centos.org/9-stream/CRB/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-CRB.repo
+RUN printf "[BaseOS]\\nname=CentOS Linux ${OS_VERSION_MAJOR} - BaseOS\\nbaseurl=https://mirror.stream.centos.org/${OS_VERSION_MAJOR}-stream/BaseOS/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-BaseOS.repo && \
+    printf "[AppStream]\\nname=CentOS Linux ${OS_VERSION_MAJOR} - AppStream\\nbaseurl=https://mirror.stream.centos.org/${OS_VERSION_MAJOR}-stream/AppStream/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-AppStream.repo && \
+    printf "[CRB]\\nname=CentOS Linux ${OS_VERSION_MAJOR} - CRB\\nbaseurl=https://mirror.stream.centos.org/${OS_VERSION_MAJOR}-stream/CRB/x86_64/os\\ngpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256\\ngpgcheck=1\\n" > /etc/yum.repos.d/CentOS-Linux-CRB.repo
 
 # Install system dependencies
 RUN dnf install -y --allowerasing \
@@ -92,11 +94,11 @@ RUN alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 && \
     ln -s /usr/bin/python3 /usr/bin/python
 
 # Install base Python packages
-RUN pip install --no-cache-dir setuptools==79.0.1 wheel setuptools_scm && \
-    pip install --no-cache-dir --upgrade Jinja2 protobuf urllib3 requests
+RUN python3 -m pip install --no-cache-dir setuptools==79.0.1 wheel setuptools_scm && \
+    python3 -m pip install --no-cache-dir --upgrade Jinja2 protobuf urllib3 requests
 
 # Setup Habana repository and install Habana packages
-RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFACTORY_URL}/artifactory/${HABANA_RPM_REPO_PATH}\\ngpgkey=https://${ARTIFACTORY_URL}/artifactory/${HABANA_RPM_REPO_PATH}/repodata/repomd.xml.key\\ngpgcheck=1\\n" > /etc/yum.repos.d/habanalabs.repo && \
+RUN printf "[habanalabs]\\nname=Habana RH${OS_VERSION_MAJOR} Linux repo\\nbaseurl=https://${ARTIFACTORY_URL}/artifactory/${HABANA_RPM_REPO_PATH}\\ngpgkey=https://${ARTIFACTORY_URL}/artifactory/${HABANA_RPM_REPO_PATH}/repodata/repomd.xml.key\\ngpgcheck=1\\n" > /etc/yum.repos.d/habanalabs.repo && \
     echo "=== Content of habanalabs.repo ===" && \
     cat /etc/yum.repos.d/habanalabs.repo && \
     echo "=== End of habanalabs.repo ===" && \
@@ -128,7 +130,7 @@ RUN printf "[habanalabs]\\nname=Habana RH9 Linux repo\\nbaseurl=https://${ARTIFA
 
 # Install Habana media loader and configure Python path
 RUN SYNAPSE_REVISION_RUNTIME=$(cat /etc/habanalabs/synapse_revision) && \
-    pip install --no-cache-dir habana-media-loader=="${SYNAPSE_VERSION}"."${SYNAPSE_REVISION_RUNTIME}" --extra-index-url ${PYPI_INDEX_URL} && \
+    python3 -m pip install --no-cache-dir habana-media-loader=="${SYNAPSE_VERSION}"."${SYNAPSE_REVISION_RUNTIME}" --extra-index-url ${PYPI_INDEX_URL} && \
     echo "/usr/lib/habanalabs" > $(python3 -c "import sysconfig; print(sysconfig.get_path('platlib'))")/habanalabs-graph.pth
 
 # ============================================================================
@@ -210,12 +212,12 @@ RUN set -e && \
     git remote add upstream $VLLM_REPO && \
     git fetch upstream --tags && \
     git checkout ${VLLM_PROJECT_COMMIT} && \
-    pip install --no-cache-dir -r <(sed '/^torch/d' requirements/build/cuda.txt) && \
-    VLLM_TARGET_DEVICE=empty pip install --no-cache-dir --no-build-isolation . && \
+    python3 -m pip install --no-cache-dir -r <(sed '/^torch/d' requirements/build/cuda.txt) && \
+    VLLM_TARGET_DEVICE=empty python3 -m pip install --no-cache-dir --no-build-isolation . && \
     cd $VLLM_PATH2 && \
     git checkout ${VLLM_GAUDI_COMMIT} && \
-    VLLM_TARGET_DEVICE=hpu pip install --no-cache-dir -v . --no-build-isolation && \
-    pip check
+    VLLM_TARGET_DEVICE=hpu python3 -m pip install --no-cache-dir -v . --no-build-isolation && \
+    python3 -m pip check
 
 # Setup non-root user for OpenShift compatibility
 RUN umask 002 && \
