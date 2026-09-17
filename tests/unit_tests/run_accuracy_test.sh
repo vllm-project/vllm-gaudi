@@ -66,6 +66,16 @@ wait_for_server() {
 cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
   pkill -f "vllm serve" || true
+  # Also reap the previous model's toy proxy server: it binds a fixed port
+  # (9195), so leaving it alive makes the next model's proxy fail with
+  # "address already in use". By PID, so no unrelated process is touched.
+  if [ -n "${PROXY_PID:-}" ]; then
+    kill "$PROXY_PID" 2>/dev/null || true
+    sleep 1
+    kill -9 "$PROXY_PID" 2>/dev/null || true
+    wait "$PROXY_PID" 2>/dev/null || true
+    PROXY_PID=""
+  fi
   sleep 2
 }
 
@@ -198,6 +208,7 @@ run_tests_for_model() {
   # Start the proxy server
   echo "Starting proxy server with command: $PROXY_CMD"
   $PROXY_CMD &
+  PROXY_PID=$!
 
   # Wait for the proxy to start
   sleep 20
