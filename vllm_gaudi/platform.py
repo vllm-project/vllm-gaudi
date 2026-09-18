@@ -301,7 +301,7 @@ class HpuPlatform(Platform):
         model_config = vllm_config.model_config
         scheduler_config = vllm_config.scheduler_config
         # model_config may be None in tests.
-        if model_config is None or not scheduler_config.is_multimodal_model:
+        if model_config is None or not getattr(scheduler_config, "is_multimodal_model", False):
             return
         if getattr(model_config.hf_config, "model_type", None) != "gemma4":
             return
