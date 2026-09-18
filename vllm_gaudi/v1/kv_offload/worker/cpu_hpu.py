@@ -257,7 +257,7 @@ def CPUOffloadingWorker_init_(
     self,
     kv_caches: CanonicalKVCaches,
     blocks_per_chunk: int,
-    num_cpu_blocks: int,
+    num_cpu_chunks: int,
     mmap_region=None,
 ):
     """HPU CPUOffloadingWorker initializer.
@@ -274,7 +274,9 @@ def CPUOffloadingWorker_init_(
             contract after vLLM PR #48150; the value is passed unchanged into
             the HPU ``SingleDirectionOffloadingHandler`` as its
             ``block_size_factor`` argument.
-        num_cpu_blocks: number of CPU blocks to allocate.
+        num_cpu_chunks: number of CPU chunks to allocate. Renamed from
+            ``num_cpu_blocks`` to match the upstream constructor contract
+            after vLLM PR #52615 (block -> chunk terminology refactor).
         mmap_region: unused on HPU; accepted for upstream API parity.
     """
     del mmap_region  # HPU offloading does not use a shared mmap region.
@@ -287,7 +289,7 @@ def CPUOffloadingWorker_init_(
         gpu_tensor = kv_cache_tensor.tensor.view(torch.int8).view((-1, gpu_page_size_bytes))
         cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
         cpu_tensor = torch.zeros(
-            (num_cpu_blocks, cpu_page_size_bytes),
+            (num_cpu_chunks, cpu_page_size_bytes),
             dtype=torch.int8,
             device="cpu",
             pin_memory=pin_memory,
