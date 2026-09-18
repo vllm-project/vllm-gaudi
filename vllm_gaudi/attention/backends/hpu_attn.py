@@ -267,7 +267,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                 raise NotImplementedError("fp8 kv cache is not supported with DSA attention backend")
             if get_config().use_contiguous_pa or get_config().defrag:
                 raise NotImplementedError(
-                    "Contiguous PA and defragmenter are not supported with DSA attention backend, rerun with VLLM_CONTIGUOUS_PA=0."
+                    "Contiguous PA and defragmenter are not supported with DSA attention backend, "
+                    "rerun with VLLM_CONTIGUOUS_PA=0."
                 )
 
     def forward_mha(  # type: ignore
