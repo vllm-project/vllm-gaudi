@@ -50,8 +50,22 @@ GIT_ROOT=$(git rev-parse --show-toplevel)
 
 #SMI_BIN=$(which nvidia-smi || which rocm-smi)
 
+# Kill whatever background jobs are still running. `kill` with an empty argument
+# list prints its usage message and fails, and under `set -e` a failing EXIT trap
+# overrides the script's own exit status - which turned a fully passing run into
+# exit 2 once every job was reaped. Expand `jobs -pr` once, kill a non-empty list.
+kill_background_jobs() {
+  local pids
+  pids=$(jobs -pr)
+  if [[ -n "$pids" ]]; then
+    # Intentionally unquoted: the list may hold several PIDs.
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+  fi
+}
+
 # Trap the SIGINT signal (triggered by Ctrl+C)
-trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
+trap kill_background_jobs SIGINT SIGTERM EXIT
 
 # Waits for vLLM to start.
 wait_for_server() {
