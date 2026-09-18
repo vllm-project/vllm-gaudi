@@ -260,6 +260,16 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                  f"heads in the layer. Sinks shape: {sinks.shape}, "
                                                  f"num_heads: {num_heads}.")
 
+        self.topk_indices_buffer = kwargs.get('topk_indices_buffer')
+        self.is_sparse = self.topk_indices_buffer is not None
+        if self.is_sparse:
+            if kv_cache_dtype == 'fp8_inc':
+                raise NotImplementedError("fp8 kv cache is not supported with DSA attention backend")
+            if get_config().use_contiguous_pa or get_config().defrag:
+                raise NotImplementedError(
+                    "Contiguous PA and defragmenter are not supported with DSA attention backend, "
+                    "rerun with VLLM_CONTIGUOUS_PA=0.")
+
     def forward_mha(  # type: ignore
             self, q: torch.Tensor, latent_vec_k: torch.Tensor, k_cache: torch.Tensor,
             attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
@@ -352,6 +362,28 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                                   values_fetch_func=None,
                                                   kv_lora_rank=self.kv_lora_rank)
         return output
+
+    def forward_mqa_sparse(self, q, k_cache, attn_metadata, topk_indices):
+        """Attend with an absorbed query to top-k physical latent-cache slots.
+
+        q contains [q_nope @ W_UK_T, q_rope]. Return latent values for the
+        owning MLA layer's W_UV projection. A slot of -1 denotes padding.
+        """
+        if isinstance(k_cache, tuple):
+            k_cache = k_cache[0]
+        batch_size = q.shape[0]
+        topk = topk_indices.shape[1]
+        topk_indices = topk_indices[:batch_size]
+        pad_mask = topk_indices == -1
+
+        flat_idx = topk_indices.clamp(min=0).reshape(-1)
+        selected = k_cache[flat_idx].view(batch_size, topk, self.kv_lora_rank + self.qk_rope_head_dim)
+        selected = selected.masked_fill(pad_mask.unsqueeze(-1), 0)
+        logits = torch.bmm(q, selected.transpose(1, 2)).float() * self.scale
+        logits = logits.masked_fill(pad_mask.unsqueeze(1), torch.finfo(torch.float32).min)
+        attn = logits.softmax(dim=-1).masked_fill(pad_mask.unsqueeze(1), 0).to(q.dtype)
+        out = torch.bmm(attn, selected[..., :self.kv_lora_rank])
+        return out.reshape(batch_size, self.num_heads * self.kv_lora_rank)
 
     # NOTE(Xinyu): Make the loaded weight contiguous to avoid the transpose
     # during each graph execution

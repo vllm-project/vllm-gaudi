@@ -1772,6 +1772,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     dtype=self.kv_cache_dtype,
                     cache_dtype_str=cache_dtype_str,
                 )
+            elif isinstance(attn_module, AttentionLayerBase):
+                spec = attn_module.get_kv_cache_spec(self.vllm_config)
+                if spec is not None:
+                    kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
 
