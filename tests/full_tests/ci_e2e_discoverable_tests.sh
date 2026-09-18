@@ -633,6 +633,25 @@ run_async_penalty_consistency_test() {
     echo "✅ Test async-scheduling penalty consistency passed."
 }
 
+# Upstream's own async-scheduler suite, run against HPUAsyncScheduler so the
+# override is held to the contract it overrides. Needs no accelerator and takes
+# seconds. --confcutdir keeps the vLLM root conftest out of the run, so the gate
+# does not depend on upstream's test-only extras.
+run_upstream_async_scheduler_gate() {
+    echo "➡️ Testing HPUAsyncScheduler against the upstream async-scheduler suite..."
+    local gate_dir vllm_root suite
+    gate_dir=$(cd "${VLLM_GAUDI_PREFIX}/tests/full_tests" && pwd)
+    vllm_root=$(cd "${VLLM_SRC_PREFIX:-${VLLM_GAUDI_PREFIX}/../vllm}" && pwd)
+    suite="${vllm_root}/tests/v1/core/test_async_scheduler.py"
+    if [ ! -f "${suite}" ]; then
+        echo "❌ upstream suite not found at ${suite}; set VLLM_SRC_PREFIX to the vLLM source tree."
+        return 1
+    fi
+    PYTHONPATH="${gate_dir}${PYTHONPATH:+:${PYTHONPATH}}" \
+    pytest -v -p upstream_async_sched_plugin --confcutdir "${vllm_root}/tests/v1/core" "${suite}"
+    echo "✅ Test HPUAsyncScheduler against the upstream async-scheduler suite passed."
+}
+
 # sleep mode
 run_sleep_mode_test() {
     echo "Testing basic model with sleep mode / wake up functionality"
@@ -705,6 +724,7 @@ launch_all_tests() {
     run_cpu_offloading_test
     run_offloading_connector_test
     run_async_penalty_consistency_test
+    run_upstream_async_scheduler_gate
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test
