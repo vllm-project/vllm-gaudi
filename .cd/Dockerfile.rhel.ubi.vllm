@@ -7,10 +7,12 @@ ARG SYNAPSE_VERSION=1.24.1
 # Use an exact revision (e.g. 695) or "latest" to auto-detect the newest available revision.
 # If you do not want metadata to show "latest", pass an exact SYNAPSE_REVISION.
 ARG SYNAPSE_REVISION=482
-ARG BASE_NAME=rhel9.6
-ARG OS_VERSION=9.6
 ARG OS_VERSION_MAJOR=9
-ARG OS_STRING=rhel96
+ARG OS_VERSION_MINOR=6
+# Derived from OS_VERSION_MAJOR/OS_VERSION_MINOR - override these instead of OS_VERSION/OS_STRING/BASE_NAME directly
+ARG OS_VERSION=${OS_VERSION_MAJOR}.${OS_VERSION_MINOR}
+ARG OS_STRING=rhel${OS_VERSION_MAJOR}${OS_VERSION_MINOR}
+ARG BASE_NAME=rhel${OS_VERSION_MAJOR}.${OS_VERSION_MINOR}
 ARG PT_VERSION=2.11.0
 ARG PT_MODULES_REPO_NAME=gaudi-pt-modules
 # for internal use - to support a different package name for RHEL 9.4 with Python 3.12
