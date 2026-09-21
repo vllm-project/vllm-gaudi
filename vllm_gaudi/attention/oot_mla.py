@@ -313,12 +313,6 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
         self.g_proj = mla_modules.g_proj
         self.skip_topk = skip_topk
-        # vllm#53906 added `self.fuse_qkv_rmsnorm`, which the base
-        # MultiHeadLatentAttentionWrapper.forward (inherited here, since we do not
-        # override forward) reads to pick the fused RMSNorm path. Because we bypass
-        # super().__init__(), replicate the assignment - pinned False because the
-        # fused kernel is Triton/CUDA-only.
-        self.fuse_qkv_rmsnorm = False
         # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
         # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
         # we do not override forward) reads and forwards to mla_attn. Because we
