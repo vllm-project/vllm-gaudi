@@ -1165,7 +1165,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'chunked_block_list', 'chunked_block_usage', 'chunked_block_groups', 'prep_initial_states',
         'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor',
         'query_start_loc', 'query_start_loc_p', 'padding_mask_flat', 'blocks_caching_range',
-        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks'
+        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks', 'image_seg_ids'
     ])
     return attention_metadata
 
@@ -1292,6 +1292,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.sliding_window = model_config.get_sliding_window()
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
+        # Gemma4 makes tokens within one image's span attend bidirectionally
+        # (prefix-LM). `is_mm_prefix_lm` is upstream's own predicate, which for
+        # Gemma4 resolves to use_bidirectional_attention == "vision". Still
+        # scoped to gemma4: the mask below hardcodes Gemma4's semantics
+        # (sliding layers only, clamped to the window), which do not hold for
+        # the other prefix-LM models that predicate also covers.
+        self._gemma4_mm_prefix = (self._get_model_type() == "gemma4"
+                                  and getattr(model_config, "is_mm_prefix_lm", False))
         self.block_size = cache_config.block_size
         # Preferred Gaudi paged-attention kernel granularity.
         # Final kernel block size is selected per KV group during
@@ -2191,6 +2199,45 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
         return mm_embeds, is_mm_embed
 
+    def _build_image_seg_ids(self, req_ids: list[str], target_bs: int, target_seq: int) -> Optional[torch.Tensor]:
+        """Build a [target_bs, target_seq] segment-id map for the Gemma4 image mask.
+
+        Entry is 0 for non-image tokens and k (>=1) for the k-th image of that
+        request. A per-image id rather than a boolean is what lets the mask
+        forbid image-A <-> image-B attention; ids only need to be distinct
+        within a row. Columns mirror ``_gather_mm_embeddings``: absolute
+        position ``p`` maps to ``p - num_computed_tokens``.
+        """
+        seg = torch.zeros(target_bs, target_seq, dtype=torch.int32, device='cpu')
+        found = False
+        for batch_row, req_id in enumerate(req_ids):
+            req_state = self.requests[req_id]
+            num_computed_tokens = req_state.num_computed_tokens
+            for k, mm_feature in enumerate(req_state.mm_features, start=1):
+                # use_bidirectional_attention == "vision": audio spans stay
+                # causal. Reachable -- 26B/31B ship an audio tower.
+                if mm_feature.modality == "audio":
+                    continue
+                pos_info = mm_feature.mm_position
+                col_lo = pos_info.offset - num_computed_tokens
+                col_hi = col_lo + pos_info.length
+                lo = max(col_lo, 0)
+                hi = min(col_hi, target_seq)
+                if lo >= hi:
+                    continue
+                is_embed = pos_info.is_embed
+                if is_embed is not None:
+                    # is_embed is indexed relative to the start of the mm span.
+                    sub = is_embed[lo - col_lo:hi - col_lo]
+                    idx = torch.nonzero(sub, as_tuple=True)[0] + lo
+                    seg[batch_row, idx] = k
+                else:
+                    seg[batch_row, lo:hi] = k
+                found = True
+        if not found:
+            return None
+        return async_h2d_copy(seg, device=self.device)
+
     def _get_model_mm_inputs(
         self,
         token_ids: torch.Tensor,
@@ -3038,6 +3085,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             window_context_blocks = align_and_pad(window_context_blocks_raw, (target_bs, sliding_block_size),
                                                   itertools.repeat(-1))
             window_context_blocks_t = async_h2d_copy(window_context_blocks, dtype=torch.int32).flatten()
+
+        image_seg_ids_t = None
+        if self._gemma4_mm_prefix:
+            image_seg_ids_t = self._build_image_seg_ids(req_ids, target_bs, target_seq)
+
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=query_lens,
             context_lens_tensor=context_lens,
@@ -3055,7 +3107,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             blocks_caching_range=blocks_caching_range,
             mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
             seqlens_offsets_for_blocks=seqlens_offsets_for_blocks,
-            window_block_list=window_context_blocks_t)
+            window_block_list=window_context_blocks_t,
+            image_seg_ids=image_seg_ids_t)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
                                 token_ids=[token_ids],
@@ -7532,6 +7585,22 @@ class HPUAttentionMetadataProcessor:
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
         return attn_metadata
 
+    def _mm_bidirectional_block(self, image_seg_ids: torch.Tensor, batch_size: int, seq_len: int, window_size: int,
+                                shift: int, device: torch.device) -> torch.Tensor:
+        """Boolean [batch, 1, seq_len, seq_len] term the Gemma4 image mask adds.
+
+        Upstream's compute_kv_seq_mask with MM_PREFIX_CLAMP_SW keeps
+        ``(causal AND sw_left) OR (mm_block AND sw_left)``; this is the second
+        disjunct. ``sw_left`` is one-sided ((i - j) < window_size), so forward
+        attention within an image is unrestricted while reaching back past the
+        window is clamped.
+        """
+        sw_left = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device),
+                             diagonal=shift - window_size + 1).view(1, 1, seq_len, seq_len)
+        seg_q = image_seg_ids.view(batch_size, 1, seq_len, 1)
+        seg_k = image_seg_ids.view(batch_size, 1, 1, seq_len)
+        return (seg_q > 0) & (seg_q == seg_k) & sw_left
+
     def _set_attn_bias_for_sliding_window(self, attn_metadata: HPUAttentionMetadataV1, batch_size: int, seq_len: int,
                                           window_size: int, device: torch.device,
                                           dtype: torch.dtype) -> HPUAttentionMetadataV1:
@@ -7555,11 +7624,16 @@ class HPUAttentionMetadataProcessor:
         prefill_metadata = attn_metadata
         shift = 0
 
+        image_seg_ids = getattr(attn_metadata, 'image_seg_ids', None)
+
         # FusedSDPA with window_size is only supported when the seq_len is multiple of the slice_size
         if self.prefill_use_fusedsdpa and self.use_window_sdpa and \
             seq_len >= self.slice_thld and self.slice_size != 0 and \
-            seq_len % self.slice_size == 0 and attn_metadata.block_list is None:
-            # no need to set sliding window mask, just use built-in window-sdpa
+            seq_len % self.slice_size == 0 and attn_metadata.block_list is None and \
+            image_seg_ids is None:
+            # no need to set sliding window mask, just use built-in window-sdpa.
+            # An image mask must fall through: built-in windowing cannot express
+            # the bidirectional block, so it has to be baked into a bias.
             return attn_metadata
 
         if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
@@ -7595,6 +7669,16 @@ class HPUAttentionMetadataProcessor:
             causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
             causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
 
+            if image_seg_ids is not None:
+                # The bidirectional term only ever opens forward pairs (j > i),
+                # and for a query in this chunk every such key is also in this
+                # chunk, so it never has to reach into the context columns:
+                # past_mask is by construction strictly backward (j < i) and
+                # already permitted by causal. Correct for chunk 2..N and for a
+                # prefix-cache hit landing mid-image.
+                causal_mask = causal_mask | self._mm_bidirectional_block(image_seg_ids, batch_size, seq_len,
+                                                                         window_size, shift, device)
+
             # TODO: Investigate further - Removing Padding cause accuracy issue
             # seq_lens_t = prefill_metadata.seq_lens_tensor
             # len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).lt(
@@ -7604,13 +7688,23 @@ class HPUAttentionMetadataProcessor:
             mask = torch.concat((past_mask, causal_mask), dim=-1)
             attn_bias = torch.where(mask, torch.tensor(0.0, dtype=dtype, device=device),
                                     torch.tensor(float('-inf'), dtype=dtype, device=device))
-        else:
+        elif image_seg_ids is None:
             # CAUSAL MASK without removing padding (CAUSAL+sliding window)
             # removing padding cause accuracy issue for images input
             tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
             mask = torch.tril(tensor, diagonal=shift)
             mask = torch.triu(mask, diagonal=shift - window_size + 1)
             attn_bias = torch.log(mask)
+        else:
+            # Gemma4 bidirectional image mask on a fresh prefill.
+            # Full-attn layers stay pure causal.
+            ones = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device)
+            window_causal = (torch.tril(ones, diagonal=shift)
+                             & torch.triu(ones, diagonal=shift - window_size + 1)).view(1, 1, seq_len, seq_len)
+            allowed = window_causal | self._mm_bidirectional_block(image_seg_ids, batch_size, seq_len, window_size,
+                                                                   shift, device)
+            attn_bias = torch.where(allowed, torch.tensor(0.0, dtype=dtype, device=device),
+                                    torch.tensor(float('-inf'), dtype=dtype, device=device))
 
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", window_attn_bias=attn_bias)
         return attn_metadata
