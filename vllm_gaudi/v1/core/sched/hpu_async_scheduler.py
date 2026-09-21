@@ -164,7 +164,18 @@ class HPUAsyncScheduler(AsyncScheduler):
         # (`is_stale=output_is_stale`); older branches call with just
         # (request, new_token_ids). Capturing extra keywords and forwarding
         # them verbatim to super() lets a single override work against both.
-        if request.num_output_placeholders == 0 and len(new_token_ids) > 0:
+        #
+        # is_stale=True marks the in-flight output frame of a request that was
+        # preempted while that frame was on the device. #48245 zeroes
+        # num_output_placeholders at preemption, so such a frame now matches the
+        # condition below even though upstream intends to deliver it. Swallowing
+        # it forces a regenerate, and under KV pressure the request is
+        # re-preempted the step it resumes, multiplying preemptions for the same
+        # delivered output. The spurious partial-chunk token above is not a stale
+        # delivery, so it stays discarded, and pre-#48245 branches never pass the
+        # keyword, making this a no-op there.
+        is_stale = kwargs.get("is_stale", False)
+        if request.num_output_placeholders == 0 and len(new_token_ids) > 0 and not is_stale:
             # If the discard flag was set (e.g. from preemption), reset it here
             # since we are effectively discarding the token anyway.
             #
