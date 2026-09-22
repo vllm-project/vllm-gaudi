@@ -69,6 +69,36 @@ class PunicaWrapperHPU(PunicaWrapperBase):
         dispatch_bgmv_linear(y, x, lora_a_stacked, lora_b_stacked, 0, scale)
         y = y.view_as(y_org)
 
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> None:
+        """Apply request-routed full linear weights to selected rows.
+
+        Used by `modules_to_save` adapters (e.g. a LoRA-replaced classification
+        head), where the adapter ships whole weights instead of an A/B pair.
+
+        Args:
+            y: Base layer output, shape (num_rows, out_features), updated in place.
+            x: Layer input, shape (num_rows, in_features).
+            weight_stacked: Replacement weights, shape (max_loras, 1, out_features, in_features).
+            bias_stacked: Replacement bias, shape (max_loras, out_features).
+            module_enabled: Per-adapter flag marking which adapters saved the module.
+        """
+        x = x.view(-1, x.shape[-1])
+        num_loras, _, out_features, _ = weight_stacked.shape
+        # Multiply against every adapter and gather the routed row afterwards, so the
+        # weight operand keeps a static shape for HPU graph compilation.
+        weights = weight_stacked.view(num_loras * out_features, -1).t().to(x.dtype)
+        all_y = (x @ weights).view(-1, num_loras, out_features)
+        indices = self.sampler_indices.clamp_min(0)
+        adapter_y = all_y.gather(1, indices.view(-1, 1, 1).expand(-1, 1, out_features)).squeeze(1)
+        y.copy_(self._select_full_linear_output(y, adapter_y, bias_stacked, module_enabled))
+
     def add_shrink(
         self,
         y: Union[tuple[torch.Tensor, ...], torch.Tensor],
