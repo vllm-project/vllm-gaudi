@@ -88,7 +88,14 @@ def _reset_executor_sleep_state(model_executor: Any) -> None:
         else:
             model_executor.sleeping_tags = set()
 
-    model_executor.is_sleeping = False
+    # Upstream vllm#44890 turned `is_sleeping` into a read-only property
+    # computed from `sleeping_tags` (Executor.is_sleeping -> bool(self.sleeping_tags)),
+    # so assigning it raises AttributeError on executors built against that
+    # vllm. Clearing sleeping_tags above already makes the property read
+    # False there; only assign the plain attribute on older executors where
+    # is_sleeping is still a writable instance attribute.
+    if not isinstance(getattr(type(model_executor), "is_sleeping", None), property):
+        model_executor.is_sleeping = False
 
 
 def _require_reconfigure_attr(config: Any, path: tuple[str, ...]) -> None:
