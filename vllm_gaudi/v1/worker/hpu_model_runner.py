@@ -977,7 +977,7 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
         # Vision embedding can be also wrapped in HPU graph once all the dynamic shape is removed.
         # Performance can be greatly improved.
         if htorch.utils.internal.is_lazy() and \
-           MULTIMODAL_REGISTRY.supports_multimodal_inputs(vllm_config.model_config) and self.is_mm_optimized:
+           vllm_config.model_config.supports_multimodal_inputs and self.is_mm_optimized:
             if hasattr(self.model, 'vision_tower'):
                 self.model.vision_tower = htorch.hpu.wrap_in_hpu_graph(self.model.vision_tower,
                                                                        disable_tensor_cache=False)
@@ -1359,7 +1359,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(model_config)
+        # Upstream PR #57913 moved this probe off MultiModalRegistry onto ModelConfig.
+        self.supports_mm_inputs = model_config.supports_multimodal_inputs
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
             self.model_config_copy = copy.deepcopy(self.model_config)
