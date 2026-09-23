@@ -17,4 +17,4 @@ fastapi<0.137
 # PixtralForConditionalGeneration cannot be inspected and every Mistral-Small-3.1
 # run dies in ModelConfig validation. vLLM's own CI pins transformers==5.16.1, so
 # it does not see this. Remove once vLLM adopts the new transformers API.
-transformers<5.17
+transformers<5.18
