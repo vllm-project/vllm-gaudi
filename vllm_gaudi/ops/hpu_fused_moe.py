@@ -330,8 +330,13 @@ def select_experts_from_routed(layer, hidden_states: torch.Tensor,
     router moved onto ``MoERunner``). ``RoutedExperts`` does, however, carry all
     the routing parameters, so we reproduce upstream's behaviour via the
     standalone ``select_experts`` helper. It is imported lazily because
-    ``experts.cpu_moe`` pulls CPU custom ops from ``vllm._custom_ops`` at
+    ``router.cpu_router`` pulls CPU custom ops from ``vllm._custom_ops`` at
     module import time.
+
+    Upstream PR #55355 relocated ``select_experts`` from
+    ``fused_moe.experts.cpu_moe`` to ``fused_moe.router.cpu_router`` (the
+    signature is unchanged; the module split factored CPU MoE routing out of
+    the monolithic experts file).
 
     Args:
         layer: The ``RoutedExperts`` instance holding the routing parameters.
@@ -341,7 +346,7 @@ def select_experts_from_routed(layer, hidden_states: torch.Tensor,
     Returns:
         A ``(topk_weights, topk_ids)`` tuple.
     """
-    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import select_experts
+    from vllm.model_executor.layers.fused_moe.router.cpu_router import select_experts
 
     # Models hand the runner a placeholder ``router_logits`` (== hidden_states)
     # and expect the runner to overwrite it with the gate output. If that step
@@ -831,6 +836,8 @@ def create_fused_moe_router(
     # Deepseek V4 vision routing bias parameters
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
+    # sequence-parallel padding parameters (upstream vLLM PR 56079+)
+    skip_padding: bool = False,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -878,6 +885,12 @@ def create_fused_moe_router(
     Hash Indices Table:
         hash_indices_table: Used to map input_ids to experts, needed for
             Deepseek V4
+
+    Sequence-parallel padding arguments (upstream vLLM PR 56079+):
+        skip_padding: Whether grouped routing should invalidate padding rows.
+            Forwarded to GroupedTopKRouter for signature parity; the guard it
+            enables (VLLM_MOE_SKIP_PADDING + a DeepEP-v2-kernel forward
+            context) is not exercised on HPU, so this is a no-op here.
 
     Vision routing bias arguments (upstream vLLM PR 54566+):
         bias_vl: Vision routing bias for image tokens (Deepseek V4).
@@ -927,6 +940,7 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
+            skip_padding=skip_padding,
         )
         return grouped_topk_router
 

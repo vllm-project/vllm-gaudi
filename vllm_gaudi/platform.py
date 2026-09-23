@@ -87,8 +87,7 @@ class HpuPlatform(Platform):
         if attn_selector_config.use_sparse:
             if not attn_selector_config.use_mla:
                 raise NotImplementedError("Sparse Attention is not supported on HPU.")
-            logger.warning("Sparse attention (DSA) is not implemented on HPU; running DSA layers as dense MLA "
-                           "(exact for sequences up to index_topk tokens, approximate beyond).")
+            logger.info("Using HPU DSA (DeepSeek Sparse Attention) with BF16 indexer.")
 
         if attn_selector_config.use_mla:
             logger.info("Using HPUAttentionMLA backend.")
@@ -98,6 +97,10 @@ class HpuPlatform(Platform):
         logger.info("Using HPUAttentionV1 backend.")
         return ("vllm_gaudi.v1.attention.backends."
                 "hpu_attn.HPUAttentionBackendV1")
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass  # DSA (DeepSeek Sparse Attention) indexer cache shares layer index with MLA attention
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -280,6 +283,36 @@ class HpuPlatform(Platform):
         # However, for HPU, speculative decoding is not supported with async scheduling.
         vllm_config.scheduler_config.async_scheduling = \
             vllm_config.scheduler_config.async_scheduling and vllm_config.speculative_config is None
+
+        cls._maybe_disable_chunked_mm_input(vllm_config)
+
+    @classmethod
+    def _maybe_disable_chunked_mm_input(cls, vllm_config: "VllmConfig") -> None:
+        """Prefill each image span in a single chunk, as CUDA does.
+
+        A prefix-LM image mask lets image tokens attend forward to later tokens
+        of the same image. If the scheduler cuts a chunk boundary through an
+        image, those keys are not in the KV cache yet when the head of the image
+        is computed -- an ordering problem no attention bias can express. So the
+        span has to be prefilled atomically.
+
+        Narrower than CUDA's hook (`platforms/cuda.py`), which triggers for every
+        `is_mm_prefix_lm` model: HPU only implements the mask for Gemma4, so
+        constraining the scheduler for any other prefix-LM model would cost
+        scheduling freedom with nothing to show for it.
+        """
+        model_config = vllm_config.model_config
+        scheduler_config = vllm_config.scheduler_config
+        # model_config may be None in tests.
+        if model_config is None or not getattr(scheduler_config, "is_multimodal_model", False):
+            return
+        if getattr(model_config.hf_config, "model_type", None) != "gemma4":
+            return
+        if not getattr(model_config, "is_mm_prefix_lm", False):
+            return
+        if not scheduler_config.disable_chunked_mm_input:
+            logger.info("Forcing --disable_chunked_mm_input for Gemma4 bidirectional image attention.")
+            scheduler_config.disable_chunked_mm_input = True
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
