@@ -40,12 +40,21 @@ class HpuCommunicator(DeviceCommunicatorBase):
             self.tp_group = get_tp_group()
         self.world_size = dist.get_world_size(group=self.cpu_group)
         self.rank = dist.get_rank(group=self.cpu_group)
+        # Resolved once here so that compiled all_reduce can pass a plain str to the functional op.
+        self.device_group_name = self.device_group.group_name if self.device_group is not None else None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         # FIXME(kzawora): this is a workaround for a bug in Habana PT bridge
         # occurring when PT_HPU_ENABLE_LAZY_COLLECTIVES=true env var is used
         # (which is required for tensor parallel HPUGraph inference)
         htorch.core.mark_step()
+        if torch.compiler.is_compiling() and self.device_group_name is not None:
+            # Emit the ops dynamo would remap dist.all_reduce to, but skip the remap itself: it inlines
+            # _functional_collectives, whose group resolution reads torch.distributed.config (a
+            # ConfigModule) and so bakes a slow config guard into every cache entry holding an all_reduce.
+            reduced = torch.ops._c10d_functional.all_reduce(input_, "sum", self.device_group_name)
+            input_.copy_(torch.ops._c10d_functional.wait_tensor(reduced))
+            return input_
         dist.all_reduce(input_, group=self.device_group)
         return input_
 
