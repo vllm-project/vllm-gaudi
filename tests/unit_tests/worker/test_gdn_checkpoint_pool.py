@@ -51,3 +51,22 @@ def test_free_block_returns_slot_to_pool():
 def test_free_unmapped_block_is_noop():
     m = GdnCheckpointMap(num_slots=1)
     m.free_block(block_id=999)  # must not raise
+
+
+def test_k_slot_index_never_exceeds_capacity():
+    # A K-slot map never exposes a slot index outside [1, K].
+    m = GdnCheckpointMap(num_slots=8)
+    seen = {m.alloc_store_slot(b) for b in range(100)}
+    assert max(seen) <= 8
+    assert 0 not in seen
+
+
+def test_translate_load_store_slots():
+    """load slot must be a lookup (0 on miss); store slot must allocate."""
+    m = GdnCheckpointMap(num_slots=4)
+    # first request: prefix miss (load block 5 unseen), store block 6
+    assert m.get_load_slot(5) == 0
+    s_store = m.alloc_store_slot(6)
+    assert s_store != 0
+    # second request reusing prefix at block 6: load must now hit
+    assert m.get_load_slot(6) == s_store
