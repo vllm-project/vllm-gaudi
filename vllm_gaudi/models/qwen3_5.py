@@ -26,32 +26,40 @@ def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
     return core_attn_out
 
 
+def _bcast(mask, ref):
+    """View a [rows] mask as [rows,1,1,...] to broadcast over ref's dims."""
+    return mask.view((-1, ) + (1, ) * (ref.dim() - 1))
+
+
 @torch._dynamo.disable
 def _gdn_ckpt_restore(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, load_slots):
     """Copy checkpoint snapshot -> live compact slot for hit requests.
 
-    load_slot == 0 means no snapshot; those rows are left untouched.
+    load_slot == 0 means no snapshot (miss/pad); those rows keep their live
+    value.  Uses integer index_select + torch.where instead of boolean
+    indexing, which HPU cannot lower.  Live slot 0 is the unused null slot,
+    so clamping the -1 padding index to 0 never collides with a real row.
     """
-    mask = load_slots > 0
-    if not bool(mask.any()):
-        return
-    src = load_slots[mask].long()
-    dst = base_slots[mask].long()
-    ssm_state.index_copy_(0, dst, ssm_ckpt.index_select(0, src).to(ssm_state.dtype))
-    conv_state.index_copy_(0, dst, conv_ckpt.index_select(0, src).to(conv_state.dtype))
+    dst = base_slots.clamp(min=0).long()
+    src = load_slots.clamp(min=0).long()
+    hit = load_slots > 0
+    ssm_cand = ssm_ckpt.index_select(0, src).to(ssm_state.dtype)
+    ssm_cur = ssm_state.index_select(0, dst)
+    ssm_state.index_copy_(0, dst, torch.where(_bcast(hit, ssm_cur), ssm_cand, ssm_cur))
+    conv_cand = conv_ckpt.index_select(0, src).to(conv_state.dtype)
+    conv_cur = conv_state.index_select(0, dst)
+    conv_state.index_copy_(0, dst, torch.where(_bcast(hit, conv_cur), conv_cand, conv_cur))
 
 
 @torch._dynamo.disable
 def _gdn_ckpt_export(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, store_slots):
     """Copy live compact slot -> checkpoint snapshot at block boundaries.
 
-    store_slot == 0 marks padding rows; those are skipped.
+    store_slot == 0 marks padding rows; they harmlessly dump into checkpoint
+    null slot 0 (never read).  No boolean indexing (HPU cannot lower it).
     """
-    mask = store_slots > 0
-    if not bool(mask.any()):
-        return
-    src = base_slots[mask].long()
-    dst = store_slots[mask].long()
+    dst = store_slots.clamp(min=0).long()
+    src = base_slots.clamp(min=0).long()
     ssm_ckpt.index_copy_(0, dst, ssm_state.index_select(0, src).to(ssm_ckpt.dtype))
     conv_ckpt.index_copy_(0, dst, conv_state.index_select(0, src).to(conv_ckpt.dtype))
 
