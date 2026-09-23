@@ -26,6 +26,36 @@ def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
     return core_attn_out
 
 
+@torch._dynamo.disable
+def _gdn_ckpt_restore(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, load_slots):
+    """Copy checkpoint snapshot -> live compact slot for hit requests.
+
+    load_slot == 0 means no snapshot; those rows are left untouched.
+    """
+    mask = load_slots > 0
+    if not bool(mask.any()):
+        return
+    src = load_slots[mask].long()
+    dst = base_slots[mask].long()
+    ssm_state.index_copy_(0, dst, ssm_ckpt.index_select(0, src).to(ssm_state.dtype))
+    conv_state.index_copy_(0, dst, conv_ckpt.index_select(0, src).to(conv_state.dtype))
+
+
+@torch._dynamo.disable
+def _gdn_ckpt_export(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, store_slots):
+    """Copy live compact slot -> checkpoint snapshot at block boundaries.
+
+    store_slot == 0 marks padding rows; those are skipped.
+    """
+    mask = store_slots > 0
+    if not bool(mask.any()):
+        return
+    src = base_slots[mask].long()
+    dst = store_slots[mask].long()
+    ssm_ckpt.index_copy_(0, dst, ssm_state.index_select(0, src).to(ssm_ckpt.dtype))
+    conv_ckpt.index_copy_(0, dst, conv_state.index_select(0, src).to(conv_ckpt.dtype))
+
+
 class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
     def __init__(self, *args, **kwargs):
@@ -33,6 +63,11 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         # cache_group_idx: set later by model runner for hybrid cache
         # lookup.  Stored as tensor so torch.compile treats it as dynamic.
         self.cache_group_idx = None
+
+        # kv_ckpt: (conv_ckpt, ssm_ckpt) bounded checkpoint tensors for
+        # compact-GDN prefix caching; set by the runner after bind_kv_cache,
+        # None when the checkpoint path is inactive.
+        self.kv_ckpt = None
 
         # mamba_chunk_size: use explicit config value or default to 128
         # for HPU bucket alignment.
@@ -75,6 +110,16 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
             indices = indices.index_select(0, cg.view(1)).squeeze(0)
         return indices
 
+    def _resolve_group_row(self, t):
+        """Select this layer's group row from a [num_groups, bs] tensor."""
+        if t is None:
+            return None
+        if t.dim() > 1:
+            cg = self.cache_group_idx
+            assert cg is not None
+            t = t.index_select(0, cg.view(1)).squeeze(0)
+        return t
+
     def _extract_metadata(self, num_tokens):
         """Extract forward-context metadata into plain tensors.
 
@@ -84,10 +129,12 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            return (False, None, None, None, None, None, None, 0, 0, 0, 0, None)
+            return (False, None, None, None, None, None, None, 0, 0, 0, 0, None, None, None)
 
         is_prompt = bool(getattr(attn_metadata, "is_prompt", False))
         state_indices = self._resolve_state_indices(attn_metadata)
+        load_slots = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_load_slots", None))
+        store_slots = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_store_slots", None))
 
         conv_state = self.kv_cache[0]
         ssm_state = self.kv_cache[1]
@@ -111,14 +158,25 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         if is_prompt and state_indices is not None:
             prefill_num_seqs = int(state_indices.numel())
             prefill_seq_len = (num_tokens // prefill_num_seqs if prefill_num_seqs > 0 else 0)
+            # Restore checkpoint snapshots into the live slots before reading
+            # initial_state, so a prefix-cache hit resumes from the frozen state.
+            if load_slots is not None and self.kv_ckpt is not None:
+                conv_ckpt, ssm_ckpt = self.kv_ckpt
+                _gdn_ckpt_restore(conv_state, ssm_state, conv_ckpt, ssm_ckpt, state_indices, load_slots)
             initial_state = ssm_state[state_indices].contiguous()
+            # Avoid scatter_nd from boolean indexing
+            mask = None
             if has_initial_state is not None:
-                # Avoid scatter_nd from boolean indexing
                 mask = has_initial_state.bool().view(-1, 1, 1, 1).to(initial_state.dtype)
+            if load_slots is not None:
+                hit = (load_slots > 0).view(-1, 1, 1, 1).to(initial_state.dtype)
+                mask = hit if mask is None else torch.maximum(mask, hit)
+            if mask is not None:
                 initial_state = initial_state * mask
 
         return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
-                num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state)
+                num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots,
+                store_slots)
 
     def forward(
         self,
@@ -140,8 +198,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
         # === Metadata extraction (natural graph break) ===============
         (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
-         num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len,
-         initial_state) = self._extract_metadata(num_tokens)
+         num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots,
+         store_slots) = self._extract_metadata(num_tokens)
 
         # === Part 1: Input Projection ================================
         if hasattr(self, 'in_proj_qkv'):
@@ -242,6 +300,10 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 ssm_state,
                 state_indices,
             )
+            # Export the freshly written live state to its checkpoint slot.
+            if store_slots is not None and self.kv_ckpt is not None:
+                conv_ckpt, ssm_ckpt = self.kv_ckpt
+                _gdn_ckpt_export(conv_state, ssm_state, conv_ckpt, ssm_ckpt, state_indices, store_slots)
 
             non_spec_out = core_attn_out_result.squeeze(0)
             core_attn_out[:non_spec_out.shape[0]] = non_spec_out
@@ -277,6 +339,12 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                     ssm_state_indices=state_indices,
                     use_qk_l2norm_in_kernel=True,
                 )
+            # Export live state to its checkpoint slot; completed blocks get
+            # their final boundary state, incomplete blocks are overwritten later.
+            if store_slots is not None and self.kv_ckpt is not None:
+                conv_ckpt, ssm_ckpt = self.kv_ckpt
+                _gdn_ckpt_export(conv_state, ssm_state, conv_ckpt, ssm_ckpt, state_indices[:num_decodes],
+                                 store_slots[:num_decodes])
 
             non_spec_out = core_attn_out_result.squeeze(0)
             if non_spec_out.shape[0] == core_attn_out.shape[0]:
