@@ -6,17 +6,18 @@ Some MLA checkpoints carry no RoPE component. GLM-5.3-Flash is one:
 ``qk_rope_head_dim=0`` with ``qk_nope_head_dim=256``, so ``qk_head_dim`` equals
 ``qk_nope_head_dim``.
 
-``forward_mha`` splits ``latent_vec_k`` into ``(k_c_normed, k_pe)`` and then
-reshapes ``k_pe``. With a zero-sized RoPE part the split is well defined and
-yields an empty tensor, but the reshape is not::
+``forward_mha`` splits ``latent_vec_k`` into ``(k_c_normed, k_pe)``, gives
+``k_pe`` a head axis, and concatenates it onto ``k_nope``. ``latent_vec_k`` is
+2-D there, so that head axis is an unsqueeze; spelling it as a reshape is what
+breaks once ``k_pe`` is empty::
 
     k_pe.view(-1, 1, 0)
     RuntimeError: cannot reshape tensor of 0 elements into shape [-1, 1, 0]
     because the unspecified dimension size -1 can be any value and is ambiguous
 
-Only the reshape and the concat consuming it need guarding -- ``split`` and
-``cat`` are both fine on a zero-sized dim. These tests pin that behaviour down
-so the distinction does not get lost.
+Nothing else on the path minds a zero-sized dim -- ``split``, ``expand`` and
+``cat`` are all well defined, and ``k`` comes out contiguous either way. These
+tests pin that down so the reshape does not come back.
 """
 
 import pytest
@@ -29,50 +30,38 @@ NUM_HEADS = 16
 TOKENS = 4
 
 
-def _k_from_latent(latent_vec_k, qk_rope_head_dim, guarded):
-    """The k-assembly half of ``forward_mha``, with and without the guard."""
+def _assemble_k(latent_vec_k, qk_rope_head_dim, kv_nope):
+    """The k-assembly half of ``forward_mha``."""
     k_c_normed, k_pe = latent_vec_k.split([KV_LORA_RANK, qk_rope_head_dim], dim=-1)
+    k_pe = k_pe.unsqueeze(1)
 
-    if guarded:
-        if qk_rope_head_dim > 0:
-            k_pe = k_pe.view(-1, 1, qk_rope_head_dim)
-    else:
-        k_pe = k_pe.view(-1, 1, qk_rope_head_dim)
-
-    tokens = k_c_normed.shape[0]
-    kv_nope = torch.randn(tokens, NUM_HEADS, QK_NOPE_HEAD_DIM + V_HEAD_DIM)
     k_nope, v = kv_nope.split([QK_NOPE_HEAD_DIM, V_HEAD_DIM], dim=-1)
-
-    if guarded and qk_rope_head_dim == 0:
-        k = k_nope
-    else:
-        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
-    return k, v
+    k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+    return k_c_normed, k, v
 
 
 @pytest.mark.parametrize("qk_rope_head_dim", [0, 64])
 def test_k_assembly_handles_zero_rope_dim(qk_rope_head_dim):
-    """k must come out as [tokens, heads, qk_nope + qk_rope] for either case."""
+    """k must be [tokens, heads, qk_nope + qk_rope] and contiguous either way."""
     latent = torch.randn(TOKENS, KV_LORA_RANK + qk_rope_head_dim)
+    kv_nope = torch.randn(TOKENS, NUM_HEADS, QK_NOPE_HEAD_DIM + V_HEAD_DIM)
 
-    k, v = _k_from_latent(latent, qk_rope_head_dim, guarded=True)
+    k_c_normed, k, v = _assemble_k(latent, qk_rope_head_dim, kv_nope)
 
+    assert k_c_normed.shape == (TOKENS, KV_LORA_RANK)
     assert k.shape == (TOKENS, NUM_HEADS, QK_NOPE_HEAD_DIM + qk_rope_head_dim)
     assert v.shape == (TOKENS, NUM_HEADS, V_HEAD_DIM)
+    assert k.is_contiguous()
 
 
-def test_unguarded_reshape_is_what_fails():
-    """Pin down that the reshape, not the split or the concat, is the problem."""
-    latent = torch.randn(TOKENS, KV_LORA_RANK)
-
-    # split is fine with a zero-sized piece
-    k_c_normed, k_pe = latent.split([KV_LORA_RANK, 0], dim=-1)
-    assert k_pe.numel() == 0
-
-    # cat is fine too
-    k_nope = torch.randn(TOKENS, NUM_HEADS, QK_NOPE_HEAD_DIM)
-    torch.cat((k_nope, k_pe.view(TOKENS, 1, 0).expand(TOKENS, NUM_HEADS, 0)), dim=-1)
-
-    # the ambiguous reshape is not
+def test_unsqueeze_is_the_reshape_without_the_ambiguity():
+    """The head axis must come from unsqueeze: the reshape is what fails at 0."""
+    k_pe = torch.randn(TOKENS, 0)
     with pytest.raises(RuntimeError, match="ambiguous"):
         k_pe.view(-1, 1, 0)
+    assert k_pe.unsqueeze(1).shape == (TOKENS, 1, 0)
+
+    # For a non-empty RoPE part the two spellings are the same tensor, which is
+    # why the unsqueeze is safe to use unconditionally.
+    k_pe = torch.randn(TOKENS, 64)
+    assert torch.equal(k_pe.view(-1, 1, 64), k_pe.unsqueeze(1))
