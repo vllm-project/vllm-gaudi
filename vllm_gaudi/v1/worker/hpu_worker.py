@@ -32,7 +32,9 @@ from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerO
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.utils import is_fake_hpu
-from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, _GDN_MAMBA_TYPES, _rebind_moe_expert_weights)
+from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, _GDN_MAMBA_TYPES, _rebind_moe_expert_weights,
+                                                   resolve_gdn_prefix_cache_mode)
+from vllm_gaudi.v1.worker.gdn_checkpoint_pool import gdn_ckpt_num_slots
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -477,6 +479,42 @@ class HPUWorker(WorkerBase):
                     "real_attn=%s, real_mamba=%s).", (1 - factor) * 100, factor, format_bytes(padded_page),
                     format_bytes(real_attn), format_bytes(real_mamba))
                 available = adjusted
+
+        if has_attn and has_gdn and compact_gdn:
+            # Compact GDN keeps live state fixed, but with prefix caching the
+            # runner allocates a per-group checkpoint pool of K+1 states per
+            # GDN layer ON TOP of the num_blocks budget. Reserve those bytes
+            # so num_blocks is sized to leave room for the pool (else OOM).
+            # K scales with num_blocks; estimate from a pre-reservation
+            # num_blocks (>= final), so the reservation is safe by construction.
+            ckpt_enabled, _ = resolve_gdn_prefix_cache_mode(compact_gdn, self.cache_config.enable_prefix_caching, True)
+            if ckpt_enabled:
+                from vllm.v1.core.kv_cache_utils import (get_kv_cache_groups, _get_kv_cache_bytes_per_block)
+                groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+                num_gdn_groups = sum(1 for g in groups
+                                     if isinstance(g.kv_cache_spec, MambaSpec)
+                                     and g.kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES)
+                num_gdn_layers = sum(1 for s in kv_cache_spec.values()
+                                     if isinstance(s, MambaSpec) and s.mamba_type in _GDN_MAMBA_TYPES)
+                per_state = next(s.page_size_bytes for s in kv_cache_spec.values()
+                                 if isinstance(s, MambaSpec) and s.mamba_type in _GDN_MAMBA_TYPES)
+                bpb = _get_kv_cache_bytes_per_block(groups)
+                if num_gdn_groups and bpb:
+                    gdn_max_reqs = self.scheduler_config.max_num_seqs
+                    for env_key in ("VLLM_PROFILE_PROMPT", "VLLM_PROFILE_DECODE"):
+                        cfg = os.environ.get(env_key)
+                        if cfg:
+                            gdn_max_reqs = max(gdn_max_reqs, int(cfg.split(",")[0]))
+                    mem_fraction = float(os.environ.get("VLLM_GDN_CKPT_MEM_FRACTION", "0.1") or 0.1)
+                    explicit_slots = int(os.environ.get("VLLM_GDN_CKPT_SLOTS", "0") or 0)
+                    nb_est = int(available) // bpb
+                    k_est = gdn_ckpt_num_slots(nb_est, num_gdn_groups, mem_fraction, gdn_max_reqs, explicit_slots)
+                    reserve = num_gdn_layers * (k_est + 1) * per_state
+                    logger.info(
+                        "Compact GDN ckpt pool reservation: %s (K_est=%d, "
+                        "gdn_layers=%d, groups=%d, per_state=%s, nb_est=%d).", format_bytes(reserve), k_est,
+                        num_gdn_layers, num_gdn_groups, format_bytes(per_state), nb_est)
+                    available -= reserve
 
         if has_attn and has_standard_mamba:
             # Standard Mamba2 + ATN hybrids (e.g. Granite): the

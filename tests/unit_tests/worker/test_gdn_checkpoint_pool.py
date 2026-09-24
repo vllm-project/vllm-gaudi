@@ -1,5 +1,31 @@
 import pytest
-from vllm_gaudi.v1.worker.gdn_checkpoint_pool import GdnCheckpointMap
+from vllm_gaudi.v1.worker.gdn_checkpoint_pool import GdnCheckpointMap, gdn_ckpt_num_slots
+
+
+def test_num_slots_explicit_override_wins():
+    # Env override is used verbatim (still capped below num_blocks).
+    assert gdn_ckpt_num_slots(num_blocks=1000, num_gdn_groups=3, mem_fraction=0.1, gdn_max_reqs=8,
+                              explicit_slots=64) == 64
+
+
+def test_num_slots_auto_formula():
+    # k = mem_fraction*(num_blocks+1)/groups - 1, floored/capped elsewhere.
+    k = gdn_ckpt_num_slots(num_blocks=2244, num_gdn_groups=3, mem_fraction=0.1, gdn_max_reqs=8, explicit_slots=0)
+    assert k == int(0.1 * 2245 / 3) - 1  # == 73
+
+
+def test_num_slots_floored_at_liveness():
+    # Tiny fraction -> floor at in-flight liveness (gdn_max_reqs).
+    assert gdn_ckpt_num_slots(num_blocks=1000, num_gdn_groups=3, mem_fraction=0.001, gdn_max_reqs=16,
+                              explicit_slots=0) == 16
+
+
+def test_num_slots_capped_below_num_blocks():
+    # Cap keeps the compact win even with a huge fraction or override.
+    assert gdn_ckpt_num_slots(num_blocks=10, num_gdn_groups=1, mem_fraction=5.0, gdn_max_reqs=8,
+                              explicit_slots=0) == 9
+    assert gdn_ckpt_num_slots(num_blocks=10, num_gdn_groups=1, mem_fraction=0.1, gdn_max_reqs=4,
+                              explicit_slots=100) == 9
 
 
 def test_miss_returns_null_slot():

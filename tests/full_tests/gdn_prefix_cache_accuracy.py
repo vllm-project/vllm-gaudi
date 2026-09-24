@@ -26,7 +26,7 @@ from vllm import LLM, SamplingParams
 
 MODEL = os.getenv("GDN_PC_TEST_MODEL", "Qwen/Qwen3-Next-80B-A3B-Instruct")
 
-# Bounded sizing so the test fits one card; the shared prefix is ~2K tokens,
+# Bounded sizing so the test fits one card; the shared prefix is ~1K tokens,
 # so full native context (can be 256K) is never needed. Env-overridable.
 MAX_MODEL_LEN = int(os.getenv("GDN_PC_MAX_LEN", "8192"))
 MAX_NUM_SEQS = int(os.getenv("GDN_PC_MAX_SEQS", "8"))
@@ -34,11 +34,35 @@ GPU_MEM_UTIL = float(os.getenv("GDN_PC_GPU_MEM_UTIL", "0.9"))
 # Slots >> distinct blocks in this 2-request test, so Phase 1 never evicts.
 CKPT_SLOTS = os.getenv("GDN_PC_CKPT_SLOTS", "128")
 
-# A shared prefix long enough to span at least one mamba block boundary.
-SHARED_PREFIX = ("The following is a detailed technical description that both "
-                 "requests share verbatim so the second request hits the prefix "
-                 "cache. ") * 32
-PROMPTS = [SHARED_PREFIX + " First continuation:", SHARED_PREFIX + " Second continuation:"]
+# A shared prefix long enough to span several mamba block boundaries. It must
+# be varied, coherent text rather than one repeated sentence: a repeated
+# sentence drives greedy decode into a degenerate loop where the first-token
+# logits sit on a knife-edge, so the unavoidable bf16 rounding of the cached
+# boundary state (the baseline recomputes the whole prefix in fp32) flips a
+# token and the exact-match check fails for a reason unrelated to correctness.
+_PARAS = (
+    "The history of computing spans several centuries, beginning with mechanical "
+    "calculators and progressing through electromechanical relays to the first "
+    "electronic digital machines built during the middle of the twentieth century. ",
+    "Early designs separated storage from processing, an idea that remains central "
+    "to nearly every general-purpose computer in use today, from tiny embedded "
+    "controllers to large distributed clusters spread across many datacenters. ",
+    "As transistors replaced vacuum tubes, machines became smaller, cheaper, and "
+    "far more reliable, enabling the personal computing revolution and eventually "
+    "the mobile devices that billions of people now carry in their pockets. ",
+    "Programming languages evolved from raw machine code toward high-level "
+    "abstractions that let engineers express complex ideas concisely while "
+    "compilers handled the tedious mapping down to individual instructions. ",
+    "Networking then connected isolated machines into a global fabric, giving us "
+    "electronic mail, the world wide web, streaming media, and the interconnected "
+    "services that define modern digital life for people everywhere. ",
+    "More recently, accelerators built for dense linear algebra made it practical "
+    "to train enormous statistical models on unprecedented quantities of text, "
+    "images, and audio gathered from across the public internet. ",
+)
+SHARED_PREFIX = "".join(_PARAS) * 3
+PROMPTS = [SHARED_PREFIX + " In summary, the first key point is",
+           SHARED_PREFIX + " In summary, the second key point is"]
 
 
 def _run(enable_prefix_caching: bool):

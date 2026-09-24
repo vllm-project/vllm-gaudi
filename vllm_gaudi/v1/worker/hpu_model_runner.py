@@ -37,7 +37,7 @@ from vllm_gaudi.extension.runtime import clear_config, finalize_config, get_conf
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
-from vllm_gaudi.v1.worker.gdn_checkpoint_pool import GdnCheckpointMap
+from vllm_gaudi.v1.worker.gdn_checkpoint_pool import GdnCheckpointMap, gdn_ckpt_num_slots
 
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.model_executor.layers.attention import Attention
@@ -1180,7 +1180,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'window_block_usage', 'window_block_groups', 'window_attn_bias', 'chunked_block_mapping', 'chunked_attn_bias',
         'chunked_block_list', 'chunked_block_usage', 'chunked_block_groups', 'prep_initial_states',
         'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor',
-        'gdn_ckpt_load_slots', 'gdn_ckpt_store_slots',
+        'gdn_ckpt_load_slots', 'gdn_ckpt_store_slots', 'gdn_ckpt_chunks_to_slot', 'gdn_ckpt_blocks_to_slot',
         'query_start_loc', 'query_start_loc_p', 'padding_mask_flat', 'blocks_caching_range',
         'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks', 'image_seg_ids'
     ])
@@ -1479,6 +1479,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # caching are both on; default False when there are no GDN layers.
         self._gdn_ckpt_enabled = getattr(self, "_gdn_ckpt_enabled", False)
         self._gdn_ckpt_slots = int(os.environ.get("VLLM_GDN_CKPT_SLOTS", "0") or 0)
+        # Deterministic K when VLLM_GDN_CKPT_SLOTS is unset: size the ckpt pool
+        # as a fraction of the equivalent non-compact GDN footprint (num_blocks
+        # states/layer), divided by num_gdn_groups since the pool is per-group.
+        self._gdn_ckpt_mem_fraction = float(os.environ.get("VLLM_GDN_CKPT_MEM_FRACTION", "0.1") or 0.1)
         self._gdn_ckpt_tensors: dict[str, tuple] = {}
         self._gdn_ckpt_maps: dict[int, GdnCheckpointMap] = {}
         self._gdn_ckpt_k: int = 0
@@ -1665,10 +1669,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
 
-    def _gdn_ckpt_slots_for_blocks(self, req_indices, load_block_idx, store_block_idx, target_bs):
+    def _gdn_ckpt_slots_for_blocks(self, req_indices, load_block_idx, store_block_idx, first_scheduled_block_idx,
+                                   target_bs):
         """Map per-request (load, store) block ids to checkpoint slots.
 
         load = pure lookup (0 on miss -> no restore); store = allocate.
+        A restore is only valid when the request resumes exactly at a completed
+        block boundary: the last computed block precedes the first scheduled
+        block (load_block_idx < first_scheduled_block_idx). An intra-block chunk
+        continuation shares the in-progress block (indices equal) and its state
+        is live in base_slot -- restoring there would clobber it with a slot the
+        prior chunk never wrote. block_id keys are also recycled across requests,
+        so probing with no genuine prefix would return a stale slot.
         Returns two [num_groups, target_bs] int32 tensors.
         """
         load_rows, store_rows = [], []
@@ -1678,11 +1690,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if group_idx in self._gdn_ckpt_maps:
                 bt = self.input_batch.block_table[group_idx].get_cpu_tensor()
                 cmap = self._gdn_ckpt_maps[group_idx]
+                dbg = os.environ.get("GDN_EVICT_DEBUG")
                 for i, req_idx in enumerate(req_indices):
-                    load_bid = int(bt[req_idx, int(load_block_idx[i])])
                     store_bid = int(bt[req_idx, int(store_block_idx[i])])
-                    load_slots[i] = cmap.get_load_slot(load_bid)
                     store_slots[i] = cmap.alloc_store_slot(store_bid)
+                    at_boundary = int(load_block_idx[i]) < int(first_scheduled_block_idx[i])
+                    if at_boundary:
+                        load_bid = int(bt[req_idx, int(load_block_idx[i])])
+                        load_slots[i] = cmap.get_load_slot(load_bid)
+                    if dbg:
+                        import sys
+                        rid = self.input_batch.req_ids[req_idx] if req_idx < len(self.input_batch.req_ids) else "?"
+                        print(f"SLOTDBG g={group_idx} req={rid} ridx={req_idx} boundary={int(at_boundary)} "
+                              f"load_bidx={int(load_block_idx[i])} first_sched_bidx={int(first_scheduled_block_idx[i])} "
+                              f"store_bidx={int(store_block_idx[i])} "
+                              f"store_bid={store_bid} store_slot={int(store_slots[i])} "
+                              f"load_bid={int(bt[req_idx, int(load_block_idx[i])])} "
+                              f"load_slot={int(load_slots[i])}",
+                              file=sys.stderr, flush=True)
             load_rows.append(load_slots)
             store_rows.append(store_slots)
         return torch.stack(load_rows, dim=0), torch.stack(store_rows, dim=0)
@@ -3001,11 +3026,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                         target_bs)
                 if self._gdn_ckpt_enabled:
                     (load_ckpt_slots_cpu, store_ckpt_slots_cpu) = self._gdn_ckpt_slots_for_blocks(
-                        req_indices, block_idx_last_computed_token_cpu, block_idx_last_scheduled_token_cpu, target_bs)
+                        req_indices, block_idx_last_computed_token_cpu, block_idx_last_scheduled_token_cpu,
+                        block_idx_first_scheduled_token_cpu, target_bs)
             else:
                 zeros = [0] * len(req_indices)
                 load_state_indices_cpu = store_state_indices_cpu = \
                     self.prepare_mamba_state_idxs(req_indices, zeros, target_bs)
+
+            if os.environ.get("GDN_EVICT_DEBUG"):
+                import sys
+                _n = len(contents.req_ids)
+                _bs = [self._gdn_req_to_base_slot.get(r) for r in contents.req_ids]
+                print(f"RUNDBG pc={self.use_prefix_caching} reqs={list(contents.req_ids)} "
+                      f"nct={num_computed_tokens_p_cpu[:_n].tolist()} "
+                      f"hinit={has_initial_states_cpu[:_n].tolist()} "
+                      f"base_slots={_bs} "
+                      f"load_sidx_g0={load_state_indices_cpu[0][:_n].tolist()} "
+                      f"store_sidx_g0={store_state_indices_cpu[0][:_n].tolist()}",
+                      file=sys.stderr, flush=True)
 
             if self.use_prefix_caching:
                 assert len(contents.req_ids) == 1
@@ -3026,6 +3064,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
                 all_blocks_caching_ranges_cpu = []
                 all_mamba_chunks_to_block_mappings_cpu = []
+                # Compact ckpt pool: per-block store slots (chunk->slot, block->slot).
+                all_ckpt_chunks_to_slot_cpu = []
+                all_ckpt_blocks_to_slot_cpu = []
                 for group_idx in range(len(self.input_batch.block_table.block_tables)):
                     block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
                     first = block_idx_first_scheduled_token_cpu[0]
@@ -3054,8 +3095,33 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     all_blocks_caching_ranges_cpu.append(bcr_padded)
                     all_mamba_chunks_to_block_mappings_cpu.append(mamba_chunks_to_block_mapping_cpu)
 
+                    if self._gdn_ckpt_enabled:
+                        # Translate each boundary block id to a checkpoint store
+                        # slot so compact prefill can snapshot every boundary
+                        # (not just the final one) into the bounded ckpt pool.
+                        # Slot 0 is the null slot; pad chunks/blocks and non-ckpt
+                        # groups land there.  One row per group keeps alignment
+                        # with cache_group_idx.
+                        ckpt_chunks_to_slot_cpu = torch.zeros(nphysical_chunks, dtype=torch.int32, device='cpu')
+                        ckpt_blocks_to_slot_cpu = torch.zeros(max_cached_blocks, dtype=torch.int32, device='cpu')
+                        if group_idx in self._gdn_ckpt_maps:
+                            cmap = self._gdn_ckpt_maps[group_idx]
+                            slot_range = torch.tensor(
+                                [cmap.alloc_store_slot(int(b)) for b in blocks_caching_range.tolist()],
+                                dtype=torch.int32,
+                                device='cpu')
+                            ckpt_chunks_to_slot_cpu[chunk_indices] = slot_range
+                            ckpt_blocks_to_slot_cpu[:n_blocks] = slot_range
+                        all_ckpt_chunks_to_slot_cpu.append(ckpt_chunks_to_slot_cpu)
+                        all_ckpt_blocks_to_slot_cpu.append(ckpt_blocks_to_slot_cpu)
+
                 all_blocks_caching_ranges_cpu = torch.stack(all_blocks_caching_ranges_cpu, dim=0)
                 all_mamba_chunks_to_block_mappings_cpu = torch.stack(all_mamba_chunks_to_block_mappings_cpu, dim=0)
+                if all_ckpt_chunks_to_slot_cpu:
+                    all_ckpt_chunks_to_slot_cpu = torch.stack(all_ckpt_chunks_to_slot_cpu, dim=0)
+                    all_ckpt_blocks_to_slot_cpu = torch.stack(all_ckpt_blocks_to_slot_cpu, dim=0)
+                else:
+                    all_ckpt_chunks_to_slot_cpu = all_ckpt_blocks_to_slot_cpu = None
 
                 computed_tokens = context_lens[0]
                 scheduled_tokens = query_lens[0]
@@ -3111,10 +3177,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mamba_chunks_to_block_mapping = async_h2d_copy(all_mamba_chunks_to_block_mappings_cpu,
                                                                device=self.device)
                 seqlens_offsets_for_blocks = async_h2d_copy(seqlens_offsets_for_blocks_cpu, device=self.device)
+                gdn_ckpt_chunks_to_slot = (async_h2d_copy(all_ckpt_chunks_to_slot_cpu, device=self.device)
+                                           if all_ckpt_chunks_to_slot_cpu is not None else None)
+                gdn_ckpt_blocks_to_slot = (async_h2d_copy(all_ckpt_blocks_to_slot_cpu, device=self.device)
+                                           if all_ckpt_blocks_to_slot_cpu is not None else None)
             else:
                 blocks_caching_range = None
                 mamba_chunks_to_block_mapping = None
                 seqlens_offsets_for_blocks = None
+                gdn_ckpt_chunks_to_slot = None
+                gdn_ckpt_blocks_to_slot = None
 
         else:
             prep_initial_states = None
@@ -3129,6 +3201,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             blocks_caching_range = None
             seqlens_offsets_for_blocks = None
             mamba_chunks_to_block_mapping = None
+            gdn_ckpt_chunks_to_slot = None
+            gdn_ckpt_blocks_to_slot = None
 
         query_lens = async_h2d_copy(query_lens, dtype=torch.int32)
         token_ids = async_h2d_copy(token_ids, dtype=torch.int32)
@@ -3168,6 +3242,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             store_indices_tensor=store_indices_tensor,
             gdn_ckpt_load_slots=gdn_ckpt_load_slots,
             gdn_ckpt_store_slots=gdn_ckpt_store_slots,
+            gdn_ckpt_chunks_to_slot=gdn_ckpt_chunks_to_slot,
+            gdn_ckpt_blocks_to_slot=gdn_ckpt_blocks_to_slot,
             query_start_loc=query_start_loc_p,
             padding_mask_flat=padding_mask_flat,
             blocks_caching_range=blocks_caching_range,
@@ -3430,10 +3506,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                        padded_batch_size)
                 store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
                                                                         padded_batch_size)
-                if self._gdn_ckpt_enabled:
-                    (load_ckpt_slots_cpu, store_ckpt_slots_cpu) = self._gdn_ckpt_slots_for_blocks(
-                        req_indices, block_idx_last_computed_token_cpu, block_idx_last_scheduled_token_cpu,
-                        padded_batch_size)
+                # Decode never resumes from a checkpoint: the request's state is
+                # live and continuous in base_slot, so the ckpt pool is a
+                # prefill-only concern. Leave load/store slots unset -> decode
+                # behaves exactly as with PC off.
             else:
                 zeros = [0] * len(req_indices)
                 load_state_indices_cpu = store_state_indices_cpu = \
@@ -6802,8 +6878,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # group. Key by position to restore the pre-#51718 sharing.
         mamba_state_cache: dict[tuple, tuple[torch.Tensor, ...]] = {}
 
-        def _mamba_state_tensors(spec: MambaSpec, layer_pos: int, num_slots: int) -> tuple[torch.Tensor, ...]:
-            key = (spec, layer_pos, num_slots)
+        def _mamba_state_tensors(spec: MambaSpec,
+                                 layer_pos: int,
+                                 num_slots: int,
+                                 variant=None) -> tuple[torch.Tensor, ...]:
+            key = (spec, layer_pos, num_slots, variant)
             tensors = mamba_state_cache.get(key)
             if tensors is None:
                 tensors = tuple(
@@ -6908,11 +6987,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                      compact_total, gdn_max_reqs, self._num_gdn_groups, num_blocks + 1)
                         kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, compact_total)
                         if self._gdn_ckpt_enabled:
-                            k = self._gdn_ckpt_slots or (4 * self._gdn_max_reqs)
+                            k = gdn_ckpt_num_slots(num_blocks, self._num_gdn_groups, self._gdn_ckpt_mem_fraction,
+                                                   self._gdn_max_reqs, self._gdn_ckpt_slots)
+                            if self._gdn_ckpt_k != k:
+                                per_state_mib = kv_cache_spec.page_size_bytes / (1024 * 1024)
+                                logger.info(
+                                    "GDN ckpt pool: K=%d slots/group (%s), %.2f MiB/state, "
+                                    "%.1f MiB/layer, num_blocks=%d, mem_fraction=%.3f", k,
+                                    "env override" if self._gdn_ckpt_slots else "auto", per_state_mib,
+                                    per_state_mib * (k + 1), num_blocks, self._gdn_ckpt_mem_fraction)
                             self._gdn_ckpt_k = k
                             assert k < num_blocks, ("GDN checkpoint slots K must be << num_blocks "
                                                     f"(K={k}, num_blocks={num_blocks})")
-                            self._gdn_ckpt_tensors[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, k + 1)
+                            # Per-group ckpt pool: GDN groups share the live state
+                            # tensor but are separated by a group offset in the
+                            # slot index. The ckpt slot maps are per-group and each
+                            # enumerate 1..k, so a shared pool would collide across
+                            # groups; key by group_idx to keep pools distinct.
+                            self._gdn_ckpt_tensors[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, k + 1,
+                                                                                      variant=group_idx)
                             self._gdn_ckpt_maps.setdefault(group_idx, GdnCheckpointMap(num_slots=k))
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
