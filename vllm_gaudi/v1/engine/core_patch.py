@@ -14,7 +14,7 @@ import cloudpickle
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.platforms import current_platform
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
@@ -337,9 +337,9 @@ def install_engine_core_patch() -> None:
             if self.scheduler.connector is not None:  # type: ignore[has-type]
                 self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore[arg-type]
 
-            # Rebuild multimodal receiver cache.
-            self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
-            self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(new_config)
+            # Rebuild multimodal receiver cache. Upstream PR #57913 moved the cache
+            # factories off MultiModalRegistry into vllm.multimodal.cache.
+            self.mm_receiver_cache = engine_receiver_cache_from_config(new_config)
 
             kv_connector = self.scheduler.get_kv_connector()
             if kv_connector is not None:
