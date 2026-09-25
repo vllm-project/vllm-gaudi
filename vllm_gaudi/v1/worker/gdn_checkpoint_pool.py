@@ -23,6 +23,23 @@ def gdn_ckpt_num_slots(num_blocks: int, num_gdn_groups: int, mem_fraction: float
     return min(k, num_blocks - 1)
 
 
+# Residency view of the worker checkpoint pools, keyed by kv_cache_group_id
+# (== worker group_idx). Populated by the runner. At TP=1 (UniProc) the
+# scheduler shares this process, so find_longest_cache_hit reads the live pool
+# and never over-reports a hit the pool has evicted. At TP>1 (MultiprocExecutor)
+# the pools live in the worker process and this stays empty in engine-core, so
+# the hit-capping wrapper is a no-op there (handled by the store-order shadow).
+_CKPT_MAPS_BY_KV_GROUP: "dict[int, GdnCheckpointMap]" = {}
+
+
+def register_ckpt_map(kv_cache_group_id: int, cmap: "GdnCheckpointMap") -> None:
+    _CKPT_MAPS_BY_KV_GROUP[kv_cache_group_id] = cmap
+
+
+def ckpt_map_for_kv_group(kv_cache_group_id: int) -> "GdnCheckpointMap | None":
+    return _CKPT_MAPS_BY_KV_GROUP.get(kv_cache_group_id)
+
+
 class GdnCheckpointMap:
 
     def __init__(self, num_slots: int):
@@ -43,6 +60,10 @@ class GdnCheckpointMap:
         if os.environ.get("GDN_EVICT_DEBUG"):
             import sys
             print("CKPTDBG", *parts, file=sys.stderr, flush=True)
+
+    def is_resident(self, block_id: int) -> bool:
+        """Whether ``block_id``'s checkpoint currently occupies a slot."""
+        return block_id in self._block_to_slot
 
     def get_load_slot(self, block_id: int) -> int:
         slot = self._block_to_slot.get(block_id, 0)
