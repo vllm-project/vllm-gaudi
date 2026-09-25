@@ -675,13 +675,17 @@ run_structured_output_test() {
 }
 
 # Compact-GDN prefix cache
-run_gdn_pc_state_check_test() {
+# These tests load a Qwen3-Next GDN hybrid, which (like the Qwen3.5/3.6 tests
+# above) needs newer transformers/huggingface_hub than this CI lane pins, and
+# the TP>1 check needs 2 cards. Left disabled (_run_ prefix, not in
+# launch_all_tests); run manually on a provisioned HPU host once support lands.
+_run_gdn_pc_state_check_test() {
     echo "➡️ Testing compact-GDN prefix-cache state correctness (TP=1)..."
     VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/gdn_pc_state_check.py"
     echo "✅ compact-GDN prefix-cache state check passed."
 }
 
-run_gdn_pc_tp2_check_test() {
+_run_gdn_pc_tp2_check_test() {
     echo "➡️ Testing compact-GDN prefix-cache correctness at TP>1..."
     VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/gdn_pc_tp2_check.py"
     echo "✅ compact-GDN prefix-cache TP>1 check passed."
@@ -742,8 +746,6 @@ launch_all_tests() {
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test
-    run_gdn_pc_state_check_test
-    run_gdn_pc_tp2_check_test
     echo "🎉 All test suites passed successfully!"
 }
 
