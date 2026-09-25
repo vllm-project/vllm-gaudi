@@ -283,9 +283,13 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.local_num_experts
-        ep_shift = layer.moe_config.ep_rank * num_experts
 
-        experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
+        # The Habana MoE kernel indexes its expert slots by LOCAL id, so the
+        # valid window is the local range. Passing the global window
+        # (ep_shift .. ep_shift + local - 1) makes every rank but rank 0 skip
+        # the experts it owns and accept ones it does not. The routing table is
+        # translated to local ids in apply_monolithic below.
+        experts_min, experts_max = 0, num_experts - 1
         if layer.moe_config.dp_size > 1 and self.use_dispatch_fn:
             dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.moe_config.is_sequence_parallel)
         else:
@@ -373,6 +377,15 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
 
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
+
+        # Expert parallelism: the kernel wants LOCAL expert ids with -1 marking
+        # tokens owned by another rank. Upstream's ExpertMapManager already
+        # built that global -> local table in layer.expert_map; translate here,
+        # before any consumer of topk_ids. expert_map is None when EP is off,
+        # in which case global == local and this is a no-op.
+        expert_map = getattr(layer, "expert_map", None)
+        if expert_map is not None:
+            topk_ids = expert_map[topk_ids]
 
         activation = _normalize_moe_activation(layer.activation)
         # Use the custom gathered-expert combine only when it wins: the number of
