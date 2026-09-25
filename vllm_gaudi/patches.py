@@ -931,11 +931,12 @@ def _patch_mamba_find_longest_cache_hit() -> None:
 def _hpu_mamba_cache_blocks(original):
     """Mirror the scheduler's just-cached boundaries into the engine-core shadow.
 
-    Shadow groups only (tp>1). The blocks newly cached this step (minus null and
-    unhashed) are exactly the boundary set the worker persists, so replaying them
-    as store touches keeps the shadow's residency and LRU order aligned.
+    Shadow groups only (tp>1). The worker checkpoints only full prompt blocks
+    during prefill, so replaying just those (not decode-region boundaries) as
+    store touches keeps the shadow's residency and LRU order a subset of the
+    worker pool.
     """
-    from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group, is_shadow
+    from vllm_gaudi.v1.worker.gdn_checkpoint_pool import (ckpt_map_for_kv_group, is_shadow, shadow_mirror_block_range)
 
     def cache_blocks(self, request, num_tokens, *args, **kwargs):
         before = self.num_cached_block.get(request.request_id, 0)
@@ -949,8 +950,12 @@ def _hpu_mamba_cache_blocks(original):
         shadow = ckpt_map_for_kv_group(gid)
         if shadow is None:
             return
+        # Mirror only the prompt blocks the worker checkpoints, never the
+        # boundaries that fill during decode (which it does not). Cached blocks
+        # are always full, so this prompt-block cutoff is the only filter beyond
+        # null/unhashed. See shadow_mirror_block_range for why the subset matters.
         blocks = self.req_to_blocks[request.request_id]
-        for idx in range(before, after):
+        for idx in shadow_mirror_block_range(before, after, request.num_prompt_tokens, self.block_size):
             block = blocks[idx]
             if block.is_null or block.block_hash is None:
                 continue

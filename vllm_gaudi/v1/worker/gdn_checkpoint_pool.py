@@ -48,6 +48,20 @@ _CKPT_MAPS_BY_KV_GROUP: "dict[int, GdnCheckpointMap]" = {}
 _SHADOW_GROUP_IDS: set[int] = set()
 
 
+def shadow_mirror_block_range(num_cached_before: int, num_cached_after: int, num_prompt_tokens: int,
+                              block_size: int) -> range:
+    """Block indices the tp>1 shadow may mirror on a cache_blocks step.
+
+    The worker checkpoints only full prompt blocks (during prefill); it never
+    checkpoints boundaries that fill during decode. Clamping the shadow to the
+    same prompt-block prefix keeps its residency a subset of the worker pool, so
+    the hit cap can never grant a prefix hit the worker cannot back (a stale
+    over-claim would resume a later request from garbage recurrent state).
+    """
+    num_prompt_blocks = num_prompt_tokens // block_size
+    return range(num_cached_before, min(num_cached_after, num_prompt_blocks))
+
+
 def register_ckpt_map(kv_cache_group_id: int, cmap: "GdnCheckpointMap") -> None:
     """Register the real worker pool for a group (TP=1); supersedes any shadow."""
     _CKPT_MAPS_BY_KV_GROUP[kv_cache_group_id] = cmap

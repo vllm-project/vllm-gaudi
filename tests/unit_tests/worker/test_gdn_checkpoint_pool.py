@@ -1,4 +1,4 @@
-from vllm_gaudi.v1.worker.gdn_checkpoint_pool import GdnCheckpointMap, gdn_ckpt_num_slots
+from vllm_gaudi.v1.worker.gdn_checkpoint_pool import (GdnCheckpointMap, gdn_ckpt_num_slots, shadow_mirror_block_range)
 
 
 def test_num_slots_explicit_override_wins():
@@ -94,3 +94,26 @@ def test_translate_load_store_slots():
     assert s_store != 0
     # second request reusing prefix at block 6: load must now hit
     assert m.get_load_slot(6) == s_store
+
+
+def test_shadow_mirror_skips_decode_region_blocks():
+    # Prompt is 3 full blocks (block_size=4 -> 12 prompt tokens). Decode has
+    # since filled blocks 3 and 4. The worker only checkpoints prompt blocks, so
+    # the shadow must mirror block indices [0,3) and never the decode blocks --
+    # over-claiming block 3/4 would grant a hit the worker cannot back.
+    r = shadow_mirror_block_range(num_cached_before=0, num_cached_after=5, num_prompt_tokens=12, block_size=4)
+    assert list(r) == [0, 1, 2]
+
+
+def test_shadow_mirror_decode_only_step_is_empty():
+    # A step that caches only decode-region blocks (before already past the
+    # prompt) mirrors nothing.
+    r = shadow_mirror_block_range(num_cached_before=3, num_cached_after=6, num_prompt_tokens=12, block_size=4)
+    assert list(r) == []
+
+
+def test_shadow_mirror_partial_prompt_step():
+    # Chunked prefill: only blocks newly cached this step, still capped at the
+    # prompt-block count.
+    r = shadow_mirror_block_range(num_cached_before=1, num_cached_after=3, num_prompt_tokens=12, block_size=4)
+    assert list(r) == [1, 2]
