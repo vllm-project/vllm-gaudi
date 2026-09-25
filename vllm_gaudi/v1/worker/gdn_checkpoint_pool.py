@@ -28,9 +28,14 @@ def gdn_ckpt_num_slots(num_blocks: int, num_gdn_groups: int, mem_fraction: float
 # Residency view of the worker checkpoint pools, keyed by kv_cache_group_id
 # (== worker group_idx). Populated by the runner. At TP=1 (UniProc) the
 # scheduler shares this process, so find_longest_cache_hit reads the live pool
-# and never over-reports a hit the pool has evicted. At TP>1 (MultiprocExecutor)
-# the pools live in the worker process and this stays empty in engine-core, so
-# the hit-capping wrapper is a no-op there (handled by the store-order shadow).
+# and never over-reports a hit the pool has evicted.
+#
+# At TP>1 (MultiprocExecutor) the pools live in the worker processes; this dict
+# stays empty in engine-core, so the hit-capping wrapper is a no-op and the
+# scheduler can still report a hit at a boundary the workers have evicted. That
+# path is NOT yet correct -- resuming from an evicted boundary reads stale
+# state. TP>1 requires an engine-core-side residency view (see the module TODO)
+# before it is safe to serve compact-GDN prefix-cache hits.
 _CKPT_MAPS_BY_KV_GROUP: "dict[int, GdnCheckpointMap]" = {}
 
 
