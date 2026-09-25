@@ -27,6 +27,7 @@ def _rotary_base_init_on_cpu(self, *args, **kwargs):
 
 RotaryEmbeddingBase.__init__ = _rotary_base_init_on_cpu
 
+
 @RotaryEmbedding.register_oot
 class HPURotaryEmbedding(RotaryEmbedding):
     """Original rotary positional embedding."""
