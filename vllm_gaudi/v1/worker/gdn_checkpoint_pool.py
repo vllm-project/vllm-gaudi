@@ -102,6 +102,15 @@ class GdnCheckpointMap:
         """Whether ``block_id``'s checkpoint currently occupies a slot."""
         return block_id in self._block_to_slot
 
+    def resident_ids(self) -> "set[int]":
+        """Block ids currently holding a slot.
+
+        The correctness invariant for tp>1 is that the engine-core shadow's
+        resident set stays a subset of the real worker pool's, so the hit cap
+        never grants a prefix hit the worker cannot back. Tests assert this.
+        """
+        return set(self._block_to_slot)
+
     def get_load_slot(self, block_id: int) -> int:
         slot = self._block_to_slot.get(block_id, 0)
         if slot:
@@ -125,6 +134,10 @@ class GdnCheckpointMap:
         return slot
 
     def free_block(self, block_id: int) -> None:
+        # Currently unused: eviction is lazy -- a slot is only reclaimed when
+        # alloc_store_slot runs out of free slots and pops the LRU victim, so
+        # nothing calls free_block explicitly. Kept for an eventual eager path
+        # (e.g. releasing a slot when the scheduler frees the owning block).
         slot = self._block_to_slot.pop(block_id, None)
         if slot is None:
             return
