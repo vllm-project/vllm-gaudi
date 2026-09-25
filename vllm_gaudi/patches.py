@@ -879,8 +879,16 @@ def _hpu_mamba_find_longest_cache_hit(original):
     """
     from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group, is_shadow
 
-    def find_longest_cache_hit(cls, block_hashes, max_length, kv_cache_group_ids, block_pool, kv_cache_spec,
-                               drop_eagle_block, alignment_tokens, dcp_world_size=1, pcp_world_size=1):
+    def find_longest_cache_hit(cls,
+                               block_hashes,
+                               max_length,
+                               kv_cache_group_ids,
+                               block_pool,
+                               kv_cache_spec,
+                               drop_eagle_block,
+                               alignment_tokens,
+                               dcp_world_size=1,
+                               pcp_world_size=1):
         maps = [ckpt_map_for_kv_group(gid) for gid in kv_cache_group_ids]
         if not any(m is not None for m in maps):
             return original(cls, block_hashes, max_length, kv_cache_group_ids, block_pool, kv_cache_spec,

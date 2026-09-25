@@ -489,9 +489,9 @@ class HPUWorker(WorkerBase):
             if ckpt_enabled:
                 from vllm.v1.core.kv_cache_utils import (get_kv_cache_groups, _get_kv_cache_bytes_per_block)
                 groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
-                num_gdn_groups = sum(1 for g in groups
-                                     if isinstance(g.kv_cache_spec, MambaSpec)
-                                     and g.kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES)
+                num_gdn_groups = sum(
+                    1 for g in groups
+                    if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES)
                 num_gdn_layers = sum(1 for s in kv_cache_spec.values()
                                      if isinstance(s, MambaSpec) and s.mamba_type in _GDN_MAMBA_TYPES)
                 per_state = next(s.page_size_bytes for s in kv_cache_spec.values()

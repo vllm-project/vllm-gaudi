@@ -6957,7 +6957,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             # Per-group ckpt pool: the slot maps each enumerate
                             # 1..k, so a shared tensor would collide across groups;
                             # key by group_idx to keep pools distinct.
-                            self._gdn_ckpt_tensors[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, k + 1,
+                            self._gdn_ckpt_tensors[layer_name] = _mamba_state_tensors(kv_cache_spec,
+                                                                                      layer_pos,
+                                                                                      k + 1,
                                                                                       variant=group_idx)
                             self._gdn_ckpt_maps.setdefault(group_idx, GdnCheckpointMap(num_slots=k))
                             register_ckpt_map(group_idx, self._gdn_ckpt_maps[group_idx])
