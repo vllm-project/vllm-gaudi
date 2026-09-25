@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Bounded block_id -> checkpoint-slot map for compact-GDN prefix caching.
 
 Compact GDN keeps only max_num_seqs live state slots, so it cannot address a
@@ -48,7 +50,7 @@ class GdnCheckpointMap:
         self._block_to_slot: dict[int, int] = {}
         self._slot_to_block: dict[int, int] = {}
         # recency order over occupied slots; front = least recently used
-        self._lru: "OrderedDict[int, None]" = OrderedDict()
+        self._lru: OrderedDict[int, None] = OrderedDict()
         self._free: list[int] = list(range(1, num_slots + 1))
 
     @property
@@ -69,8 +71,7 @@ class GdnCheckpointMap:
         slot = self._block_to_slot.get(block_id, 0)
         if slot:
             self._lru.move_to_end(slot)
-        self._dbg("LOAD", f"bid={block_id}", f"slot={slot}",
-                  f"held_bid={self._slot_to_block.get(slot)}")
+        self._dbg("LOAD", f"bid={block_id}", f"slot={slot}", f"held_bid={self._slot_to_block.get(slot)}")
         return slot
 
     def alloc_store_slot(self, block_id: int) -> int:
