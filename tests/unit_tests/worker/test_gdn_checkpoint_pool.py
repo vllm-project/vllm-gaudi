@@ -1,4 +1,3 @@
-import pytest
 from vllm_gaudi.v1.worker.gdn_checkpoint_pool import GdnCheckpointMap, gdn_ckpt_num_slots
 
 
@@ -22,8 +21,7 @@ def test_num_slots_floored_at_liveness():
 
 def test_num_slots_capped_below_num_blocks():
     # Cap keeps the compact win even with a huge fraction or override.
-    assert gdn_ckpt_num_slots(num_blocks=10, num_gdn_groups=1, mem_fraction=5.0, gdn_max_reqs=8,
-                              explicit_slots=0) == 9
+    assert gdn_ckpt_num_slots(num_blocks=10, num_gdn_groups=1, mem_fraction=5.0, gdn_max_reqs=8, explicit_slots=0) == 9
     assert gdn_ckpt_num_slots(num_blocks=10, num_gdn_groups=1, mem_fraction=0.1, gdn_max_reqs=4,
                               explicit_slots=100) == 9
 
@@ -56,11 +54,11 @@ def test_distinct_blocks_get_distinct_slots():
 
 def test_eviction_is_lru():
     m = GdnCheckpointMap(num_slots=2)
-    sa = m.alloc_store_slot(block_id=1)   # slots: {1->sa}
-    sb = m.alloc_store_slot(block_id=2)   # slots full: {1->sa, 2->sb}
-    m.get_load_slot(block_id=1)           # touch 1 -> 2 is now LRU
-    sc = m.alloc_store_slot(block_id=3)   # evicts block 2
-    assert sc == sb                       # reused block 2's slot
+    sa = m.alloc_store_slot(block_id=1)  # slots: {1->sa}
+    sb = m.alloc_store_slot(block_id=2)  # slots full: {1->sa, 2->sb}
+    m.get_load_slot(block_id=1)  # touch 1 -> 2 is now LRU
+    sc = m.alloc_store_slot(block_id=3)  # evicts block 2
+    assert sc == sb  # reused block 2's slot
     assert m.get_load_slot(block_id=2) == 0
     assert m.get_load_slot(block_id=1) == sa
 
@@ -70,7 +68,7 @@ def test_free_block_returns_slot_to_pool():
     s1 = m.alloc_store_slot(block_id=1)
     m.free_block(block_id=1)
     assert m.get_load_slot(block_id=1) == 0
-    s2 = m.alloc_store_slot(block_id=2)   # slot reusable, no eviction needed
+    s2 = m.alloc_store_slot(block_id=2)  # slot reusable, no eviction needed
     assert s2 == s1
 
 

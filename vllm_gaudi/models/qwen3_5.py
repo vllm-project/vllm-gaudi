@@ -209,8 +209,7 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
         return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
                 num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots,
-                store_slots, mamba_map, blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot,
-                ckpt_blocks_to_slot)
+                store_slots, mamba_map, blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot)
 
     def forward(
         self,
@@ -232,8 +231,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
         # === Metadata extraction (natural graph break) ===============
         (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
-         num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots,
-         store_slots, mamba_map, blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot,
+         num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots, store_slots,
+         mamba_map, blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot,
          ckpt_blocks_to_slot) = self._extract_metadata(num_tokens)
 
         # === Part 1: Input Projection ================================
