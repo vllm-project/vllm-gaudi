@@ -7,8 +7,25 @@ from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding, Phi3Lo
                                                          LinearScalingRotaryEmbedding, DynamicNTKScalingRotaryEmbedding,
                                                          YaRNScalingRotaryEmbedding, DeepseekScalingRotaryEmbedding,
                                                          MRotaryEmbedding)
+from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbeddingBase
 from vllm.model_executor.custom_op import CustomOp
 
+_orig_rotary_base_init = RotaryEmbeddingBase.__init__
+
+
+def _rotary_base_init_on_cpu(self, *args, **kwargs):
+    # HPU sin/cos returns garbage for |x| > 196608 (3 * 2**16), which the
+    # inv_freq=1 pair reaches at that position, so build the table on CPU.
+    target = torch.get_default_device()
+    with torch.device("cpu"):
+        _orig_rotary_base_init(self, *args, **kwargs)
+    if target.type != "cpu":
+        for name, buf in self._buffers.items():
+            if buf is not None:
+                self._buffers[name] = buf.to(target)
+
+
+RotaryEmbeddingBase.__init__ = _rotary_base_init_on_cpu
 
 @RotaryEmbedding.register_oot
 class HPURotaryEmbedding(RotaryEmbedding):
