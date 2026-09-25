@@ -201,6 +201,43 @@ def test_generate_decode_buckets():
     assert all(ctx <= bs * (max_model_len // block_size) for bs, _, ctx in buckets)
 
 
+# --- Explicitly added buckets ---
+
+
+def _manager_with_buckets(prompt_buckets, decode_buckets):
+    manager = HPUBucketingManager.__new__(HPUBucketingManager)
+    manager.initialized = True
+    manager._fallback_max_ctx = 0
+    manager.seed_decode_buckets = None
+    manager.prompt_buckets = list(prompt_buckets)
+    manager.decode_buckets = list(decode_buckets)
+    return manager
+
+
+def test_add_decode_bucket_is_returned_by_lookup():
+    # Requested bucket is finer than the generated ladder. Lookups use bisect,
+    # so an out-of-order insert stays invisible and a coarser bucket wins.
+    manager = _manager_with_buckets([], [(1, 1, 64), (26, 1, 1664), (50, 1, 3200)])
+    manager.add_decode_bucket((32, 1, 416))
+    assert manager.decode_buckets == sorted(manager.decode_buckets)
+    assert manager.find_decode_bucket(32, 416) == (32, 1, 416)
+
+
+def test_add_prompt_bucket_is_returned_by_lookup():
+    manager = _manager_with_buckets([(1, 128, 0), (1, 2048, 0)], [])
+    manager.add_prompt_bucket((1, 1664, 0))
+    assert manager.prompt_buckets == sorted(manager.prompt_buckets)
+    assert manager.find_prompt_bucket(1, 1664, 0) == (1, 1664, 0)
+
+
+def test_add_bucket_does_not_duplicate():
+    manager = _manager_with_buckets([(1, 128, 0)], [(32, 1, 416)])
+    manager.add_decode_bucket((32, 1, 416))
+    manager.add_prompt_bucket((1, 128, 0))
+    assert manager.decode_buckets == [(32, 1, 416)]
+    assert manager.prompt_buckets == [(1, 128, 0)]
+
+
 # --- Exponential bucketing tests ---
 
 
