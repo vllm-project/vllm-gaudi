@@ -32,10 +32,8 @@ def _bcast(mask, ref):
 def _gdn_ckpt_restore(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, load_slots):
     """Copy checkpoint snapshot -> live compact slot for hit requests.
 
-    load_slot == 0 means no snapshot (miss/pad); those rows keep their live
-    value.  Uses integer index_select + torch.where instead of boolean
-    indexing, which HPU cannot lower.  Live slot 0 is the unused null slot,
-    so clamping the -1 padding index to 0 never collides with a real row.
+    load_slot 0 = miss/pad (row keeps its live value). Uses index_select +
+    torch.where, not boolean indexing (HPU cannot lower it).
     """
     dst = base_slots.clamp(min=0).long()
     src = load_slots.clamp(min=0).long()
@@ -51,20 +49,13 @@ def _gdn_ckpt_restore(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, lo
 def _gdn_save_block_states(ssm_dst, conv_dst, varlen_states, conv_in, ssm_index, conv_index, block_offsets):
     """Snapshot every block boundary into the destination caches.
 
-    A single prefill forward must record the recurrent + conv state at each
-    block boundary (not just the final one) or a later prefix-cache hit on a
-    mid-prefix boundary resumes from stale state.  Mirrors the mamba2 mixer's
-    ``ssm_state[mamba_chunks_to_block_mapping] = varlen_states``.
-
-    Non-compact passes the block-indexed live caches with block-id index
-    tensors; compact passes the bounded ckpt pool with per-block store-slot
-    index tensors.  varlen_states: [num_chunks, H, V, K] (seq 0).  conv_in:
-    [dim, seq_len] pre-conv input (seq 0, zero initial conv state).  Padding
-    chunks/blocks land on the scratch/null slot harmlessly.
+    Records recurrent + conv state at each boundary (not just the final one) so
+    a later prefix-cache hit on a mid-prefix boundary resumes correctly.
+    Non-compact targets the block-indexed live caches; compact targets the
+    bounded ckpt pool. Padding chunks/blocks land on the null slot harmlessly.
     """
-    # ssm: per-chunk boundary state -> its dst slot (pad chunks -> scratch).
-    # index_copy_ (not dst[idx]=) so HPU lowers to index_copy_fwd, not
-    # scatter_nd_onnx whose glue rejects a small dst dim0 (K+1) vs #chunks.
+    # index_copy_ (not dst[idx]=): HPU lowers it to index_copy_fwd, not
+    # scatter_nd_onnx, which rejects a small dst dim0 (K+1) vs #chunks.
     ssm_dst.index_copy_(0, ssm_index.long(), varlen_states.to(ssm_dst.dtype))
 
     # conv: last (state_len) inputs ending at each block boundary offset.
@@ -82,8 +73,8 @@ def _gdn_save_block_states(ssm_dst, conv_dst, varlen_states, conv_in, ssm_index,
 def _gdn_ckpt_export(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, store_slots):
     """Copy live compact slot -> checkpoint snapshot at block boundaries.
 
-    store_slot == 0 marks padding rows; they harmlessly dump into checkpoint
-    null slot 0 (never read).  No boolean indexing (HPU cannot lower it).
+    store_slot 0 = padding (dumps into null slot 0, never read). No boolean
+    indexing (HPU cannot lower it).
     """
     dst = store_slots.clamp(min=0).long()
     src = base_slots.clamp(min=0).long()
@@ -99,9 +90,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         # lookup.  Stored as tensor so torch.compile treats it as dynamic.
         self.cache_group_idx = None
 
-        # kv_ckpt: (conv_ckpt, ssm_ckpt) bounded checkpoint tensors for
-        # compact-GDN prefix caching; set by the runner after bind_kv_cache,
-        # None when the checkpoint path is inactive.
+        # (conv_ckpt, ssm_ckpt) bounded checkpoint tensors for compact-GDN
+        # prefix caching; set by the runner after bind_kv_cache, else None.
         self.kv_ckpt = None
 
         # mamba_chunk_size: use explicit config value or default to 128
@@ -201,8 +191,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         if is_prompt and state_indices is not None:
             prefill_num_seqs = int(state_indices.numel())
             prefill_seq_len = (num_tokens // prefill_num_seqs if prefill_num_seqs > 0 else 0)
-            # Restore checkpoint snapshots into the live slots before reading
-            # initial_state, so a prefix-cache hit resumes from the frozen state.
+            # Restore snapshots into live slots before reading initial_state,
+            # so a prefix-cache hit resumes from the frozen state.
             if load_slots is not None and self.kv_ckpt is not None:
                 conv_ckpt, ssm_ckpt = self.kv_ckpt
                 _gdn_ckpt_restore(conv_state, ssm_state, conv_ckpt, ssm_ckpt, state_indices, load_slots)
@@ -324,10 +314,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 g = g * token_mask_h
                 beta = beta * token_mask_h
 
-            # Prefix caching needs every block boundary snapshotted (not just
-            # the final state), so ask the kernel for per-chunk boundary states.
-            # Non-compact scatters into the block-indexed cache; compact into
-            # the bounded ckpt pool.
+            # Prefix caching needs every block boundary snapshotted, so ask the
+            # kernel for per-chunk boundary states.
             want_block_save = mamba_map is not None
             kernel_out = hpu_chunk_gated_delta_rule(
                 q=query,
@@ -356,16 +344,13 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 state_indices,
             )
             if want_block_save:
-                # Snapshot every block boundary (mamba2-style) so a later
-                # prefix-cache hit on a mid-prefix boundary resumes correctly.
                 conv_in_seq0 = mixed_qkv.transpose(0, 1)[:, :prefill_seq_len]
                 if self.kv_ckpt is None:
                     # Non-compact: block-indexed live caches.
                     _gdn_save_block_states(ssm_state, conv_state, varlen_states[0], conv_in_seq0, mamba_map,
                                            blocks_caching_range, seqlens_offsets)
                 else:
-                    # Compact: scatter every boundary into the bounded ckpt pool,
-                    # keyed by per-block store slot instead of block id.
+                    # Compact: bounded ckpt pool, keyed by store slot not block id.
                     conv_ckpt, ssm_ckpt = self.kv_ckpt
                     _gdn_save_block_states(ssm_ckpt, conv_ckpt, varlen_states[0], conv_in_seq0, ckpt_chunks_to_slot,
                                            ckpt_blocks_to_slot, seqlens_offsets)

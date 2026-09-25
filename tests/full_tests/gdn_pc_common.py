@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared helpers for the compact-GDN prefix-cache state tests.
+"""Shared helpers for the compact-GDN prefix-cache tests.
 
-Both gdn_pc_state_check.py (restore correctness) and gdn_pc_lru_stress.py
-(eviction correctness) validate against fresh-compute *state tensors* rather
-than output tokens; they share the prose prefix and the tolerance rule.
+Shared prose prefix and state-tensor tolerance rule used by the state and
+TP>1 correctness checks.
 """
 import torch
 

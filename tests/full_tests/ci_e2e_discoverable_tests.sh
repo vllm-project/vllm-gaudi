@@ -674,6 +674,19 @@ run_structured_output_test() {
     echo "✅ Test with structured outputs passed."
 }
 
+# Compact-GDN prefix cache
+run_gdn_pc_state_check_test() {
+    echo "➡️ Testing compact-GDN prefix-cache state correctness (TP=1)..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/gdn_pc_state_check.py"
+    echo "✅ compact-GDN prefix-cache state check passed."
+}
+
+run_gdn_pc_tp2_check_test() {
+    echo "➡️ Testing compact-GDN prefix-cache correctness at TP>1..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/gdn_pc_tp2_check.py"
+    echo "✅ compact-GDN prefix-cache TP>1 check passed."
+}
+
 # --- Utility Functions ---
 
 # Function to run all tests sequentially
@@ -729,6 +742,8 @@ launch_all_tests() {
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test
+    run_gdn_pc_state_check_test
+    run_gdn_pc_tp2_check_test
     echo "🎉 All test suites passed successfully!"
 }
 

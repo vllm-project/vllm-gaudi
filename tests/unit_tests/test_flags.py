@@ -232,34 +232,3 @@ def test_defrag_override_respected_with_contiguous_pa():
 
     assert config.get('use_contiguous_pa') is True
     assert config.get('defrag') is False
-
-
-def test_compact_gdn_pc_activates_checkpoint_not_warning(monkeypatch):
-    """Compact GDN + prefix caching must NOT silently fall through to the
-    corrupting warning path; it must enable the checkpoint path and keep
-    compact mode."""
-    from vllm_gaudi.v1.worker import hpu_model_runner as hmr
-    monkeypatch.setenv("VLLM_COMPACT_GDN", "1")
-    enabled, forced_compact = hmr.resolve_gdn_prefix_cache_mode(compact_requested=True,
-                                                                prefix_caching=True,
-                                                                checkpoint_supported=True)
-    assert enabled is True
-    assert forced_compact == "1"
-
-
-def test_compact_gdn_pc_falls_back_to_non_compact_when_unsupported(monkeypatch):
-    from vllm_gaudi.v1.worker import hpu_model_runner as hmr
-    enabled, forced_compact = hmr.resolve_gdn_prefix_cache_mode(compact_requested=True,
-                                                                prefix_caching=True,
-                                                                checkpoint_supported=False)
-    assert enabled is False
-    assert forced_compact == "0"  # forced non-compact rather than corrupt
-
-
-def test_no_prefix_caching_leaves_compact_untouched(monkeypatch):
-    from vllm_gaudi.v1.worker import hpu_model_runner as hmr
-    enabled, forced_compact = hmr.resolve_gdn_prefix_cache_mode(compact_requested=True,
-                                                                prefix_caching=False,
-                                                                checkpoint_supported=True)
-    assert enabled is False
-    assert forced_compact == "1"

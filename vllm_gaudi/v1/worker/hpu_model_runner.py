@@ -920,21 +920,6 @@ def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num
     )
 
 
-def resolve_gdn_prefix_cache_mode(compact_requested: bool, prefix_caching: bool,
-                                  checkpoint_supported: bool) -> tuple[bool, str]:
-    """Decide the compact/checkpoint mode for GDN + prefix caching.
-
-    Returns (checkpoint_enabled, compact_env_value). Never returns a
-    combination that runs compact GDN with prefix caching but no checkpoint
-    path — that is the silently-corrupting case, so fall back to non-compact.
-    """
-    if not (compact_requested and prefix_caching):
-        return False, ("1" if compact_requested else "0")
-    if checkpoint_supported:
-        return True, "1"
-    return False, "0"
-
-
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
 
     def __init__(self):
@@ -1428,19 +1413,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         os.environ["VLLM_COMPACT_GDN"] = "1"
                 compact_req = os.environ.get("VLLM_COMPACT_GDN", "0") in ("1", "true")
                 pc_on = self.vllm_config.cache_config.enable_prefix_caching
-                ckpt_supported = True  # HPU GDN checkpoint path (this feature)
-                self._gdn_ckpt_enabled, compact_val = resolve_gdn_prefix_cache_mode(
-                    compact_req, pc_on, ckpt_supported)
-                os.environ["VLLM_COMPACT_GDN"] = compact_val
-                if pc_on and compact_req and not self._gdn_ckpt_enabled:
-                    logger.warning("Compact GDN + prefix caching: checkpoint path "
-                                   "unavailable, forcing non-compact GDN.")
-                logger.info(
-                    "GDN layers detected (%d): "
-                    "VLLM_USE_HYBRID_CACHE=%s, "
-                    "VLLM_USE_NAIVE_MAMBA_CACHE_SHARING=%s, "
-                    "VLLM_COMPACT_GDN=%s", self.num_gdn, os.environ["VLLM_USE_HYBRID_CACHE"],
-                    os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"], os.environ["VLLM_COMPACT_GDN"])
+                # Checkpoint prefix caching rides on compact GDN: on whenever
+                # both are active (compact is auto-disabled for PD above).
+                self._gdn_ckpt_enabled = compact_req and pc_on
 
         hf_text_config = self.model_config.hf_text_config
         self.mamba_chunk_size_is_explicit = (self.num_mamba_like_layers > 0
@@ -1475,13 +1450,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._gdn_req_to_base_slot: dict[str, int] = {}
 
         # Compact-GDN prefix-cache checkpoint pool (bounded, plugin-allocated).
-        # _gdn_ckpt_enabled is set by the guard above when compact GDN + prefix
-        # caching are both on; default False when there are no GDN layers.
+        # _gdn_ckpt_enabled is set by the guard above; default False (no GDN).
         self._gdn_ckpt_enabled = getattr(self, "_gdn_ckpt_enabled", False)
         self._gdn_ckpt_slots = int(os.environ.get("VLLM_GDN_CKPT_SLOTS", "0") or 0)
-        # Deterministic K when VLLM_GDN_CKPT_SLOTS is unset: size the ckpt pool
-        # as a fraction of the equivalent non-compact GDN footprint (num_blocks
-        # states/layer), divided by num_gdn_groups since the pool is per-group.
+        # Auto K when VLLM_GDN_CKPT_SLOTS is unset: a fraction of the non-compact
+        # footprint (num_blocks states/layer), split across GDN groups.
         self._gdn_ckpt_mem_fraction = float(os.environ.get("VLLM_GDN_CKPT_MEM_FRACTION", "0.1") or 0.1)
         self._gdn_ckpt_tensors: dict[str, tuple] = {}
         self._gdn_ckpt_maps: dict[int, GdnCheckpointMap] = {}
@@ -1673,17 +1646,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                    target_bs, num_full_blocks):
         """Map per-request (load, store) block ids to checkpoint slots.
 
-        load = pure lookup (0 on miss -> no restore); store = allocate, but
-        only for a full, non-null block (num_full_blocks bounds fullness): a
-        partial trailing block is never a resumable hit and would only pollute
-        the bounded pool. A restore is only valid when the request resumes at
-        a completed
-        block boundary: the last computed block precedes the first scheduled
-        block (load_block_idx < first_scheduled_block_idx). An intra-block chunk
-        continuation shares the in-progress block (indices equal) and its state
-        is live in base_slot -- restoring there would clobber it with a slot the
-        prior chunk never wrote. block_id keys are also recycled across requests,
-        so probing with no genuine prefix would return a stale slot.
+        load = lookup (0 on miss -> no restore); store = allocate, but only for
+        a full, non-null block (a partial trailing block is never a resumable
+        hit and would only pollute the bounded pool). Restore is valid only when
+        the request resumes at a completed boundary (load_block_idx <
+        first_scheduled_block_idx); an intra-block continuation shares the live
+        base_slot, and recycled block_id keys would otherwise return a stale slot.
         Returns two [num_groups, target_bs] int32 tensors.
         """
         load_rows, store_rows = [], []
@@ -1693,32 +1661,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if group_idx in self._gdn_ckpt_maps:
                 bt = self.input_batch.block_table[group_idx].get_cpu_tensor()
                 cmap = self._gdn_ckpt_maps[group_idx]
-                dbg = os.environ.get("GDN_EVICT_DEBUG")
                 for i, req_idx in enumerate(req_indices):
-                    # Resolve the load slot before allocating the store slot: a
-                    # full pool would otherwise evict the just-granted resume
-                    # boundary here (store victim = LRU) before we read it,
-                    # turning a scheduler-granted hit into a stale base_slot read.
+                    # Resolve load before store: else a full pool could evict the
+                    # just-granted resume boundary (LRU victim) before we read it.
                     at_boundary = int(load_block_idx[i]) < int(first_scheduled_block_idx[i])
                     if at_boundary:
                         load_bid = int(bt[req_idx, int(load_block_idx[i])])
                         load_slots[i] = cmap.get_load_slot(load_bid)
                     store_bid = int(bt[req_idx, int(store_block_idx[i])])
-                    # Persist only full, non-null boundaries; a partial trailing
-                    # block or a retired null block is never a resumable hit, so
-                    # keep it out of the bounded pool (0 = null scratch slot).
+                    # Persist only full, non-null boundaries (0 = null scratch).
                     if int(store_block_idx[i]) < int(num_full_blocks[i]) and store_bid != 0:
                         store_slots[i] = cmap.alloc_store_slot(store_bid)
-                    if dbg:
-                        import sys
-                        rid = self.input_batch.req_ids[req_idx] if req_idx < len(self.input_batch.req_ids) else "?"
-                        print(f"SLOTDBG g={group_idx} req={rid} ridx={req_idx} boundary={int(at_boundary)} "
-                              f"load_bidx={int(load_block_idx[i])} first_sched_bidx={int(first_scheduled_block_idx[i])} "
-                              f"store_bidx={int(store_block_idx[i])} "
-                              f"store_bid={store_bid} store_slot={int(store_slots[i])} "
-                              f"load_bid={int(bt[req_idx, int(load_block_idx[i])])} "
-                              f"load_slot={int(load_slots[i])}",
-                              file=sys.stderr, flush=True)
             load_rows.append(load_slots)
             store_rows.append(store_slots)
         return torch.stack(load_rows, dim=0), torch.stack(store_rows, dim=0)
@@ -3046,18 +2999,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 load_state_indices_cpu = store_state_indices_cpu = \
                     self.prepare_mamba_state_idxs(req_indices, zeros, target_bs)
 
-            if os.environ.get("GDN_EVICT_DEBUG"):
-                import sys
-                _n = len(contents.req_ids)
-                _bs = [self._gdn_req_to_base_slot.get(r) for r in contents.req_ids]
-                print(f"RUNDBG pc={self.use_prefix_caching} reqs={list(contents.req_ids)} "
-                      f"nct={num_computed_tokens_p_cpu[:_n].tolist()} "
-                      f"hinit={has_initial_states_cpu[:_n].tolist()} "
-                      f"base_slots={_bs} "
-                      f"load_sidx_g0={load_state_indices_cpu[0][:_n].tolist()} "
-                      f"store_sidx_g0={store_state_indices_cpu[0][:_n].tolist()}",
-                      file=sys.stderr, flush=True)
-
             if self.use_prefix_caching:
                 assert len(contents.req_ids) == 1
                 assert mamba_block_size % self.mamba_chunk_size == 0
@@ -3109,22 +3050,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     all_mamba_chunks_to_block_mappings_cpu.append(mamba_chunks_to_block_mapping_cpu)
 
                     if self._gdn_ckpt_enabled:
-                        # Translate each boundary block id to a checkpoint store
-                        # slot so compact prefill can snapshot every boundary
-                        # (not just the final one) into the bounded ckpt pool.
-                        # Slot 0 is the null slot; pad chunks/blocks and non-ckpt
-                        # groups land there.  One row per group keeps alignment
-                        # with cache_group_idx.
+                        # Translate each boundary block id to a store slot so
+                        # compact prefill can snapshot every boundary into the
+                        # bounded pool. Slot 0 = null (pad/non-ckpt groups).
                         ckpt_chunks_to_slot_cpu = torch.zeros(nphysical_chunks, dtype=torch.int32, device='cpu')
                         ckpt_blocks_to_slot_cpu = torch.zeros(max_cached_blocks, dtype=torch.int32, device='cpu')
                         if group_idx in self._gdn_ckpt_maps:
                             cmap = self._gdn_ckpt_maps[group_idx]
-                            # Persist only full, non-null boundaries: a partial
-                            # trailing block or a retired null block is never a
-                            # resumable hit, so keep it out of the bounded pool
-                            # (slot 0 = null scratch). This is the exact set the
-                            # scheduler caches, so an engine-core residency view
-                            # can mirror it.
+                            # Persist only full, non-null boundaries (slot 0 =
+                            # null scratch) -- the exact set the scheduler caches.
                             first_bidx = int(first)
                             num_full_blocks = (int(context_lens[0]) + int(query_lens[0])) // mamba_block_size
                             slot_range = torch.tensor([
@@ -3529,10 +3463,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                        padded_batch_size)
                 store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
                                                                         padded_batch_size)
-                # Decode never resumes from a checkpoint: the request's state is
-                # live and continuous in base_slot, so the ckpt pool is a
-                # prefill-only concern. Leave load/store slots unset -> decode
-                # behaves exactly as with PC off.
+                # Decode never resumes from a checkpoint (state is live/continuous
+                # in base_slot), so leave slots unset -- prefill-only concern.
             else:
                 zeros = [0] * len(req_indices)
                 load_state_indices_cpu = store_state_indices_cpu = \
@@ -7022,11 +6954,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             self._gdn_ckpt_k = k
                             assert k < num_blocks, ("GDN checkpoint slots K must be << num_blocks "
                                                     f"(K={k}, num_blocks={num_blocks})")
-                            # Per-group ckpt pool: GDN groups share the live state
-                            # tensor but are separated by a group offset in the
-                            # slot index. The ckpt slot maps are per-group and each
-                            # enumerate 1..k, so a shared pool would collide across
-                            # groups; key by group_idx to keep pools distinct.
+                            # Per-group ckpt pool: the slot maps each enumerate
+                            # 1..k, so a shared tensor would collide across groups;
+                            # key by group_idx to keep pools distinct.
                             self._gdn_ckpt_tensors[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, k + 1,
                                                                                       variant=group_idx)
                             self._gdn_ckpt_maps.setdefault(group_idx, GdnCheckpointMap(num_slots=k))
