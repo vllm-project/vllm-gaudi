@@ -1670,11 +1670,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
 
     def _gdn_ckpt_slots_for_blocks(self, req_indices, load_block_idx, store_block_idx, first_scheduled_block_idx,
-                                   target_bs):
+                                   target_bs, num_full_blocks):
         """Map per-request (load, store) block ids to checkpoint slots.
 
-        load = pure lookup (0 on miss -> no restore); store = allocate.
-        A restore is only valid when the request resumes exactly at a completed
+        load = pure lookup (0 on miss -> no restore); store = allocate, but
+        only for a full, non-null block (num_full_blocks bounds fullness): a
+        partial trailing block is never a resumable hit and would only pollute
+        the bounded pool. A restore is only valid when the request resumes at
+        a completed
         block boundary: the last computed block precedes the first scheduled
         block (load_block_idx < first_scheduled_block_idx). An intra-block chunk
         continuation shares the in-progress block (indices equal) and its state
@@ -1701,7 +1704,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         load_bid = int(bt[req_idx, int(load_block_idx[i])])
                         load_slots[i] = cmap.get_load_slot(load_bid)
                     store_bid = int(bt[req_idx, int(store_block_idx[i])])
-                    store_slots[i] = cmap.alloc_store_slot(store_bid)
+                    # Persist only full, non-null boundaries; a partial trailing
+                    # block or a retired null block is never a resumable hit, so
+                    # keep it out of the bounded pool (0 = null scratch slot).
+                    if int(store_block_idx[i]) < int(num_full_blocks[i]) and store_bid != 0:
+                        store_slots[i] = cmap.alloc_store_slot(store_bid)
                     if dbg:
                         import sys
                         rid = self.input_batch.req_ids[req_idx] if req_idx < len(self.input_batch.req_ids) else "?"
@@ -3029,9 +3036,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
                                                                         target_bs)
                 if self._gdn_ckpt_enabled:
+                    num_full_blocks_per_req = [(int(context_lens[j]) + int(query_lens[j])) // mamba_block_size
+                                               for j in range(len(req_indices))]
                     (load_ckpt_slots_cpu, store_ckpt_slots_cpu) = self._gdn_ckpt_slots_for_blocks(
                         req_indices, block_idx_last_computed_token_cpu, block_idx_last_scheduled_token_cpu,
-                        block_idx_first_scheduled_token_cpu, target_bs)
+                        block_idx_first_scheduled_token_cpu, target_bs, num_full_blocks_per_req)
             else:
                 zeros = [0] * len(req_indices)
                 load_state_indices_cpu = store_state_indices_cpu = \
@@ -3110,10 +3119,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         ckpt_blocks_to_slot_cpu = torch.zeros(max_cached_blocks, dtype=torch.int32, device='cpu')
                         if group_idx in self._gdn_ckpt_maps:
                             cmap = self._gdn_ckpt_maps[group_idx]
-                            slot_range = torch.tensor(
-                                [cmap.alloc_store_slot(int(b)) for b in blocks_caching_range.tolist()],
-                                dtype=torch.int32,
-                                device='cpu')
+                            # Persist only full, non-null boundaries: a partial
+                            # trailing block or a retired null block is never a
+                            # resumable hit, so keep it out of the bounded pool
+                            # (slot 0 = null scratch). This is the exact set the
+                            # scheduler caches, so an engine-core residency view
+                            # can mirror it.
+                            first_bidx = int(first)
+                            num_full_blocks = (int(context_lens[0]) + int(query_lens[0])) // mamba_block_size
+                            slot_range = torch.tensor([
+                                cmap.alloc_store_slot(bid) if (first_bidx + i < num_full_blocks and bid != 0) else 0
+                                for i, bid in enumerate(blocks_caching_range.tolist())
+                            ],
+                                                      dtype=torch.int32,
+                                                      device='cpu')
                             ckpt_chunks_to_slot_cpu[chunk_indices] = slot_range
                             ckpt_blocks_to_slot_cpu[:n_blocks] = slot_range
                         all_ckpt_chunks_to_slot_cpu.append(ckpt_chunks_to_slot_cpu)
