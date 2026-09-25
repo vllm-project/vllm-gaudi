@@ -37,7 +37,7 @@ from vllm_gaudi.extension.runtime import clear_config, finalize_config, get_conf
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
-from vllm_gaudi.v1.worker.gdn_checkpoint_pool import GdnCheckpointMap, gdn_ckpt_num_slots
+from vllm_gaudi.v1.worker.gdn_checkpoint_pool import (GdnCheckpointMap, gdn_ckpt_num_slots, register_ckpt_map)
 
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.model_executor.layers.attention import Attention
@@ -1692,12 +1692,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 cmap = self._gdn_ckpt_maps[group_idx]
                 dbg = os.environ.get("GDN_EVICT_DEBUG")
                 for i, req_idx in enumerate(req_indices):
-                    store_bid = int(bt[req_idx, int(store_block_idx[i])])
-                    store_slots[i] = cmap.alloc_store_slot(store_bid)
+                    # Resolve the load slot before allocating the store slot: a
+                    # full pool would otherwise evict the just-granted resume
+                    # boundary here (store victim = LRU) before we read it,
+                    # turning a scheduler-granted hit into a stale base_slot read.
                     at_boundary = int(load_block_idx[i]) < int(first_scheduled_block_idx[i])
                     if at_boundary:
                         load_bid = int(bt[req_idx, int(load_block_idx[i])])
                         load_slots[i] = cmap.get_load_slot(load_bid)
+                    store_bid = int(bt[req_idx, int(store_block_idx[i])])
+                    store_slots[i] = cmap.alloc_store_slot(store_bid)
                     if dbg:
                         import sys
                         rid = self.input_batch.req_ids[req_idx] if req_idx < len(self.input_batch.req_ids) else "?"
@@ -7007,6 +7011,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             self._gdn_ckpt_tensors[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, k + 1,
                                                                                       variant=group_idx)
                             self._gdn_ckpt_maps.setdefault(group_idx, GdnCheckpointMap(num_slots=k))
+                            register_ckpt_map(group_idx, self._gdn_ckpt_maps[group_idx])
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
                         # GDN/linear_attention: non-compact (baseline) allocation

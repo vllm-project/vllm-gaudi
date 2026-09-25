@@ -94,6 +94,7 @@ Currently:
 
 import gc
 import inspect
+import os
 from typing import Callable, Optional
 
 import torch
@@ -866,6 +867,57 @@ def _patch_inc_quantization_config() -> None:
     register_quantization_config("inc")(_FakeINCConfig)
 
 
+def _hpu_mamba_find_longest_cache_hit(original):
+    """Cap a mamba-group prefix hit at what the compact ckpt pool can supply.
+
+    vLLM reports a hit purely from the block hash cache, with no coupling to the
+    bounded compact-GDN checkpoint pool. When that pool has evicted a boundary's
+    checkpoint the worker cannot resume from it, so the reported hit must not
+    exceed the last resident boundary; the coordinator's min-across-groups then
+    shortens num_computed_tokens and the tail recomputes. No-op when no ckpt pool
+    is registered for the group (non-compact, standard mamba, or worker-side at
+    tp>1).
+    """
+    from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group
+
+    def find_longest_cache_hit(cls, block_hashes, max_length, kv_cache_group_ids, block_pool, kv_cache_spec,
+                               drop_eagle_block, alignment_tokens, dcp_world_size=1, pcp_world_size=1):
+        maps = [ckpt_map_for_kv_group(gid) for gid in kv_cache_group_ids]
+        if not any(m is not None for m in maps):
+            return original(cls, block_hashes, max_length, kv_cache_group_ids, block_pool, kv_cache_spec,
+                            drop_eagle_block, alignment_tokens, dcp_world_size, pcp_world_size)
+        ml = max_length
+        while ml > 0:
+            blocks, hit_length = original(cls, block_hashes, ml, kv_cache_group_ids, block_pool, kv_cache_spec,
+                                          drop_eagle_block, alignment_tokens, dcp_world_size, pcp_world_size)
+            if hit_length == 0:
+                return blocks, 0
+            resident = True
+            for group_blocks, cmap in zip(blocks, maps):
+                if cmap is None or not group_blocks:
+                    continue
+                if not cmap.is_resident(group_blocks[-1].block_id):
+                    resident = False
+                    break
+            if resident:
+                return blocks, hit_length
+            ml = hit_length - 1
+        return tuple([] for _ in kv_cache_group_ids), 0
+
+    return find_longest_cache_hit
+
+
+def _patch_mamba_find_longest_cache_hit() -> None:
+    if os.environ.get("VLLM_GDN_PC_HIT_CAP", "1") == "0":
+        return
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+    if getattr(MambaManager.find_longest_cache_hit, "_hpu_gdn_wrapped", False):
+        return
+    wrapped = _hpu_mamba_find_longest_cache_hit(MambaManager.find_longest_cache_hit.__func__)
+    wrapped._hpu_gdn_wrapped = True
+    MambaManager.find_longest_cache_hit = classmethod(wrapped)
+
+
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
     # --- torch.accelerator.empty_cache ---
@@ -908,6 +960,7 @@ def apply() -> None:
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
         _patch_inc_quantization_config()
+        _patch_mamba_find_longest_cache_hit()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
