@@ -1165,9 +1165,9 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'window_block_usage', 'window_block_groups', 'window_attn_bias', 'chunked_block_mapping', 'chunked_attn_bias',
         'chunked_block_list', 'chunked_block_usage', 'chunked_block_groups', 'prep_initial_states',
         'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor',
-        'gdn_ckpt_load_slots', 'gdn_ckpt_store_slots', 'gdn_ckpt_chunks_to_slot', 'gdn_ckpt_blocks_to_slot',
-        'query_start_loc', 'query_start_loc_p', 'padding_mask_flat', 'blocks_caching_range',
-        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks', 'image_seg_ids'
+        'gdn_ckpt_load_slots', 'gdn_ckpt_chunks_to_slot', 'gdn_ckpt_blocks_to_slot', 'query_start_loc',
+        'query_start_loc_p', 'padding_mask_flat', 'blocks_caching_range', 'mamba_chunks_to_block_mapping',
+        'seqlens_offsets_for_blocks', 'image_seg_ids'
     ])
     return attention_metadata
 
@@ -1642,39 +1642,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
 
-    def _gdn_ckpt_slots_for_blocks(self, req_indices, load_block_idx, store_block_idx, first_scheduled_block_idx,
-                                   target_bs, num_full_blocks):
-        """Map per-request (load, store) block ids to checkpoint slots.
+    def _gdn_ckpt_load_slots_for_blocks(self, req_indices, load_block_idx, first_scheduled_block_idx, target_bs):
+        """Map each request's resume boundary block id to a checkpoint load slot.
 
-        load = lookup (0 on miss -> no restore); store = allocate, but only for
-        a full, non-null block (a partial trailing block is never a resumable
-        hit and would only pollute the bounded pool). Restore is valid only when
-        the request resumes at a completed boundary (load_block_idx <
+        load = lookup (0 on miss -> no restore). Restore is valid only when the
+        request resumes at a completed boundary (load_block_idx <
         first_scheduled_block_idx); an intra-block continuation shares the live
         base_slot, and recycled block_id keys would otherwise return a stale slot.
-        Returns two [num_groups, target_bs] int32 tensors.
+        Store allocation lives in the caching-range loop (which snapshots every
+        boundary); doing it here too would double-touch the bounded pool's LRU.
+        Returns a [num_groups, target_bs] int32 tensor.
         """
-        load_rows, store_rows = [], []
+        load_rows = []
         for group_idx in range(len(self.input_batch.block_table.block_tables)):
             load_slots = torch.zeros(target_bs, dtype=torch.int32)
-            store_slots = torch.zeros(target_bs, dtype=torch.int32)
             if group_idx in self._gdn_ckpt_maps:
                 bt = self.input_batch.block_table[group_idx].get_cpu_tensor()
                 cmap = self._gdn_ckpt_maps[group_idx]
                 for i, req_idx in enumerate(req_indices):
-                    # Resolve load before store: else a full pool could evict the
-                    # just-granted resume boundary (LRU victim) before we read it.
                     at_boundary = int(load_block_idx[i]) < int(first_scheduled_block_idx[i])
                     if at_boundary:
                         load_bid = int(bt[req_idx, int(load_block_idx[i])])
                         load_slots[i] = cmap.get_load_slot(load_bid)
-                    store_bid = int(bt[req_idx, int(store_block_idx[i])])
-                    # Persist only full, non-null boundaries (0 = null scratch).
-                    if int(store_block_idx[i]) < int(num_full_blocks[i]) and store_bid != 0:
-                        store_slots[i] = cmap.alloc_store_slot(store_bid)
             load_rows.append(load_slots)
-            store_rows.append(store_slots)
-        return torch.stack(load_rows, dim=0), torch.stack(store_rows, dim=0)
+        return torch.stack(load_rows, dim=0)
 
     def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int], is_prompt: bool):
         '''
@@ -2982,18 +2973,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 )
 
             req_indices = [self.input_batch.req_id_to_index[req_id] for req_id in contents.req_ids]
-            load_ckpt_slots_cpu = store_ckpt_slots_cpu = None
+            load_ckpt_slots_cpu = None
             if self.use_prefix_caching:
                 load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu,
                                                                        target_bs)
                 store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
                                                                         target_bs)
                 if self._gdn_ckpt_enabled:
-                    num_full_blocks_per_req = [(int(context_lens[j]) + int(query_lens[j])) // mamba_block_size
-                                               for j in range(len(req_indices))]
-                    (load_ckpt_slots_cpu, store_ckpt_slots_cpu) = self._gdn_ckpt_slots_for_blocks(
-                        req_indices, block_idx_last_computed_token_cpu, block_idx_last_scheduled_token_cpu,
-                        block_idx_first_scheduled_token_cpu, target_bs, num_full_blocks_per_req)
+                    load_ckpt_slots_cpu = self._gdn_ckpt_load_slots_for_blocks(req_indices,
+                                                                               block_idx_last_computed_token_cpu,
+                                                                               block_idx_first_scheduled_token_cpu,
+                                                                               target_bs)
             else:
                 zeros = [0] * len(req_indices)
                 load_state_indices_cpu = store_state_indices_cpu = \
@@ -3067,6 +3057,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             ],
                                                       dtype=torch.int32,
                                                       device='cpu')
+                            # slot_range is one entry per boundary block; it must
+                            # line up 1:1 with the chunk indices we scatter into,
+                            # or a boundary would get the wrong slot (or none).
+                            assert len(slot_range) == len(chunk_indices) == n_blocks
                             ckpt_chunks_to_slot_cpu[chunk_indices] = slot_range
                             ckpt_blocks_to_slot_cpu[:n_blocks] = slot_range
                         all_ckpt_chunks_to_slot_cpu.append(ckpt_chunks_to_slot_cpu)
@@ -3120,8 +3114,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             store_indices_tensor = async_h2d_copy(store_state_indices_cpu, device=self.device)
             gdn_ckpt_load_slots = (async_h2d_copy(load_ckpt_slots_cpu, device=self.device)
                                    if load_ckpt_slots_cpu is not None else None)
-            gdn_ckpt_store_slots = (async_h2d_copy(store_ckpt_slots_cpu, device=self.device)
-                                    if store_ckpt_slots_cpu is not None else None)
 
             has_initial_states_p = async_h2d_copy(has_initial_states_cpu, dtype=torch.int32)
             last_chunk_indices_p = async_h2d_copy(last_chunk_indices, dtype=torch.int32)
@@ -3150,7 +3142,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             load_indices_tensor = None
             store_indices_tensor = None
             gdn_ckpt_load_slots = None
-            gdn_ckpt_store_slots = None
             has_initial_states_p = None
             last_chunk_indices_p = None
             padding_mask_flat = None
@@ -3198,7 +3189,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             load_indices_tensor=load_indices_tensor,
             store_indices_tensor=store_indices_tensor,
             gdn_ckpt_load_slots=gdn_ckpt_load_slots,
-            gdn_ckpt_store_slots=gdn_ckpt_store_slots,
             gdn_ckpt_chunks_to_slot=gdn_ckpt_chunks_to_slot,
             gdn_ckpt_blocks_to_slot=gdn_ckpt_blocks_to_slot,
             query_start_loc=query_start_loc_p,
@@ -3457,7 +3447,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 )
 
             req_indices = list(range(num_decodes))
-            load_ckpt_slots_cpu = store_ckpt_slots_cpu = None
+            load_ckpt_slots_cpu = None
             if self.use_prefix_caching:
                 load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu,
                                                                        padded_batch_size)
@@ -3483,8 +3473,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             store_indices_tensor = async_h2d_copy(store_state_indices_cpu, device=self.device)
             gdn_ckpt_load_slots = (async_h2d_copy(load_ckpt_slots_cpu, device=self.device)
                                    if load_ckpt_slots_cpu is not None else None)
-            gdn_ckpt_store_slots = (async_h2d_copy(store_ckpt_slots_cpu, device=self.device)
-                                    if store_ckpt_slots_cpu is not None else None)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
         else:
@@ -3492,7 +3480,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             load_indices_tensor = None
             store_indices_tensor = None
             gdn_ckpt_load_slots = None
-            gdn_ckpt_store_slots = None
             query_start_loc_p = None
 
         # CPU<>HPU sync *should not* happen here.
@@ -3563,7 +3550,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             load_indices_tensor=load_indices_tensor,
             store_indices_tensor=store_indices_tensor,
             gdn_ckpt_load_slots=gdn_ckpt_load_slots,
-            gdn_ckpt_store_slots=gdn_ckpt_store_slots,
             seq_lens_tensor=seq_lens_tensor,
             query_start_loc=query_start_loc_p,
         )

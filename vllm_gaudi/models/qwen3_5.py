@@ -70,18 +70,6 @@ def _gdn_save_block_states(ssm_dst, conv_dst, varlen_states, conv_in, ssm_index,
     conv_dst.index_copy_(0, conv_index.long(), windows.transpose(-1, -2).to(conv_dst.dtype))
 
 
-def _gdn_ckpt_export(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, store_slots):
-    """Copy live compact slot -> checkpoint snapshot at block boundaries.
-
-    store_slot 0 = padding (dumps into null slot 0, never read). No boolean
-    indexing (HPU cannot lower it).
-    """
-    dst = store_slots.clamp(min=0).long()
-    src = base_slots.clamp(min=0).long()
-    ssm_ckpt.index_copy_(0, dst, ssm_state.index_select(0, src).to(ssm_ckpt.dtype))
-    conv_ckpt.index_copy_(0, dst, conv_state.index_select(0, src).to(conv_ckpt.dtype))
-
-
 class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
     def __init__(self, *args, **kwargs):
@@ -154,13 +142,11 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            return (False, None, None, None, None, None, None, 0, 0, 0, 0, None, None, None, None, None, None, None,
-                    None)
+            return (False, None, None, None, None, None, None, 0, 0, 0, 0, None, None, None, None, None, None, None)
 
         is_prompt = bool(getattr(attn_metadata, "is_prompt", False))
         state_indices = self._resolve_state_indices(attn_metadata)
         load_slots = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_load_slots", None))
-        store_slots = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_store_slots", None))
         # Per-block prefix-cache metadata (None outside prefix caching).
         mamba_map = self._resolve_group_row(getattr(attn_metadata, "mamba_chunks_to_block_mapping", None))
         blocks_caching_range = self._resolve_group_row(getattr(attn_metadata, "blocks_caching_range", None))
@@ -208,8 +194,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 initial_state = initial_state * mask
 
         return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
-                num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots,
-                store_slots, mamba_map, blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot)
+                num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots, mamba_map,
+                blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot)
 
     def forward(
         self,
@@ -231,8 +217,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
         # === Metadata extraction (natural graph break) ===============
         (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
-         num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots, store_slots,
-         mamba_map, blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot,
+         num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots, mamba_map,
+         blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot,
          ckpt_blocks_to_slot) = self._extract_metadata(num_tokens)
 
         # === Part 1: Input Projection ================================
@@ -343,6 +329,14 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 state_indices,
             )
             if want_block_save:
+                # Boundary snapshotting assumes a single prefill sequence: it
+                # reads varlen_states[0] / seq-0 conv inputs only. The runner
+                # enforces this upstream (one request per prefix-caching prefill
+                # step), but assert here so the contract is local to the consumer
+                # -- a silent skip of seqs 1+ would leave the scheduler caching
+                # blocks the worker never checkpointed (shadow-not-subset).
+                assert prefill_num_seqs == 1, ("GDN boundary checkpointing requires prefill_num_seqs == 1 "
+                                               f"(got {prefill_num_seqs})")
                 conv_in_seq0 = mixed_qkv.transpose(0, 1)[:, :prefill_seq_len]
                 if self.kv_ckpt is None:
                     # Non-compact: block-indexed live caches.
@@ -388,13 +382,6 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                     ssm_state_indices=state_indices,
                     use_qk_l2norm_in_kernel=True,
                 )
-            # Export live state to its checkpoint slot; completed blocks get
-            # their final boundary state, incomplete blocks are overwritten later.
-            if store_slots is not None and self.kv_ckpt is not None:
-                conv_ckpt, ssm_ckpt = self.kv_ckpt
-                _gdn_ckpt_export(conv_state, ssm_state, conv_ckpt, ssm_ckpt, state_indices[:num_decodes],
-                                 store_slots[:num_decodes])
-
             non_spec_out = core_attn_out_result.squeeze(0)
             if non_spec_out.shape[0] == core_attn_out.shape[0]:
                 core_attn_out.copy_(non_spec_out)

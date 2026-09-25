@@ -877,7 +877,10 @@ def _hpu_mamba_find_longest_cache_hit(original):
     registered. For a shadow pool (tp>1) also load-touch the served boundary so
     the shadow evicts in lockstep with the worker.
     """
+    from vllm.v1.kv_cache_interface import MambaSpec
+
     from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group, is_shadow
+    from vllm_gaudi.v1.worker.hpu_model_runner import _GDN_MAMBA_TYPES
 
     def find_longest_cache_hit(cls,
                                block_hashes,
@@ -890,7 +893,30 @@ def _hpu_mamba_find_longest_cache_hit(original):
                                dcp_world_size=1,
                                pcp_world_size=1):
         maps = [ckpt_map_for_kv_group(gid) for gid in kv_cache_group_ids]
-        if not any(m is not None for m in maps):
+        # kv_cache_spec is a single spec shared by every group in this call
+        # (MambaManager asserts isinstance(kv_cache_spec, MambaSpec)), so
+        # mamba_type is uniform across kv_cache_group_ids.
+        is_gdn = isinstance(kv_cache_spec, MambaSpec) and kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES
+        # A bounded ckpt pool exists only under compact GDN; non-compact GDN
+        # keeps the full block-indexed state cache and needs no cap. Match the
+        # shadow-registration gate exactly so "expected" == "registered".
+        compact_on = os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() in ("1", "true")
+        if is_gdn and compact_on:
+            # Fail loud (not open) if a GDN group lacks its checkpoint map. Under
+            # compact GDN every GDN group is mapped by construction -- the real
+            # worker pool at tp=1, an engine-core shadow at tp>1. A group reaching
+            # here unmapped means the env gates (VLLM_COMPACT_GDN + prefix caching)
+            # diverged across worker/engine-core; skipping it (the `cmap is None`
+            # branch below) would fail open -- granting a prefix hit the worker's
+            # bounded pool cannot back, resuming a later request from stale
+            # recurrent state. Crash instead of silently corrupting.
+            assert all(m is not None for m in maps), (
+                "GDN kv-cache group has no checkpoint map in find_longest_cache_hit; "
+                "check VLLM_COMPACT_GDN / prefix-caching env gates match across worker and engine-core.")
+        elif not any(m is not None for m in maps):
+            # Non-GDN mamba, or GDN without a bounded pool (non-compact, full
+            # block-indexed cache): every cached boundary is restorable, so
+            # there is nothing to cap -- defer to the unmodified lookup.
             return original(cls, block_hashes, max_length, kv_cache_group_ids, block_pool, kv_cache_spec,
                             drop_eagle_block, alignment_tokens, dcp_world_size, pcp_world_size)
         ml = max_length
@@ -901,6 +927,8 @@ def _hpu_mamba_find_longest_cache_hit(original):
                 return blocks, 0
             resident = True
             for group_blocks, cmap in zip(blocks, maps):
+                # cmap is None only for a non-GDN group (asserted above for the
+                # GDN case); such groups restore from the full cache, no cap.
                 if cmap is None or not group_blocks:
                     continue
                 if not cmap.is_resident(group_blocks[-1].block_id):
@@ -911,6 +939,13 @@ def _hpu_mamba_find_longest_cache_hit(original):
                     if cmap is not None and group_blocks and is_shadow(gid):
                         cmap.get_load_slot(group_blocks[-1].block_id)
                 return blocks, hit_length
+            # Retry for a shorter prefix. This assumes original() is monotone:
+            # a smaller max_length never returns a longer hit. hit_length - 1
+            # guarantees strict progress (hit_length >= 1 here, since 0 returned
+            # above), so ml strictly decreases and the loop terminates. Guard
+            # against a non-monotone original returning hit_length > ml anyway.
+            if hit_length > ml:
+                break
             ml = hit_length - 1
         return tuple([] for _ in kv_cache_group_ids), 0
 
@@ -918,8 +953,9 @@ def _hpu_mamba_find_longest_cache_hit(original):
 
 
 def _patch_mamba_find_longest_cache_hit() -> None:
-    if os.environ.get("VLLM_GDN_PC_HIT_CAP", "1") == "0":
-        return
+    # Always installed: the wrapper delegates to stock lookup whenever no
+    # checkpoint map is registered, which is exactly when compact GDN prefix
+    # caching is not active. So it is a no-op for non-GDN / non-compact mamba.
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
     if getattr(MambaManager.find_longest_cache_hit, "_hpu_gdn_wrapped", False):
         return
@@ -965,8 +1001,8 @@ def _hpu_mamba_cache_blocks(original):
 
 
 def _patch_mamba_cache_blocks() -> None:
-    if os.environ.get("VLLM_GDN_PC_HIT_CAP", "1") == "0":
-        return
+    # Always installed: the wrapper returns early unless the group is a tp>1
+    # shadow (is_shadow), so it is a no-op otherwise.
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
     if getattr(MambaManager.cache_blocks, "_hpu_gdn_wrapped", False):
         return
@@ -1014,8 +1050,9 @@ def _hpu_kv_cache_manager_init(original):
 
 
 def _patch_kv_cache_manager_shadow() -> None:
-    if os.environ.get("VLLM_GDN_PC_HIT_CAP", "1") == "0":
-        return
+    # Always installed: the wrapped __init__ registers a shadow pool only when
+    # VLLM_COMPACT_GDN is on, caching is enabled, and GDN groups exist, so it is
+    # a no-op otherwise.
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     if getattr(KVCacheManager.__init__, "_hpu_gdn_wrapped", False):
         return
