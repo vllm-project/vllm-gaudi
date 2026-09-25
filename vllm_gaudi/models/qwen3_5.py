@@ -271,8 +271,11 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
             g, beta = hpu_fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
             conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+            # Transpose to [channels, tokens] once; reused below for the block
+            # boundary conv-input snapshot to avoid a second identical transpose.
+            mixed_qkv_t = mixed_qkv.transpose(0, 1)
             mixed_qkv_conv = hpu_causal_conv1d_fn(
-                x=mixed_qkv.transpose(0, 1),
+                x=mixed_qkv_t,
                 weight=conv_weights,
                 bias=self.conv1d.bias,
                 activation=self.activation,
@@ -300,8 +303,9 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 beta = beta * token_mask_h
 
             # Prefix caching needs every block boundary snapshotted, so ask the
-            # kernel for per-chunk boundary states.
-            want_block_save = mamba_map is not None
+            # kernel for per-chunk boundary states. On the compact path mamba_map
+            # is not transferred (the ckpt slot maps replace it), so key off either.
+            want_block_save = mamba_map is not None or ckpt_chunks_to_slot is not None
             kernel_out = hpu_chunk_gated_delta_rule(
                 q=query,
                 k=key,
@@ -337,7 +341,7 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 # blocks the worker never checkpointed (shadow-not-subset).
                 assert prefill_num_seqs == 1, ("GDN boundary checkpointing requires prefill_num_seqs == 1 "
                                                f"(got {prefill_num_seqs})")
-                conv_in_seq0 = mixed_qkv.transpose(0, 1)[:, :prefill_seq_len]
+                conv_in_seq0 = mixed_qkv_t[:, :prefill_seq_len]
                 if self.kv_ckpt is None:
                     # Non-compact: block-indexed live caches.
                     _gdn_save_block_states(ssm_state, conv_state, varlen_states[0], conv_in_seq0, mamba_map,

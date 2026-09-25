@@ -3122,9 +3122,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
             if self.use_prefix_caching:
-                blocks_caching_range = async_h2d_copy(all_blocks_caching_ranges_cpu, device=self.device)
-                mamba_chunks_to_block_mapping = async_h2d_copy(all_mamba_chunks_to_block_mappings_cpu,
-                                                               device=self.device)
+                # On the compact-GDN path the model consumes the ckpt slot maps
+                # (below), not the block-indexed maps, so skip transferring the
+                # latter. Non-GDN mamba (hpu_mamba_mixer2) still needs them.
+                if self._gdn_ckpt_enabled:
+                    blocks_caching_range = None
+                    mamba_chunks_to_block_mapping = None
+                else:
+                    blocks_caching_range = async_h2d_copy(all_blocks_caching_ranges_cpu, device=self.device)
+                    mamba_chunks_to_block_mapping = async_h2d_copy(all_mamba_chunks_to_block_mappings_cpu,
+                                                                   device=self.device)
                 seqlens_offsets_for_blocks = async_h2d_copy(seqlens_offsets_for_blocks_cpu, device=self.device)
                 gdn_ckpt_chunks_to_slot = (async_h2d_copy(all_ckpt_chunks_to_slot_cpu, device=self.device)
                                            if all_ckpt_chunks_to_slot_cpu is not None else None)
