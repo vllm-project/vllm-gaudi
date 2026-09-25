@@ -8,7 +8,9 @@ from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding, Phi3Lo
                                                          YaRNScalingRotaryEmbedding, DeepseekScalingRotaryEmbedding,
                                                          MRotaryEmbedding)
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbeddingBase
-from vllm.model_executor.custom_op import CustomOp
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 _orig_rotary_base_init = RotaryEmbeddingBase.__init__
 
@@ -496,8 +498,23 @@ class HPULlama3RotaryEmbedding(Llama3RotaryEmbedding):
         return query, key
 
 
-@CustomOp.register_oot(name='Phi3LongRoPEScaledRotaryEmbedding')
 class HPUPhi3LongRoPEScaledRotaryEmbedding(Phi3LongRoPEScaledRotaryEmbedding):
+    """LongRoPE rotary embedding (Phi-3, Phi-4-mini) on HPU.
+
+    Replaces upstream ``vllm.model_executor.layers.rotary_embedding.Phi3LongRoPEScaledRotaryEmbedding``.
+    Upstream is a plain nn.Module, not a CustomOp, so ``register_oot`` never reaches it; the class is
+    swapped into the rotary_embedding package namespace at the end of this module instead. The HPU
+    runner passes 2D positions and precomputes cos/sin once per step via ``prepare_cos_sin``.
+
+    Remove the swap (and use ``register_oot``) once upstream makes the class a CustomOp.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Upstream rejects non-neox in __init__ and does not store the flag; the shared HPU path reads it.
+        self.is_neox_style = True
+        logger.info_once("HPU LongRoPE: use_long_rope=%s (original_max_position_embeddings=%d)", self.use_long_rope,
+                         self.original_max_position_embeddings)
 
     def prepare_cos_sin(self,
                         positions: torch.Tensor,
@@ -508,56 +525,19 @@ class HPUPhi3LongRoPEScaledRotaryEmbedding(Phi3LongRoPEScaledRotaryEmbedding):
             offsets = offsets.view(positions.shape[0], -1)
             positions = positions + offsets
         positions = positions.flatten()
+        # Long factors live after the short cache rows; upstream picks them per server from max_model_len.
+        if self.use_long_rope:
+            positions = positions + self.original_max_position_embeddings
         num_tokens = positions.shape[0]
         cos_sin = self.long_short_cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         cos = torch.cat((cos, cos), dim=-1)
         sin = torch.cat((sin, sin), dim=-1)
-
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-    def forward_oot(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        from habana_frameworks.torch.hpex.kernels import (RotaryPosEmbeddingMode, apply_rotary_pos_emb)
-
-        rope_mode: RotaryPosEmbeddingMode
-        rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
-
-        if hasattr(self, "scaling_factors") or self.sin is None:
-            self.prepare_cos_sin(positions, offsets)
-        if self.recompute_cos_sin:
-            self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
-
-        sin = self.sin
-        cos = self.cos
-
-        if offsets is not None:
-            offsets = offsets.view(positions.shape[0], -1)
-            positions = positions + offsets
-        positions = positions.flatten()
-        num_tokens = positions.shape[0]
-
-        query_shape = query.shape
-        query = query.view(num_tokens, -1, self.head_size)
-        query_rot = query[..., :self.rotary_dim]
-        query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
-        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
-
-        key_shape = key.shape
-        key = key.view(num_tokens, -1, self.head_size)
-        key_rot = key[..., :self.rotary_dim]
-        key_pass = key[..., self.rotary_dim:]
-        key_rot = apply_rotary_pos_emb(key_rot, cos, sin, None, 0, rope_mode)
-        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
-
-        return query, key
+    # The shared HPU forward does the rotary/pass split; bind forward too, as upstream is no CustomOp.
+    forward_oot = forward = HPURotaryEmbedding.forward_oot
 
 
 @Llama4VisionRotaryEmbedding.register_oot
@@ -738,3 +718,13 @@ class HPUMRotaryEmbedding(MRotaryEmbedding):
         key_rot = apply_rotary_pos_emb(key_rot, cos, sin, None, 0, rope_mode)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
+
+
+# get_rope() resolves Phi3LongRoPEScaledRotaryEmbedding from the package namespace; swap it there.
+# Remove once upstream makes the class a CustomOp and register_oot can be used instead.
+import vllm.model_executor.layers.rotary_embedding as _rope_pkg  # noqa: E402
+
+if "Phi3LongRoPEScaledRotaryEmbedding" not in _rope_pkg.get_rope.__code__.co_names:
+    raise RuntimeError("get_rope() no longer references Phi3LongRoPEScaledRotaryEmbedding as a package global; "
+                       "update the HPU LongRoPE swap in vllm_gaudi/ops/hpu_rotary_embedding.py")
+_rope_pkg.Phi3LongRoPEScaledRotaryEmbedding = HPUPhi3LongRoPEScaledRotaryEmbedding

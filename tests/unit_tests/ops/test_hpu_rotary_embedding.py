@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch.nn as nn
 import habana_frameworks.torch as htorch
+from types import SimpleNamespace
 from typing import NamedTuple
 from utils import temporary_op_registry_oot, register_op
 from transformers.models.auto.configuration_auto import AutoConfig
@@ -17,8 +18,7 @@ from vllm_gaudi.ops.hpu_rotary_embedding import (HPURotaryEmbedding, HPULinearSc
 from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding, LinearScalingRotaryEmbedding,
                                                          DynamicNTKScalingRotaryEmbedding, YaRNScalingRotaryEmbedding,
                                                          DeepseekScalingRotaryEmbedding, Llama3RotaryEmbedding,
-                                                         Phi3LongRoPEScaledRotaryEmbedding, Llama4VisionRotaryEmbedding,
-                                                         MRotaryEmbedding)
+                                                         Llama4VisionRotaryEmbedding, MRotaryEmbedding)
 
 # General settings
 HIDDEN_SIZES = [4096]
@@ -308,38 +308,63 @@ def test_llama3_rotary_embedding(
     run_rotary_embedding_test(native_rotary_data, oot_rotary_data, seq_length, hidden_size, **kwargs)
 
 
-@pytest.mark.skip(reason="Phi3LongRoPEScaledRotaryEmbedding currently does not inherit CustomOp")
-@pytest.mark.parametrize("seq_length", SEQ_LENGTHS)
-@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
-@pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
-@pytest.mark.parametrize("base", BASES)
-@pytest.mark.parametrize("is_neox_style", [True])
-def test_phi3_long_rope_scaled_rotary_embedding(
-    default_vllm_config: None,
-    seq_length: int,
-    hidden_size: int,
-    head_size: int,
-    rotary_dim: int,
-    max_position_embeddings: int,
-    base: float,
-    is_neox_style: bool,
-) -> None:
+# Positions as the HPU runner builds them: (batch_size, seq_length, valid tokens per row, pad value).
+# Prompts are [bs, seq] padded with -1 (bucket tail and dummy rows); decode rows are [bs, 1] padded with 0.
+PHI3_POSITION_LAYOUTS = {
+    "prompt_bs1": (1, 1024, [1024], -1),
+    "prompt_padded": (4, 256, [256, 200, 17, 0], -1),
+    "decode": (8, 1, [1, 1, 1, 1, 1, 1, 0, 0], 0),
+}
+
+
+# (128, 96): Phi-4-mini partial rotary; (96, 96): Phi-3.5-mini full rotary. Both use 48 factors.
+# max_model_len picks the short (4096) or long (16384) factors.
+@pytest.mark.parametrize("head_size, rotary_dim", [(128, 96), (96, 96)])
+@pytest.mark.parametrize("max_model_len", [4096, 16384])
+@pytest.mark.parametrize("layout", PHI3_POSITION_LAYOUTS)
+def test_phi3_long_rope_scaled_rotary_embedding(monkeypatch, head_size: int, rotary_dim: int, max_model_len: int,
+                                                layout: str) -> None:
+    # Upstream is not a CustomOp, so compare the two classes directly instead of via the OOT registry.
+    import vllm.model_executor.layers.rotary_embedding as rope_pkg
+    from vllm.model_executor.layers.rotary_embedding import phi3_long_rope_scaled_rope as phi3_rope
+    assert rope_pkg.Phi3LongRoPEScaledRotaryEmbedding is HPUPhi3LongRoPEScaledRotaryEmbedding
+
+    model_config = SimpleNamespace(max_model_len=max_model_len)
+    monkeypatch.setattr(phi3_rope, "get_current_vllm_config", lambda: SimpleNamespace(model_config=model_config))
     config = AutoConfig.from_pretrained("microsoft/Phi-4-mini-instruct")
     kwargs = {
         "head_size": head_size,
         "rotary_dim": rotary_dim,
-        "max_position_embeddings": max_position_embeddings,
-        "base": base,
-        "is_neox_style": is_neox_style,
+        "max_position_embeddings": config.max_position_embeddings,
         "original_max_position_embeddings": config.original_max_position_embeddings,
+        "base": 10000.0,
+        "is_neox_style": True,
+        "dtype": torch.bfloat16,
         "short_factor": config.rope_scaling["short_factor"],
         "long_factor": config.rope_scaling["long_factor"],
     }
-    native_rotary_data = RotaryData(cls=Phi3LongRoPEScaledRotaryEmbedding, dtype=torch.bfloat16, device="hpu")
-    oot_rotary_data = RotaryData(cls=HPUPhi3LongRoPEScaledRotaryEmbedding, dtype=torch.bfloat16, device="hpu")
-    run_rotary_embedding_test(native_rotary_data, oot_rotary_data, seq_length, hidden_size, **kwargs)
+    with torch.device("hpu"):
+        native = phi3_rope.Phi3LongRoPEScaledRotaryEmbedding(**kwargs)
+        oot = HPUPhi3LongRoPEScaledRotaryEmbedding(**kwargs)
+    assert native.use_long_rope == oot.use_long_rope == (max_model_len > config.original_max_position_embeddings)
+
+    batch_size, seq_length, valid_lens, pad_value = PHI3_POSITION_LAYOUTS[layout]
+    hidden_size = 32 * head_size
+    valid = torch.arange(seq_length, device="hpu") < torch.tensor(valid_lens, device="hpu").unsqueeze(-1)
+    positions = torch.randint(high=max_model_len, size=(batch_size, seq_length), dtype=torch.int64, device="hpu")
+    # The runner feeds the padding into prepare_cos_sin as is; padded rows are never compared.
+    positions = torch.where(valid, positions, pad_value)
+    query = torch.randn(batch_size, seq_length, hidden_size, dtype=torch.bfloat16, device="hpu")
+    key = torch.randn(batch_size, seq_length, hidden_size, dtype=torch.bfloat16, device="hpu")
+    # Upstream expects flat [T] positions / [T, hidden] q,k; the HPU runner passes [bs, seq] and [bs, seq, hidden].
+    ref_query, ref_key = native(positions[valid], query[valid], key[valid])
+
+    oot.prepare_cos_sin(positions)
+    if not htorch.utils.internal.is_lazy():
+        oot = torch.compile(oot, **HPUCompileConfig().get_compile_args())
+    query_out, key_out = oot(positions, query, key)
+    torch.testing.assert_close(query_out[valid], ref_query, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(key_out[valid], ref_key, atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize("seq_length", VISION_SEQ_LENGTHS)
