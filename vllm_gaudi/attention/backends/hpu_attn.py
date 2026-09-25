@@ -288,7 +288,11 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         # =========================== #
 
         k_c_normed, k_pe = latent_vec_k.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
+        # latent_vec_k is 2-D, so this is an unsqueeze. Spelling it as one keeps
+        # MLA variants without a RoPE component working: they leave k_pe empty,
+        # and view(-1, 1, 0) is ambiguous because a zero in the shape makes the
+        # element count 0 and -1 unsolvable.
+        k_pe = k_pe.unsqueeze(1)
 
         kv_nope = self.kv_b_proj(k_c_normed)[0]\
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
