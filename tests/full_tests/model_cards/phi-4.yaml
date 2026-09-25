@@ -1,0 +1,11 @@
+# Owner: @pawel-olejniczak
+model_card:
+  model_name: "microsoft/phi-4"
+  tasks: gsm8k
+  num_fewshot: 5
+  limit: 256
+  max_model_len: 4096
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.92
