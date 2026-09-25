@@ -25,22 +25,56 @@ def gdn_ckpt_num_slots(num_blocks: int, num_gdn_groups: int, mem_fraction: float
     return min(k, num_blocks - 1)
 
 
-# Residency view of the worker checkpoint pools, keyed by kv_cache_group_id
-# (== worker group_idx). Populated by the runner. At TP=1 (UniProc) the
-# scheduler shares this process, so find_longest_cache_hit reads the live pool
-# and never over-reports a hit the pool has evicted.
+def gdn_ckpt_shadow_num_slots(num_blocks: int, num_gdn_groups: int, mem_fraction: float, explicit_slots: int) -> int:
+    """Engine-core shadow-pool depth: a lower bound on the worker's K.
+
+    The worker floors K at its in-flight liveness (max_num_seqs), which
+    engine-core cannot see. Dropping that floor to 1 keeps the shadow's K <=
+    the worker's, so the shadow's resident set stays a subset of the worker's
+    (LRU stack property): the hit cap can only be conservative, never stale.
+    Equal to the worker's K in the common case (explicit slots, or the memory
+    term dominating the floor).
+    """
+    return gdn_ckpt_num_slots(num_blocks, num_gdn_groups, mem_fraction, 1, explicit_slots)
+
+
+# Residency view of the checkpoint pools, keyed by kv_cache_group_id
+# (== worker group_idx). find_longest_cache_hit reads it to cap a prefix hit
+# at the last boundary the bounded pool still holds.
 #
-# At TP>1 (MultiprocExecutor) the pools live in the worker processes; this dict
-# stays empty in engine-core, so the hit-capping wrapper is a no-op and the
-# scheduler can still report a hit at a boundary the workers have evicted. That
-# path is NOT yet correct -- resuming from an evicted boundary reads stale
-# state. TP>1 requires an engine-core-side residency view (see the module TODO)
-# before it is safe to serve compact-GDN prefix-cache hits.
+# At TP=1 (UniProc) the scheduler shares the worker process, so the runner
+# registers the *real* worker pool here (register_ckpt_map) and the cap reads
+# the live pool directly -- never over-reporting a hit the pool has evicted.
+#
+# At TP>1 (MultiprocExecutor) the real pools live in the worker processes and
+# this dict would otherwise stay empty in engine-core, making the cap a no-op
+# so the scheduler could report a hit at a boundary the workers have evicted
+# (stale-state resume). To close that gap, engine-core registers a *shadow*
+# pool (register_shadow_map): a residency mirror driven by the same
+# full-non-null block set the scheduler caches, so its is_resident matches the
+# worker pools by construction. A group is either real (TP=1) or shadow (TP>1),
+# never both.
 _CKPT_MAPS_BY_KV_GROUP: "dict[int, GdnCheckpointMap]" = {}
+# Group ids whose registered map is an engine-core shadow (TP>1), not a real
+# worker pool. Kept separate so hit/load-touch bookkeeping only runs on shadows.
+_SHADOW_GROUP_IDS: set[int] = set()
 
 
 def register_ckpt_map(kv_cache_group_id: int, cmap: "GdnCheckpointMap") -> None:
+    """Register the real worker pool for a group (TP=1); supersedes any shadow."""
     _CKPT_MAPS_BY_KV_GROUP[kv_cache_group_id] = cmap
+    _SHADOW_GROUP_IDS.discard(kv_cache_group_id)
+
+
+def register_shadow_map(kv_cache_group_id: int, cmap: "GdnCheckpointMap") -> None:
+    """Register an engine-core residency mirror for a group (TP>1)."""
+    _CKPT_MAPS_BY_KV_GROUP[kv_cache_group_id] = cmap
+    _SHADOW_GROUP_IDS.add(kv_cache_group_id)
+
+
+def is_shadow(kv_cache_group_id: int) -> bool:
+    """Whether the registered map for a group is an engine-core shadow."""
+    return kv_cache_group_id in _SHADOW_GROUP_IDS
 
 
 def ckpt_map_for_kv_group(kv_cache_group_id: int) -> "GdnCheckpointMap | None":

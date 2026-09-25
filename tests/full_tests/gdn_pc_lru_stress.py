@@ -57,12 +57,15 @@ NUM_PREFIXES = int(os.getenv("GDN_PC_NUM_PREFIXES", "6"))
 
 
 def _distinct_prefixes(n: int) -> list[str]:
-    # Rotate the paragraph order so each prefix diverges from the first token
-    # and occupies its own kv blocks (no cross-prefix sharing).
+    # A per-index marker makes each prefix diverge from the very first token,
+    # so no two share kv blocks even when n exceeds len(PARAS) (a rotation
+    # alone repeats every len(PARAS) prefixes, letting a later prefix fully hit
+    # an earlier one and save no boundary). The rotated body keeps each prefix
+    # long enough to span multiple full kv blocks.
     out = []
     for i in range(n):
         rot = PARAS[i % len(PARAS):] + PARAS[:i % len(PARAS)]
-        out.append("".join(rot) * PREFIX_REPEAT)
+        out.append(f"Document {i} begins here. " + "".join(rot) * PREFIX_REPEAT)
     return out
 
 

@@ -875,10 +875,13 @@ def _hpu_mamba_find_longest_cache_hit(original):
     checkpoint the worker cannot resume from it, so the reported hit must not
     exceed the last resident boundary; the coordinator's min-across-groups then
     shortens num_computed_tokens and the tail recomputes. No-op when no ckpt pool
-    is registered for the group (non-compact, standard mamba, or worker-side at
-    tp>1).
+    is registered for the group (non-compact or standard mamba).
+
+    For an engine-core shadow pool (tp>1) the served hit's boundary is also
+    load-touched, mirroring the worker's restore recency so the shadow evicts
+    in lockstep with the worker.
     """
-    from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group
+    from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group, is_shadow
 
     def find_longest_cache_hit(cls, block_hashes, max_length, kv_cache_group_ids, block_pool, kv_cache_spec,
                                drop_eagle_block, alignment_tokens, dcp_world_size=1, pcp_world_size=1):
@@ -900,6 +903,9 @@ def _hpu_mamba_find_longest_cache_hit(original):
                     resident = False
                     break
             if resident:
+                for gid, group_blocks, cmap in zip(kv_cache_group_ids, blocks, maps):
+                    if cmap is not None and group_blocks and is_shadow(gid):
+                        cmap.get_load_slot(group_blocks[-1].block_id)
                 return blocks, hit_length
             ml = hit_length - 1
         return tuple([] for _ in kv_cache_group_ids), 0
@@ -916,6 +922,100 @@ def _patch_mamba_find_longest_cache_hit() -> None:
     wrapped = _hpu_mamba_find_longest_cache_hit(MambaManager.find_longest_cache_hit.__func__)
     wrapped._hpu_gdn_wrapped = True
     MambaManager.find_longest_cache_hit = classmethod(wrapped)
+
+
+def _hpu_mamba_cache_blocks(original):
+    """Mirror the scheduler's just-cached boundaries into the engine-core shadow.
+
+    Runs only for shadow groups (tp>1). The set of blocks newly cached this
+    step -- ``req_to_blocks[req][num_cached_before:num_cached_after]``, minus
+    null and unhashed blocks -- is exactly the full, non-null boundary set the
+    worker persists, so replaying it as store touches keeps the shadow's
+    residency and LRU order aligned with the worker pool.
+    """
+    from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group, is_shadow
+
+    def cache_blocks(self, request, num_tokens, *args, **kwargs):
+        before = self.num_cached_block.get(request.request_id, 0)
+        original(self, request, num_tokens, *args, **kwargs)
+        gid = self.kv_cache_group_id
+        if not is_shadow(gid):
+            return
+        after = self.num_cached_block.get(request.request_id, 0)
+        if after <= before:
+            return
+        shadow = ckpt_map_for_kv_group(gid)
+        if shadow is None:
+            return
+        blocks = self.req_to_blocks[request.request_id]
+        for idx in range(before, after):
+            block = blocks[idx]
+            if block.is_null or block.block_hash is None:
+                continue
+            shadow.alloc_store_slot(block.block_id)
+
+    return cache_blocks
+
+
+def _patch_mamba_cache_blocks() -> None:
+    if os.environ.get("VLLM_GDN_PC_HIT_CAP", "1") == "0":
+        return
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+    if getattr(MambaManager.cache_blocks, "_hpu_gdn_wrapped", False):
+        return
+    wrapped = _hpu_mamba_cache_blocks(MambaManager.cache_blocks)
+    wrapped._hpu_gdn_wrapped = True
+    MambaManager.cache_blocks = wrapped
+
+
+def _hpu_kv_cache_manager_init(original):
+    """Register an engine-core shadow checkpoint pool per GDN group at tp>1.
+
+    At tp=1 the worker shares this process and registers the real pool, so the
+    ``is None`` guard skips (or the worker's later registration supersedes the
+    shadow). At tp>1 the worker pools live in other processes and this registry
+    is otherwise empty, leaving the hit cap a no-op; the shadow closes that gap.
+    Its depth is a lower bound on the worker's K (see gdn_ckpt_shadow_num_slots).
+    """
+
+    def __init__(self, kv_cache_config, *args, **kwargs):
+        original(self, kv_cache_config, *args, **kwargs)
+        if os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() not in ("1", "true"):
+            return
+        if not getattr(self, "enable_caching", False):
+            return
+        from vllm.v1.kv_cache_interface import MambaSpec
+
+        from vllm_gaudi.v1.worker.gdn_checkpoint_pool import (GdnCheckpointMap, ckpt_map_for_kv_group,
+                                                              gdn_ckpt_shadow_num_slots, register_shadow_map)
+        from vllm_gaudi.v1.worker.hpu_model_runner import _GDN_MAMBA_TYPES
+
+        groups = kv_cache_config.kv_cache_groups
+        gdn_gids = [
+            gid for gid, g in enumerate(groups)
+            if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES
+        ]
+        if not gdn_gids:
+            return
+        mem_fraction = float(os.environ.get("VLLM_GDN_CKPT_MEM_FRACTION", "0.1") or 0.1)
+        explicit_slots = int(os.environ.get("VLLM_GDN_CKPT_SLOTS", "0") or 0)
+        k = gdn_ckpt_shadow_num_slots(kv_cache_config.num_blocks, len(gdn_gids), mem_fraction, explicit_slots)
+        for gid in gdn_gids:
+            if ckpt_map_for_kv_group(gid) is None:
+                register_shadow_map(gid, GdnCheckpointMap(k))
+
+    return __init__
+
+
+def _patch_kv_cache_manager_shadow() -> None:
+    if os.environ.get("VLLM_GDN_PC_HIT_CAP", "1") == "0":
+        return
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    if getattr(KVCacheManager.__init__, "_hpu_gdn_wrapped", False):
+        return
+    wrapped = _hpu_kv_cache_manager_init(KVCacheManager.__init__)
+    wrapped._hpu_gdn_wrapped = True
+    KVCacheManager.__init__ = wrapped
 
 
 def apply() -> None:
@@ -961,6 +1061,8 @@ def apply() -> None:
         _patch_sdpa_attention_forward()
         _patch_inc_quantization_config()
         _patch_mamba_find_longest_cache_hit()
+        _patch_mamba_cache_blocks()
+        _patch_kv_cache_manager_shadow()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
