@@ -30,30 +30,18 @@ def gdn_ckpt_shadow_num_slots(num_blocks: int, num_gdn_groups: int, mem_fraction
 
     The worker floors K at its in-flight liveness (max_num_seqs), which
     engine-core cannot see. Dropping that floor to 1 keeps the shadow's K <=
-    the worker's, so the shadow's resident set stays a subset of the worker's
-    (LRU stack property): the hit cap can only be conservative, never stale.
-    Equal to the worker's K in the common case (explicit slots, or the memory
-    term dominating the floor).
+    the worker's, so its resident set stays a subset of the worker's and the
+    hit cap can only be conservative, never stale.
     """
     return gdn_ckpt_num_slots(num_blocks, num_gdn_groups, mem_fraction, 1, explicit_slots)
 
 
-# Residency view of the checkpoint pools, keyed by kv_cache_group_id
-# (== worker group_idx). find_longest_cache_hit reads it to cap a prefix hit
-# at the last boundary the bounded pool still holds.
-#
-# At TP=1 (UniProc) the scheduler shares the worker process, so the runner
-# registers the *real* worker pool here (register_ckpt_map) and the cap reads
-# the live pool directly -- never over-reporting a hit the pool has evicted.
-#
-# At TP>1 (MultiprocExecutor) the real pools live in the worker processes and
-# this dict would otherwise stay empty in engine-core, making the cap a no-op
-# so the scheduler could report a hit at a boundary the workers have evicted
-# (stale-state resume). To close that gap, engine-core registers a *shadow*
-# pool (register_shadow_map): a residency mirror driven by the same
-# full-non-null block set the scheduler caches, so its is_resident matches the
-# worker pools by construction. A group is either real (TP=1) or shadow (TP>1),
-# never both.
+# Residency view of the checkpoint pools, keyed by kv_cache_group_id.
+# find_longest_cache_hit reads it to cap a prefix hit at the last boundary the
+# bounded pool still holds. TP=1: the runner registers the real worker pool
+# (register_ckpt_map). TP>1: the real pools live in worker processes, so
+# engine-core registers a shadow residency mirror (register_shadow_map) driven
+# by the same blocks the scheduler caches. A group is real or shadow, never both.
 _CKPT_MAPS_BY_KV_GROUP: "dict[int, GdnCheckpointMap]" = {}
 # Group ids whose registered map is an engine-core shadow (TP>1), not a real
 # worker pool. Kept separate so hit/load-touch bookkeeping only runs on shadows.
@@ -96,12 +84,6 @@ class GdnCheckpointMap:
     def num_slots(self) -> int:
         return self._num_slots
 
-    def _dbg(self, *parts) -> None:
-        import os
-        if os.environ.get("GDN_EVICT_DEBUG"):
-            import sys
-            print("CKPTDBG", *parts, file=sys.stderr, flush=True)
-
     def is_resident(self, block_id: int) -> bool:
         """Whether ``block_id``'s checkpoint currently occupies a slot."""
         return block_id in self._block_to_slot
@@ -110,23 +92,19 @@ class GdnCheckpointMap:
         slot = self._block_to_slot.get(block_id, 0)
         if slot:
             self._lru.move_to_end(slot)
-        self._dbg("LOAD", f"bid={block_id}", f"slot={slot}", f"held_bid={self._slot_to_block.get(slot)}")
         return slot
 
     def alloc_store_slot(self, block_id: int) -> int:
         slot = self._block_to_slot.get(block_id)
         if slot is not None:
             self._lru.move_to_end(slot)
-            self._dbg("STORE-REUSE", f"bid={block_id}", f"slot={slot}")
             return slot
         if self._free:
             slot = self._free.pop()
-            self._dbg("STORE-NEW", f"bid={block_id}", f"slot={slot}")
         else:
             slot, _ = self._lru.popitem(last=False)
             old_block = self._slot_to_block.pop(slot)
             del self._block_to_slot[old_block]
-            self._dbg("STORE-EVICT", f"bid={block_id}", f"slot={slot}", f"dropped={old_block}")
         self._block_to_slot[block_id] = slot
         self._slot_to_block[slot] = block_id
         self._lru[slot] = None

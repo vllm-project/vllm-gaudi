@@ -870,16 +870,12 @@ def _patch_inc_quantization_config() -> None:
 def _hpu_mamba_find_longest_cache_hit(original):
     """Cap a mamba-group prefix hit at what the compact ckpt pool can supply.
 
-    vLLM reports a hit purely from the block hash cache, with no coupling to the
-    bounded compact-GDN checkpoint pool. When that pool has evicted a boundary's
-    checkpoint the worker cannot resume from it, so the reported hit must not
-    exceed the last resident boundary; the coordinator's min-across-groups then
-    shortens num_computed_tokens and the tail recomputes. No-op when no ckpt pool
-    is registered for the group (non-compact or standard mamba).
-
-    For an engine-core shadow pool (tp>1) the served hit's boundary is also
-    load-touched, mirroring the worker's restore recency so the shadow evicts
-    in lockstep with the worker.
+    vLLM reports a hit from the block hash cache alone; if the bounded ckpt pool
+    has evicted that boundary the worker cannot resume from it, so cap the hit at
+    the last resident boundary (the coordinator's min-across-groups then trims
+    num_computed_tokens and the tail recomputes). No-op when no ckpt pool is
+    registered. For a shadow pool (tp>1) also load-touch the served boundary so
+    the shadow evicts in lockstep with the worker.
     """
     from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group, is_shadow
 
@@ -927,11 +923,9 @@ def _patch_mamba_find_longest_cache_hit() -> None:
 def _hpu_mamba_cache_blocks(original):
     """Mirror the scheduler's just-cached boundaries into the engine-core shadow.
 
-    Runs only for shadow groups (tp>1). The set of blocks newly cached this
-    step -- ``req_to_blocks[req][num_cached_before:num_cached_after]``, minus
-    null and unhashed blocks -- is exactly the full, non-null boundary set the
-    worker persists, so replaying it as store touches keeps the shadow's
-    residency and LRU order aligned with the worker pool.
+    Shadow groups only (tp>1). The blocks newly cached this step (minus null and
+    unhashed) are exactly the boundary set the worker persists, so replaying them
+    as store touches keeps the shadow's residency and LRU order aligned.
     """
     from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group, is_shadow
 
@@ -971,11 +965,10 @@ def _patch_mamba_cache_blocks() -> None:
 def _hpu_kv_cache_manager_init(original):
     """Register an engine-core shadow checkpoint pool per GDN group at tp>1.
 
-    At tp=1 the worker shares this process and registers the real pool, so the
-    ``is None`` guard skips (or the worker's later registration supersedes the
-    shadow). At tp>1 the worker pools live in other processes and this registry
-    is otherwise empty, leaving the hit cap a no-op; the shadow closes that gap.
-    Its depth is a lower bound on the worker's K (see gdn_ckpt_shadow_num_slots).
+    At tp=1 the worker shares this process and registers the real pool (the
+    shadow is skipped or superseded). At tp>1 the worker pools are in other
+    processes and this registry would stay empty, making the hit cap a no-op;
+    the shadow closes that gap. Depth is a lower bound on the worker's K.
     """
 
     def __init__(self, kv_cache_config, *args, **kwargs):

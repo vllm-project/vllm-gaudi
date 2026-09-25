@@ -32,8 +32,7 @@ from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerO
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.utils import is_fake_hpu
-from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, _GDN_MAMBA_TYPES, _rebind_moe_expert_weights,
-                                                   resolve_gdn_prefix_cache_mode)
+from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, _GDN_MAMBA_TYPES, _rebind_moe_expert_weights)
 from vllm_gaudi.v1.worker.gdn_checkpoint_pool import gdn_ckpt_num_slots
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
@@ -481,13 +480,12 @@ class HPUWorker(WorkerBase):
                 available = adjusted
 
         if has_attn and has_gdn and compact_gdn:
-            # Compact GDN keeps live state fixed, but with prefix caching the
-            # runner allocates a per-group checkpoint pool of K+1 states per
-            # GDN layer ON TOP of the num_blocks budget. Reserve those bytes
-            # so num_blocks is sized to leave room for the pool (else OOM).
-            # K scales with num_blocks; estimate from a pre-reservation
-            # num_blocks (>= final), so the reservation is safe by construction.
-            ckpt_enabled, _ = resolve_gdn_prefix_cache_mode(compact_gdn, self.cache_config.enable_prefix_caching, True)
+            # With prefix caching the runner allocates a per-group ckpt pool of
+            # K+1 states per GDN layer on top of the num_blocks budget, so
+            # reserve those bytes now or num_blocks oversizes and OOMs. K scales
+            # with num_blocks; estimate from a pre-reservation num_blocks (>=
+            # final), so the reservation is safe by construction.
+            ckpt_enabled = compact_gdn and self.cache_config.enable_prefix_caching
             if ckpt_enabled:
                 from vllm.v1.core.kv_cache_utils import (get_kv_cache_groups, _get_kv_cache_bytes_per_block)
                 groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
