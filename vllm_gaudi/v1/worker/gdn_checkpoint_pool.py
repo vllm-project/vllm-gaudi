@@ -132,15 +132,3 @@ class GdnCheckpointMap:
         self._slot_to_block[slot] = block_id
         self._lru[slot] = None
         return slot
-
-    def free_block(self, block_id: int) -> None:
-        # Currently unused: eviction is lazy -- a slot is only reclaimed when
-        # alloc_store_slot runs out of free slots and pops the LRU victim, so
-        # nothing calls free_block explicitly. Kept for an eventual eager path
-        # (e.g. releasing a slot when the scheduler frees the owning block).
-        slot = self._block_to_slot.pop(block_id, None)
-        if slot is None:
-            return
-        del self._slot_to_block[slot]
-        self._lru.pop(slot, None)
-        self._free.append(slot)
