@@ -66,6 +66,14 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     seqlens_offsets_for_blocks: Optional[torch.Tensor] = None
     window_block_list: Optional[torch.Tensor] = None
     image_seg_ids: Optional[torch.Tensor] = None
+    # Compact-GDN prefix-cache checkpoint load slots (device int32 [num_groups, bs]);
+    # a positive slot restores a resumed request's frozen state before prefill.
+    gdn_ckpt_load_slots: Optional[torch.Tensor] = None
+    # Per-block ckpt store slots for compact prefill boundary snapshots:
+    # chunk -> slot ([num_groups, nphysical_chunks]) and block -> slot
+    # ([num_groups, max_cached_blocks]).
+    gdn_ckpt_chunks_to_slot: Optional[torch.Tensor] = None
+    gdn_ckpt_blocks_to_slot: Optional[torch.Tensor] = None
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
@@ -88,6 +96,9 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               last_chunk_indices_p=None,
                               load_indices_tensor=None,
                               store_indices_tensor=None,
+                              gdn_ckpt_load_slots=None,
+                              gdn_ckpt_chunks_to_slot=None,
+                              gdn_ckpt_blocks_to_slot=None,
                               query_start_loc=None,
                               padding_mask_flat=None,
                               blocks_caching_range=None,
@@ -112,6 +123,9 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    last_chunk_indices_p=last_chunk_indices_p,
                    load_indices_tensor=load_indices_tensor,
                    store_indices_tensor=store_indices_tensor,
+                   gdn_ckpt_load_slots=gdn_ckpt_load_slots,
+                   gdn_ckpt_chunks_to_slot=gdn_ckpt_chunks_to_slot,
+                   gdn_ckpt_blocks_to_slot=gdn_ckpt_blocks_to_slot,
                    query_start_loc=query_start_loc,
                    query_start_loc_p=query_start_loc,
                    padding_mask_flat=padding_mask_flat,
@@ -137,6 +151,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              chunked_block_groups,
                              load_indices_tensor=None,
                              store_indices_tensor=None,
+                             gdn_ckpt_load_slots=None,
                              query_start_loc=None,
                              seq_lens_tensor=None):
         return cls(is_prompt=False,
@@ -160,5 +175,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    prep_initial_states=None,
                    load_indices_tensor=load_indices_tensor,
                    store_indices_tensor=store_indices_tensor,
+                   gdn_ckpt_load_slots=gdn_ckpt_load_slots,
                    query_start_loc=query_start_loc,
                    query_start_loc_p=query_start_loc)
