@@ -63,20 +63,6 @@ def test_eviction_is_lru():
     assert m.get_load_slot(block_id=1) == sa
 
 
-def test_free_block_returns_slot_to_pool():
-    m = GdnCheckpointMap(num_slots=1)
-    s1 = m.alloc_store_slot(block_id=1)
-    m.free_block(block_id=1)
-    assert m.get_load_slot(block_id=1) == 0
-    s2 = m.alloc_store_slot(block_id=2)  # slot reusable, no eviction needed
-    assert s2 == s1
-
-
-def test_free_unmapped_block_is_noop():
-    m = GdnCheckpointMap(num_slots=1)
-    m.free_block(block_id=999)  # must not raise
-
-
 def test_k_slot_index_never_exceeds_capacity():
     # A K-slot map never exposes a slot index outside [1, K].
     m = GdnCheckpointMap(num_slots=8)

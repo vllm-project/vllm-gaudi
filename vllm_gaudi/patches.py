@@ -975,6 +975,13 @@ def _hpu_mamba_cache_blocks(original):
     from vllm_gaudi.v1.worker.gdn_checkpoint_pool import (ckpt_map_for_kv_group, is_shadow, shadow_mirror_block_range)
 
     def cache_blocks(self, request, num_tokens, *args, **kwargs):
+        # Delta from num_cached_block, NOT num_computed_tokens: the scheduler
+        # resets num_computed_tokens to 0 on preemption, but num_cached_block is
+        # re-seeded to the prefix-hit block count at (re-)admission
+        # (add_local_computed_blocks) before cache_blocks can run. So [before,
+        # after) is always the blocks this request freshly checkpoints, never the
+        # inherited prefix -- which is what keeps the shadow a subset of the
+        # worker across preemption.
         before = self.num_cached_block.get(request.request_id, 0)
         original(self, request, num_tokens, *args, **kwargs)
         gid = self.kv_cache_group_id
