@@ -211,7 +211,8 @@ def hpu_chunk_gdr_phase_b(
     Vdim: int,
     output_final_state: bool,
     output_dtype: torch.dtype | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+    output_varlen_states: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     """Phase B: sequential loop — stages 5-6 (state-dependent).
 
     Dispatches between optimized (hoisted precompute) and legacy
@@ -234,6 +235,7 @@ def hpu_chunk_gdr_phase_b(
             Vdim,
             output_final_state,
             output_dtype,
+            output_varlen_states,
         )
     return _hpu_chunk_gdr_phase_b_optimized(
         u_all,
@@ -251,6 +253,7 @@ def hpu_chunk_gdr_phase_b(
         Vdim,
         output_final_state,
         output_dtype,
+        output_varlen_states,
     )
 
 
@@ -275,7 +278,8 @@ def _hpu_chunk_gdr_phase_b_optimized(
     Vdim: int,
     output_final_state: bool,
     output_dtype: torch.dtype | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+    output_varlen_states: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     """Optimized Phase B: chunk-local precompute hoisted out of the loop.
 
     Loop body keeps only the recurrent matmul/add:
@@ -283,6 +287,10 @@ def _hpu_chunk_gdr_phase_b_optimized(
       state_{i+1} = M_i @ state_i + N_i
 
     Internal recurrent state is stored as [S, H, K, V].
+
+    When ``output_varlen_states`` is set, the post-chunk boundary state is
+    captured for every chunk and returned as [S, num_chunks, H, V, K] (the
+    ssm_state slot layout), for per-block prefix-cache checkpointing.
     """
     tc = u_all.shape[2]
     padded_len = num_chunks * tc
@@ -328,9 +336,14 @@ def _hpu_chunk_gdr_phase_b_optimized(
 
     state_t = init_state.to(compute_dtype).transpose(-1, -2)  # [S,H,K,V]
 
+    varlen_chunks = [] if output_varlen_states else None
     for ci in range(num_chunks):
         core_h[:, ci].add_(torch.matmul(C_h[:, ci], state_t))
         state_t = torch.matmul(M_full[:, ci], state_t) + N_t[:, ci]
+        if output_varlen_states:
+            # Post-chunk boundary state in ssm_state layout [S,H,V,K].
+            st_c = state_t if output_dtype is None else state_t.to(output_dtype)
+            varlen_chunks.append(st_c.transpose(-1, -2))
 
     out = _eager_reshape_output(core_h, S, padded_len, seq_len, H, Vdim)
 
@@ -341,7 +354,12 @@ def _hpu_chunk_gdr_phase_b_optimized(
         st = state_t if output_dtype is None else state_t.to(output_dtype)
         final_state = st.transpose(-1, -2).contiguous()
 
-    return out, final_state
+    varlen_states = None
+    if output_varlen_states:
+        # [S, num_chunks, H, V, K]
+        varlen_states = torch.stack(varlen_chunks, dim=1).contiguous()
+
+    return out, final_state, varlen_states
 
 
 def _recurrent_timestep_body(
@@ -805,7 +823,8 @@ def hpu_chunk_gated_delta_rule(
     # NOTE: neumann_iters impacts accuracy. 14 is used for Qwen3.5; other
     # models may need re-tuning. See _hpu_solve_lower_triangular_batched docs.
     neumann_iters: int = 14,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+    output_varlen_states: bool = False,
+):
     """PyTorch replacement for chunk_gated_delta_rule.
 
     This path intentionally mirrors upstream prefill call semantics without
@@ -859,7 +878,7 @@ def hpu_chunk_gated_delta_rule(
             neumann_iters=neumann_iters,
         )
 
-        out, final_state = hpu_chunk_gdr_phase_b(
+        out, final_state, varlen_states = hpu_chunk_gdr_phase_b(
             u_all,
             w_all,
             q_chunks,
@@ -875,10 +894,17 @@ def hpu_chunk_gated_delta_rule(
             Vdim=Vdim_c,
             output_final_state=output_final_state,
             output_dtype=initial_state.dtype if initial_state is not None else None,
+            output_varlen_states=output_varlen_states,
         )
 
         out = out.to(q.dtype).view(B, T, H_c, Vdim)
+        if output_varlen_states:
+            return out, final_state, varlen_states
         return out, final_state
+
+    if output_varlen_states:
+        raise NotImplementedError("output_varlen_states requires the bucketed prefill path "
+                                  "(prefill_num_seqs/prefill_seq_len).")
 
     # ---- Legacy paths (cu_seqlens / non-bucketed) ----
     return _hpu_chunk_gated_delta_rule_legacy(
@@ -1166,11 +1192,15 @@ def _hpu_chunk_gdr_phase_b_legacy(
     Vdim: int,
     output_final_state: bool,
     output_dtype: torch.dtype | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+    output_varlen_states: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     """Legacy Phase B: uses _phase_b_step per chunk (reference accuracy).
 
     Slower but numerically identical to the original implementation.
     Enable via VLLM_GDN_LEGACY_PHASE_B=1 for debugging accuracy issues.
+
+    ``output_varlen_states`` captures the per-chunk boundary state as
+    [S, num_chunks, H, V, K] (states are already in ssm_state layout).
     """
     tc = u_all.shape[2]
     padded_len = num_chunks * tc
@@ -1179,6 +1209,8 @@ def _hpu_chunk_gdr_phase_b_legacy(
     states = init_state.clone()
     out_all = torch.zeros(S, num_chunks, tc, H, Vdim, dtype=torch.float32, device=device)
 
+    cast_dtype = output_dtype if output_dtype is not None else init_state.dtype
+    varlen_chunks = [] if output_varlen_states else None
     for ci in range(num_chunks):
         out_all[:, ci], states = _phase_b_step(
             u_all[:, ci],
@@ -1193,14 +1225,20 @@ def _hpu_chunk_gdr_phase_b_legacy(
             Kdim,
             Vdim,
         )
+        if output_varlen_states:
+            varlen_chunks.append(states.to(cast_dtype))
 
     out = out_all.reshape(S, padded_len, H, Vdim)[:, :seq_len, :, :].reshape(-1, H, Vdim)
 
     final_state: torch.Tensor | None = None
     if output_final_state:
-        final_state = states.to(output_dtype if output_dtype is not None else init_state.dtype)
+        final_state = states.to(cast_dtype)
 
-    return out, final_state
+    varlen_states = None
+    if output_varlen_states:
+        varlen_states = torch.stack(varlen_chunks, dim=1).contiguous()
+
+    return out, final_state, varlen_states
 
 
 def _phase_b_step(
