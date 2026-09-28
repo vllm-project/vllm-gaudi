@@ -1,11 +1,48 @@
 # Decode-time checkpointing for compact-GDN prefix caching
 
-**Branch:** `feat/compact-gdn-prefix-cache`
+**Branch:** `fix/gdn-pc-review-1814`
 **Date:** 2026-09-28
-**Goal:** Behavioral parity with upstream vLLM — extend compact-GDN prefix
-caching to snapshot blocks that fill during **decode**, not just full prompt
-blocks filled during prefill. Achieved by extending the existing bounded
-checkpoint pool, not by adopting upstream's `mamba_cache_mode` architecture.
+
+> **STATUS: NOT IMPLEMENTED — deferred (2026-09-28), pending re-decision.**
+> This is a genuine **parity fix**, not a beyond-upstream enhancement: upstream
+> Qwen3.5 in `align` mode *does* checkpoint decode-sealed block boundaries. See
+> "Upstream reality check" below.
+
+**Goal:** reach behavioral parity with upstream Qwen3.5 `align` mode — extend
+compact-GDN prefix caching to snapshot blocks that fill during **decode**, not
+just full prompt blocks filled during prefill — by extending the existing
+bounded checkpoint pool rather than replicating upstream's per-block state-copy
+memory model.
+
+## Upstream reality check (verified against `github/vllm` @ `ced6857afa`)
+
+Upstream Qwen3.5 in `align` mode **does** support decode-time prefix caching.
+The checkpoint is a **framework-level state copy in the model runner**, not a
+kernel store — which is easy to miss by reading only the GDN kernel calls:
+
+- The GDN decode kernel is in-place (`inplace_final_state=True`,
+  `ssm_state_indices=block_table[:, 0]`) — but that is orthogonal to prefix
+  caching.
+- `gpu/model_states/mamba_hybrid.py` copies the running recurrent state to the
+  **block-aligned cache position** on align batches, via model-registered copy
+  funcs (`preprocess_mamba_align_fused_kernel`, `run_fused_postprocess_align`,
+  `compute_aligned_state_indices`). Qwen3.5 registers
+  `gated_delta_net_state_copy_func` (`mamba_utils.py`).
+- `mamba_attn.py:684-687` forces a flush on the step completing a mamba block
+  "so the exact boundary state is materialized for prefix caching."
+- `qwen3_5.py:332` rejects only `"all"`, explicitly steering to `"align"`.
+
+So decode-produced boundary states are cacheable and reusable upstream. **#1814's
+Gaudi decode is in-place with no equivalent state copy, so it is *behind*
+upstream** on this workload — hence a parity fix, not an enhancement. The design
+below reaches the same behavior through the bounded ckpt pool: a base→pool copy
+at each decode-sealed boundary (compact keeps one base slot per request, so it
+cannot leave a per-block slot frozen the way upstream's per-block cache does).
+
+> NOTE: An earlier revision of this doc claimed the opposite (that upstream
+> qwen3/GDN has no decode prefix caching, and that `align` is in-place with no
+> snapshot). That was incorrect — it read only the kernel/`gdn_attn.py` path and
+> missed the align state-copy in the model runner. Corrected here.
 
 ## Problem
 

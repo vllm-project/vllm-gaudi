@@ -93,6 +93,12 @@ class GdnCheckpointMap:
         # recency order over occupied slots; front = least recently used
         self._lru: OrderedDict[int, None] = OrderedDict()
         self._free: list[int] = list(range(1, num_slots + 1))
+        # block_id -> req_id that decode-checkpointed it this epoch (tp=1 only).
+        # The runner stores a decode-sealed block's boundary state during the
+        # forward pass, one step before the scheduler caches the block; this
+        # records the store so cache_blocks keeps it (confirm_decode_store)
+        # instead of dropping it as a decode-region recycle. See note/confirm.
+        self._decode_pending: dict[int, str] = {}
 
     @property
     def num_slots(self) -> int:
@@ -113,12 +119,36 @@ class GdnCheckpointMap:
         Dropping the key on the step the block is re-cached closes that window.
         No-op when the block holds no slot.
         """
+        self._decode_pending.pop(block_id, None)
         slot = self._block_to_slot.pop(block_id, None)
         if slot is None:
             return
         del self._slot_to_block[slot]
         self._lru.pop(slot, None)
         self._free.append(slot)
+
+    def note_decode_store(self, block_id: int, req_id: str) -> None:
+        """Record that ``req_id`` decode-checkpointed ``block_id`` this epoch.
+
+        tp=1 only. The runner stores the boundary state during the forward pass
+        of the step that seals the block; the scheduler caches the block on the
+        next step. ``confirm_decode_store`` then keeps the store rather than
+        dropping it. Tagged by req_id so a stale mark left by a finished request
+        cannot protect a later recycle of the same block_id into a different
+        prefix (that would be a wrong resume).
+        """
+        self._decode_pending[block_id] = req_id
+
+    def confirm_decode_store(self, block_id: int, req_id: str) -> bool:
+        """Whether ``req_id`` holds a live decode checkpoint at ``block_id``.
+
+        Pops the pending mark either way. True -> the worker checkpointed this
+        block for THIS request this epoch, so its resident slot is valid; the
+        caller keeps it. False -> no mark, or a stale mark from another request
+        (a recycled block_id); the caller drops the key so is_resident cannot
+        report a stale prefix as restorable.
+        """
+        return self._decode_pending.pop(block_id, None) == req_id
 
     def resident_ids(self) -> "set[int]":
         """Block ids currently holding a slot.

@@ -984,12 +984,13 @@ def _hpu_mamba_cache_blocks(original):
       * Prompt blocks -- on a tp>1 shadow, mirror them as store touches so the
         shadow's residency and LRU order track the worker pool (a subset). On
         the tp=1 real pool the worker does the store itself, so nothing to do.
-      * Decode-region blocks -- the worker will not checkpoint them, and each
-        was freshly (re-)hashed by the scheduler, so any checkpoint stale-keyed
-        at that recycled block_id is now invalid. Drop the key on BOTH the real
-        pool (tp=1) and the shadow (tp>1), or is_resident would report a
-        different prefix's state as restorable and a later request would resume
-        from garbage.
+      * Decode-region blocks -- at tp=1 the worker may have decode-checkpointed
+        the block last step (note_decode_store); confirm_decode_store keeps that
+        store for the storing request and drops everything else. On a tp>1 shadow
+        (never marked) and for any recompute re-prefill or stale recycle,
+        confirm_ returns False and the key is dropped, or is_resident would
+        report a different prefix's state as restorable and a later request would
+        resume from garbage.
     """
     from vllm_gaudi.v1.worker.gdn_checkpoint_pool import (ckpt_map_for_kv_group, is_shadow, shadow_mirror_block_range)
 
@@ -1022,6 +1023,14 @@ def _hpu_mamba_cache_blocks(original):
             if idx in mirror:
                 if shadow:
                     cmap.alloc_store_slot(block.block_id)
+            elif cmap.confirm_decode_store(block.block_id, request.request_id):
+                # tp=1 only: the worker decode-checkpointed this sealed block for
+                # THIS request last step (note_decode_store). Keep it -- this is a
+                # genuine forward-decode boundary, not a recycle. confirm_ returns
+                # False on a shadow (never marked), a recompute re-prefill (worker
+                # does not decode-store during prefill), or a stale mark from
+                # another request, all of which fall through to drop below.
+                pass
             else:
                 cmap.drop(block.block_id)
 

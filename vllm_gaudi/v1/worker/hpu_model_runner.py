@@ -1470,6 +1470,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._gdn_ckpt_tensors: dict[str, tuple] = {}
         self._gdn_ckpt_maps: dict[int, GdnCheckpointMap] = {}
         self._gdn_ckpt_k: int = 0
+        # Decode-time checkpointing (snapshot blocks sealed during decode, not
+        # just full prompt blocks). Gated to world_size==1 (tp=pp=1): only then
+        # does register_ckpt_map supersede the engine-core shadow, so
+        # find_longest_cache_hit reads the real worker pool and a decode store
+        # can produce a hit. At tp>1 the shadow is read and does not mirror
+        # decode boundaries, so a worker decode store would only add eviction
+        # pressure on prompt checkpoints -- never a hit. tp>1 decode PC is a
+        # follow-up (needs shadow mirroring of decode stores).
+        self._gdn_ckpt_decode_store = (self._gdn_ckpt_enabled and self.parallel_config.world_size == 1)
         # {group_idx: {slot}} load targets of the prefills formed so far this
         # step; a store must not evict a slot a batch will restore from this
         # step. Reset at the start of prefill-input prep, accumulated as each
@@ -1691,6 +1700,44 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         load_slots[i] = cmap.get_load_slot(load_bid)
             load_rows.append(load_slots)
         return torch.stack(load_rows, dim=0)
+
+    def _gdn_ckpt_store_slots_for_sealed_blocks(self, req_indices, context_lens, num_scheduled_tokens,
+                                                block_idx_last_scheduled, target_bs):
+        """Decode: allocate a checkpoint store slot for each block sealed this step.
+
+        A block seals when this decode step fills it exactly
+        ((num_computed + 1) % mamba_block_size == 0, non-spec: 1 token/step). Its
+        boundary state is the request's live base-slot state after the in-place
+        update, so the model copies base -> store_slot. Records (block_id,
+        req_id) so cache_blocks keeps (not drops) the store on the step the
+        scheduler caches the block. Honors the same-step reservation set so a
+        decode store never evicts a slot a prefill in this step will load.
+        Returns a [num_groups, target_bs] int32 tensor (0 = no store).
+        """
+        mamba_block_size = self.cache_config.mamba_block_size
+        store_rows = []
+        for group_idx in range(len(self.input_batch.block_table.block_tables)):
+            store_slots = torch.zeros(target_bs, dtype=torch.int32)
+            if group_idx in self._gdn_ckpt_maps:
+                bt = self.input_batch.block_table[group_idx].get_cpu_tensor()
+                cmap = self._gdn_ckpt_maps[group_idx]
+                reserved = self._gdn_ckpt_step_reserved.get(group_idx) or None
+                for i, req_idx in enumerate(req_indices):
+                    # Non-spec decode only: spec steps schedule >1 token and the
+                    # seal math below assumes 1 token/step (see design non-goal).
+                    if int(num_scheduled_tokens[i]) != 1:
+                        continue
+                    if (int(context_lens[i]) + 1) % mamba_block_size != 0:
+                        continue
+                    sealed_bid = int(bt[req_idx, int(block_idx_last_scheduled[i])])
+                    if sealed_bid == 0:
+                        continue
+                    slot = cmap.alloc_store_slot(sealed_bid, reserved)
+                    if slot:
+                        store_slots[i] = slot
+                        cmap.note_decode_store(sealed_bid, self.input_batch.req_ids[req_idx])
+            store_rows.append(store_slots)
+        return torch.stack(store_rows, dim=0)
 
     def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int], is_prompt: bool):
         '''
@@ -3541,13 +3588,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             req_indices = list(range(num_decodes))
             load_ckpt_slots_cpu = None
+            store_ckpt_slots_cpu = None
             if self.use_prefix_caching:
                 load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu,
                                                                        padded_batch_size)
                 store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
                                                                         padded_batch_size)
                 # Decode never resumes from a checkpoint (state is live/continuous
-                # in base_slot), so leave slots unset -- prefill-only concern.
+                # in base_slot), so load slots stay unset -- prefill-only concern.
+                # It does snapshot blocks it seals this step (decode-time PC),
+                # gated to tp=1 where find_longest_cache_hit reads the real pool.
+                if self._gdn_ckpt_decode_store:
+                    store_ckpt_slots_cpu = self._gdn_ckpt_store_slots_for_sealed_blocks(
+                        req_indices, context_lens, num_scheduled_tokens, block_idx_last_scheduled_token_cpu,
+                        padded_batch_size)
             else:
                 zeros = [0] * len(req_indices)
                 load_state_indices_cpu = store_state_indices_cpu = \
@@ -3566,6 +3620,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             store_indices_tensor = async_h2d_copy(store_state_indices_cpu, device=self.device)
             gdn_ckpt_load_slots = (async_h2d_copy(load_ckpt_slots_cpu, device=self.device)
                                    if load_ckpt_slots_cpu is not None else None)
+            gdn_ckpt_store_slots = (async_h2d_copy(store_ckpt_slots_cpu, device=self.device)
+                                    if store_ckpt_slots_cpu is not None else None)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
         else:
@@ -3573,6 +3629,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             load_indices_tensor = None
             store_indices_tensor = None
             gdn_ckpt_load_slots = None
+            gdn_ckpt_store_slots = None
             query_start_loc_p = None
 
         # CPU<>HPU sync *should not* happen here.
@@ -3643,6 +3700,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             load_indices_tensor=load_indices_tensor,
             store_indices_tensor=store_indices_tensor,
             gdn_ckpt_load_slots=gdn_ckpt_load_slots,
+            gdn_ckpt_store_slots=gdn_ckpt_store_slots,
             seq_lens_tensor=seq_lens_tensor,
             query_start_loc=query_start_loc_p,
         )

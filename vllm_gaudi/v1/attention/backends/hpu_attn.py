@@ -74,6 +74,10 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     # ([num_groups, max_cached_blocks]).
     gdn_ckpt_chunks_to_slot: Optional[torch.Tensor] = None
     gdn_ckpt_blocks_to_slot: Optional[torch.Tensor] = None
+    # Per-request decode store slots ([num_groups, bs]); a positive slot means
+    # this decode step sealed a block whose boundary state must be snapshotted
+    # base_slot -> ckpt pool. 0 = no store this step. tp=1 only.
+    gdn_ckpt_store_slots: Optional[torch.Tensor] = None
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
@@ -152,6 +156,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              load_indices_tensor=None,
                              store_indices_tensor=None,
                              gdn_ckpt_load_slots=None,
+                             gdn_ckpt_store_slots=None,
                              query_start_loc=None,
                              seq_lens_tensor=None):
         return cls(is_prompt=False,
@@ -176,5 +181,6 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    load_indices_tensor=load_indices_tensor,
                    store_indices_tensor=store_indices_tensor,
                    gdn_ckpt_load_slots=gdn_ckpt_load_slots,
+                   gdn_ckpt_store_slots=gdn_ckpt_store_slots,
                    query_start_loc=query_start_loc,
                    query_start_loc_p=query_start_loc)

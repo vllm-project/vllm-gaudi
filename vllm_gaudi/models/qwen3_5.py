@@ -46,6 +46,27 @@ def _gdn_ckpt_restore(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, lo
     conv_state.index_copy_(0, dst, torch.where(_bcast(hit, conv_cur), conv_cand, conv_cur))
 
 
+def _gdn_copy_block_state(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, store_slots):
+    """Snapshot a decode-sealed block's live compact-slot state -> ckpt pool.
+
+    Mirror of ``_gdn_ckpt_restore`` in the base->pool direction. After the
+    in-place decode update, the request's base slot holds the just-sealed
+    block's boundary state, so no varlen recompute is needed (unlike prefill's
+    ``_gdn_save_block_states``). store_slot 0 = no store (row writes the null
+    slot's own value back, a no-op). Uses index_select + torch.where +
+    index_copy_, not boolean indexing (HPU cannot lower it).
+    """
+    src = base_slots.clamp(min=0).long()
+    dst = store_slots.clamp(min=0).long()
+    store = store_slots > 0
+    ssm_cand = ssm_state.index_select(0, src).to(ssm_ckpt.dtype)
+    ssm_cur = ssm_ckpt.index_select(0, dst)
+    ssm_ckpt.index_copy_(0, dst, torch.where(_bcast(store, ssm_cur), ssm_cand, ssm_cur))
+    conv_cand = conv_state.index_select(0, src).to(conv_ckpt.dtype)
+    conv_cur = conv_ckpt.index_select(0, dst)
+    conv_ckpt.index_copy_(0, dst, torch.where(_bcast(store, conv_cur), conv_cand, conv_cur))
+
+
 def _gdn_save_block_states(ssm_dst, conv_dst, varlen_states, conv_in, ssm_index, conv_index, block_offsets):
     """Snapshot every block boundary into the destination caches.
 
@@ -142,7 +163,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            return (False, None, None, None, None, None, None, 0, 0, 0, 0, None, None, None, None, None, None, None)
+            return (False, None, None, None, None, None, None, 0, 0, 0, 0, None, None, None, None, None, None, None,
+                    None)
 
         is_prompt = bool(getattr(attn_metadata, "is_prompt", False))
         state_indices = self._resolve_state_indices(attn_metadata)
@@ -154,6 +176,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         # Compact ckpt-pool per-block store slots (None outside compact prefix caching).
         ckpt_chunks_to_slot = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_chunks_to_slot", None))
         ckpt_blocks_to_slot = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_blocks_to_slot", None))
+        # Compact ckpt-pool decode store slots (None outside compact decode PC).
+        ckpt_store_slots = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_store_slots", None))
 
         conv_state = self.kv_cache[0]
         ssm_state = self.kv_cache[1]
@@ -195,7 +219,7 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
         return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
                 num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots, mamba_map,
-                blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot)
+                blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot, ckpt_store_slots)
 
     def forward(
         self,
@@ -218,8 +242,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         # === Metadata extraction (natural graph break) ===============
         (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
          num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots, mamba_map,
-         blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot,
-         ckpt_blocks_to_slot) = self._extract_metadata(num_tokens)
+         blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot,
+         ckpt_store_slots) = self._extract_metadata(num_tokens)
 
         # === Part 1: Input Projection ================================
         if hasattr(self, 'in_proj_qkv'):
@@ -386,6 +410,16 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                     ssm_state_indices=state_indices,
                     use_qk_l2norm_in_kernel=True,
                 )
+            # Snapshot any block sealed by this decode step: the in-place update
+            # left its boundary state in the request's base slot, so copy
+            # base_slot -> ckpt pool. store_slot 0 rows are no-ops. Compact path
+            # only (kv_ckpt set); the runner gates the store to tp=1.
+            if ckpt_store_slots is not None and self.kv_ckpt is not None and state_indices is not None:
+                conv_ckpt, ssm_ckpt = self.kv_ckpt
+                base_slots = state_indices[:num_decodes]
+                _gdn_copy_block_state(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots,
+                                      ckpt_store_slots[:num_decodes])
+
             non_spec_out = core_attn_out_result.squeeze(0)
             if non_spec_out.shape[0] == core_attn_out.shape[0]:
                 core_attn_out.copy_(non_spec_out)
