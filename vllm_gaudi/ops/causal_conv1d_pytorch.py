@@ -191,10 +191,10 @@ def hpu_causal_conv1d_fn(
     if any(ptr is not None for ptr in (
             block_idx_first_scheduled_token,
             block_idx_last_scheduled_token,
-            initial_state_idx,
             num_computed_tokens,
     )):
-        raise NotImplementedError("Prefix caching metadata is not supported in the PyTorch reference implementation.")
+        raise NotImplementedError("Per-block prefix-caching metadata is not supported in the PyTorch "
+                                  "reference implementation.")
 
     activation = _normalize_activation(activation)
     original_dtype = x.dtype
@@ -231,6 +231,9 @@ def hpu_causal_conv1d_fn(
             raise ValueError("'cache_indices' must align with the batch dimension implied by 'query_start_loc'.")
         if has_initial_state is not None and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
+        if initial_state_idx is not None and initial_state_idx.numel() != padded_batch:
+            raise ValueError("'initial_state_idx' must align with the batch dimension implied by "
+                             "'query_start_loc'.")
 
     # Get cache indices
     if cache_indices is None:
@@ -249,6 +252,20 @@ def hpu_causal_conv1d_fn(
     safe_cache_idx_prefill = torch.remainder(batch_cache_idx, num_conv_slots_pf)
     valid_mask_prefill = batch_cache_idx >= 0
 
+    # Slot to read the *incoming* conv state from.  With prefix caching the state to
+    # continue from lives in the last-computed block, while the new state must be
+    # written to the last-scheduled block (cache_indices); the two differ on any
+    # chunk that crosses a mamba-block boundary.  Reading through cache_indices
+    # there would pick up a block this sequence has never written.  Upstream's CUDA
+    # causal_conv1d takes the same split via initial_state_idx.  When it is not
+    # supplied (prefix caching off) read and write collapse to one slot, as before.
+    if initial_state_idx is None:
+        safe_read_idx_prefill = safe_cache_idx_prefill
+    else:
+        read_idx = (initial_state_idx.to(x_work.device)
+                    if initial_state_idx.device != x_work.device else initial_state_idx)
+        safe_read_idx_prefill = torch.remainder(read_idx.reshape(-1), num_conv_slots_pf)
+
     # Batched path — HPU bucketed prefill pads all sequences to the same
     # length, so we can reshape to (B, dim, L) and process all sequences in
     # one shot without any device-to-host syncs.
@@ -260,7 +277,7 @@ def hpu_causal_conv1d_fn(
 
         # Gather init states for all sequences at once: (B, state_len, dim) -> (B, dim, state_len)
         if has_initial_state is not None:
-            raw_states = conv_states.index_select(0, safe_cache_idx_prefill)[:, -state_len:, :].transpose(-1, -2)
+            raw_states = conv_states.index_select(0, safe_read_idx_prefill)[:, -state_len:, :].transpose(-1, -2)
             # has_initial_state may have fewer elements than padded_batch;
             # pad with False (0) so the mask broadcasts correctly.
             his = has_initial_state
@@ -322,9 +339,10 @@ def hpu_causal_conv1d_fn(
 
             seq_x_b = x_work[:, seq_start:seq_end]
             cache_idx_b = safe_cache_idx_prefill[b:b + 1]
+            read_idx_b = safe_read_idx_prefill[b:b + 1]
 
             if has_initial_state is not None:
-                raw_state_b = conv_states[cache_idx_b, -state_len:, :].transpose(-1, -2).squeeze(0)
+                raw_state_b = conv_states[read_idx_b, -state_len:, :].transpose(-1, -2).squeeze(0)
                 mask_b = has_initial_state[b] if has_initial_state.numel() > 1 else has_initial_state[0]
                 init_state_b = torch.where(mask_b, raw_state_b,
                                            torch.zeros(dim, state_len, device=x_work.device, dtype=work_dtype))

@@ -218,7 +218,9 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 cache_indices=store_indices,
                 block_idx_first_scheduled_token=None,
                 block_idx_last_scheduled_token=None,
-                initial_state_idx=None,
+                # Read the incoming state from the load slot while cache_indices
+                # writes the outgoing state to the store slot.
+                initial_state_idx=state_indices,
                 query_start_loc=query_start_loc,
                 block_size_to_align=mamba_block_size,
                 num_computed_tokens=None,
