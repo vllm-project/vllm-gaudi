@@ -568,6 +568,7 @@ def hpu_fused_recurrent_gated_delta_rule(
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
+    ssm_store_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """PyTorch replacement for fused_recurrent_gated_delta_rule.
 
@@ -625,6 +626,14 @@ def hpu_fused_recurrent_gated_delta_rule(
             sidx = torch.remainder(sidx_raw, num_slots)
         else:
             sidx = torch.arange(num_seqs, dtype=torch.long, device=device)
+        # Write slot: with prefix caching a decoded token that opens a new mamba
+        # block must store its state into the last-scheduled block, not the one it
+        # was read from.  Unset collapses write onto read, as before.
+        if ssm_store_indices is None:
+            sidx_store = sidx
+        else:
+            sidx_store = torch.remainder(
+                ssm_store_indices.reshape(-1).to(dtype=torch.long, device=device), final_state.shape[0])
 
         h_batch = _eager_read_state(final_state, sidx, _GDN_COMPUTE_DTYPE)
 
@@ -651,7 +660,7 @@ def hpu_fused_recurrent_gated_delta_rule(
         out_batch = torch.matmul(h_batch, q_s.unsqueeze(-1)).squeeze(-1)
 
         # Direct index_copy_ (no eager wrapper for this test).
-        final_state.index_copy_(0, sidx, h_batch.to(final_state.dtype))
+        final_state.index_copy_(0, sidx_store, h_batch.to(final_state.dtype))
         out_full = out_batch.to(v.dtype)
 
         out_result = out_full.unsqueeze(0) if cu_seqlens is not None else out_full.view(B, T, HV, Vdim)

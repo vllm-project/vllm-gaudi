@@ -413,6 +413,9 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 initial_state_idx=None,
                 query_start_loc=query_start_loc,
                 validate_data=False,
+                # Read from the load slot, write to the store slot: they differ on
+                # the step whose token opens a new mamba block.
+                store_cache_indices=(store_indices[:num_decodes] if store_indices is not None else None),
             )
 
             query, key, value = self.rearrange_mixed_qkv(mixed_qkv_conv)
@@ -427,6 +430,7 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                         if query_start_loc is not None else None),
                     ssm_state_indices=state_indices,
                     use_qk_l2norm_in_kernel=True,
+                    ssm_store_indices=store_indices,
                 )
             # Snapshot any block sealed by this decode step: the in-place update
             # left its boundary state in the request's base slot, so copy
