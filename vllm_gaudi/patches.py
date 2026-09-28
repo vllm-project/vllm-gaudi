@@ -258,12 +258,18 @@ def _hpu_gather_logprobs(
 ):
     """HPU-safe replacement for ``Sampler.gather_logprobs``.
 
-    Identical logic to the upstream implementation (vllm PR #38933) but with
-    the two ``mark_unbacked()`` calls removed.  On HPU, ``mark_unbacked`` is a
-    forbidden callable in ``torch._dynamo`` (``is_forbidden=True``).  When the
-    compiled ``Sampler`` traces ``gather_logprobs``, hitting ``mark_unbacked``
-    raises ``AssertionError: Attempt to trace forbidden callable``.  HPU does
-    not need this CUDA-specific recompile hint.
+    Same logic as the upstream implementation (vllm PR #38933), with two
+    HPU-specific differences:
+
+    * The two ``mark_unbacked()`` calls are removed.  On HPU, ``mark_unbacked``
+      is a forbidden callable in ``torch._dynamo`` (``is_forbidden=True``).
+      When the compiled ``Sampler`` traces ``gather_logprobs``, hitting
+      ``mark_unbacked`` raises ``AssertionError: Attempt to trace forbidden
+      callable``.  HPU does not need this CUDA-specific recompile hint.
+    * The token ids are cast to int32 before the ``cat``, not after it (see
+      the comment below).  Keep this cast if the replacement is ever dropped
+      on a vLLM bump: upstream's int64 cat followed by the int32 cast is the
+      code that reads back wrong on HPU.
 
     Upstream ref: https://github.com/vllm-project/vllm/pull/38933
     """
@@ -276,9 +282,16 @@ def _hpu_gather_logprobs(
     token_logprobs = logprobs.gather(-1, token_ids)
     # mark_unbacked calls intentionally omitted — forbidden on HPU dynamo.
     token_ranks = _sampler_mod.batched_count_greater_than(logprobs, token_logprobs)
-    indices = torch.cat((token_ids, topk_indices), dim=1)
+    # Cast to int32 before the concatenation, not after it. Upstream builds
+    # the int64 ``cat`` first and casts the result; on HPU (lazy mode) that
+    # int64 cat -> int32 cast chain is read back with wrong contents: token
+    # ids outside the vocabulary, and column 0 not equal to the sampled id it
+    # was copied from, while the float ``logprobs`` cat next to it and the
+    # int32 ``sampled_token_ids`` from the same tensor are always right.
+    # Casting each operand first sidesteps the int64 path entirely and is
+    # numerically identical (vocabulary ids fit in int32).
+    indices = torch.cat((token_ids.to(torch.int32), topk_indices.to(torch.int32)), dim=1)
     logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
-    indices = indices.to(torch.int32)
     return LogprobsTensors(indices, logprobs, token_ranks)
 
 
@@ -298,7 +311,10 @@ def _patch_gather_logprobs() -> None:
     import vllm.v1.sample.sampler as _sampler_mod
 
     if "mark_unbacked" not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
-        return  # Not affected — older vLLM without PR #38933.
+        # Older vLLM without PR #38933: no mark_unbacked to remove, so the
+        # stock gather_logprobs is kept. Note that it still builds the ids
+        # with the int64 cat -> int32 cast described in _hpu_gather_logprobs.
+        return
 
     _sampler_mod.Sampler.gather_logprobs = staticmethod(  # type: ignore[method-assign]
         _hpu_gather_logprobs)
