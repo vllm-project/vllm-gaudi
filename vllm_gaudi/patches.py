@@ -936,15 +936,14 @@ def _hpu_mamba_find_longest_cache_hit(original):
                     resident = False
                     break
             if resident:
-                # Refresh recency on the granted boundary in BOTH pool kinds.
-                # tp=1 (real pool): the worker applies this step's stores before
-                # it looks up the load slot, so without this touch the just-
-                # granted hit block could be the LRU victim and be evicted before
-                # it is read. tp>1 (shadow): keeps the shadow evicting in lockstep
-                # with the worker.
-                for gid, group_blocks, cmap in zip(kv_cache_group_ids, blocks, maps):
-                    if cmap is not None and group_blocks:
-                        cmap.get_load_slot(group_blocks[-1].block_id)
+                # No recency touch here. This cap runs at schedule time, for
+                # candidate requests that may never be scheduled -- touching the
+                # (tp>1) shadow LRU for one would diverge it from the worker,
+                # over-retaining a block the worker has evicted and later
+                # granting a hit it cannot back. Recency is store-driven only
+                # (see GdnCheckpointMap.get_load_slot); the granted boundary is
+                # kept alive across this step's stores by the reserved-slot set
+                # in the worker's store loop, not by an LRU touch.
                 return blocks, hit_length
             # Retry for a shorter prefix. This assumes original() is monotone:
             # a smaller max_length never returns a longer hit. hit_length - 1

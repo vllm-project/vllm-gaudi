@@ -130,10 +130,18 @@ class GdnCheckpointMap:
         return set(self._block_to_slot)
 
     def get_load_slot(self, block_id: int) -> int:
-        slot = self._block_to_slot.get(block_id, 0)
-        if slot:
-            self._lru.move_to_end(slot)
-        return slot
+        """Look up ``block_id``'s slot (0 = miss). Pure read: does NOT reorder LRU.
+
+        Recency is driven *solely* by the store stream (alloc_store_slot). The
+        worker and the tp>1 shadow see the same stores (cache_blocks mirrors
+        them), so store-only recency keeps their eviction order identical and
+        the shadow's resident set a subset of the worker's at any K. A load
+        touch would only ever fire on one side (the worker on a continuation, or
+        the shadow on a still-unscheduled hit probe), diverging the two orders
+        and breaking that invariant. A load target is instead protected from
+        same-step store eviction by the ``reserved`` set in alloc_store_slot.
+        """
+        return self._block_to_slot.get(block_id, 0)
 
     def alloc_store_slot(self, block_id: int, reserved: "set[int] | None" = None) -> int:
         """Assign a store slot to ``block_id``, evicting the LRU if the pool is full.

@@ -79,21 +79,37 @@ def test_resident_ids_tracks_stored_blocks():
     assert all(m.is_resident(b) for b in (10, 11, 12))
 
 
-def test_eviction_is_lru_and_load_touch_reorders():
-    # K=4: fill it, then a 5th alloc evicts the least-recently-used block.
+def test_eviction_is_store_driven_and_load_does_not_reorder():
+    # Recency is driven only by the store stream; a load lookup never reorders
+    # the LRU. This is what keeps the worker pool and the tp>1 shadow -- which
+    # see the same stores but not each other's loads -- evicting in lockstep.
     m = GdnCheckpointMap(num_slots=4)
     for bid in (10, 11, 12, 13):
         m.alloc_store_slot(bid)
     assert m.resident_ids() == {10, 11, 12, 13}
 
-    m.alloc_store_slot(14)  # evicts 10 (LRU)
+    m.alloc_store_slot(14)  # evicts 10 (oldest store)
     assert m.resident_ids() == {11, 12, 13, 14}
     assert m.get_load_slot(10) == 0  # evicted -> miss
 
-    # A load hit on 11 moves it to MRU, so the next eviction victim is 12.
+    # A load hit on 11 does NOT promote it: the next store still evicts the
+    # oldest store (11). A regression to load-touch would evict 12 here instead.
     assert m.get_load_slot(11) != 0
-    m.alloc_store_slot(15)  # evicts 12, not 11
-    assert m.resident_ids() == {11, 13, 14, 15}
+    m.alloc_store_slot(15)
+    assert m.resident_ids() == {12, 13, 14, 15}
+
+
+def test_restore_touches_recency_but_load_does_not():
+    # Re-storing a resident block refreshes its recency (it is a store); a load
+    # lookup does not. Pins the distinction so a regression to load-touch fails.
+    m = GdnCheckpointMap(num_slots=3)
+    m.alloc_store_slot(10)
+    m.alloc_store_slot(11)
+    m.alloc_store_slot(12)
+    m.get_load_slot(10)  # non-touching: 10 stays the oldest store
+    m.alloc_store_slot(11)  # re-store 11 -> most recent
+    m.alloc_store_slot(20)  # evicts 10 (oldest), not the re-stored 11
+    assert m.resident_ids() == {11, 12, 20}
 
 
 def test_realloc_of_resident_block_is_idempotent():
@@ -243,3 +259,27 @@ def test_shadow_subset_via_mirror_range_matches_worker_checkpoints():
         assert shadow.resident_ids() <= worker_checkpointed
         # Shadow residency is a subset of the worker pool's live keys.
         assert shadow.resident_ids() <= worker.resident_ids()
+
+
+def test_divergent_loads_never_break_subset_invariant():
+    # The 3.1/3.3 guard, at equal K -- the fragile config where a load-touch
+    # would break the invariant. Loads are non-touching, so a worker-only
+    # continuation load and a shadow-only unscheduled hit probe cannot diverge
+    # the two pools' eviction order. Both see the same store stream; assert the
+    # subset holds at every step, and (equal K, identical stores) that the
+    # resident sets stay identical despite the one-sided loads.
+    worker = GdnCheckpointMap(num_slots=4)
+    shadow = GdnCheckpointMap(num_slots=4)
+    stored: list[int] = []
+    for bid in range(1, 30):
+        worker.alloc_store_slot(bid)
+        shadow.alloc_store_slot(bid)
+        stored.append(bid)
+        # Worker-only load on an older resident block (a continuation resume).
+        if len(stored) >= 3:
+            worker.get_load_slot(stored[-3])
+        # Shadow-only probe on the oldest resident block (an unscheduled hit
+        # candidate the worker never processes).
+        shadow.get_load_slot(min(shadow.resident_ids()))
+        assert shadow.resident_ids() <= worker.resident_ids()
+    assert shadow.resident_ids() == worker.resident_ids()

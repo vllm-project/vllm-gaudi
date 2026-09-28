@@ -1459,6 +1459,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._gdn_ckpt_tensors: dict[str, tuple] = {}
         self._gdn_ckpt_maps: dict[int, GdnCheckpointMap] = {}
         self._gdn_ckpt_k: int = 0
+        # {group_idx: {slot}} load targets of the prefills formed so far this
+        # step; a store must not evict a slot a batch will restore from this
+        # step. Reset at the start of prefill-input prep, accumulated as each
+        # batch's load slots are computed (before its stores run).
+        self._gdn_ckpt_step_reserved: dict[int, set[int]] = {}
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
@@ -1649,9 +1654,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         request resumes at a completed boundary (load_block_idx <
         first_scheduled_block_idx); an intra-block continuation shares the live
         base_slot, and recycled block_id keys would otherwise return a stale slot.
+        The lookup is pure (get_load_slot does not touch the LRU): a worker load
+        on the request's own continuation boundary has no engine-core equivalent,
+        so touching here would diverge the worker pool from the tp>1 shadow.
         Store allocation lives in the caching-range loop (which snapshots every
-        boundary); doing it here too would double-touch the bounded pool's LRU.
-        Returns a [num_groups, target_bs] int32 tensor.
+        boundary), not here. Returns a [num_groups, target_bs] int32 tensor.
         """
         load_rows = []
         for group_idx in range(len(self.input_batch.block_table.block_tables)):
@@ -2984,6 +2991,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                                block_idx_last_computed_token_cpu,
                                                                                block_idx_first_scheduled_token_cpu,
                                                                                target_bs)
+                    # Reserve this batch's restore targets before its (and any
+                    # later batch's) stores run, so a store never recycles a slot
+                    # a batch will read from this step. Per group: slots are
+                    # per-map. See _gdn_ckpt_step_reserved.
+                    for g in range(load_ckpt_slots_cpu.shape[0]):
+                        slots = {int(s) for s in load_ckpt_slots_cpu[g].tolist() if s}
+                        if slots:
+                            self._gdn_ckpt_step_reserved.setdefault(g, set()).update(slots)
             else:
                 zeros = [0] * len(req_indices)
                 load_state_indices_cpu = store_state_indices_cpu = \
@@ -3068,12 +3083,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             num_prompt_blocks = num_prompt_tokens // mamba_block_size
                             num_full_blocks = min((int(context_lens[0]) + int(query_lens[0])) // mamba_block_size,
                                                   num_prompt_blocks)
-                            # Never evict a slot another batch in this step loads
+                            # Never evict a slot any batch in this step loads
                             # from (its checkpoint is about to be read); such a
                             # store is skipped (null slot) and recomputes instead.
-                            reserved = ({int(s)
-                                         for s in load_ckpt_slots_cpu[group_idx].tolist()
-                                         if s} if load_ckpt_slots_cpu is not None else None)
+                            # Spans all prefills formed so far this step, not just
+                            # this one, so a store cannot clobber another batch's
+                            # restore target.
+                            reserved = self._gdn_ckpt_step_reserved.get(group_idx) or None
                             slot_range = torch.tensor([
                                 cmap.alloc_store_slot(bid, reserved) if
                                 (first_bidx + i < num_full_blocks and bid != 0) else 0
@@ -3264,6 +3280,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         all_batch_contents, num_pad_across_dp = \
             self._extract_prefill_batch_contents(
                 num_prefills, num_decodes, num_scheduled_tokens)
+        # Fresh per step: batches are formed in order below, each reserving its
+        # load slots (so a later batch's stores never evict an earlier batch's
+        # restore target). See _gdn_ckpt_step_reserved.
+        self._gdn_ckpt_step_reserved.clear()
         all_batches = [self._form_prefill_batch(bc) for bc in all_batch_contents]
         merge_contents(all_batches[0], *all_batches[1:])
 
