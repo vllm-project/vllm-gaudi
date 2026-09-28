@@ -103,6 +103,77 @@ def test_realloc_of_resident_block_is_idempotent():
     assert m.resident_ids() == {10}
 
 
+# --- drop: invalidate a recycled/rehashed block key ---------------------------
+
+
+def test_drop_invalidates_resident_block_and_frees_slot():
+    # The map is keyed by block_id. When the scheduler recycles a freed block
+    # into a new prefix (new hash) that the worker will not re-checkpoint, the
+    # stale key must be dropped or is_resident would report the block's previous
+    # prefix as restorable -- a wrong resume.
+    m = GdnCheckpointMap(num_slots=4)
+    m.alloc_store_slot(10)
+    assert m.is_resident(10)
+    m.drop(10)
+    assert not m.is_resident(10)
+    assert m.get_load_slot(10) == 0
+    assert m.resident_ids() == set()
+
+
+def test_drop_of_absent_block_is_noop():
+    m = GdnCheckpointMap(num_slots=4)
+    m.alloc_store_slot(10)
+    m.drop(999)  # not resident
+    assert m.resident_ids() == {10}
+
+
+def test_drop_reclaims_capacity_without_eviction():
+    # After a full pool drops a block, the freed slot is reused by the next
+    # store instead of evicting a still-valid block.
+    m = GdnCheckpointMap(num_slots=2)
+    m.alloc_store_slot(10)
+    m.alloc_store_slot(11)
+    m.drop(10)
+    m.alloc_store_slot(12)  # reuses 10's freed slot, keeps 11
+    assert m.resident_ids() == {11, 12}
+
+
+# --- reserved slots: a store must not evict a load target of the same step ----
+
+
+def test_store_skips_reserved_slot_when_evicting():
+    m = GdnCheckpointMap(num_slots=3)
+    s10 = m.alloc_store_slot(10)  # oldest
+    m.alloc_store_slot(11)
+    m.alloc_store_slot(12)
+    # Slot s10 is the LRU victim, but another batch loads from it this step.
+    # The store must evict the next-oldest (11's slot) instead and keep s10.
+    m.alloc_store_slot(20, reserved={s10})
+    assert m.is_resident(10)  # reserved load target preserved
+    assert not m.is_resident(11)  # next-oldest evicted instead
+    assert m.resident_ids() == {10, 12, 20}
+
+
+def test_store_skipped_when_all_slots_reserved():
+    m = GdnCheckpointMap(num_slots=2)
+    s10 = m.alloc_store_slot(10)
+    s11 = m.alloc_store_slot(11)
+    # Every slot is a load target this step: no evictable slot, so the store is
+    # skipped (null slot 0) rather than clobbering a checkpoint about to be read.
+    assert m.alloc_store_slot(20, reserved={s10, s11}) == 0
+    assert not m.is_resident(20)
+    assert m.resident_ids() == {10, 11}
+
+
+def test_reserved_none_matches_plain_lru_eviction():
+    # reserved=None (default) must behave exactly like the original LRU evict.
+    m = GdnCheckpointMap(num_slots=2)
+    m.alloc_store_slot(10)
+    m.alloc_store_slot(11)
+    m.alloc_store_slot(12)  # evicts 10 (LRU)
+    assert m.resident_ids() == {11, 12}
+
+
 # --- The residency subset invariant -------------------------------------------
 
 

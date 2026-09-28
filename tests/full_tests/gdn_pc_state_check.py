@@ -22,7 +22,8 @@ Run on an HPU host with a GDN hybrid model, e.g.:
 
 CKPT_SLOTS is large so no boundary is evicted between the reference request's
 save and the second request's restore -- this test isolates restore
-correctness, not eviction (see gdn_pc_lru_stress.py for eviction).
+correctness, not eviction (LRU eviction and the residency-subset invariant are
+covered by tests/unit_tests/test_gdn_checkpoint_pool.py).
 
 Runs in-process (VLLM_ENABLE_V1_MULTIPROCESSING=0) because the state hooks are
 monkeypatches that must execute in the same process as the model forward; a

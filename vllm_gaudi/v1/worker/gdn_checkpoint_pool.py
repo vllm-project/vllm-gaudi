@@ -102,6 +102,24 @@ class GdnCheckpointMap:
         """Whether ``block_id``'s checkpoint currently occupies a slot."""
         return block_id in self._block_to_slot
 
+    def drop(self, block_id: int) -> None:
+        """Invalidate any checkpoint keyed at ``block_id``, freeing its slot.
+
+        The map is keyed by block_id, but the scheduler recycles a freed block
+        into a new prefix with a new hash. If the worker will not re-checkpoint
+        that recycled block (it is a decode-region boundary, never a full prompt
+        block), a stale block_id->slot entry would otherwise make is_resident
+        report the block's *previous* prefix as restorable -- a wrong resume.
+        Dropping the key on the step the block is re-cached closes that window.
+        No-op when the block holds no slot.
+        """
+        slot = self._block_to_slot.pop(block_id, None)
+        if slot is None:
+            return
+        del self._slot_to_block[slot]
+        self._lru.pop(slot, None)
+        self._free.append(slot)
+
     def resident_ids(self) -> "set[int]":
         """Block ids currently holding a slot.
 
@@ -117,7 +135,16 @@ class GdnCheckpointMap:
             self._lru.move_to_end(slot)
         return slot
 
-    def alloc_store_slot(self, block_id: int) -> int:
+    def alloc_store_slot(self, block_id: int, reserved: "set[int] | None" = None) -> int:
+        """Assign a store slot to ``block_id``, evicting the LRU if the pool is full.
+
+        ``reserved`` is a set of slot indices another batch in the same worker
+        step will load from; eviction skips them so a store never clobbers a
+        checkpoint that is about to be read this step. If every slot is reserved
+        (the pool cannot grow without evicting a load target), the store is
+        skipped and slot 0 (null) is returned -- safe, since a missing
+        checkpoint just falls back to recompute, never a wrong result.
+        """
         slot = self._block_to_slot.get(block_id)
         if slot is not None:
             self._lru.move_to_end(slot)
@@ -125,10 +152,22 @@ class GdnCheckpointMap:
         if self._free:
             slot = self._free.pop()
         else:
-            slot, _ = self._lru.popitem(last=False)
+            slot = self._evict_lru(reserved)
+            if slot is None:
+                return 0
             old_block = self._slot_to_block.pop(slot)
             del self._block_to_slot[old_block]
         self._block_to_slot[block_id] = slot
         self._slot_to_block[slot] = block_id
         self._lru[slot] = None
         return slot
+
+    def _evict_lru(self, reserved: "set[int] | None") -> "int | None":
+        """Pop the least-recently-used slot not in ``reserved``; None if none."""
+        if not reserved:
+            slot, _ = self._lru.popitem(last=False)
+            return slot
+        victim = next((slot for slot in self._lru if slot not in reserved), None)
+        if victim is not None:
+            del self._lru[victim]
+        return victim

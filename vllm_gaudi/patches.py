@@ -94,12 +94,13 @@ Currently:
 
 import gc
 import inspect
-import os
 from typing import Callable, Optional
 
 import torch
 
 from vllm import envs
+
+import vllm_gaudi.envs as gaudi_envs
 
 # NOTE: neither ``vllm.platforms.current_platform`` nor
 # ``vllm.distributed.parallel_state`` is imported at module top level — both
@@ -879,7 +880,7 @@ def _hpu_mamba_find_longest_cache_hit(original):
     """
     from vllm.v1.kv_cache_interface import MambaSpec
 
-    from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group, is_shadow
+    from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group
     from vllm_gaudi.v1.worker.hpu_model_runner import _GDN_MAMBA_TYPES
 
     def find_longest_cache_hit(cls,
@@ -900,7 +901,7 @@ def _hpu_mamba_find_longest_cache_hit(original):
         # A bounded ckpt pool exists only under compact GDN; non-compact GDN
         # keeps the full block-indexed state cache and needs no cap. Match the
         # shadow-registration gate exactly so "expected" == "registered".
-        compact_on = os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() in ("1", "true")
+        compact_on = gaudi_envs.VLLM_COMPACT_GDN
         if is_gdn and compact_on:
             # Fail loud (not open) if a GDN group lacks its checkpoint map. Under
             # compact GDN every GDN group is mapped by construction -- the real
@@ -935,8 +936,14 @@ def _hpu_mamba_find_longest_cache_hit(original):
                     resident = False
                     break
             if resident:
+                # Refresh recency on the granted boundary in BOTH pool kinds.
+                # tp=1 (real pool): the worker applies this step's stores before
+                # it looks up the load slot, so without this touch the just-
+                # granted hit block could be the LRU victim and be evicted before
+                # it is read. tp>1 (shadow): keeps the shadow evicting in lockstep
+                # with the worker.
                 for gid, group_blocks, cmap in zip(kv_cache_group_ids, blocks, maps):
-                    if cmap is not None and group_blocks and is_shadow(gid):
+                    if cmap is not None and group_blocks:
                         cmap.get_load_slot(group_blocks[-1].block_id)
                 return blocks, hit_length
             # Retry for a shorter prefix. This assumes original() is monotone:
@@ -949,6 +956,9 @@ def _hpu_mamba_find_longest_cache_hit(original):
             ml = hit_length - 1
         return tuple([] for _ in kv_cache_group_ids), 0
 
+    # Expose the stock function so the patch-contract test can unwrap to it and
+    # pin its signature whether or not patching has already run (order-safe).
+    find_longest_cache_hit.__wrapped__ = original
     return find_longest_cache_hit
 
 
@@ -965,12 +975,22 @@ def _patch_mamba_find_longest_cache_hit() -> None:
 
 
 def _hpu_mamba_cache_blocks(original):
-    """Mirror the scheduler's just-cached boundaries into the engine-core shadow.
+    """Keep the checkpoint map consistent with the scheduler's just-cached blocks.
 
-    Shadow groups only (tp>1). The worker checkpoints only full prompt blocks
-    during prefill, so replaying just those (not decode-region boundaries) as
-    store touches keeps the shadow's residency and LRU order a subset of the
-    worker pool.
+    Runs for every registered group (real pool at tp=1, engine-core shadow at
+    tp>1). The scheduler caches full blocks in [before, after); the worker only
+    checkpoints the full *prompt* blocks (during prefill), never boundaries that
+    fill during decode. Two things follow:
+
+      * Prompt blocks -- on a tp>1 shadow, mirror them as store touches so the
+        shadow's residency and LRU order track the worker pool (a subset). On
+        the tp=1 real pool the worker does the store itself, so nothing to do.
+      * Decode-region blocks -- the worker will not checkpoint them, and each
+        was freshly (re-)hashed by the scheduler, so any checkpoint stale-keyed
+        at that recycled block_id is now invalid. Drop the key on BOTH the real
+        pool (tp=1) and the shadow (tp>1), or is_resident would report a
+        different prefix's state as restorable and a later request would resume
+        from garbage.
     """
     from vllm_gaudi.v1.worker.gdn_checkpoint_pool import (ckpt_map_for_kv_group, is_shadow, shadow_mirror_block_range)
 
@@ -985,25 +1005,30 @@ def _hpu_mamba_cache_blocks(original):
         before = self.num_cached_block.get(request.request_id, 0)
         original(self, request, num_tokens, *args, **kwargs)
         gid = self.kv_cache_group_id
-        if not is_shadow(gid):
+        cmap = ckpt_map_for_kv_group(gid)
+        if cmap is None:
             return
         after = self.num_cached_block.get(request.request_id, 0)
         if after <= before:
             return
-        shadow = ckpt_map_for_kv_group(gid)
-        if shadow is None:
-            return
-        # Mirror only the prompt blocks the worker checkpoints, never the
-        # boundaries that fill during decode (which it does not). Cached blocks
-        # are always full, so this prompt-block cutoff is the only filter beyond
-        # null/unhashed. See shadow_mirror_block_range for why the subset matters.
+        shadow = is_shadow(gid)
+        # Prompt-block slice the worker checkpoints; everything else in
+        # [before, after) is a decode-region boundary it will not.
+        mirror = frozenset(shadow_mirror_block_range(before, after, request.num_prompt_tokens, self.block_size))
         blocks = self.req_to_blocks[request.request_id]
-        for idx in shadow_mirror_block_range(before, after, request.num_prompt_tokens, self.block_size):
+        for idx in range(before, after):
             block = blocks[idx]
             if block.is_null or block.block_hash is None:
                 continue
-            shadow.alloc_store_slot(block.block_id)
+            if idx in mirror:
+                if shadow:
+                    cmap.alloc_store_slot(block.block_id)
+            else:
+                cmap.drop(block.block_id)
 
+    # Expose the stock function so the patch-contract test can unwrap to it and
+    # pin its signature whether or not patching has already run (order-safe).
+    cache_blocks.__wrapped__ = original
     return cache_blocks
 
 
@@ -1029,7 +1054,7 @@ def _hpu_kv_cache_manager_init(original):
 
     def __init__(self, kv_cache_config, *args, **kwargs):
         original(self, kv_cache_config, *args, **kwargs)
-        if os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() not in ("1", "true"):
+        if not gaudi_envs.VLLM_COMPACT_GDN:
             return
         if not getattr(self, "enable_caching", False):
             return
@@ -1046,8 +1071,8 @@ def _hpu_kv_cache_manager_init(original):
         ]
         if not gdn_gids:
             return
-        mem_fraction = float(os.environ.get("VLLM_GDN_CKPT_MEM_FRACTION", "0.1") or 0.1)
-        explicit_slots = int(os.environ.get("VLLM_GDN_CKPT_SLOTS", "0") or 0)
+        mem_fraction = gaudi_envs.VLLM_GDN_CKPT_MEM_FRACTION
+        explicit_slots = gaudi_envs.VLLM_GDN_CKPT_SLOTS
         k = gdn_ckpt_shadow_num_slots(kv_cache_config.num_blocks, len(gdn_gids), mem_fraction, explicit_slots)
         for gid in gdn_gids:
             if ckpt_map_for_kv_group(gid) is None:

@@ -34,6 +34,7 @@ from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, _GDN_MAMBA_TYPES, _rebind_moe_expert_weights)
 from vllm_gaudi.v1.worker.gdn_checkpoint_pool import gdn_ckpt_num_slots
+import vllm_gaudi.envs as gaudi_envs
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from vllm_gaudi.extension.logger import logger as init_logger
@@ -451,7 +452,7 @@ class HPUWorker(WorkerBase):
         has_gdn = any(isinstance(s, MambaSpec) and s.mamba_type in _GDN_MAMBA_TYPES for s in kv_cache_spec.values())
         has_standard_mamba = any(
             isinstance(s, MambaSpec) and s.mamba_type not in _GDN_MAMBA_TYPES for s in kv_cache_spec.values())
-        compact_gdn = os.environ.get("VLLM_COMPACT_GDN", "0").strip().lower() in ("1", "true")
+        compact_gdn = gaudi_envs.VLLM_COMPACT_GDN
         if has_attn and has_gdn and not compact_gdn:
             # When compact GDN is OFF, GDN state scales with num_blocks
             # just like ATN.  GPU shares one raw buffer via as_strided,
@@ -503,8 +504,8 @@ class HPUWorker(WorkerBase):
                         cfg = os.environ.get(env_key)
                         if cfg:
                             gdn_max_reqs = max(gdn_max_reqs, int(cfg.split(",")[0]))
-                    mem_fraction = float(os.environ.get("VLLM_GDN_CKPT_MEM_FRACTION", "0.1") or 0.1)
-                    explicit_slots = int(os.environ.get("VLLM_GDN_CKPT_SLOTS", "0") or 0)
+                    mem_fraction = gaudi_envs.VLLM_GDN_CKPT_MEM_FRACTION
+                    explicit_slots = gaudi_envs.VLLM_GDN_CKPT_SLOTS
                     nb_est = int(available) // bpb
                     k_est = gdn_ckpt_num_slots(nb_est, num_gdn_groups, mem_fraction, gdn_max_reqs, explicit_slots)
                     reserve = num_gdn_layers * (k_est + 1) * per_state

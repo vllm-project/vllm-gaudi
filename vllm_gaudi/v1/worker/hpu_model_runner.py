@@ -1411,7 +1411,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         logger.warning("Compact GDN auto-disabled: incompatible with PD disaggregated serving")
                     else:
                         os.environ["VLLM_COMPACT_GDN"] = "1"
-                compact_req = os.environ.get("VLLM_COMPACT_GDN", "0") in ("1", "true")
+                compact_req = gaudi_envs.VLLM_COMPACT_GDN
                 pc_on = self.vllm_config.cache_config.enable_prefix_caching
                 # Checkpoint prefix caching rides on compact GDN: on whenever
                 # both are active (compact is auto-disabled for PD above).
@@ -1442,7 +1442,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # For request with base_slot `s` in group `g`, the actual tensor
         # index is `s * num_gdn_groups + g + 1` (1-based, slot 0 unused).
         # Tensor size: max_num_reqs * num_gdn_groups + 2.
-        self._compact_gdn_enabled = os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() in ("1", "true")
+        self._compact_gdn_enabled = gaudi_envs.VLLM_COMPACT_GDN
         self._compact_gdn_group_ids: set[int] = set()
         self._compact_gdn_group_offset: dict[int, int] = {}  # {group_idx: g_offset}
         self._num_gdn_groups = 0  # set during initialize_kv_cache
@@ -1452,10 +1452,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Compact-GDN prefix-cache checkpoint pool (bounded, plugin-allocated).
         # _gdn_ckpt_enabled is set by the guard above; default False (no GDN).
         self._gdn_ckpt_enabled = getattr(self, "_gdn_ckpt_enabled", False)
-        self._gdn_ckpt_slots = int(os.environ.get("VLLM_GDN_CKPT_SLOTS", "0") or 0)
+        self._gdn_ckpt_slots = gaudi_envs.VLLM_GDN_CKPT_SLOTS
         # Auto K when VLLM_GDN_CKPT_SLOTS is unset: a fraction of the non-compact
         # footprint (num_blocks states/layer), split across GDN groups.
-        self._gdn_ckpt_mem_fraction = float(os.environ.get("VLLM_GDN_CKPT_MEM_FRACTION", "0.1") or 0.1)
+        self._gdn_ckpt_mem_fraction = gaudi_envs.VLLM_GDN_CKPT_MEM_FRACTION
         self._gdn_ckpt_tensors: dict[str, tuple] = {}
         self._gdn_ckpt_maps: dict[int, GdnCheckpointMap] = {}
         self._gdn_ckpt_k: int = 0
@@ -3049,10 +3049,34 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             cmap = self._gdn_ckpt_maps[group_idx]
                             # Persist only full, non-null boundaries (slot 0 =
                             # null scratch) -- the exact set the scheduler caches.
+                            # Clamp at the *original* prompt-block count: the
+                            # worker only checkpoints full prompt blocks, never
+                            # boundaries that fill during decode. Otherwise a
+                            # preemption recompute (which re-prefills prompt+
+                            # emitted output) would checkpoint decode-region
+                            # blocks at recycled block ids; at tp=1 that poisons
+                            # the pool find_longest_cache_hit reads and a later
+                            # request resumes from garbage. input_batch.
+                            # num_prompt_tokens is inflated to prompt+output on
+                            # such a recompute (see add_request), so subtract the
+                            # emitted outputs to recover the stable prompt length
+                            # the shadow clamps to (shadow_mirror_block_range).
                             first_bidx = int(first)
-                            num_full_blocks = (int(context_lens[0]) + int(query_lens[0])) // mamba_block_size
+                            req_idx0 = req_indices[0]
+                            num_emitted = len(self.input_batch.req_output_token_ids[req_idx0] or ())
+                            num_prompt_tokens = int(self.input_batch.num_prompt_tokens[req_idx0]) - num_emitted
+                            num_prompt_blocks = num_prompt_tokens // mamba_block_size
+                            num_full_blocks = min((int(context_lens[0]) + int(query_lens[0])) // mamba_block_size,
+                                                  num_prompt_blocks)
+                            # Never evict a slot another batch in this step loads
+                            # from (its checkpoint is about to be read); such a
+                            # store is skipped (null slot) and recomputes instead.
+                            reserved = ({int(s)
+                                         for s in load_ckpt_slots_cpu[group_idx].tolist()
+                                         if s} if load_ckpt_slots_cpu is not None else None)
                             slot_range = torch.tensor([
-                                cmap.alloc_store_slot(bid) if (first_bidx + i < num_full_blocks and bid != 0) else 0
+                                cmap.alloc_store_slot(bid, reserved) if
+                                (first_bidx + i < num_full_blocks and bid != 0) else 0
                                 for i, bid in enumerate(blocks_caching_range.tolist())
                             ],
                                                       dtype=torch.int32,

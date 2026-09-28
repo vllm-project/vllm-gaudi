@@ -146,6 +146,7 @@ class HpuPlatform(Platform):
         # a lazy-mode subprocess (GAUDISW-248809) and always respect values the
         # user set explicitly (GAUDISW-249135).
         cls.set_compile_env_defaults()
+        cls._maybe_set_compact_gdn_env_default(vllm_config)
         cls._maybe_disable_synapse_input_reuse(vllm_config)
         parallel_config = vllm_config.parallel_config
 
@@ -490,6 +491,25 @@ class HpuPlatform(Platform):
             os.environ['FUSER_ENABLE_MULTI_THREADED_INVOCATIONS'] = '1'
 
     @classmethod
+    def _num_gdn_layers(cls, vllm_config: VllmConfig) -> int:
+        """GDN/linear-attention layer count, or 0 if this is not a GDN model.
+
+        granitemoehybrid relabels plain mamba layers as "linear_attention"; the
+        model runner excludes it explicitly, so treat it as non-GDN here too.
+        """
+        model_config = getattr(vllm_config, 'model_config', None)
+        if model_config is None:
+            return 0
+        if getattr(model_config.hf_config, 'model_type', None) == 'granitemoehybrid':
+            return 0
+        try:
+            return sum(
+                model_config.get_num_layers_by_block_type(vllm_config.parallel_config, bt)
+                for bt in ('gdn_attention', 'linear_attention'))
+        except Exception:
+            return 0
+
+    @classmethod
     def _compact_gdn_active(cls, vllm_config: VllmConfig) -> bool:
         """Whether compact-GDN will be active for this model.
 
@@ -501,23 +521,33 @@ class HpuPlatform(Platform):
         explicit = os.environ.get('VLLM_COMPACT_GDN')
         if explicit is not None:
             return explicit.strip().lower() in ('1', 'true')
-        model_config = getattr(vllm_config, 'model_config', None)
-        if model_config is None:
-            return False
-        # granitemoehybrid relabels plain mamba layers as "linear_attention"; the
-        # model runner excludes it explicitly or num_gdn is misdetected as > 0.
-        if getattr(model_config.hf_config, 'model_type', None) == 'granitemoehybrid':
-            return False
-        try:
-            num_gdn = sum(
-                model_config.get_num_layers_by_block_type(vllm_config.parallel_config, bt)
-                for bt in ('gdn_attention', 'linear_attention'))
-        except Exception:
-            return False
-        if num_gdn <= 0:
+        if cls._num_gdn_layers(vllm_config) <= 0:
             return False
         # Compact-GDN is auto-disabled for PD-disaggregated serving.
         return getattr(vllm_config, 'kv_transfer_config', None) is None
+
+    @classmethod
+    def _maybe_set_compact_gdn_env_default(cls, vllm_config: VllmConfig) -> None:
+        """Pin VLLM_COMPACT_GDN in the environment once, at engine construction.
+
+        check_and_update_config runs in the process that spawns the workers, so
+        setting the env here makes engine-core and every spawned worker inherit
+        one value. Without this, engine-core (which registers the prefix-cache
+        shadow and caps hits) and the workers (which run the actual compact/
+        non-compact path) can disagree -- e.g. under PD the worker auto-disables
+        compact GDN but engine-core would still cap hits, silently dropping
+        prefix hits. A user-set VLLM_COMPACT_GDN is never overwritten, and
+        non-GDN models are left untouched.
+        """
+        if os.environ.get('VLLM_COMPACT_GDN') is not None:
+            return
+        if cls._num_gdn_layers(vllm_config) <= 0:
+            return
+        active = cls._compact_gdn_active(vllm_config)
+        os.environ['VLLM_COMPACT_GDN'] = '1' if active else '0'
+        if not active:
+            logger.info("Compact GDN auto-disabled (PD-disaggregated serving); "
+                        "pinning VLLM_COMPACT_GDN=0 for engine-core and workers.")
 
     @classmethod
     def _maybe_disable_synapse_input_reuse(cls, vllm_config: VllmConfig) -> None:

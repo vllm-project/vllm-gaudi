@@ -11,9 +11,9 @@ same full-non-null boundary stream the workers cache, restoring the cap across
 processes.
 
 This validates the fix as a black box. The in-process state harness
-(gdn_pc_state_check / gdn_pc_lru_stress) forces VLLM_ENABLE_V1_MULTIPROCESSING=0,
-which pins tp=1; at tp>1 the workers are separate processes and their state is
-unreachable. So we observe two engine-core-visible signals instead:
+(gdn_pc_state_check) forces VLLM_ENABLE_V1_MULTIPROCESSING=0, which pins tp=1;
+at tp>1 the workers are separate processes and their state is unreachable. So we
+observe two engine-core-visible signals instead:
 
   1. num_cached_tokens -- with a small pool, a revisit onto an evicted boundary
      must report a CAPPED hit (0 here, since each distinct prefix owns one
