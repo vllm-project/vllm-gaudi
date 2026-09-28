@@ -382,6 +382,7 @@ def hpu_causal_conv1d_update(
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     validate_data: bool = False,
+    store_cache_indices: torch.Tensor | None = None,
 ):
     if num_accepted_tokens is not None:
         raise NotImplementedError("Speculative decoding updates are not supported in the reference implementation.")
@@ -406,6 +407,7 @@ def hpu_causal_conv1d_update(
         metadata=None,
         validate_data=validate_data,
         is_prompt=False,
+        store_cache_indices=store_cache_indices,
     )
     return reshape_spec.reshape_fn(result)
 
@@ -427,6 +429,7 @@ def hpu_causal_conv1d_fn_update(
     metadata=None,
     validate_data: bool = False,
     is_prompt: bool = True,
+    store_cache_indices: torch.Tensor | None = None,
 ):
     if any(ptr is not None for ptr in (
             block_idx_first_scheduled_token,
@@ -489,6 +492,15 @@ def hpu_causal_conv1d_fn_update(
     # remainder(-1, N) == N-1, remainder(valid, N) == valid.
     num_conv_slots = conv_states.shape[0]
     safe_cache_idx = torch.remainder(batch_cache_idx, num_conv_slots)
+    # Slot to write the updated state to.  With prefix caching a decoded token can
+    # open a new mamba block, and the state must then land in the last-scheduled
+    # block, not the one it was read from.  Unset collapses write onto read.
+    if store_cache_indices is None:
+        safe_store_idx = safe_cache_idx
+    else:
+        st = (store_cache_indices.to(conv_states.device)
+              if store_cache_indices.device != conv_states.device else store_cache_indices)
+        safe_store_idx = torch.remainder(st.reshape(-1), num_conv_slots)
 
     init_state = conv_states[safe_cache_idx, -state_len:, :]
     init_state = init_state.transpose(-1, -2)
@@ -502,6 +514,6 @@ def hpu_causal_conv1d_fn_update(
     out = seq_out
 
     with torch.no_grad():
-        conv_states[safe_cache_idx, -state_len:, :] = new_state.transpose(-1, -2)
+        conv_states[safe_store_idx, -state_len:, :] = new_state.transpose(-1, -2)
 
     return out.to(original_dtype)
