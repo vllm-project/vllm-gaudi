@@ -1452,6 +1452,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Compact-GDN prefix-cache checkpoint pool (bounded, plugin-allocated).
         # _gdn_ckpt_enabled is set by the guard above; default False (no GDN).
         self._gdn_ckpt_enabled = getattr(self, "_gdn_ckpt_enabled", False)
+        # The K+1 ckpt tensors are allocated ONLY on the hybrid-cache path of
+        # initialize_kv_cache; the naive-sharing and non-hybrid branches never
+        # create them, leaving kv_ckpt unset on the layers. If prefix caching
+        # asked for the pool but hybrid cache is off (an explicit
+        # VLLM_USE_HYBRID_CACHE=0), disable it cleanly here instead of building
+        # ckpt slot metadata and a hit cap against tensors that never exist --
+        # that mismatch would resume a later request from a garbage slot.
+        if self._gdn_ckpt_enabled and not self.use_hybrid_cache:
+            logger.warning("Compact-GDN prefix caching needs VLLM_USE_HYBRID_CACHE=1 (the ckpt pool is allocated "
+                           "only on the hybrid path); disabling it because hybrid cache is off.")
+            self._gdn_ckpt_enabled = False
         self._gdn_ckpt_slots = gaudi_envs.VLLM_GDN_CKPT_SLOTS
         # Auto K when VLLM_GDN_CKPT_SLOTS is unset: a fraction of the non-compact
         # footprint (num_blocks states/layer), split across GDN groups.
