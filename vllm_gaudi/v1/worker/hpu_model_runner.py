@@ -1475,6 +1475,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # step. Reset at the start of prefill-input prep, accumulated as each
         # batch's load slots are computed (before its stores run).
         self._gdn_ckpt_step_reserved: dict[int, set[int]] = {}
+        # req_ids scheduled fresh this step (in scheduled_new_reqs). A fresh
+        # request's compact base slot was just recycled, so it owns NO valid
+        # live GDN state -- any num_computed_tokens>0 is a prefix-cache hit that
+        # must resume from a resident checkpoint. If that checkpoint was evicted
+        # (load slot 0), it must recompute, not resume from the garbage live
+        # slot. Continuations keep their own live state. Refreshed per step.
+        self._gdn_new_req_ids: set[str] = set()
 
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
@@ -1907,6 +1914,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 else:
                     logger.warning("GDN_COMPACT free finished req=%s has NO slot! "
                                    "Possible leak.", req_id)
+
+        # Track which requests are scheduled fresh this step: they own no valid
+        # live GDN state, so a prefix-cache hit must load a resident checkpoint
+        # or recompute (see _gdn_new_req_ids). Preempted-and-resumed requests
+        # keep their base slot (not freed above), so they are continuations, not
+        # fresh -- scheduled_new_reqs excludes them.
+        if self._gdn_ckpt_enabled:
+            self._gdn_new_req_ids = {rd.req_id for rd in scheduler_output.scheduled_new_reqs}
 
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
@@ -3002,6 +3017,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                                block_idx_last_computed_token_cpu,
                                                                                block_idx_first_scheduled_token_cpu,
                                                                                target_bs)
+                    # Differentiate a fresh prefix-cache hit from a chunked
+                    # continuation. A fresh request (recycled base slot) owns no
+                    # valid live state, so a num_computed_tokens>0 is a prefix
+                    # hit that may resume ONLY from a resident checkpoint. If
+                    # that checkpoint is not resident (load slot 0 in every
+                    # group -- never checkpointed, or evicted by a same-step
+                    # store), clear has_initial_states so the model zeroes the
+                    # initial state and recomputes, instead of resuming from the
+                    # garbage live slot. Continuations keep their own live state
+                    # (has_initial_states unchanged). This makes a missing
+                    # checkpoint fall back to recompute -- never a wrong result
+                    # -- independent of same-step store/evict order.
+                    ckpt_hit = (load_ckpt_slots_cpu > 0).any(dim=0)
+                    for i, req_id in enumerate(contents.req_ids):
+                        if req_id in self._gdn_new_req_ids and not bool(ckpt_hit[i]):
+                            has_initial_states_cpu[i] = False
                     # Reserve this batch's restore targets before its (and any
                     # later batch's) stores run, so a store never recycles a slot
                     # a batch will read from this step. Per group: slots are
