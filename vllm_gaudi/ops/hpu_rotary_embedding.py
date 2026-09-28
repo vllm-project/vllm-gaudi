@@ -510,7 +510,11 @@ class HPUPhi3LongRoPEScaledRotaryEmbedding(Phi3LongRoPEScaledRotaryEmbedding):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        # Not a RotaryEmbeddingBase, so _rotary_base_init_on_cpu misses it; build the cache on CPU here too.
+        target = torch.get_default_device()
+        with torch.device("cpu"):
+            super().__init__(*args, **kwargs)
+        self.long_short_cos_sin_cache = self.long_short_cos_sin_cache.to(target)
         # Upstream rejects non-neox in __init__ and does not store the flag; the shared HPU path reads it.
         self.is_neox_style = True
         logger.info_once("HPU LongRoPE: use_long_rope=%s (original_max_position_embeddings=%d)", self.use_long_rope,
