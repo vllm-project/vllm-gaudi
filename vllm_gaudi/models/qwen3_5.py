@@ -131,18 +131,32 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         value = value.reshape(1, value.size(0), -1, self.head_v_dim).contiguous()
         return query, key, value
 
-    def _resolve_state_indices(self, attn_metadata):
-        """Resolve load_indices_tensor, handling 2-D cache-group case.
-
-        For Qwen 3.5 (GDN), load and store indices are identical
-        so using load_indices_tensor is sufficient.
-        """
-        indices = attn_metadata.load_indices_tensor
+    def _select_cache_group(self, indices):
         if indices is not None and indices.dim() > 1:
             cg = self.cache_group_idx
             assert cg is not None
             indices = indices.index_select(0, cg.view(1)).squeeze(0)
         return indices
+
+    def _resolve_state_indices(self, attn_metadata):
+        """Slot to READ the incoming recurrent state from (last computed block)."""
+        return self._select_cache_group(attn_metadata.load_indices_tensor)
+
+    def _resolve_store_indices(self, attn_metadata):
+        """Slot to WRITE the outgoing recurrent state to (last scheduled block).
+
+        With prefix caching off the runner sets ``load_indices_tensor`` and
+        ``store_indices_tensor`` to the same thing, so this used to be assumed
+        identical to the load slot. With prefix caching on they differ: load is
+        ``block_idx_last_computed_token`` while store is
+        ``block_idx_last_scheduled_token``. Writing the final state to the load
+        slot then leaves the block the next step reads from never written, which
+        corrupts generation for any prompt spanning more than one mamba block.
+        """
+        store = getattr(attn_metadata, "store_indices_tensor", None)
+        if store is None:
+            return self._resolve_state_indices(attn_metadata)
+        return self._select_cache_group(store)
 
     def _resolve_group_row(self, t):
         """Select this layer's group row from a [num_groups, bs] tensor."""
@@ -164,10 +178,11 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
             return (False, None, None, None, None, None, None, 0, 0, 0, 0, None, None, None, None, None, None, None,
-                    None)
+                    None, None)
 
         is_prompt = bool(getattr(attn_metadata, "is_prompt", False))
         state_indices = self._resolve_state_indices(attn_metadata)
+        store_indices = self._resolve_store_indices(attn_metadata)
         load_slots = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_load_slots", None))
         # Per-block prefix-cache metadata (None outside prefix caching).
         mamba_map = self._resolve_group_row(getattr(attn_metadata, "mamba_chunks_to_block_mapping", None))
@@ -219,7 +234,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
         return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
                 num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots, mamba_map,
-                blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot, ckpt_store_slots)
+                blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot, ckpt_store_slots,
+                store_indices)
 
     def forward(
         self,
@@ -242,8 +258,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         # === Metadata extraction (natural graph break) ===============
         (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
          num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots, mamba_map,
-         blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot,
-         ckpt_store_slots) = self._extract_metadata(num_tokens)
+         blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot, ckpt_store_slots,
+         store_indices) = self._extract_metadata(num_tokens)
 
         # === Part 1: Input Projection ================================
         if hasattr(self, 'in_proj_qkv'):
@@ -305,7 +321,7 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_state,
-                cache_indices=state_indices,
+                cache_indices=store_indices,
                 block_idx_first_scheduled_token=None,
                 block_idx_last_scheduled_token=None,
                 initial_state_idx=None,
@@ -354,7 +370,7 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 core_attn_out_result,
                 final_state,
                 ssm_state,
-                state_indices,
+                store_indices,
             )
             if want_block_save:
                 # Boundary snapshotting assumes a single prefill sequence: it
