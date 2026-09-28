@@ -346,6 +346,9 @@ def test_phi3_long_rope_scaled_rotary_embedding(monkeypatch, head_size: int, rot
     with torch.device("hpu"):
         native = phi3_rope.Phi3LongRoPEScaledRotaryEmbedding(**kwargs)
         oot = HPUPhi3LongRoPEScaledRotaryEmbedding(**kwargs)
+    # The HPU class builds its cache on CPU, which can differ by 1 bf16 ulp between builds; share one cache so the
+    # test compares the forward paths only.
+    native.long_short_cos_sin_cache = oot.long_short_cos_sin_cache
     assert native.use_long_rope == oot.use_long_rope == (max_model_len > config.original_max_position_embeddings)
 
     batch_size, seq_length, valid_lens, pad_value = PHI3_POSITION_LAYOUTS[layout]
