@@ -667,6 +667,12 @@ def hpu_fused_recurrent_gated_delta_rule(
         return out_result, final_state
 
     # --- General (multi-token) fallback path ---
+    # The general path writes state back to the load slot; it does not honor a
+    # separate store slot. Fail loudly rather than silently dropping it -- normal
+    # decode takes the single-token fast path above.
+    if ssm_store_indices is not None:
+        raise NotImplementedError(
+            "ssm_store_indices is only supported on the single-token decode fast path.")
     return _recurrent_general_path(
         q,
         k,
