@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     VLLM_HPU_MOE_GATHER_RATIO: float = 0.4
     VLLM_HPU_MOE_GATHER_VERIFY: bool = False
     VLLM_COMPACT_GDN: bool = False
+    VLLM_GDN_CKPT_SLOTS: int = 0
+    VLLM_GDN_CKPT_MEM_FRACTION: float = 0.1
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -115,6 +117,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # it lazily rather than caching it at import time.
     "VLLM_COMPACT_GDN":
     lambda: os.environ.get("VLLM_COMPACT_GDN", "0").strip().lower() in ("1", "true"),
+
+    # Per-group compact-GDN prefix-cache checkpoint-pool depth K. 0 (default)
+    # lets the runner size K from a memory fraction; a positive value overrides.
+    "VLLM_GDN_CKPT_SLOTS":
+    lambda: int(os.environ.get("VLLM_GDN_CKPT_SLOTS", "0") or 0),
+
+    # Fraction of the equivalent non-compact GDN footprint budgeted for the
+    # compact-GDN prefix-cache checkpoint pool when VLLM_GDN_CKPT_SLOTS=0.
+    # Under-provisioning is safe (an evicted prefix recomputes), so this only
+    # trades HBM against prefix-cache hit rate.
+    "VLLM_GDN_CKPT_MEM_FRACTION":
+    lambda: float(os.environ.get("VLLM_GDN_CKPT_MEM_FRACTION", "0.1") or 0.1),
 }
 
 # end-env-vars-definition

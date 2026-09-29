@@ -100,6 +100,8 @@ import torch
 
 from vllm import envs
 
+import vllm_gaudi.envs as gaudi_envs
+
 # NOTE: neither ``vllm.platforms.current_platform`` nor
 # ``vllm.distributed.parallel_state`` is imported at module top level — both
 # force re-entrant platform resolution *while this module is being imported by
@@ -866,6 +868,239 @@ def _patch_inc_quantization_config() -> None:
     register_quantization_config("inc")(_FakeINCConfig)
 
 
+def _hpu_mamba_find_longest_cache_hit(original):
+    """Cap a mamba-group prefix hit at what the compact ckpt pool can supply.
+
+    vLLM reports a hit from the block hash cache alone; if the bounded ckpt pool
+    has evicted that boundary the worker cannot resume from it, so cap the hit at
+    the last resident boundary (the coordinator's min-across-groups then trims
+    num_computed_tokens and the tail recomputes). No-op when no ckpt pool is
+    registered. For a shadow pool (tp>1) also load-touch the served boundary so
+    the shadow evicts in lockstep with the worker.
+    """
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    from vllm_gaudi.v1.worker.gdn_checkpoint_pool import ckpt_map_for_kv_group
+    from vllm_gaudi.v1.worker.hpu_model_runner import _GDN_MAMBA_TYPES
+
+    def find_longest_cache_hit(cls,
+                               block_hashes,
+                               max_length,
+                               kv_cache_group_ids,
+                               block_pool,
+                               kv_cache_spec,
+                               drop_eagle_block,
+                               alignment_tokens,
+                               dcp_world_size=1,
+                               pcp_world_size=1):
+        maps = [ckpt_map_for_kv_group(gid) for gid in kv_cache_group_ids]
+        # kv_cache_spec is a single spec shared by every group in this call
+        # (MambaManager asserts isinstance(kv_cache_spec, MambaSpec)), so
+        # mamba_type is uniform across kv_cache_group_ids.
+        is_gdn = isinstance(kv_cache_spec, MambaSpec) and kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES
+        # A bounded ckpt pool exists only under compact GDN; non-compact GDN
+        # keeps the full block-indexed state cache and needs no cap. Match the
+        # shadow-registration gate exactly so "expected" == "registered".
+        compact_on = gaudi_envs.VLLM_COMPACT_GDN
+        if is_gdn and compact_on:
+            # Fail loud (not open) if a GDN group lacks its checkpoint map. Under
+            # compact GDN every GDN group is mapped by construction -- the real
+            # worker pool at tp=1, an engine-core shadow at tp>1. A group reaching
+            # here unmapped means the env gates (VLLM_COMPACT_GDN + prefix caching)
+            # diverged across worker/engine-core; skipping it (the `cmap is None`
+            # branch below) would fail open -- granting a prefix hit the worker's
+            # bounded pool cannot back, resuming a later request from stale
+            # recurrent state. Crash instead of silently corrupting.
+            assert all(m is not None for m in maps), (
+                "GDN kv-cache group has no checkpoint map in find_longest_cache_hit; "
+                "check VLLM_COMPACT_GDN / prefix-caching env gates match across worker and engine-core.")
+        elif not any(m is not None for m in maps):
+            # Non-GDN mamba, or GDN without a bounded pool (non-compact, full
+            # block-indexed cache): every cached boundary is restorable, so
+            # there is nothing to cap -- defer to the unmodified lookup.
+            return original(cls, block_hashes, max_length, kv_cache_group_ids, block_pool, kv_cache_spec,
+                            drop_eagle_block, alignment_tokens, dcp_world_size, pcp_world_size)
+        ml = max_length
+        while ml > 0:
+            blocks, hit_length = original(cls, block_hashes, ml, kv_cache_group_ids, block_pool, kv_cache_spec,
+                                          drop_eagle_block, alignment_tokens, dcp_world_size, pcp_world_size)
+            if hit_length == 0:
+                return blocks, 0
+            resident = True
+            for group_blocks, cmap in zip(blocks, maps):
+                # cmap is None only for a non-GDN group (asserted above for the
+                # GDN case); such groups restore from the full cache, no cap.
+                if cmap is None or not group_blocks:
+                    continue
+                if not cmap.is_resident(group_blocks[-1].block_id):
+                    resident = False
+                    break
+            if resident:
+                # No recency touch here. This cap runs at schedule time, for
+                # candidate requests that may never be scheduled -- touching the
+                # (tp>1) shadow LRU for one would diverge it from the worker,
+                # over-retaining a block the worker has evicted and later
+                # granting a hit it cannot back. Recency is store-driven only
+                # (see GdnCheckpointMap.get_load_slot); the granted boundary is
+                # kept alive across this step's stores by the reserved-slot set
+                # in the worker's store loop, not by an LRU touch.
+                return blocks, hit_length
+            # Retry for a shorter prefix. This assumes original() is monotone:
+            # a smaller max_length never returns a longer hit. hit_length - 1
+            # guarantees strict progress (hit_length >= 1 here, since 0 returned
+            # above), so ml strictly decreases and the loop terminates. Guard
+            # against a non-monotone original returning hit_length > ml anyway.
+            if hit_length > ml:
+                break
+            ml = hit_length - 1
+        return tuple([] for _ in kv_cache_group_ids), 0
+
+    # Expose the stock function so the patch-contract test can unwrap to it and
+    # pin its signature whether or not patching has already run (order-safe).
+    find_longest_cache_hit.__wrapped__ = original
+    return find_longest_cache_hit
+
+
+def _patch_mamba_find_longest_cache_hit() -> None:
+    # Always installed: the wrapper delegates to stock lookup whenever no
+    # checkpoint map is registered, which is exactly when compact GDN prefix
+    # caching is not active. So it is a no-op for non-GDN / non-compact mamba.
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+    if getattr(MambaManager.find_longest_cache_hit, "_hpu_gdn_wrapped", False):
+        return
+    wrapped = _hpu_mamba_find_longest_cache_hit(MambaManager.find_longest_cache_hit.__func__)
+    wrapped._hpu_gdn_wrapped = True
+    MambaManager.find_longest_cache_hit = classmethod(wrapped)
+
+
+def _hpu_mamba_cache_blocks(original):
+    """Keep the checkpoint map consistent with the scheduler's just-cached blocks.
+
+    Runs for every registered group (real pool at tp=1, engine-core shadow at
+    tp>1). The scheduler caches full blocks in [before, after); the worker only
+    checkpoints the full *prompt* blocks (during prefill), never boundaries that
+    fill during decode. Two things follow:
+
+      * Prompt blocks -- on a tp>1 shadow, mirror them as store touches so the
+        shadow's residency and LRU order track the worker pool (a subset). On
+        the tp=1 real pool the worker does the store itself, so nothing to do.
+      * Decode-region blocks -- at tp=1 the worker may have decode-checkpointed
+        the block last step (note_decode_store); confirm_decode_store keeps that
+        store for the storing request and drops everything else. On a tp>1 shadow
+        (never marked) and for any recompute re-prefill or stale recycle,
+        confirm_ returns False and the key is dropped, or is_resident would
+        report a different prefix's state as restorable and a later request would
+        resume from garbage.
+    """
+    from vllm_gaudi.v1.worker.gdn_checkpoint_pool import (ckpt_map_for_kv_group, is_shadow, shadow_mirror_block_range)
+
+    def cache_blocks(self, request, num_tokens, *args, **kwargs):
+        # Delta from num_cached_block, NOT num_computed_tokens: the scheduler
+        # resets num_computed_tokens to 0 on preemption, but num_cached_block is
+        # re-seeded to the prefix-hit block count at (re-)admission
+        # (add_local_computed_blocks) before cache_blocks can run. So [before,
+        # after) is always the blocks this request freshly checkpoints, never the
+        # inherited prefix -- which is what keeps the shadow a subset of the
+        # worker across preemption.
+        before = self.num_cached_block.get(request.request_id, 0)
+        original(self, request, num_tokens, *args, **kwargs)
+        gid = self.kv_cache_group_id
+        cmap = ckpt_map_for_kv_group(gid)
+        if cmap is None:
+            return
+        after = self.num_cached_block.get(request.request_id, 0)
+        if after <= before:
+            return
+        shadow = is_shadow(gid)
+        # Prompt-block slice the worker checkpoints; everything else in
+        # [before, after) is a decode-region boundary it will not.
+        mirror = frozenset(shadow_mirror_block_range(before, after, request.num_prompt_tokens, self.block_size))
+        blocks = self.req_to_blocks[request.request_id]
+        for idx in range(before, after):
+            block = blocks[idx]
+            if block.is_null or block.block_hash is None:
+                continue
+            if idx in mirror:
+                if shadow:
+                    cmap.alloc_store_slot(block.block_id)
+            elif cmap.confirm_decode_store(block.block_id, request.request_id):
+                # tp=1 only: the worker decode-checkpointed this sealed block for
+                # THIS request last step (note_decode_store). Keep it -- this is a
+                # genuine forward-decode boundary, not a recycle. confirm_ returns
+                # False on a shadow (never marked), a recompute re-prefill (worker
+                # does not decode-store during prefill), or a stale mark from
+                # another request, all of which fall through to drop below.
+                pass
+            else:
+                cmap.drop(block.block_id)
+
+    # Expose the stock function so the patch-contract test can unwrap to it and
+    # pin its signature whether or not patching has already run (order-safe).
+    cache_blocks.__wrapped__ = original
+    return cache_blocks
+
+
+def _patch_mamba_cache_blocks() -> None:
+    # Always installed: the wrapper returns early unless the group is a tp>1
+    # shadow (is_shadow), so it is a no-op otherwise.
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+    if getattr(MambaManager.cache_blocks, "_hpu_gdn_wrapped", False):
+        return
+    wrapped = _hpu_mamba_cache_blocks(MambaManager.cache_blocks)
+    wrapped._hpu_gdn_wrapped = True
+    MambaManager.cache_blocks = wrapped
+
+
+def _hpu_kv_cache_manager_init(original):
+    """Register an engine-core shadow checkpoint pool per GDN group at tp>1.
+
+    At tp=1 the worker shares this process and registers the real pool (the
+    shadow is skipped or superseded). At tp>1 the worker pools are in other
+    processes and this registry would stay empty, making the hit cap a no-op;
+    the shadow closes that gap. Depth is a lower bound on the worker's K.
+    """
+
+    def __init__(self, kv_cache_config, *args, **kwargs):
+        original(self, kv_cache_config, *args, **kwargs)
+        if not gaudi_envs.VLLM_COMPACT_GDN:
+            return
+        if not getattr(self, "enable_caching", False):
+            return
+        from vllm.v1.kv_cache_interface import MambaSpec
+
+        from vllm_gaudi.v1.worker.gdn_checkpoint_pool import (GdnCheckpointMap, ckpt_map_for_kv_group,
+                                                              gdn_ckpt_shadow_num_slots, register_shadow_map)
+        from vllm_gaudi.v1.worker.hpu_model_runner import _GDN_MAMBA_TYPES
+
+        groups = kv_cache_config.kv_cache_groups
+        gdn_gids = [
+            gid for gid, g in enumerate(groups)
+            if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES
+        ]
+        if not gdn_gids:
+            return
+        mem_fraction = gaudi_envs.VLLM_GDN_CKPT_MEM_FRACTION
+        explicit_slots = gaudi_envs.VLLM_GDN_CKPT_SLOTS
+        k = gdn_ckpt_shadow_num_slots(kv_cache_config.num_blocks, len(gdn_gids), mem_fraction, explicit_slots)
+        for gid in gdn_gids:
+            if ckpt_map_for_kv_group(gid) is None:
+                register_shadow_map(gid, GdnCheckpointMap(k))
+
+    return __init__
+
+
+def _patch_kv_cache_manager_shadow() -> None:
+    # Always installed: the wrapped __init__ registers a shadow pool only when
+    # VLLM_COMPACT_GDN is on, caching is enabled, and GDN groups exist, so it is
+    # a no-op otherwise.
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    if getattr(KVCacheManager.__init__, "_hpu_gdn_wrapped", False):
+        return
+    wrapped = _hpu_kv_cache_manager_init(KVCacheManager.__init__)
+    wrapped._hpu_gdn_wrapped = True
+    KVCacheManager.__init__ = wrapped
+
+
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
     # --- torch.accelerator.empty_cache ---
@@ -908,6 +1143,9 @@ def apply() -> None:
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
         _patch_inc_quantization_config()
+        _patch_mamba_find_longest_cache_hit()
+        _patch_mamba_cache_blocks()
+        _patch_kv_cache_manager_shadow()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 

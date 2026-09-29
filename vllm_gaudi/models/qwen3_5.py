@@ -16,14 +16,79 @@ from vllm_gaudi.ops.hpu_gdn_pytorch import (
 def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
     """Persist GDN final_state into ssm_state cache for chunked prefill.
 
-    Must be @torch._dynamo.disable because HPU torch.compile silently
-    drops in-place index_copy_ to aliased state tensors.  Returns
-    core_attn_out as a pass-through so the compiled graph consumes
-    the call — HPU drops dynamo-disabled calls whose results are unused.
+    Returns core_attn_out as a pass-through so the compiled graph consumes
+    the call.
     """
     safe_si = torch.remainder(state_indices, ssm_state.shape[0]).long()
     ssm_state.index_copy_(0, safe_si, final_state.to(device=ssm_state.device, dtype=ssm_state.dtype))
     return core_attn_out
+
+
+def _bcast(mask, ref):
+    """View a [rows] mask as [rows,1,1,...] to broadcast over ref's dims."""
+    return mask.view((-1, ) + (1, ) * (ref.dim() - 1))
+
+
+def _gdn_ckpt_restore(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, load_slots):
+    """Copy checkpoint snapshot -> live compact slot for hit requests.
+
+    load_slot 0 = miss/pad (row keeps its live value). Uses index_select +
+    torch.where, not boolean indexing (HPU cannot lower it).
+    """
+    dst = base_slots.clamp(min=0).long()
+    src = load_slots.clamp(min=0).long()
+    hit = load_slots > 0
+    ssm_cand = ssm_ckpt.index_select(0, src).to(ssm_state.dtype)
+    ssm_cur = ssm_state.index_select(0, dst)
+    ssm_state.index_copy_(0, dst, torch.where(_bcast(hit, ssm_cur), ssm_cand, ssm_cur))
+    conv_cand = conv_ckpt.index_select(0, src).to(conv_state.dtype)
+    conv_cur = conv_state.index_select(0, dst)
+    conv_state.index_copy_(0, dst, torch.where(_bcast(hit, conv_cur), conv_cand, conv_cur))
+
+
+def _gdn_copy_block_state(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots, store_slots):
+    """Snapshot a decode-sealed block's live compact-slot state -> ckpt pool.
+
+    Mirror of ``_gdn_ckpt_restore`` in the base->pool direction. After the
+    in-place decode update, the request's base slot holds the just-sealed
+    block's boundary state, so no varlen recompute is needed (unlike prefill's
+    ``_gdn_save_block_states``). store_slot 0 = no store (row writes the null
+    slot's own value back, a no-op). Uses index_select + torch.where +
+    index_copy_, not boolean indexing (HPU cannot lower it).
+    """
+    src = base_slots.clamp(min=0).long()
+    dst = store_slots.clamp(min=0).long()
+    store = store_slots > 0
+    ssm_cand = ssm_state.index_select(0, src).to(ssm_ckpt.dtype)
+    ssm_cur = ssm_ckpt.index_select(0, dst)
+    ssm_ckpt.index_copy_(0, dst, torch.where(_bcast(store, ssm_cur), ssm_cand, ssm_cur))
+    conv_cand = conv_state.index_select(0, src).to(conv_ckpt.dtype)
+    conv_cur = conv_ckpt.index_select(0, dst)
+    conv_ckpt.index_copy_(0, dst, torch.where(_bcast(store, conv_cur), conv_cand, conv_cur))
+
+
+def _gdn_save_block_states(ssm_dst, conv_dst, varlen_states, conv_in, ssm_index, conv_index, block_offsets):
+    """Snapshot every block boundary into the destination caches.
+
+    Records recurrent + conv state at each boundary (not just the final one) so
+    a later prefix-cache hit on a mid-prefix boundary resumes correctly.
+    Non-compact targets the block-indexed live caches; compact targets the
+    bounded ckpt pool. Padding chunks/blocks land on the null slot harmlessly.
+    """
+    # index_copy_ (not dst[idx]=): HPU lowers it to index_copy_fwd, not
+    # scatter_nd_onnx, which rejects a small dst dim0 (K+1) vs #chunks.
+    ssm_dst.index_copy_(0, ssm_index.long(), varlen_states.to(ssm_dst.dtype))
+
+    # conv: last (state_len) inputs ending at each block boundary offset.
+    state_len = conv_dst.shape[1]
+    dim = conv_dst.shape[2]
+    cip = torch.cat([conv_in.new_zeros(dim, state_len), conv_in], dim=1)  # [dim, state_len+L]
+    off = block_offsets.long()
+    cols = off.view(-1, 1) + torch.arange(state_len, device=off.device).view(1, -1)  # [n, state_len]
+    idx = cols.unsqueeze(1).expand(-1, dim, -1)  # [n, dim, state_len]
+    windows = torch.gather(cip.unsqueeze(0).expand(off.shape[0], -1, -1), 2, idx)
+    # index_copy_ for the same reason as ssm above.  windows: [n, state_len, dim].
+    conv_dst.index_copy_(0, conv_index.long(), windows.transpose(-1, -2).to(conv_dst.dtype))
 
 
 class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
@@ -33,6 +98,10 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         # cache_group_idx: set later by model runner for hybrid cache
         # lookup.  Stored as tensor so torch.compile treats it as dynamic.
         self.cache_group_idx = None
+
+        # (conv_ckpt, ssm_ckpt) bounded checkpoint tensors for compact-GDN
+        # prefix caching; set by the runner after bind_kv_cache, else None.
+        self.kv_ckpt = None
 
         # mamba_chunk_size: use explicit config value or default to 128
         # for HPU bucket alignment.
@@ -62,18 +131,42 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         value = value.reshape(1, value.size(0), -1, self.head_v_dim).contiguous()
         return query, key, value
 
-    def _resolve_state_indices(self, attn_metadata):
-        """Resolve load_indices_tensor, handling 2-D cache-group case.
-
-        For Qwen 3.5 (GDN), load and store indices are identical
-        so using load_indices_tensor is sufficient.
-        """
-        indices = attn_metadata.load_indices_tensor
+    def _select_cache_group(self, indices):
         if indices is not None and indices.dim() > 1:
             cg = self.cache_group_idx
             assert cg is not None
             indices = indices.index_select(0, cg.view(1)).squeeze(0)
         return indices
+
+    def _resolve_state_indices(self, attn_metadata):
+        """Slot to READ the incoming recurrent state from (last computed block)."""
+        return self._select_cache_group(attn_metadata.load_indices_tensor)
+
+    def _resolve_store_indices(self, attn_metadata):
+        """Slot to WRITE the outgoing recurrent state to (last scheduled block).
+
+        With prefix caching off the runner sets ``load_indices_tensor`` and
+        ``store_indices_tensor`` to the same thing, so this used to be assumed
+        identical to the load slot. With prefix caching on they differ: load is
+        ``block_idx_last_computed_token`` while store is
+        ``block_idx_last_scheduled_token``. Writing the final state to the load
+        slot then leaves the block the next step reads from never written, which
+        corrupts generation for any prompt spanning more than one mamba block.
+        """
+        store = getattr(attn_metadata, "store_indices_tensor", None)
+        if store is None:
+            return self._resolve_state_indices(attn_metadata)
+        return self._select_cache_group(store)
+
+    def _resolve_group_row(self, t):
+        """Select this layer's group row from a [num_groups, bs] tensor."""
+        if t is None:
+            return None
+        if t.dim() > 1:
+            cg = self.cache_group_idx
+            assert cg is not None
+            t = t.index_select(0, cg.view(1)).squeeze(0)
+        return t
 
     def _extract_metadata(self, num_tokens):
         """Extract forward-context metadata into plain tensors.
@@ -84,10 +177,22 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            return (False, None, None, None, None, None, None, 0, 0, 0, 0, None)
+            return (False, None, None, None, None, None, None, 0, 0, 0, 0, None, None, None, None, None, None, None,
+                    None, None)
 
         is_prompt = bool(getattr(attn_metadata, "is_prompt", False))
         state_indices = self._resolve_state_indices(attn_metadata)
+        store_indices = self._resolve_store_indices(attn_metadata)
+        load_slots = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_load_slots", None))
+        # Per-block prefix-cache metadata (None outside prefix caching).
+        mamba_map = self._resolve_group_row(getattr(attn_metadata, "mamba_chunks_to_block_mapping", None))
+        blocks_caching_range = self._resolve_group_row(getattr(attn_metadata, "blocks_caching_range", None))
+        seqlens_offsets = getattr(attn_metadata, "seqlens_offsets_for_blocks", None)
+        # Compact ckpt-pool per-block store slots (None outside compact prefix caching).
+        ckpt_chunks_to_slot = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_chunks_to_slot", None))
+        ckpt_blocks_to_slot = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_blocks_to_slot", None))
+        # Compact ckpt-pool decode store slots (None outside compact decode PC).
+        ckpt_store_slots = self._resolve_group_row(getattr(attn_metadata, "gdn_ckpt_store_slots", None))
 
         conv_state = self.kv_cache[0]
         ssm_state = self.kv_cache[1]
@@ -111,14 +216,26 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         if is_prompt and state_indices is not None:
             prefill_num_seqs = int(state_indices.numel())
             prefill_seq_len = (num_tokens // prefill_num_seqs if prefill_num_seqs > 0 else 0)
+            # Restore snapshots into live slots before reading initial_state,
+            # so a prefix-cache hit resumes from the frozen state.
+            if load_slots is not None and self.kv_ckpt is not None:
+                conv_ckpt, ssm_ckpt = self.kv_ckpt
+                _gdn_ckpt_restore(conv_state, ssm_state, conv_ckpt, ssm_ckpt, state_indices, load_slots)
             initial_state = ssm_state[state_indices].contiguous()
+            # Avoid scatter_nd from boolean indexing
+            mask = None
             if has_initial_state is not None:
-                # Avoid scatter_nd from boolean indexing
                 mask = has_initial_state.bool().view(-1, 1, 1, 1).to(initial_state.dtype)
+            if load_slots is not None:
+                hit = (load_slots > 0).view(-1, 1, 1, 1).to(initial_state.dtype)
+                mask = hit if mask is None else torch.maximum(mask, hit)
+            if mask is not None:
                 initial_state = initial_state * mask
 
         return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
-                num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state)
+                num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots, mamba_map,
+                blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot, ckpt_store_slots,
+                store_indices)
 
     def forward(
         self,
@@ -140,8 +257,9 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
         # === Metadata extraction (natural graph break) ===============
         (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
-         num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len,
-         initial_state) = self._extract_metadata(num_tokens)
+         num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, load_slots, mamba_map,
+         blocks_caching_range, seqlens_offsets, ckpt_chunks_to_slot, ckpt_blocks_to_slot, ckpt_store_slots,
+         store_indices) = self._extract_metadata(num_tokens)
 
         # === Part 1: Input Projection ================================
         if hasattr(self, 'in_proj_qkv'):
@@ -193,17 +311,22 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
             g, beta = hpu_fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
             conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+            # Transpose to [channels, tokens] once; reused below for the block
+            # boundary conv-input snapshot to avoid a second identical transpose.
+            mixed_qkv_t = mixed_qkv.transpose(0, 1)
             mixed_qkv_conv = hpu_causal_conv1d_fn(
-                x=mixed_qkv.transpose(0, 1),
+                x=mixed_qkv_t,
                 weight=conv_weights,
                 bias=self.conv1d.bias,
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_state,
-                cache_indices=state_indices,
+                cache_indices=store_indices,
                 block_idx_first_scheduled_token=None,
                 block_idx_last_scheduled_token=None,
-                initial_state_idx=None,
+                # Read the incoming state from the load slot while cache_indices
+                # writes the outgoing state to the store slot.
+                initial_state_idx=state_indices,
                 query_start_loc=query_start_loc,
                 block_size_to_align=mamba_block_size,
                 num_computed_tokens=None,
@@ -221,7 +344,11 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 g = g * token_mask_h
                 beta = beta * token_mask_h
 
-            core_attn_out_result, final_state = hpu_chunk_gated_delta_rule(
+            # Prefix caching needs every block boundary snapshotted, so ask the
+            # kernel for per-chunk boundary states. On the compact path mamba_map
+            # is not transferred (the ckpt slot maps replace it), so key off either.
+            want_block_save = mamba_map is not None or ckpt_chunks_to_slot is not None
+            kernel_out = hpu_chunk_gated_delta_rule(
                 q=query,
                 k=key,
                 v=value,
@@ -233,15 +360,39 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 chunk_size=self.mamba_chunk_size,
                 prefill_num_seqs=prefill_num_seqs,
                 prefill_seq_len=prefill_seq_len,
+                output_varlen_states=want_block_save,
             )
-            # State save in dynamo-disabled wrapper — index_copy_ is
-            # silently dropped by HPU torch.compile on aliased tensors.
+            if want_block_save:
+                core_attn_out_result, final_state, varlen_states = kernel_out
+            else:
+                core_attn_out_result, final_state = kernel_out
+                varlen_states = None
+            # Persist the final recurrent state to the live cache slot.
             core_attn_out_result = _save_ssm_state(
                 core_attn_out_result,
                 final_state,
                 ssm_state,
-                state_indices,
+                store_indices,
             )
+            if want_block_save:
+                # Boundary snapshotting assumes a single prefill sequence: it
+                # reads varlen_states[0] / seq-0 conv inputs only. The runner
+                # enforces this upstream (one request per prefix-caching prefill
+                # step), but assert here so the contract is local to the consumer
+                # -- a silent skip of seqs 1+ would leave the scheduler caching
+                # blocks the worker never checkpointed (shadow-not-subset).
+                assert prefill_num_seqs == 1, ("GDN boundary checkpointing requires prefill_num_seqs == 1 "
+                                               f"(got {prefill_num_seqs})")
+                conv_in_seq0 = mixed_qkv_t[:, :prefill_seq_len]
+                if self.kv_ckpt is None:
+                    # Non-compact: block-indexed live caches.
+                    _gdn_save_block_states(ssm_state, conv_state, varlen_states[0], conv_in_seq0, mamba_map,
+                                           blocks_caching_range, seqlens_offsets)
+                else:
+                    # Compact: bounded ckpt pool, keyed by store slot not block id.
+                    conv_ckpt, ssm_ckpt = self.kv_ckpt
+                    _gdn_save_block_states(ssm_ckpt, conv_ckpt, varlen_states[0], conv_in_seq0, ckpt_chunks_to_slot,
+                                           ckpt_blocks_to_slot, seqlens_offsets)
 
             non_spec_out = core_attn_out_result.squeeze(0)
             core_attn_out[:non_spec_out.shape[0]] = non_spec_out
@@ -262,6 +413,9 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 initial_state_idx=None,
                 query_start_loc=query_start_loc,
                 validate_data=False,
+                # Read from the load slot, write to the store slot: they differ on
+                # the step whose token opens a new mamba block.
+                store_cache_indices=(store_indices[:num_decodes] if store_indices is not None else None),
             )
 
             query, key, value = self.rearrange_mixed_qkv(mixed_qkv_conv)
@@ -276,7 +430,17 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                         if query_start_loc is not None else None),
                     ssm_state_indices=state_indices,
                     use_qk_l2norm_in_kernel=True,
+                    ssm_store_indices=store_indices,
                 )
+            # Snapshot any block sealed by this decode step: the in-place update
+            # left its boundary state in the request's base slot, so copy
+            # base_slot -> ckpt pool. store_slot 0 rows are no-ops. Compact path
+            # only (kv_ckpt set); the runner gates the store to tp=1.
+            if ckpt_store_slots is not None and self.kv_ckpt is not None and state_indices is not None:
+                conv_ckpt, ssm_ckpt = self.kv_ckpt
+                base_slots = state_indices[:num_decodes]
+                _gdn_copy_block_state(conv_state, ssm_state, conv_ckpt, ssm_ckpt, base_slots,
+                                      ckpt_store_slots[:num_decodes])
 
             non_spec_out = core_attn_out_result.squeeze(0)
             if non_spec_out.shape[0] == core_attn_out.shape[0]:
