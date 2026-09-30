@@ -27,7 +27,7 @@ upstream reference semantics (nvidia/ subpackage at the pinned commit):
   fallback with a device-resident FP8 n-gram table and an eager dilated
   short-conv following ``nvidia/ops/ple.py`` kernel semantics.
 
-Known HPU bring-up limitations (intentional, see the M3a card):
+Known HPU bring-up limitations (intentional):
 
 * The QSA raw-key ring / compressed-key cache and the PLE conv state and
   n-gram trailing-token history are module-allocated buffers keyed by the
@@ -114,11 +114,6 @@ _QWEN4EXP_HF_TO_VLLM_MAPPER = WeightsMapper(orig_to_new_prefix={
     "model.language_model.": "language_model.model.",
     "lm_head.": "language_model.lm_head.",
 }, )
-
-# PLE n-gram checkpoints shard the embedding table into this many row
-# shards (config.split_ngram_parts); shard i covers rows
-# [i * org_vocab/num_shards, (i+1) * org_vocab/num_shards).
-_NGRAM_NUM_SHARDS = 128
 
 
 def _gemma_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -564,6 +559,8 @@ class HpuQSAIndexer(nn.Module):
             torch.zeros(num_slots, max_rows_per_req, self.index_head_dim, dtype=torch.bfloat16),
             persistent=False,
         )
+        # Visible groups per merged-top-k iteration: bounds the
+        # [num_tokens, chunk, index_head_dim] gather working set.
         self._topk_chunk = 4096
         logger.info(
             "HpuQSAIndexer %s: slots=%d rows/req=%d head_dim=%d "
@@ -677,8 +674,9 @@ class HpuQSAIndexer(nn.Module):
         # below, mirroring upstream ``qsa_cache._build_qsa_metadata_torch``
         # (``seq_lens.index_select(0, token_to_req)``).  Broadcasting the
         # per-request tensor against per-token positions crashes on the
-        # first multi-request decode step (M4-D1: 9 requests, 14 token
-        # rows -> RuntimeError -> EngineDeadError).  Padding rows clamp to
+        # first multi-request decode step (reproduced in-house: 9
+        # requests, 14 token rows -> RuntimeError -> EngineDeadError).
+        # Padding rows clamp to
         # the last request, which is harmless: token_mask zeroes their
         # visible counts below.  In prefill (single active request) the
         # expansion is a no-op broadcast of the one request's length.
@@ -717,8 +715,8 @@ class HpuQSAIndexer(nn.Module):
             best_val = top.values
             # Recover ids by advanced indexing, not torch.gather: 2-D gather
             # with an int64 source does not lower on this synapse bridge
-            # (probe-proven: identical gather on float32 passes, advanced
-            # indexing passes).
+            # (verified experimentally: identical gather on float32
+            # passes, advanced indexing passes).
             best_idx = merged_idx[torch.arange(num_tokens, device=device).unsqueeze(1), top.indices]
         filled = visible.clamp(max=k).unsqueeze(1) > \
             torch.arange(k, device=device).unsqueeze(0)
@@ -897,9 +895,9 @@ def hpu_qsa_sparse_paged_attention(
             # are per-(token, plan-column) [num_tokens, sel_width].  Expand
             # the current-token page across the plan width before the
             # where — for num_tokens == 1 the pre-expansion form broadcast
-            # fine (all M3 probes), but multi-request decode raises
-            # 'size of tensor a (sel_width) must match tensor b
-            # (num_tokens) at dimension 1' (M4b iteration-2 crash).  The
+            # fine (verified experimentally), but multi-request decode
+            # raises 'size of tensor a (sel_width) must match tensor b
+            # (num_tokens) at dimension 1' (reproduced in-house).  The
             # prefill branch above is already plan-width shaped via its
             # chunk_row gather.
             page = torch.where(
@@ -1204,7 +1202,10 @@ class HpuQwen4ExpNGramEmbedding(nn.Module):
         self.head_dim = embedding_dim // self.ngram_heads
         self.eos_token_id = int(config.eos_token_id)
         self.unigram_vocab_size = int(config.vocab_size)
-        self.split_ngram_parts = int(getattr(config, "split_ngram_parts", 512))
+        # Default matches the shipped checkpoints (docstring above); the
+        # tiling in copy_shard_ derives its step from this value, so a
+        # mismatched default would silently mis-place shard rows.
+        self.split_ngram_parts = int(getattr(config, "split_ngram_parts", 128))
         vocab_base = int(config.ngram_vocab_size_base)
         divisor = int(config.make_ngram_vocab_size_divisible_by)
         self.num_shards = self.split_ngram_parts
@@ -1230,9 +1231,10 @@ class HpuQwen4ExpNGramEmbedding(nn.Module):
         rows_per_rank = (padded + self.tp_size - 1) // self.tp_size
         self.rank_row_start = self.tp_rank * rows_per_rank
         self.rank_row_end = min(self.rank_row_start + rows_per_rank, padded)
-        # Rank-local device-resident storage (G4/capacity.md: 47.68 GiB
-        # FP8 table split across ranks, ~11.9 GiB/card): the parameter
-        # holds ONLY this rank's row range, in rank-local coordinates —
+        # Rank-local device-resident storage: the FP8 table is large, so
+        # it is split across ranks and each rank keeps only its row slice
+        # device-resident.  The parameter holds ONLY this rank's row
+        # range, in rank-local coordinates —
         # the same VocabParallelEmbedding-style split as upstream's
         # ETP-sharded PLEVocabParallelEmbedding.  The lookup
         # (``forward``) already works in rank-local coordinates.
@@ -1343,13 +1345,13 @@ class HpuQwen4ExpNGramEmbedding(nn.Module):
         i * ceil(...) + rows_in_shard)`` (upstream
         nvidia/ngram_embedding.py shard_size + common/ple.py
         compute_ple_shard_overlap at the shipped pin).  The shards are
-        DISJOINT (M4-D4 p0 probe: no tail bleed exists — the old
+        DISJOINT (verified on-device: no tail bleed exists — the old
         "2 * head_dim bleed" assumption was wrong) and the per-shard
         step is CEIL, not floor: with org_vocab=320,001,446 and 128
         shards each shard ships 2,500,012 rows but the floor step is
         2,500,011, so the floor mapping displaced every shard i>=1 by
-        i rows and left the final 37 org rows unwritten (M4-D4
-        deterministic-garbage defect).
+        i rows and left the final 37 org rows unwritten — a silent
+        deterministic-garbage defect.
         """
         shard_full = (self.org_vocab_size + self.num_shards - 1) // self.num_shards
         start = shard_index * shard_full
@@ -2103,8 +2105,8 @@ class HpuQwen4ExpForCausalLM(nn.Module, IsHybrid):
             # while checkpoint names carry the ``model.language_model.``
             # wrapper prefix.  The regular path applies this same rename
             # before AutoWeightsLoader (below); the PLE branches must apply
-            # it BEFORE their direct dict lookups too.  M4-D4-residual: the
-            # un-renamed lookups silently missed every PLE hash buffer
+            # it BEFORE their direct dict lookups too.  Without the rename
+            # the lookups silently missed every PLE hash buffer
             # (layer_multipliers stayed at its zeros init -> every hashed id
             # collapsed to offsets[h]; weight_scale stayed at 1.0 -> the
             # gathered FP8 rows dequantized ~5000x too large), producing
