@@ -516,8 +516,11 @@ class HpuPlatform(Platform):
             return False
         if num_gdn <= 0:
             return False
-        # Compact-GDN is auto-disabled for PD-disaggregated serving.
-        return getattr(vllm_config, 'kv_transfer_config', None) is None
+        # Compact-GDN is auto-disabled for PD-disaggregated serving and prefix caching.
+        if getattr(vllm_config, 'kv_transfer_config', None) is not None:
+            return False
+        cache_config = getattr(vllm_config, 'cache_config', None)
+        return not getattr(cache_config, 'enable_prefix_caching', False)
 
     @classmethod
     def _maybe_disable_synapse_input_reuse(cls, vllm_config: VllmConfig) -> None:
