@@ -284,11 +284,8 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.local_num_experts
 
-        # The Habana MoE kernel indexes its expert slots by LOCAL id, so the
-        # valid window is the local range. Passing the global window
-        # (ep_shift .. ep_shift + local - 1) makes every rank but rank 0 skip
-        # the experts it owns and accept ones it does not. The routing table is
-        # translated to local ids in apply_monolithic below.
+        # apply_monolithic routes by local id (see layer.expert_map there), so
+        # the window is the local range.
         experts_min, experts_max = 0, num_experts - 1
         if layer.moe_config.dp_size > 1 and self.use_dispatch_fn:
             dispatch_fn = partial(dispatch_hidden_states, is_sequence_parallel=layer.moe_config.is_sequence_parallel)
@@ -378,14 +375,15 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
-        # Expert parallelism: the kernel wants LOCAL expert ids with -1 marking
-        # tokens owned by another rank. Upstream's ExpertMapManager already
-        # built that global -> local table in layer.expert_map; translate here,
-        # before any consumer of topk_ids. expert_map is None when EP is off,
-        # in which case global == local and this is a no-op.
+        # layer.expert_map (None without EP) maps a global id to this rank's
+        # slot, or -1 for an expert another rank owns. Unlike
+        # ep_rank * local_num_experts it also holds for uneven splits and
+        # round-robin placement. It is int32; the op wants int64. The gather
+        # helper keeps taking global ids.
+        global_topk_ids = topk_ids
         expert_map = getattr(layer, "expert_map", None)
         if expert_map is not None:
-            topk_ids = expert_map[topk_ids]
+            topk_ids = expert_map[topk_ids].to(torch.int64)
 
         activation = _normalize_moe_activation(layer.activation)
         # Use the custom gathered-expert combine only when it wins: the number of
@@ -402,12 +400,12 @@ class HPUFp8MoEMethod(Fp8MoEMethod):
             # (bypasses the Habana op's fixed per-layer stage pipeline).
             if _HPU_MOE_GATHER_VERIFY:
                 stock = layer.moe_op(x, topk_ids, topk_weights, permuted_weights=True, activation=activation)
-                custom = gather_silu_fp8_moe(layer, x, topk_ids, topk_weights)
+                custom = gather_silu_fp8_moe(layer, x, global_topk_ids, topk_weights)
                 _verify_moe_combine(stock, custom)
                 del stock
                 output = custom
             else:
-                output = gather_silu_fp8_moe(layer, x, topk_ids, topk_weights)
+                output = gather_silu_fp8_moe(layer, x, global_topk_ids, topk_weights)
         else:
             output = layer.moe_op(
                 x,
