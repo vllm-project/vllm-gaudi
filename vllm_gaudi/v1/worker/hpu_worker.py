@@ -650,6 +650,43 @@ class HPUWorker(WorkerBase):
         except Exception:
             return None
 
+    def _clear_runtime_memory_after_sleep(self) -> None:
+        """Clear the runtime references that can keep stale HPU model state resident.
+
+        This is deliberately run in the sleep/swap path before reloading a new model.
+        The goal is to avoid leaving both old model weights and old KV-cache state
+        live at the same time, which can trigger cgroup OOMs during model swap."""
+        if self.model_runner is None:
+            return
+
+        if hasattr(self.model_runner, "defragmenter"):
+            self.model_runner.defragmenter = None
+        if hasattr(self.model_runner, "kv_caches"):
+            self.model_runner.kv_caches = []
+        if hasattr(self.model_runner, "model") and self.model_runner.model is not None:
+            try:
+                del self.model_runner.model
+            except Exception:
+                pass
+        self.model_runner.model = None
+
+        static_forward_context = getattr(self.vllm_config.compilation_config, "static_forward_context", None)
+        if static_forward_context is not None:
+            for layer_name in static_forward_context:
+                layer_ctx = static_forward_context[layer_name]
+                if hasattr(layer_ctx, "kv_cache"):
+                    layer_ctx.kv_cache = None
+
+        gc.collect()
+        with contextlib.suppress(Exception):
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim(0)
+        with contextlib.suppress(Exception):
+            torch.hpu.synchronize()
+
+        self.kv_cache_sleeping = True
+
     def sleep(self, level: int = 1) -> None:
         """Put the worker into sleep mode to reduce memory usage. Unlike GPU workers that use custom
         memory allocators, HPU workers use a simpler approach of moving model to CPU and clearing KV cache.
@@ -686,11 +723,7 @@ class HPUWorker(WorkerBase):
             logger.warning("KV cache has not been initialized yet, skipping discarding it")
         else:
             with HabanaMemoryProfiler() as m:
-                self.model_runner.defragmenter = None
-                self.model_runner.kv_caches = []
-                forward_context = self.vllm_config.compilation_config.static_forward_context
-                for layer_name in forward_context:
-                    forward_context[layer_name].kv_cache = None
+                self._clear_runtime_memory_after_sleep()
                 gc.collect()
                 torch.hpu.synchronize()
             msg = f"Discarding KV cache for sleep mode took {m.get_summary_string()}"

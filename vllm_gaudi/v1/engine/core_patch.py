@@ -25,6 +25,35 @@ logger = init_logger(__name__)
 _QUANT_CONFIG_UNCHANGED = object()
 
 
+def _ensure_memory_released_for_reload(
+    *,
+    memory_before_mb: float | None,
+    memory_after_unload_mb: float | None,
+    memory_release_threshold_ratio: float = 0.1,
+) -> None:
+    """Guard against reloads that happen before stale HPU memory is released.
+
+    On the sleep/swap path, leaving old model and KV-cache state resident while
+    loading a replacement model can trigger cgroup OOMs. This helper ensures we
+    do not proceed with the new load unless the unload step actually frees a
+    meaningful amount of memory.
+    """
+    if memory_before_mb is None or memory_after_unload_mb is None:
+        return
+
+    released_mb = max(0.0, memory_before_mb - memory_after_unload_mb)
+    if memory_before_mb <= 0.0:
+        return
+
+    released_ratio = released_mb / memory_before_mb
+    if released_ratio < memory_release_threshold_ratio:
+        raise RuntimeError(
+            "Reload aborted: model memory was not released before reload "
+            f"(before={memory_before_mb:.1f}MB, after_unload={memory_after_unload_mb:.1f}MB, "
+            f"released={released_mb:.1f}MB, ratio={released_ratio:.3f})"
+        )
+
+
 def _collect_numeric_values(value: Any) -> list[float]:
     if isinstance(value, (int, float)):
         return [float(value)]
@@ -277,8 +306,15 @@ def install_engine_core_patch() -> None:
             except Exception as exc:  # pragma: no cover - best effort
                 logger.warning("Failed to sleep executor before reconfigure: %s", exc)
 
-            # Unload model put to sleep, reload new model on worker
+            # Unload model put to sleep, reload new model on worker.
+            # Guard against a reload that happens before stale HPU memory is truly
+            # released; on sleep/swap paths this can leave old model state resident
+            # and trigger cgroup OOMs.
             unload_result = self.collective_rpc("unload_model")
+            _ensure_memory_released_for_reload(
+                memory_before_mb=memory_before_mb,
+                memory_after_unload_mb=_collect_total_hpu_used_memory_mb(self),
+            )
             # Validate unload_result: collective_rpc returns a list of per-worker results.
             if not isinstance(unload_result, (list, tuple)) or len(unload_result) == 0:
                 logger.warning(

@@ -336,6 +336,35 @@ def test_deserialize_reconfigure_config_accepts_valid_payload(monkeypatch):
     assert decoded.model_config.model == "test-model"
 
 
+def test_guard_rejects_reload_when_memory_not_released():
+    with pytest.raises(RuntimeError, match="memory was not released"):
+        core_patch._ensure_memory_released_for_reload(memory_before_mb=100.0, memory_after_unload_mb=60.0)
+
+
+def test_worker_sleep_clears_runtime_state_from_model_runner():
+    from vllm_gaudi.v1.worker.hpu_worker import HPUWorker
+
+    worker = HPUWorker.__new__(HPUWorker)
+    worker.model_sleeping = False
+    worker.kv_cache_sleeping = False
+    worker.kv_cache_config = SimpleNamespace()
+    worker.model_runner = SimpleNamespace(
+        defragmenter=object(),
+        kv_caches=[object()],
+        model=SimpleNamespace(),
+    )
+    worker.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context={"layer": SimpleNamespace(kv_cache=object())})
+    )
+
+    worker._clear_runtime_memory_after_sleep()
+
+    assert worker.model_runner.defragmenter is None
+    assert worker.model_runner.kv_caches == []
+    assert worker.vllm_config.compilation_config.static_forward_context["layer"].kv_cache is None
+    assert worker.kv_cache_sleeping is True
+
+
 def test_gaudi_reconfigure_engine_rolls_back_on_load_failure(monkeypatch):
 
     class _FakeNewConfig:
