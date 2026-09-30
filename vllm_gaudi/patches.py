@@ -275,9 +275,16 @@ def _hpu_gather_logprobs(
     token_logprobs = logprobs.gather(-1, token_ids)
     # mark_unbacked calls intentionally omitted — forbidden on HPU dynamo.
     token_ranks = _sampler_mod.batched_count_greater_than(logprobs, token_logprobs)
-    indices = torch.cat((token_ids, topk_indices), dim=1)
+    # Cast to int32 before the concatenation, not after it. Upstream builds
+    # the int64 ``cat`` first and casts the result; on HPU (lazy mode) that
+    # int64 cat -> int32 cast chain is read back with wrong contents: token
+    # ids outside the vocabulary, and column 0 not equal to the sampled id it
+    # was copied from, while the float ``logprobs`` cat next to it and the
+    # int32 ``sampled_token_ids`` from the same tensor are always right.
+    # Casting each operand first sidesteps the int64 path entirely and is
+    # numerically identical (vocabulary ids fit in int32).
+    indices = torch.cat((token_ids.to(torch.int32), topk_indices.to(torch.int32)), dim=1)
     logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
-    indices = indices.to(torch.int32)
     return LogprobsTensors(indices, logprobs, token_ranks)
 
 
