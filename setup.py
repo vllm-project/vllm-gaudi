@@ -72,5 +72,6 @@ setup(
             "04.hpu_tool_parsers = vllm_gaudi:register_tool_parsers",
         ],
         "pytest11": ["vllm_gaudi_compat = pytest_compat"],
+        "console_scripts": ["vllm-gaudi-calibrate = vllm_gaudi.calibration.cli:main"],
     },
 )

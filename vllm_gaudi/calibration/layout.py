@@ -19,6 +19,7 @@ from pathlib import Path
 SUPPORTED_DEVICES = ("g2", "g3")
 DUMP_STATS_BASENAME = "inc_output"
 DEFAULT_OBSERVER = "maxabs"
+MANIFEST_NAME = "calibration_manifest.json"
 
 
 def model_dir_name(model: str) -> str:
@@ -84,7 +85,7 @@ class OutputLayout:
 
     @property
     def manifest(self) -> Path:
-        return self.stats_dir / "calibration_manifest.json"
+        return self.stats_dir / MANIFEST_NAME
 
     @property
     def logs_dir(self) -> Path:
