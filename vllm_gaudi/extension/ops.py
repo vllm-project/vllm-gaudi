@@ -1558,9 +1558,20 @@ class MoeWNA16Matmul(torch.nn.Module):
 
 
 class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
-    """ Mixture of Experts for compressed int4 WNA16 """
+    """ Mixture of Experts for compressed int4 WNA16
 
-    def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8):
+    Two execution paths, selected by the quant method:
+
+    * native_int4=False: reconstruct every local expert with
+      convert_from_uint4 and call the bf16 .fused_weights overload. The
+      only option for checkpoints with g_idx.
+
+    * native_int4=True: pass the packed int4 straight to
+      .int4_fused_weights overload, so nothing is dequantized. Requires the codes
+      rebiased to signed nibbles, which the quant method does once at load.
+    """
+
+    def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8, native_int4: bool = False):
         super().__init__()
         self.w13_list = torch.nn.ModuleList([MoeWNA16Matmul() for _ in range(num_experts)])
         self.w2_list = torch.nn.ModuleList([MoeWNA16Matmul() for _ in range(num_experts)])
@@ -1568,6 +1579,8 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         self.num_experts = num_experts
         self.experts_min = experts_min
         self.experts_max = experts_max
+        self.native_int4 = native_int4
+        self._cached_int4: Optional[tuple] = None
         if MAX_EXPERTS_PER_SLICE > 0:
             max_expert_per_slice = MAX_EXPERTS_PER_SLICE
         else:
@@ -1575,6 +1588,68 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         self.moe_n_slice = 1 if self.num_experts <= max_expert_per_slice \
                 else self.num_experts // max_expert_per_slice
         self.num_expert_per_group = self.num_experts // self.moe_n_slice
+
+    def supports_native_int4(self) -> tuple[bool, str]:
+        """Whether these weights can be fed to int4_fused_weights."""
+
+        # The overload takes no g_idx, so activation reordering cannot be
+        # expressed. Silently dropping g_idx would corrupt output, so refuse.
+        for name, mods in (("w13", self.w13_list), ("w2", self.w2_list)):
+            if any(getattr(m, "g_idx", None) is not None for m in mods):
+                return False, (f"{name} has g_idx set (actorder); int4_fused_weights has no g_idx argument")
+        return True, ""
+
+    def _cache_weight_lists(self) -> None:
+        """Freeze the per-expert packed-weight and scale tuples for the int4 path."""
+
+        self._cached_int4 = (
+            tuple(m.weight_packed for m in self.w13_list),
+            tuple(m.weight_packed for m in self.w2_list),
+            tuple(m.weight_scale for m in self.w13_list),
+            tuple(m.weight_scale for m in self.w2_list),
+        )
+
+    def _forward_native_int4(self, x, topk_ids, topk_weights, permuted_weights, activation):
+        """No dequantization: packed int4 goes straight to the fused kernel."""
+
+        if self._cached_int4 is None:
+            self._cache_weight_lists()
+        w13_p, w2_p, w13_s, w2_s = self._cached_int4
+
+        def call(lo, hi, sl):
+            return torch.ops.hpu.mixture_of_experts.int4_fused_weights(
+                hidden_states=x,
+                expert_routing_table=topk_ids,
+                router_weights=topk_weights,
+                w12=list(w13_p[sl]),
+                w3=list(w2_p[sl]),
+                d_scale_w12=list(w13_s[sl]),
+                d_scale_w3=list(w2_s[sl]),
+                # No zero point: symmetric int4 needs none once the codes are
+                # signed, and the overload rejects a packed int32 one.
+                zero_point_w12=None,
+                zero_point_w3=None,
+                # Everything below is keyword-only in this overload's schema.
+                permuted_weights=permuted_weights,
+                activation=activation,
+                experts_min=lo,
+                experts_max=hi,
+                # Codes are read as signed int4 nibbles, not compressed-tensors'
+                # uint4b8 (value + 8) -- hence the rebias at load.
+                is_signed=True,
+            )
+
+        if self.moe_n_slice == 1:
+            return call(self.experts_min, self.experts_max, slice(None))
+
+        final_hidden_states = None
+        for i in range(self.moe_n_slice):
+            sl = slice(i * self.num_expert_per_group, (i + 1) * self.num_expert_per_group)
+            min_expert = self.experts_min + i * self.num_expert_per_group
+            slice_out = call(min_expert, min_expert + self.num_expert_per_group - 1, sl)
+            htorch.core.mark_step()
+            final_hidden_states = slice_out if i == 0 else final_hidden_states + slice_out
+        return final_hidden_states
 
     def forward(
         self,
@@ -1585,6 +1660,10 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         activation="silu",
     ):
         activation = _as_activation_str(activation)
+
+        if self.native_int4:
+            return self._forward_native_int4(x, topk_ids, topk_weights, permuted_weights, activation)
+
         w13_list = []
         w2_list = []
         for j in range(self.num_experts):
