@@ -28,6 +28,7 @@ from vllm_gaudi.calibration.expand import expand_dir
 from vllm_gaudi.calibration.inc_config import build_configs, load_user_config, write_json_atomic
 from vllm_gaudi.calibration.layout import DEFAULT_OBSERVER, OutputLayout
 from vllm_gaudi.calibration.manifest import build_manifest, inventory, redact_env
+from vllm_gaudi.calibration.measurements import SCALES, list_measurement_files
 from vllm_gaudi.calibration.postprocess import postprocess_dir
 from vllm_gaudi.calibration.presets import ResolvedPreset, resolve_preset
 from vllm_gaudi.calibration.unify import unify_dir
@@ -135,18 +136,39 @@ def _measurement_names(dump: str, observer: str, tp: int) -> list[Path]:
     return names
 
 
-def check_measurements(dump: str, observer: str, tp: int, since: float) -> None:
-    """Verifies that the MEASURE phase wrote a fresh measurement for every rank.
+def remove_previous_outputs(dump: str, observer: str, *, scales_only: bool) -> None:
+    """Removes the INC files an earlier run left at ``dump``.
+
+    INC QUANTIZE reuses existing scale files and computes scales only for the modules missing
+    from them, so a rerun would keep the old scales. New measurements make every derived file
+    stale, so before MEASURE all files go, before QUANTIZE only the scales.
+    """
+    directory = Path(dump).parent
+    if not directory.is_dir():
+        return
+    prefix = f"{Path(dump).name}_hooks_"
+    old = [
+        f.path for f in list_measurement_files(directory, observer)
+        if f.prefix.startswith(prefix) and (f.kind == SCALES or not scales_only)
+    ]
+    if old:
+        logger.info("Removing %d files of an earlier run from %s", len(old), directory)
+        for path in old:
+            path.unlink()
+
+
+def check_measurements(dump: str, observer: str, tp: int) -> None:
+    """Verifies that the MEASURE phase wrote a measurement for every rank.
 
     Raises:
-        CalibrationError: If a file is missing or older than ``since``.
+        CalibrationError: If a file is missing.
     """
-    stale = [p for p in _measurement_names(dump, observer, tp) if not p.is_file() or p.stat().st_mtime < since]
-    if stale:
+    missing = [p for p in _measurement_names(dump, observer, tp) if not p.is_file()]
+    if missing:
         directory = Path(dump).parent
         present = sorted(p.name for p in directory.iterdir()) if directory.is_dir() else []
         raise CalibrationError(
-            f"The measure phase did not write {[p.name for p in stale]} in {directory}. INC writes them from "
+            f"The measure phase did not write {[p.name for p in missing]} in {directory}. INC writes them from "
             "finalize_calibration when the engine shuts down cleanly; check the measure log for an engine crash. "
             f"Directory contents: {present}")
 
@@ -174,6 +196,17 @@ def _engine_args(args: CalibrationArgs, preset: ResolvedPreset) -> dict[str, Any
     return engine
 
 
+def _expert_parallel(args: CalibrationArgs, preset: ResolvedPreset) -> bool:
+    """Returns whether the engine runs with expert parallelism, ``--engine-arg`` included."""
+    engine = {**_engine_args(args, preset), **args.engine_args}
+    return bool(engine.get("enable_expert_parallel", False))
+
+
+def _quantization(info: ModelInfo) -> str | None:
+    """Returns the vLLM ``quantization`` argument; an already quantized checkpoint keeps its own method."""
+    return None if info.quant_method else "inc"
+
+
 def _model_args(args: CalibrationArgs, preset: ResolvedPreset, info: ModelInfo, phase: str) -> dict[str, Any]:
     engine = _engine_args(args, preset)
     if phase == "quantize":
@@ -190,6 +223,7 @@ def _model_args(args: CalibrationArgs, preset: ResolvedPreset, info: ModelInfo, 
                                    max_images=args.max_images,
                                    image_max_side=args.image_max_side,
                                    multi_node=args.multi_node,
+                                   quantization=_quantization(info),
                                    user_engine_args=args.engine_args)
 
 
@@ -241,6 +275,15 @@ def _write_configs(args: CalibrationArgs, preset: ResolvedPreset, layout: Output
         measure = load_user_config(args.measure_config, base_dir=os.getcwd())
     if args.quant_config:
         quant = load_user_config(args.quant_config, base_dir=os.getcwd())
+    # QUANTIZE reads the measurements from its own dump_stats_path, so a generated config follows a user one.
+    if args.measure_config and not args.quant_config:
+        quant["dump_stats_path"] = measure["dump_stats_path"]
+    elif args.quant_config and not args.measure_config:
+        measure["dump_stats_path"] = quant["dump_stats_path"]
+    elif os.path.normpath(measure["dump_stats_path"]) != os.path.normpath(quant["dump_stats_path"]):
+        raise ValueError(f"--measure-config and --quant-config have different dump_stats_path values "
+                         f"({measure['dump_stats_path']} and {quant['dump_stats_path']}); QUANTIZE would not find "
+                         "the measurements")
     write_json_atomic(layout.measure_config, measure)
     write_json_atomic(layout.quant_config, quant)
     Path(measure["dump_stats_path"]).parent.mkdir(parents=True, exist_ok=True)
@@ -258,11 +301,22 @@ def _phase_config_path(args: CalibrationArgs, config: Mapping[str, Any], path: P
     return str(buffer)
 
 
-def serve_command(args: CalibrationArgs, layout: OutputLayout, serve_world: int) -> str:
-    """Returns the command that serves the calibrated model."""
+def serve_command(args: CalibrationArgs,
+                  layout: OutputLayout,
+                  serve_world: int,
+                  *,
+                  quantization: str | None = "inc",
+                  expert_parallel: bool = False) -> str:
+    """Returns the command that serves the calibrated model.
+
+    The measurement files of an expert parallel run hold the experts of each rank, so the
+    model must be served with expert parallelism as well, unless it was unified to one card.
+    """
     parts = [f"QUANT_CONFIG={shlex.quote(str(layout.quant_config))}", "vllm", "serve", shlex.quote(args.model)]
-    parts += ["--quantization", "inc", "--kv-cache-dtype", "fp8_inc", "--tensor-parallel-size", str(serve_world)]
-    if args.expand_to_ep is not None:
+    if quantization is not None:
+        parts += ["--quantization", quantization]
+    parts += ["--kv-cache-dtype", "fp8_inc", "--tensor-parallel-size", str(serve_world)]
+    if args.expand_to_ep is not None or (expert_parallel and serve_world > 1):
         parts.append("--enable-expert-parallel")
     if args.trust_remote_code:
         parts.append("--trust-remote-code")
@@ -350,9 +404,9 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
         }
 
     if "measure" in args.phases:
-        measure_start = time.time()
+        remove_previous_outputs(dump, observer, scales_only=False)
         spawn("measure", measure_cfg, layout.measure_config, _eval_spec(args, tasks, args.limit))
-        check_measurements(dump, observer, args.tp, since=measure_start - 1)
+        check_measurements(dump, observer, args.tp)
         if args.postprocess:
             manifest_fields["postprocess"] = postprocess_dir(stats_dir, world=args.tp, observer=observer)
 
@@ -362,12 +416,13 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
             evaluation = _eval_spec(args, tasks[:1], min(args.smoke_limit, args.limit))
         elif args.quantize_eval == "full":
             evaluation = _eval_spec(args, tasks, args.limit)
+        remove_previous_outputs(dump, observer, scales_only=True)
         spawn("quantize", quant_cfg, layout.quant_config, evaluation)
         check_scales(dump, observer, quant_cfg.get("scale_method", preset.scale_method), args.tp)
 
     serve_world = args.tp
+    use_ep = _expert_parallel(args, preset)
     if args.unify_to_tp is not None:
-        use_ep = bool(_engine_args(args, preset).get("enable_expert_parallel", False))
         written = unify_dir(stats_dir, args.unify_to_tp, use_ep=use_ep, source_world=args.tp, observer=observer)
         manifest_fields["unify"] = {"world": args.unify_to_tp, "files": [p.name for p in written]}
         serve_world = args.unify_to_tp
@@ -376,7 +431,11 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
         manifest_fields["expand"] = {"world": args.expand_to_ep, "files": [p.name for p in written]}
         serve_world = args.expand_to_ep
 
-    manifest_fields["serve_command"] = serve_command(args, layout, serve_world)
+    manifest_fields["serve_command"] = serve_command(args,
+                                                     layout,
+                                                     serve_world,
+                                                     quantization=_quantization(info),
+                                                     expert_parallel=use_ep)
     manifest_fields["files"] = inventory(stats_dir)
     manifest = _finish(layout, manifest_fields, started, keep_logs=args.keep_logs)
     logger.info("Calibration finished. Serve the model with:\n  %s", manifest_fields["serve_command"])

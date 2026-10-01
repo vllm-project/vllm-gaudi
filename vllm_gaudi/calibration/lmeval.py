@@ -45,6 +45,7 @@ def build_model_args(*,
                      max_images: int | None = None,
                      image_max_side: int = 0,
                      multi_node: bool = False,
+                     quantization: str | None = "inc",
                      user_engine_args: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Builds the keyword arguments of the lm-eval vLLM model for one phase.
 
@@ -61,6 +62,8 @@ def build_model_args(*,
         max_images: Images per prompt for multimodal models.
         image_max_side: Longest image side lm-eval resizes images to, multimodal only; 0 keeps the size.
         multi_node: Run the engine on a Ray cluster.
+        quantization: vLLM ``quantization`` argument; None for a checkpoint that is already quantized,
+            whose own method vLLM then keeps. ``QUANT_CONFIG`` enables INC either way.
         user_engine_args: ``--engine-arg`` values; they override everything else.
 
     Returns:
@@ -76,10 +79,10 @@ def build_model_args(*,
         "batch_size": batch_size,
         "max_gen_toks": max_gen_toks,
         "seed": DEFAULT_SEED,
-        # QUANT_CONFIG is what enables INC; "inc" keeps vLLM from applying another quantization.
-        "quantization": "inc",
         "kv_cache_dtype": MEASURE_KV_CACHE_DTYPE if phase == "measure" else QUANTIZE_KV_CACHE_DTYPE,
     }
+    if quantization is not None:
+        args["quantization"] = quantization
     args.update(engine_args)
     if multi_node:
         args["distributed_executor_backend"] = "ray"
