@@ -20,6 +20,9 @@ DEFAULT_LIMIT = 512
 DEFAULT_SMOKE_LIMIT = 8
 DEFAULT_MAX_GEN_TOKS = 256
 DEFAULT_SEED = 42
+# Longest image side for multimodal models. The HPU KV cache takes most of the free memory, so full-size
+# images can exhaust what is left for the vision encoder.
+DEFAULT_IMAGE_MAX_SIDE = 1280
 MEASURE_KV_CACHE_DTYPE = "auto"
 QUANTIZE_KV_CACHE_DTYPE = "fp8_inc"
 
@@ -40,6 +43,7 @@ def build_model_args(*,
                      trust_remote_code: bool = False,
                      multimodal: bool = False,
                      max_images: int | None = None,
+                     image_max_side: int = 0,
                      multi_node: bool = False,
                      user_engine_args: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Builds the keyword arguments of the lm-eval vLLM model for one phase.
@@ -55,6 +59,7 @@ def build_model_args(*,
         trust_remote_code: Forwarded to vLLM and transformers.
         multimodal: Use the multimodal lm-eval model.
         max_images: Images per prompt for multimodal models.
+        image_max_side: Longest image side lm-eval resizes images to, multimodal only; 0 keeps the size.
         multi_node: Run the engine on a Ray cluster.
         user_engine_args: ``--engine-arg`` values; they override everything else.
 
@@ -80,6 +85,8 @@ def build_model_args(*,
         args["distributed_executor_backend"] = "ray"
     if multimodal and max_images is not None:
         args["max_images"] = max_images
+    if multimodal and image_max_side:
+        args["image_max_side"] = image_max_side
     args.update(user_engine_args or {})
     return args
 
