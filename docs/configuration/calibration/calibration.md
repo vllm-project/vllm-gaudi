@@ -54,6 +54,8 @@ For a model `Org/Model-Name`, the output directory given with `-o` contains:
 
 `<world>` is the tensor parallel size of the run and `<rank>` goes from `0` to `<world> - 1`. The layout and the config file names are the same as with the old `calibrate_model.sh`, so existing `QUANT_CONFIG` paths keep working.
 
+A run into a directory that already holds a calibration of the same model and device replaces it. Before the MEASURE phase, the tool removes all `inc_output_hooks_*` files of the earlier run, and before the QUANTIZE phase, the scale files. INC would otherwise keep the earlier scales and compute new ones only for modules that have none.
+
 ## Serving the Calibrated Model
 
 Serving reads the quant config through the `QUANT_CONFIG` environment variable. The config's `dump_stats_path` points to the measurement and scale files. At the end of a run, the tool prints the serve command and stores it in the manifest:
@@ -63,7 +65,7 @@ QUANT_CONFIG=<output_dir>/<model_name>/maxabs_quant_<device>.json \
     vllm serve <model> --quantization inc --kv-cache-dtype fp8_inc --tensor-parallel-size <N>
 ```
 
-The tensor parallel size must match the world size of the files in `<device>/`: the `--tp` of the run, or the target of `--unify-to-tp` or `--expand-to-ep`. For more serving options, see [Intel® Neural Compressor](../quantization/inc.md).
+The tensor parallel size must match the world size of the files in `<device>/`: the `--tp` of the run, or the target of `--unify-to-tp` or `--expand-to-ep`. If the run used expert parallelism, for example with the `deepseek` preset, the files hold the experts of each rank, so the printed command adds `--enable-expert-parallel` whenever the world size is greater than 1. For a checkpoint that is already quantized, such as the FP8 DeepSeek-R1, the tool does not pass `--quantization inc` in the phases or in the printed command: vLLM keeps the quantization method of the checkpoint, and `QUANT_CONFIG` enables INC. For more serving options, see [Intel® Neural Compressor](../quantization/inc.md).
 
 ## Prerequisites
 

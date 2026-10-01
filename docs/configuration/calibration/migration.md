@@ -73,7 +73,9 @@ The old scripts read a `.pkl` dataset (`-d`) or downloaded a Hugging Face datase
 | Fused MoE detection in unify and expand | Any node whose name contains `moe` was treated as a fused MoE op, including Mixtral's `block_sparse_moe.gate`. | Only nodes with per-expert child nodes are fused MoE ops. |
 | MoE with `--tp` > 1 and no unify | No warning. | A reminder is logged that serving with another world size needs `--unify-to-tp`. |
 | Multi-node `QUANT_CONFIG` | You exported `QUANT_CONFIG` to a shared buffer file on every node before `ray start`. | The tool sets `QUANT_CONFIG` for each phase and the plugin forwards it to the Ray workers. `--quant-config-buffer` keeps the old buffer approach available. See [Shared Config Buffer](advanced.md#shared-config-buffer). |
-| Result check | None. | The tool checks that every rank wrote fresh measurement files, runs a smoke evaluation of the quantized model, and writes `calibration_manifest.json`. |
+| Result check | None. | The tool checks that every rank wrote its measurement files, runs a smoke evaluation of the quantized model, and writes `calibration_manifest.json`. |
+| Rerun into the same output directory | INC kept the scale files of the earlier run and computed scales only for modules missing from them. | The tool removes the earlier measurement and scale files before MEASURE, and the scale files before QUANTIZE. |
+| Expert parallel serving | `--enable-expert-parallel` was printed only for the expand step. | The printed serve command also adds it when the run used expert parallelism, for example with the `deepseek` preset, and the world size is greater than 1. |
 
 ## Dependencies
 

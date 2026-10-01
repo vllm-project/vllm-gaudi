@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import dataclasses
 import json
 import os
 import sys
@@ -113,15 +114,30 @@ def test_missing_measurements_is_a_hard_error(tmp_path):
         run_calibration(args(tmp_path), FakeRunner(QWEN, write_measurements=False))
 
 
-def test_stale_measurements_are_rejected(tmp_path):
+def test_measurements_of_an_earlier_run_are_removed(tmp_path):
     stats = tmp_path / "my-model" / "g3"
     stats.mkdir(parents=True)
     write_measure_run(stats, 1)
-    old = 1_000_000_000
-    for path in stats.iterdir():
-        os.utime(path, (old, old))
-    with pytest.raises(CalibrationError):
+    write_rank(stats, SCALES_PREFIX, 0, 1, measure_nodes(0))
+    unrelated = stats / "notes.txt"
+    unrelated.write_text("kept")
+    with pytest.raises(CalibrationError, match="finalize_calibration"):
         run_calibration(args(tmp_path), FakeRunner(QWEN, write_measurements=False))
+    assert [p.name for p in stats.iterdir()] == ["notes.txt"]
+
+
+def test_quantize_only_run_removes_old_scales(tmp_path):
+    stats = tmp_path / "my-model" / "g3"
+    stats.mkdir(parents=True)
+    write_measure_run(stats, 2)
+    for world in (1, 2):
+        for rank in range(world):
+            write_rank(stats, SCALES_PREFIX, rank, world, {"stale": {}})
+    run_calibration(args(tmp_path, tp=2, phases=("quantize", )), FakeRunner(QWEN))
+    assert (stats / f"{PREFIX}_1_2.json").is_file()
+    assert not (stats / f"{SCALES_PREFIX}_0_1.json").exists()
+    scales = json.loads((stats / f"{SCALES_PREFIX}_0_2.json").read_text())
+    assert "stale" not in scales["Nodes"]
 
 
 def test_quantize_eval_none_and_full(tmp_path):
@@ -150,6 +166,47 @@ def test_preset_and_user_env_reach_the_phase(tmp_path):
     assert manifest["preset"]["name"] == "mixtral"
     quant = json.loads((tmp_path / "my-model" / "maxabs_quant_g3.json").read_text())
     assert quant["scale_format"] == "CONST"
+
+
+def test_engine_arg_expert_parallel_drives_unify_and_serve(tmp_path, monkeypatch):
+    deepseek = ModelInfo(model_type="deepseek_v2", is_moe=True, num_experts=64, has_chat_template=True, source="test")
+    seen = []
+    monkeypatch.setattr(orchestrator, "unify_dir", lambda *a, **kw: seen.append(kw["use_ep"]) or [])
+    manifest = run_calibration(args(tmp_path, tp=4, unify_to_tp=2), FakeRunner(deepseek))
+    assert seen == [True]
+    assert manifest["serve_command"].endswith("--tensor-parallel-size 2 --enable-expert-parallel")
+    manifest = run_calibration(args(tmp_path, tp=4, unify_to_tp=2, engine_args={"enable_expert_parallel": False}),
+                               FakeRunner(deepseek))
+    assert seen == [True, False]
+    assert "--enable-expert-parallel" not in manifest["serve_command"]
+    manifest = run_calibration(args(tmp_path, tp=2, unify_to_tp=1), FakeRunner(deepseek))
+    assert "--enable-expert-parallel" not in manifest["serve_command"]
+
+
+def test_quantized_checkpoint_keeps_its_quantization(tmp_path):
+    runner = FakeRunner(dataclasses.replace(QWEN, quant_method="fp8"))
+    manifest = run_calibration(args(tmp_path), runner)
+    assert all("quantization" not in spec["model_args"] for name, spec, _ in runner.calls if name != "detect")
+    assert "--quantization" not in manifest["serve_command"]
+    manifest = run_calibration(args(tmp_path), FakeRunner(QWEN))
+    assert "--quantization inc" in manifest["serve_command"]
+
+
+def test_user_config_dump_stats_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    custom = {"method": "HOOKS", "mode": "MEASURE", "observer": "maxabs", "dump_stats_path": "custom/inc_output"}
+    measure = tmp_path / "measure.json"
+    measure.write_text(json.dumps(custom))
+    run_calibration(args(tmp_path / "out", device="g3", dry_run=True, measure_config=str(measure)), FakeRunner(QWEN))
+    quant = json.loads((tmp_path / "out" / "my-model" / "maxabs_quant_g3.json").read_text())
+    assert quant["mode"] == "QUANTIZE"
+    assert quant["dump_stats_path"] == str(tmp_path / "custom" / "inc_output")
+    other = tmp_path / "quant.json"
+    other.write_text(json.dumps({**custom, "mode": "QUANTIZE", "dump_stats_path": "/elsewhere/inc_output"}))
+    with pytest.raises(ValueError, match="dump_stats_path"):
+        run_calibration(
+            args(tmp_path / "out", device="g3", dry_run=True, measure_config=str(measure), quant_config=str(other)),
+            FakeRunner(QWEN))
 
 
 def test_model_rejections(tmp_path):
