@@ -1,104 +1,81 @@
-# Introduction
+# Calibration Overview
 
-vLLM Hardware Plugin for Intel® Gaudi® supports running inference on HPU with 8-bit floating point (FP8) precision using [Intel® Neural Compressor (INC)](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#inference-using-fp8) package. Inference requires prior calibration to generate the necessary measurements, quantization files, and configuration data that are required for running quantized models.
+vLLM Hardware Plugin for Intel® Gaudi® runs inference with 8-bit floating point (FP8) weights and activations through [Intel® Neural Compressor (INC)](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#inference-using-fp8). Before a model can be served in FP8, it has to be calibrated: INC observes the value ranges of the model's activations and weights on sample data and turns them into FP8 scales.
 
-This document explains how to perform calibration. It provides separate procedures for a single Intel® Gaudi® node and multiple nodes. Before proceeding, review the notes and recommendations and troubleshooting information to ensure proper execution.
+The plugin ships one calibration tool for text and multimodal models, `vllm-gaudi-calibrate` (also available as `python -m vllm_gaudi.calibration`). It replaces the `calibrate_model.sh` scripts and the `step-*.py` scripts used in earlier releases. If you used those, see [Migration](migration.md).
 
-## Notes and Recommendations
+## How Calibration Works
 
-### Device Recommendation
+`vllm-gaudi-calibrate run` performs these steps:
 
-For calibration, use the same device type that you plan to use for inference. The generated measurements are device-dependent, so scales collected on Intel® Gaudi® 3 cannot be reused on Intel® Gaudi® 2, and vice versa. Using measurements generated on a different device type may cause accuracy issues.
+1. **Detect.** The tool reads the HPU device type (`g2` for Intel® Gaudi® 2, `g3` for Intel® Gaudi® 3) and inspects the model: modality (text or multimodal), Mixture of Experts (MoE) layers, encoder-decoder architecture, and whether a chat template exists. Encoder-decoder models are rejected, because INC calibration supports decoder-only models.
+2. **Configure.** It selects a model family preset (see [Presets](reference.md#presets)) and writes two INC configuration files, one for each phase.
+3. **MEASURE phase.** A vLLM engine is started with `QUANT_CONFIG` pointing to the measure config. INC installs observers, and lm-eval tasks feed data through the model. When the engine shuts down, INC writes the measurement files from `finalize_calibration`.
+4. **Postprocess.** The tool copies the KV cache input ranges into the attention matmul measurements, so the FP8 KV cache uses the cached tensor ranges. Use `--no-postprocess` to skip this step.
+5. **QUANTIZE phase.** A second engine is started with the quant config. INC computes the scales from the measurements and writes the scale files. By default, the phase then runs a short smoke evaluation on the quantized model.
+6. **Optionally unify or expand** the measurements for another tensor parallel or expert parallel size (see [Advanced Usage](advanced.md)).
+7. **Write the manifest** and print the `vllm serve` command for the calibrated model.
 
-### Mandatory Parameters
+Each phase runs in its own Python process. INC reads `QUANT_CONFIG` when the HPU model runner is imported, and writes the measurement files only when the engine shuts down, so each phase needs a fresh interpreter with its own environment.
 
-To simplify the calibration process, we offer the `calibrate_model.sh` script that generates the `maxabs_quant_g3.json` file for FP8 inference. The script requires providing the following arguments:
+### Calibration Data
 
-- `-m <path/ID>`: Path to a locally stored model or the model ID from the [Hugging Face](https://huggingface.co/models) hub.
-- `-d <path>`: Path to the source dataset in the pickle (`.pkl`) format.
-- `-o <path>`: Path to the directory where you want to save the generated measurements. We recommend storing unification results in the source directory. This allows you to run the vLLM server with FP8 precision and different tensor parallelism values without modifying the directory specified in the `QUANT_CONFIG` environment variable.
+The data comes from [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) tasks, run through lm-eval's vLLM model (`VLLM` for text models, `VLLM_VLM` for multimodal models). The defaults are:
 
-The script also offers optional arguments that you can explore by executing the script with the `-h` flag. The more common optional parameters are:
+| Modality | Default tasks | Samples |
+|----------|---------------|---------|
+| Text | `pile_10k gsm8k` | 512 per task (`--limit`) |
+| Multimodal | `mmmu_val` | 512 per task (`--limit`) |
 
-- `-b <size>`: Sets the batch size used for running the measurements (default: 32).
-- `-l <samples>`: Sets the limit of the samples in the calibration dataset.
-- `-t <size>`: Sets the tensor parallel size (default: 1).
+`pile_10k` is a loglikelihood task that exercises prefill, and `gsm8k` is a generation task that also exercises decode and the KV cache. You can choose other tasks with `--tasks`, or provide your own lm-eval task YAML files with `--include-path`. For details, see [Default Tasks and Limits](reference.md#default-tasks-and-limits) and [Custom Calibration Data](advanced.md#custom-calibration-data).
 
-### Dataset
+### Device Type
 
-The calibration procedure works with any dataset that contains the `system_prompt` and `question` fields. These fields prepare a calibration dataset with prompts formatted specifically for your model. We recommend using a public dataset from MLCommons, as used in the [Llama2-70b](https://github.com/mlcommons/inference/tree/master/language/llama2-70b#preprocessed) inference submission.
+Calibrate on the same device type that you use for inference. The scales depend on the device, so scales generated on Intel® Gaudi® 3 cannot be reused on Intel® Gaudi® 2, and vice versa. The device type is part of every output path, so calibrations for both device types can share one output directory.
 
-### DeepSeek Models
+## Output Layout
 
-For the [DeepSeek-R1](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) series models, which contain 256 experts, provide a diverse and sufficiently large sample set to ensure that all experts are properly activated during calibration. Through testing, we observed that using [NeelNanda/pile-10k](https://huggingface.co/datasets/NeelNanda/pile-10k) and selecting 512 samples, each with at least 1,024 tokens, provides effective calibration coverage.
+For a model `Org/Model-Name`, the output directory given with `-o` contains:
 
-> **Important (MoE models calibrated with expert parallelism).** When you calibrate a Mixture-of-Experts model with `-u` (expert parallelism) on more than one card, each rank only measures its **EP-local** experts (for example, 16 of 128 experts per rank for Llama-4 Maverick on TP8/EP8). These per-rank measurements must be unified so that every expert has its own scale, otherwise the non-local experts fall back to coarse quantization at serve time and FP8 accuracy drops. The unify step runs only when a target rank is given, so pass **both `-u` and `-r`** to `calibrate_model.sh` (for example `-r 1` to unify onto a single card), then use `step-6-expand-measurements.py` to expand to the deployment card count. **Passing `-u` with `TP>1` but without `-r` skips unification** and leaves only the EP-local experts measured. (Small-expert models such as Mixtral are not affected.) See the [MoE recommendations](calibration_multi_node.md#recommendations-for-advanced-usage-for-moe-models) for the full unify-and-expand procedure.
-
-## Calibration Procedures
-
-Refer to the following chapters to follow the calibration procedure for your setup:
-
-- [Simple calibration for a single Intel® Gaudi® node](calibration_one_node.md)
-- [Calibration for multiple Intel® Gaudi® nodes](calibration_multi_node.md)
-
-## Configuration
-
-The `calibrate_model.sh` script automatically generates appropriate configuration files for the calibration process. However, if you require advanced customization, you can use JSON configuration files. The `quantization_config` directory contains JSON templates that you can use directly or modify to suit your specific requirements.
-
-To apply custom configurations for calibration, add the `QUANT_CONFIG` environment variable pointing to your configuration JSON file to the `step-2-measure-scales.py` and `step-4-quantize-scales.py` calibration steps. To apply the configuration when running FP8 inference, set `QUANT_CONFIG` to point to the quantization configuration file, either the one generated by calibration or your custom configuration.
-
-### Supported Configuration Options
-
-The following table summarizes the options that you can set in a configuration file:
-
-| Attribute            | Description | Values |
-|----------------------|-------------|--------|
-| `mode`             | The mode to run INC with. | - `MEASURE`: Measures statistics of all modules and emits the results to `dump_stats_path`.<br>- `QUANTIZE` (default): Quantizes and runs the model according to the provided measurements. |
-| `observer`         | The method used to observe and track tensor statistics. | - `maxabs` (default): Tracks the maximum absolute values of tensors.<br>- `save`: Saves all tensors to files. |
-| `allowlist`        | The list of `nn.Module` names or types to quantize. Empty list means all supported modules are quantized by default. See [Custom Patched Modules](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#supported-modules). | Default: empty list |
-| `blocklist`        | List of `nn.Module` names or types not to quantize. | Default: empty list |
-| `dump_stats_path`  | The path to save and load measurements. Directory structure is created up to the last `/`; the string after the last `/` is used as a prefix for measurement files. | Default: `stats` |
-| `scale_method`     | The method for calculating the scale from measurements. | - `unit_scale` (default): Always uses the scale of 1.<br>- `maxabs_arbitrary`: Stretches or compresses maxabs to the full-scale of FP8.<br>- `maxabs_hw`: Stretches or compresses maxabs to full-scale of FP8, then replaces it with hardware-accelerated scale based on `device_for_scales`.<br>- `maxabs_pow2`: Stretches or compresses maxabs to full-scale of FP8, then replaces it with hardware-accelerated scale based on `device_for_scales`, rounded to the power of 2.<br>- `maxabs_hw_opt_weight`: The weight scale chosen for the minimal MSE among hardware-accelerated scales; activations use `maxabs_hw`.<br>- `act_maxabs_pow2_weights_pcs_opt_pow2`: Per-channel weights use `maxabs_hw_opt_weight`; activations use `maxabs_pow2`.<br>- `act_maxabs_hw_weights_pcs_maxabs_pow2`: Per-channel weights use `maxabs_pow2`; activations use `maxabs_hw`.<br>- `act_maxabs_pcs_pow2_weight_maxabs_pts_pow2_hw`: Only for dynamic quantization. Per-tensor weights use `maxabs_hw`; activations use per-token `maxabs_pow2`. |
-| `measure_exclude`  | Tensor types to exclude from measurement. | - `NONE`: Measures all tensors.<br>- `OUTPUT` (default): Skips output tensors. |
-| `scale_format`     | The format of scales passed to custom PyTorch operations. | - `const`: Scales passed as tensors.<br>- `scalar` (default): Scales passed as scalar values for compilation time and throughput optimizations. |
-| `device_for_scales`| Exponent-bias values for converting FP32/BF16 to FP8-143. | - `GAUDI3`: The expanded exponent-bias range (0–63).<br>- `GAUDI2`: Four possible exponent biases (3, 7, 11, 15), default is 7. |
-| `dynamic_quantization` | Enables dynamic FP8 quantization with per-token scales. Only supported with `act_maxabs_pcs_pow2_weight_maxabs_pts_pow2_hw`. | - `true`: Enable.<br>- `false` (default): Disable. |
-
-### Configuring Backoff Factors
-
-When using any of the maxabs-based `scale_method` options, you can fine-tune the quantization behavior by configuring backoff factors. The `input_backoff` and `weight_backoff` factors provide a safety margin when converting inputs and weights to FP8. For example, if an activation has a larger absolute value than observed in calibration, the maxabs value is scaled to:
-
-```
-input_backoff * FP8_143_FULLSCALE
+```text
+<output_dir>/
+  model-name/                          # last path component of the model, lower-cased
+    maxabs_measure_<device>.json       # INC config of the MEASURE phase
+    maxabs_quant_<device>.json         # INC config of the QUANTIZE phase; use it for serving
+    <device>/                          # g2 or g3
+      inc_output_hooks_maxabs_<rank>_<world>.json             # measurements
+      inc_output_hooks_maxabs_<rank>_<world>.npz
+      inc_output_hooks_maxabs_<rank>_<world>_mod_list.json    # measured module list
+      inc_output_hooks_maxabs_MAXABS_HW_<rank>_<world>.json   # scales
+      inc_output_hooks_maxabs_MAXABS_HW_<rank>_<world>.npz
+      calibration_manifest.json        # what was calibrated, how, with which versions
+      logs/                            # measure.log, quantize.log; removed after success unless --keep-logs
 ```
 
-Similarly, for weights:
+`<world>` is the tensor parallel size of the run and `<rank>` goes from `0` to `<world> - 1`. The layout and the config file names are the same as with the old `calibrate_model.sh`, so existing `QUANT_CONFIG` paths keep working.
 
-```
-weight_backoff * FP8_143_FULLSCALE
-```
+## Serving the Calibrated Model
 
-By default, the backoff factors are set to:
+Serving reads the quant config through the `QUANT_CONFIG` environment variable. The config's `dump_stats_path` points to the measurement and scale files. At the end of a run, the tool prints the serve command and stores it in the manifest:
 
-- `input_backoff`: 0.25
-- `weight_backoff`: 0.5
-
-To change these values, add the following to the quantization configuration JSON file:
-
-```json
-"scale_params": {"input_backoff": <INPUT_BACKOFF>, "weight_backoff": <WEIGHT_BACKOFF>}
+```bash
+QUANT_CONFIG=<output_dir>/<model_name>/maxabs_quant_<device>.json \
+    vllm serve <model> --quantization inc --kv-cache-dtype fp8_inc --tensor-parallel-size <N>
 ```
 
-### Compilation Time and Throughput Optimization
+The tensor parallel size must match the world size of the files in `<device>/`: the `--tp` of the run, or the target of `--unify-to-tp` or `--expand-to-ep`. For more serving options, see [Intel® Neural Compressor](../quantization/inc.md).
 
-The `scale_format` configuration option provides performance optimizations for FP8 inference. When set to `scalar` (default), it improves both compilation speed and runtime throughput by reducing the number of compiled recipes and minimizing host-side overhead when launching FP8 operations. Note that the compilation time improvement varies depending on your model's properties, such as the recipe count and scale distribution.
+## Prerequisites
 
-This optimization is not applicable to Per-Channel Quantization (PCQ).
+- An Intel® Gaudi® 2 or Intel® Gaudi® 3 machine with vLLM and vLLM Hardware Plugin for Intel® Gaudi® installed (see [Installation](../../getting_started/installation.md)).
+- The calibration dependencies: `pip install -r calibration/requirements.txt` (`lm_eval>=0.4.12`, `datasets`, `Pillow`, and `ray`, which lm-eval's multimodal vLLM model imports). Do not install `lm_eval[vllm]`, because it replaces the HPU build of vLLM with the one from PyPI.
+- Access to the model and to the datasets of the lm-eval tasks, either through the Hugging Face Hub or a local cache.
+- Enough HPUs for the tensor parallel size of the run. A model that does not fit on one card needs `--tp`.
 
-## Troubleshooting
+## Further Reading
 
-If you encounter the following error when running the script, ensure you set a valid tensor parallelism value, for example `-t 8`:
-
-```
-RuntimeError: [Rank:0] FATAL ERROR :: MODULE:PT_DEVMEM Allocation failed for size::939524096 (896)MB
-```
+- [Quick Start](quickstart.md): Calibrate and serve a model with one command.
+- [Reference](reference.md): Every subcommand and option, presets, environment variables, and the INC configuration schema.
+- [Advanced Usage](advanced.md): Unifying and expanding measurements, multi-node calibration, custom data, and custom INC configs.
+- [Troubleshooting](troubleshooting.md): Common failures and how to fix them.
+- [Migration](migration.md): Moving from `calibrate_model.sh` and the step scripts.

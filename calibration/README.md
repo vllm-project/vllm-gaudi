@@ -1,9 +1,19 @@
 # Calibration
 
-vLLM Hardware Plugin for Intel® Gaudi® supports running inference on HPU with 8-bit floating point (FP8) precision using [Intel® Neural Compressor (INC)](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#inference-using-fp8) package. Inference requires prior calibration to generate the necessary measurements, quantization files, and configuration data that are required for running quantized models.
+vLLM Hardware Plugin for Intel® Gaudi® runs FP8 inference through [Intel® Neural Compressor (INC)](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#inference-using-fp8). Models are calibrated with the `vllm-gaudi-calibrate` command (also available as `python -m vllm_gaudi.calibration`), which handles text and multimodal models:
 
-Detailed calibration procedures for a single Intel® Gaudi® node and multiple nodes are available in the `docs` folder:
+```bash
+pip install -r calibration/requirements.txt
+vllm-gaudi-calibrate run <model> -o <output_dir>
+```
 
-- [Introduction](../docs/configuration/calibration/calibration.md): Overview, recommendations, and troubleshooting guidance  
-- [Simple calibration procedure for a single Intel® Gaudi® node](../docs/configuration/calibration/calibration_one_node.md)
-- [Calibration procedure for multiple Intel® Gaudi® nodes](../docs/configuration/calibration/calibration_multi_node)
+For details, see the calibration documentation:
+
+- [Calibration Overview](../docs/configuration/calibration/calibration.md)
+- [Quick Start](../docs/configuration/calibration/quickstart.md)
+- [Reference](../docs/configuration/calibration/reference.md)
+- [Advanced Usage](../docs/configuration/calibration/advanced.md)
+- [Troubleshooting](../docs/configuration/calibration/troubleshooting.md)
+- [Migration from `calibrate_model.sh`](../docs/configuration/calibration/migration.md)
+
+The `calibrate_model.sh` scripts in this directory are deprecated stubs that print the equivalent `vllm-gaudi-calibrate` command.
