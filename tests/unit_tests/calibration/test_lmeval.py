@@ -13,6 +13,7 @@ def test_kv_cache_dtype_depends_on_phase():
     assert build()["kv_cache_dtype"] == "auto"
     assert build(phase="quantize")["kv_cache_dtype"] == "fp8_inc"
     assert build()["quantization"] == "inc"
+    assert "quantization" not in build(quantization=None)
     with pytest.raises(ValueError):
         build(phase="serve")
 

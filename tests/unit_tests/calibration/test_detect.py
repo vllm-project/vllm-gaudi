@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from vllm_gaudi.calibration.detect import (ModelInfo, classify_hf_config, detect_device, device_from_name,
-                                           find_num_experts, has_multimodal_subconfig)
+                                           find_num_experts, find_quant_method, has_multimodal_subconfig)
 
 
 @pytest.mark.parametrize(("name", "expected"), [("GAUDI2", "g2"), ("GAUDI3", "g3"), ("Gaudi 3", "g3"),
@@ -33,6 +33,13 @@ def test_find_num_experts_variants():
     assert find_num_experts(SimpleNamespace(num_experts=1)) is None
     assert find_num_experts(SimpleNamespace(num_experts=True)) is None
     assert find_num_experts(SimpleNamespace(hidden_size=4096)) is None
+
+
+def test_find_quant_method():
+    assert find_quant_method(SimpleNamespace(quantization_config={"quant_method": "fp8"})) == "fp8"
+    assert find_quant_method(SimpleNamespace(quantization_config=SimpleNamespace(quant_method="awq"))) == "awq"
+    assert find_quant_method(SimpleNamespace(quantization_config=None)) is None
+    assert find_quant_method(SimpleNamespace(hidden_size=4096)) is None
 
 
 def test_has_multimodal_subconfig():
