@@ -19,7 +19,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_gaudi.platform import HpuPlatform
+from vllm_gaudi.platform import HpuPlatform, retain_envs
 
 _EAGER_ONLY_VARS = (
     "RUNTIME_SCALE_PATCHING",
@@ -386,3 +386,13 @@ def test_check_and_update_config_does_not_rescale_granitemoehybrid_mamba_page_si
         f"granitemoehybrid models. Expected {CORRECT_MAMBA_PAGE_SIZE_PADDED}, "
         f"got {cache_config.mamba_page_size_padded} "
         f"(would be {CORRUPTED_MAMBA_PAGE_SIZE_PADDED} if rescaled with block_size=128).")
+
+
+@pytest.mark.parametrize("name", ["QUANT_CONFIG", "HCCL_SOCKET_IFNAME", "PT_HPU_LAZY_MODE", "VLLM_SKIP_WARMUP"])
+def test_retain_envs_forwards_ray_worker_vars(name):
+    assert retain_envs(name)
+
+
+@pytest.mark.parametrize("name", ["HOME", "QUANT_CONFIG_BACKUP", "PATH"])
+def test_retain_envs_skips_unrelated_vars(name):
+    assert not retain_envs(name)
