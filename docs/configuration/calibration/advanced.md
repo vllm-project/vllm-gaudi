@@ -201,7 +201,7 @@ vllm-gaudi-calibrate run <model> -o <output_dir> \
     --quant-config calibration/quantization_config/maxabs_quant.json
 ```
 
-The tool loads each file, resolves a relative `dump_stats_path` against the current directory, and writes the result to `<output_dir>/<model_name>/maxabs_{measure,quant}_<device>.json`, which the phases and the serve command use. The tool takes the measurement location and the observer from the measure config. Keep `dump_stats_path` the same in both files, so the QUANTIZE phase finds the measurements.
+The tool loads each file, resolves a relative `dump_stats_path` against the current directory, and writes the result to `<output_dir>/<model_name>/maxabs_{measure,quant}_<device>.json`, which the phases and the serve command use. The tool takes the measurement location and the observer from the measure config. If you pass only one of the two options, the generated other config takes its `dump_stats_path`. If you pass both, they must have the same `dump_stats_path`, so the QUANTIZE phase finds the measurements; the tool stops otherwise.
 
 To check the configs before a run, use `print-config` with the same options. To change only a few keys of the generated configs, prefer the dedicated options, such as `--scale-format`, `--blocklist`, `--input-backoff`, or `--device-for-scales`. They are listed in [INC Configuration Options](reference.md#inc-configuration-options).
 
@@ -213,7 +213,7 @@ To check the configs before a run, use `print-config` with the same options. To 
 vllm-gaudi-calibrate run <model> -o <output_dir> --phases quantize --scale-format CONST
 ```
 
-Both configs are always written again. With `--phases quantize`, the tool does not check or postprocess the measurements.
+Both configs are always written again. With `--phases quantize`, the tool removes the earlier scale files so that INC computes them from the new settings, and does not check or postprocess the measurements.
 
 ## MoE Models
 

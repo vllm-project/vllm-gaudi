@@ -73,7 +73,7 @@ The options marked `unset` are written to the quant config only when given. `--b
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--tp` | `1` | Tensor parallel size. |
-| `--expert-parallel` | off (preset) | Enable expert parallelism. Also selects the expert parallel merge rule for `--unify-to-tp`. The `deepseek` preset enables it. |
+| `--expert-parallel` | off (preset) | Enable expert parallelism. Also selects the expert parallel merge rule for `--unify-to-tp` and adds `--enable-expert-parallel` to the printed serve command. The `deepseek` preset enables it; to turn it off, pass `--engine-arg enable_expert_parallel=false`. |
 | `--batch-size` | `auto` | lm-eval batch size, `auto` or a positive integer. |
 | `--max-num-seqs` | preset (`32`) | vLLM `max_num_seqs`. |
 | `--max-model-len` | preset (`4096` text, `8192` multimodal, `2048` granite4) | vLLM `max_model_len`. |

@@ -8,7 +8,7 @@ When a phase fails, `vllm-gaudi-calibrate` exits with code `1` and names the pha
 The measure phase did not write [...] in <output_dir>/<model_name>/<device>. INC writes them from finalize_calibration when the engine shuts down cleanly; check the measure log for an engine crash.
 ```
 
-After the MEASURE phase, the tool checks that every rank wrote a fresh `inc_output_hooks_maxabs_<rank>_<world>.json`, `.npz`, and `_mod_list.json`. INC writes these files from `finalize_calibration`, which runs only when the engine shuts down cleanly. If they are missing or older than the start of the phase:
+Before the MEASURE phase, the tool removes the files of an earlier run. After it, the tool checks that every rank wrote `inc_output_hooks_maxabs_<rank>_<world>.json`, `.npz`, and `_mod_list.json`. INC writes these files from `finalize_calibration`, which runs only when the engine shuts down cleanly. If they are missing:
 
 - Check `measure.log` for an engine crash, an out-of-memory error, or a worker that died before shutdown. Rerun with `--keep-logs` if you need the logs of a run that later succeeds.
 - Make sure that the measure config was used. `QUANT_CONFIG` is set by the tool for each phase; a `QUANT_CONFIG` exported in your shell is ignored. With `--measure-config`, check that `dump_stats_path` points to the directory named in the error.

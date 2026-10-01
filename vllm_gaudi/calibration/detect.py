@@ -32,6 +32,7 @@ class ModelInfo:
         num_experts: Number of routed experts, if any.
         is_encoder_decoder: Whether the model is an encoder-decoder model.
         has_chat_template: Whether the tokenizer or processor has a chat template; None if unknown.
+        quant_method: ``quant_method`` of the checkpoint's ``quantization_config``, None for an unquantized one.
         source: Which library produced the facts (``vllm``, ``transformers`` or ``none``).
     """
 
@@ -42,6 +43,7 @@ class ModelInfo:
     num_experts: int | None = None
     is_encoder_decoder: bool = False
     has_chat_template: bool | None = None
+    quant_method: str | None = None
     source: str = "none"
 
     @property
@@ -78,6 +80,16 @@ def find_num_experts(hf_config: Any) -> int | None:
     return None
 
 
+def find_quant_method(hf_config: Any) -> str | None:
+    """Returns the ``quant_method`` of an already quantized checkpoint, or None."""
+    quant_config = getattr(hf_config, "quantization_config", None)
+    if isinstance(quant_config, dict):
+        method = quant_config.get("quant_method")
+    else:
+        method = getattr(quant_config, "quant_method", None)
+    return str(method) if method else None
+
+
 def has_multimodal_subconfig(hf_config: Any) -> bool:
     """Heuristic multimodality check used only when vllm cannot be imported."""
     return any(getattr(hf_config, key, None) is not None for key in MULTIMODAL_SUBCONFIG_KEYS)
@@ -110,6 +122,7 @@ def classify_hf_config(hf_config: Any,
         num_experts=num_experts,
         is_encoder_decoder=bool(is_encoder_decoder),
         has_chat_template=has_chat_template,
+        quant_method=find_quant_method(hf_config),
         source=source,
     )
 
