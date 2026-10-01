@@ -6,12 +6,12 @@ This release is based on [vLLM v0.30.0](https://github.com/vllm-project/vllm/rel
 
 ## Highlights
 
-- Enabled the plugin on upstream [vLLM v0.30.0](https://github.com/vllm-project/vllm/releases/tag/v0.30.0), tracking upstream API changes across MoE, MLA, KV cache, quantization, and serving.
-- Added GLM-5.2-FP8 support with DeepSeek Sparse Attention (DSA) and Nemotron-H FP8 support with quantization-aware Mamba and non-gated FP8 MoE.
+- Enabled the plugin on upstream [vLLM v0.30.0](https://github.com/vllm-project/vllm/releases/tag/v0.30.0), incorporating upstream API changes across MoE, MLA, KV cache, quantization, and serving.
+- Added support for GLM-5.2-FP8 with DeepSeek Sparse Attention (DSA) and Nemotron-H FP8 with quantization-aware Mamba and non-gated FP8 MoE.
 - Improved Qwen3.5/3.6 MoE token generation at low batch sizes with an opt-in gathered-expert MoE combine for FP8.
 - Improved Qwen3.5 GDN correctness with prefix caching and compact GDN, and fixed RoPE accuracy for very long contexts.
 - Reduced decode warmup memory by clamping decode block buckets to the physical KV cache size.
-- Added RHEL 10.2 Dockerfiles, and strengthened supply-chain security with Cosign-signed release tarballs, OpenSSF Scorecard, Dependabot, and SHA-pinned GitHub Actions.
+- Added RHEL 10.2 Dockerfiles and strengthened supply-chain security with Cosign-signed release tarballs, OpenSSF Scorecard, Dependabot, and SHA-pinned GitHub Actions.
 
 ---
 
@@ -41,7 +41,7 @@ This release is based on [vLLM v0.30.0](https://github.com/vllm-project/vllm/rel
 - Fixed the Qwen3.5 GDN `mamba_chunk_size` alignment bypass with prefix caching. ([#1815](https://github.com/vllm-project/vllm-gaudi/pull/1815))
 - Disabled Synapse persistent-input reuse for compact GDN to prevent recurrent-state corruption. ([#1753](https://github.com/vllm-project/vllm-gaudi/pull/1753))
 - Fixed RoPE numerical issues for very long contexts. ([#1817](https://github.com/vllm-project/vllm-gaudi/pull/1817))
-- Tiled the FusedSDPA query dimension to avoid the 2^31-byte prompt-bias overflow, and handled a `None` attention bias in the tiling path. ([#1749](https://github.com/vllm-project/vllm-gaudi/pull/1749), [#1784](https://github.com/vllm-project/vllm-gaudi/pull/1784))
+- Tiled the FusedSDPA query dimension to avoid the 2^31-byte prompt-bias overflow and handled an attention bias of `None` in the tiling path. ([#1749](https://github.com/vllm-project/vllm-gaudi/pull/1749), [#1784](https://github.com/vllm-project/vllm-gaudi/pull/1784))
 - Restricted Mamba/hybrid prefill batches to a single request. ([#1725](https://github.com/vllm-project/vllm-gaudi/pull/1725))
 
 ---
@@ -60,7 +60,7 @@ This release is based on [vLLM v0.30.0](https://github.com/vllm-project/vllm/rel
 - Tracked upstream vLLM KV cache and quantization changes: `KVCacheTensor.shared_by` migration, `region_num_blocks`, and removed `actorder`/`g_idx`. ([#1751](https://github.com/vllm-project/vllm-gaudi/pull/1751), [#1788](https://github.com/vllm-project/vllm-gaudi/pull/1788))
 - Tracked upstream vLLM engine, processor, and serving changes: relocated engine/protocol imports, pre-tokenized `ProcessorInputs` prompts, `default_chat_template_kwargs`, and HPU communicator and shared-memory updates. ([#1776](https://github.com/vllm-project/vllm-gaudi/pull/1776), [#1748](https://github.com/vllm-project/vllm-gaudi/pull/1748), [#1786](https://github.com/vllm-project/vllm-gaudi/pull/1786), [#1660](https://github.com/vllm-project/vllm-gaudi/pull/1660))
 - Removed the HPU HunYuan V1 overrides after upstream vLLM deleted the native HunYuan V1 implementation; HunYuan V1 models are now served through the upstream Transformers modeling backend. ([#1759](https://github.com/vllm-project/vllm-gaudi/pull/1759))
-- Migrated model weight-loader skip rules after upstream vLLM #53106. ([#1763](https://github.com/vllm-project/vllm-gaudi/pull/1763))
+- Migrated model weight-loader skip rules following upstream vLLM PR #53106. ([#1763](https://github.com/vllm-project/vllm-gaudi/pull/1763))
 - Added an empty `record_logical_topk_ready()` call for upstream compatibility. ([#1824](https://github.com/vllm-project/vllm-gaudi/pull/1824))
 - Fixed the MiniMax-M2 fused MoE import after an upstream API change. ([#1720](https://github.com/vllm-project/vllm-gaudi/pull/1720))
 
@@ -69,7 +69,7 @@ This release is based on [vLLM v0.30.0](https://github.com/vllm-project/vllm/rel
 ## Serving and Infrastructure
 
 - Added RHEL 10.2 support to the Dockerfiles. ([#1801](https://github.com/vllm-project/vllm-gaudi/pull/1801))
-- Made the MiniMax-M3 tool-call parser tolerate a dropped `<` in the invoke tag, and listed MiniMax-M3 as a validated model. ([#1724](https://github.com/vllm-project/vllm-gaudi/pull/1724))
+- Made the MiniMax-M3 tool-call parser tolerate a missing `<` in the invoke tag and listed MiniMax-M3 as a validated model. ([#1724](https://github.com/vllm-project/vllm-gaudi/pull/1724))
 - Fixed runtime errors in single-process Qwen model swapping. ([#1604](https://github.com/vllm-project/vllm-gaudi/pull/1604))
 - Fixed model banner and runtime logging issues in multi-model runs. ([#1608](https://github.com/vllm-project/vllm-gaudi/pull/1608))
 - Kept multimodal processor output on HPU via `torch_shm` in tests. ([#1706](https://github.com/vllm-project/vllm-gaudi/pull/1706))
@@ -79,8 +79,8 @@ This release is based on [vLLM v0.30.0](https://github.com/vllm-project/vllm/rel
 
 ## Fixes
 
-- Made sampling penalties correct under async scheduling. ([#1761](https://github.com/vllm-project/vllm-gaudi/pull/1761))
-- Kept stale in-flight output after async-scheduling preemption. ([#1794](https://github.com/vllm-project/vllm-gaudi/pull/1794))
+- Fixed sampling penalties under async scheduling. ([#1761](https://github.com/vllm-project/vllm-gaudi/pull/1761))
+- Preserved stale in-flight output after async-scheduling preemption. ([#1794](https://github.com/vllm-project/vllm-gaudi/pull/1794))
 - Fixed the decode-block clamp misdetecting hybrid and sliding-window models. ([#1745](https://github.com/vllm-project/vllm-gaudi/pull/1745))
 - Fixed a Kimi-K2.5 vision 2D-RoPE warmup crash after upstream fused-kernel inlining. ([#1754](https://github.com/vllm-project/vllm-gaudi/pull/1754))
 - Patched `torch.accelerator.empty_host_cache` to fix a teardown segfault. ([#1762](https://github.com/vllm-project/vllm-gaudi/pull/1762))
