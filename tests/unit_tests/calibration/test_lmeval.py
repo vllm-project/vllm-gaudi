@@ -29,6 +29,9 @@ def test_precedence_and_optional_args():
     assert args["distributed_executor_backend"] == "ray"
     assert "max_images" not in build(max_images=2)
     assert build(multimodal=True, max_images=2)["max_images"] == 2
+    assert "image_max_side" not in build(image_max_side=640)
+    assert "image_max_side" not in build(multimodal=True, image_max_side=0)
+    assert build(multimodal=True, image_max_side=640)["image_max_side"] == 640
     assert "distributed_executor_backend" not in build()
 
 
