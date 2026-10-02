@@ -43,7 +43,7 @@ def test_unify_scales_uses_whole_value_max():
     ranks = [{
         LINEAR: {
             "inputs": [1.0, 5.0],
-            "outputs": 2.0,
+            "outputs": [2.0],
             "params": {
                 "weight": [3.0, 1.0]
             }
@@ -51,14 +51,14 @@ def test_unify_scales_uses_whole_value_max():
     }, {
         LINEAR: {
             "inputs": [4.0, 0.5],
-            "outputs": 1.0,
+            "outputs": [1.0],
             "params": {
                 "weight": [2.0, 9.0]
             }
         }
     }]
     unified = unify_nodes(ranks, scales=True)
-    assert unified[LINEAR] == {"inputs": [4.0, 5.0], "outputs": 2.0, "params": {"weight": [3.0, 1.0]}}
+    assert unified[LINEAR] == {"inputs": [4.0, 5.0], "outputs": [2.0], "params": {"weight": [3.0, 1.0]}}
 
 
 def test_unify_scales_expert_parallel_extends_fused_inputs():
@@ -85,14 +85,18 @@ def test_unify_scales_expert_parallel_extends_fused_inputs():
 
 def test_unify_dir_tp2_to_tp1(tmp_path):
     write_measure_run(tmp_path, world=2)
-    write_rank(tmp_path, SCALES_PREFIX, 0, 2, {LINEAR: {"inputs": [1.0]}})
-    write_rank(tmp_path, SCALES_PREFIX, 1, 2, {LINEAR: {"inputs": [2.0]}})
+    # INC scale files hold a list of floats per node and a scalar weight scale.
+    write_rank(tmp_path, SCALES_PREFIX, 0, 2, {LINEAR: {"inputs": [1.0], "outputs": [0.5], "params": {"weight": 0.25}}})
+    write_rank(tmp_path, SCALES_PREFIX, 1, 2, {LINEAR: {"inputs": [2.0], "outputs": [0.25], "params": {"weight": 0.5}}})
     written = unify_dir(tmp_path, 1, use_ep=True)
     assert [p.name for p in written] == [f"{PREFIX}_0_1.json", f"{SCALES_PREFIX}_0_1.json"]
     data = json.loads(written[0].read_text())
     assert data["LocalRank"] == -1
     assert len(data["Nodes"][FUSED]["outputs"]) == 5
-    assert load_npz(written[1].with_suffix(".npz"))["Nodes"][LINEAR]["inputs"][0].tolist() == 2.0
+    scales = load_npz(written[1].with_suffix(".npz"))["Nodes"][LINEAR]
+    assert scales["inputs"][0].tolist() == 2.0
+    assert scales["outputs"][0].tolist() == 0.5
+    assert scales["params"]["weight"].tolist() == 0.5
 
 
 def test_unify_dir_counts_only_the_source_world(tmp_path):
