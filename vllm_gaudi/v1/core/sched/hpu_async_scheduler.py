@@ -151,15 +151,15 @@ class HPUAsyncScheduler(AsyncScheduler):
 
     @cached_property
     def _align_to_mamba_block(self) -> bool:
-        """Whether to snap prefill chunk ends to mamba_block_size.
+        """Whether to snap prefill chunk ends to the state-block grid.
 
         True only for Qwen3.5-style hybrids running non-compact GDN with prefix
-        caching: those force cache_config.block_size to 128 while
-        mamba_block_size stays large, so mamba_chunk_size alignment never lands
-        on the align-mode SSM checkpoint grid. (Compact GDN is auto-disabled
-        under prefix caching, so this path is non-compact by construction; the
-        check is kept explicit.) Every other model keeps mamba_chunk_size
-        alignment. Model-lifetime constant, so computed once.
+        caching: for these, mamba_chunk_size alignment never lands on the
+        align-mode SSM checkpoint grid (cache_config.block_size), so reuse
+        plateaus. (Compact GDN is auto-disabled under prefix caching, so this
+        path is non-compact by construction; the check is kept explicit.) Every
+        other model keeps mamba_chunk_size alignment. Model-lifetime constant,
+        so computed once.
         """
         cache_config = self.vllm_config.cache_config
         if not (cache_config.enable_prefix_caching and cache_config.mamba_block_size):
@@ -195,22 +195,18 @@ class HPUAsyncScheduler(AsyncScheduler):
         """HPU override: align chunked-prefill splits so SSM checkpoints land.
 
         On HPU the model runner requires context_lens to be a multiple of
-        mamba_chunk_size, and the upstream aligner uses cache_config.block_size.
+        mamba_chunk_size. For most hybrids the default mamba_chunk_size split
+        already keeps the runner happy and lands checkpoints on the state grid;
+        that behavior is retained unchanged.
 
-        For most hybrids block_size == mamba_block_size, so aligning chunk ends
-        to mamba_chunk_size keeps the runner happy and checkpoints land on the
-        state grid; that behavior is retained unchanged.
-
-        Qwen3.5-style hybrids are special: HPU forces cache_config.block_size to
-        128 while mamba_block_size stays large (e.g. 896). In "align" cache mode
-        a reusable SSM state is checkpointed only when a step ends on a
-        mamba_block_size boundary, so clipping to mamba_chunk_size (128) strands
-        those checkpoints and prefix-cache hits collapse to
-        LCM(step budget, mamba_block_size). For these models we snap chunk ends
-        to mamba_block_size instead. mamba_block_size is a multiple of
-        mamba_chunk_size (runner-enforced), so the context_lens invariant still
-        holds; if a full block does not fit the step budget we fall back to
-        mamba_chunk_size alignment.
+        Qwen3.5-style hybrids are special: in "align" cache mode a reusable SSM
+        state is checkpointed only when a step ends on the state-block grid,
+        which is cache_config.block_size (the LCM block size the prefix hash
+        uses). Clipping to mamba_chunk_size strands those checkpoints and
+        prefix-cache hits collapse to LCM(step budget, block_size). For these
+        models we snap chunk ends to block_size instead; it is a multiple of
+        mamba_chunk_size, so the context_lens invariant still holds, and we fall
+        back to mamba_chunk_size alignment when a full block won't fit the step.
 
         Both the layer count and the chunk size must match the model runner's
         own logic exactly (see the cached properties above); a mismatch makes
@@ -227,9 +223,10 @@ class HPUAsyncScheduler(AsyncScheduler):
         prompt_end = max(request.num_prompt_tokens, request.num_tokens - 1)
         if start < prompt_end and num_new_tokens < prompt_end - start:
             if self._align_to_mamba_block:
-                # Snap the chunk end to the mamba_block_size grid; fall back to
-                # chunk_size alignment when a full block won't fit this step.
-                block_size = cache_config.mamba_block_size
+                # Snap the chunk end to the SSM state-block grid (the LCM
+                # block_size the prefix hash uses); fall back to chunk_size
+                # alignment when a full block won't fit this step.
+                block_size = cache_config.block_size
                 aligned = (start + num_new_tokens) // block_size * block_size - start
                 num_new_tokens = aligned if aligned > 0 else (num_new_tokens // chunk_size * chunk_size)
             else:
