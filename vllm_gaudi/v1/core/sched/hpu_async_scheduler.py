@@ -138,6 +138,33 @@ class HPUAsyncScheduler(AsyncScheduler):
             for block_type in ("mamba", "gdn_attention", "linear_attention"))
 
     @cached_property
+    def _align_to_mamba_block(self) -> bool:
+        """Qwen3.5 hybrid on non-compact GDN with prefix caching: in "align" mode an SSM
+        state is only checkpointed when a step ends on a state-block boundary.
+        """
+        from vllm_gaudi.platform import HpuPlatform, is_qwen3_5_hybrid_model
+        if not self.vllm_config.cache_config.enable_prefix_caching:
+            return False
+        if not is_qwen3_5_hybrid_model(self.vllm_config.model_config):
+            return False
+        return not HpuPlatform._compact_gdn_active(self.vllm_config)
+
+    @cached_property
+    def _mamba_state_block_size(self) -> int:
+        """Tokens per mamba state slot, from MambaSpec in the KV cache config.
+
+        Not cache_config.block_size: for these models that is reset to the 128-token HPU
+        kernel block, so it is not the state grid (upstream's splitter uses it and would
+        align to 128 here). 0 if the mamba groups disagree.
+        """
+        from vllm.v1.kv_cache_interface import MambaSpec
+        sizes = {
+            g.kv_cache_spec.block_size
+            for g in self.kv_cache_config.kv_cache_groups if isinstance(g.kv_cache_spec, MambaSpec)
+        }
+        return sizes.pop() if len(sizes) == 1 else 0
+
+    @cached_property
     def _mamba_align_chunk_size(self) -> int:
         """Chunk size to align chunked-prefill splits to, mirroring the runner's
         fallback (see ``mamba_chunk_size`` in hpu_model_runner.py).
@@ -180,62 +207,26 @@ class HPUAsyncScheduler(AsyncScheduler):
         num_computed_tokens = (request.num_computed_tokens + num_new_local_computed_tokens +
                                num_external_computed_tokens)
         prompt_end = max(request.num_prompt_tokens, request.num_tokens - 1)
-        mamba_block = self._gdn_state_block_size()
-        # In mamba_cache_mode="align" a step's state lands in the slot defined as "state
-        # after (slot+1)*mamba_block tokens", so a chunk ending off a block boundary
-        # writes one block too high: the completed block stays null (reuse lost) and the
-        # over-written block is hashed as covering more tokens than its state does
-        # (measured: a 9,607-token prompt reused state from token 8,192, wrong output).
-        # So stop crossing chunks AT the boundary (final chunk included, else a one-step
-        # prompt completes no block and gets 0% reuse). align-only, matching upstream's
-        # need_mamba_block_aligned_split, so "all" mode and other Mamba models are untouched.
-        align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
-        # mamba_block % chunk_size == 0 (896 = 7*128) keeps the stop compatible with the
-        # runner's context_lens % chunk_size assertion; if not, fall through below.
-        if (align_mode and mamba_block > 0 and mamba_block % chunk_size == 0
-                and num_computed_tokens < prompt_end):
-            next_boundary = ((num_computed_tokens // mamba_block) + 1) * mamba_block
-            chunk_end = num_computed_tokens + num_new_tokens
-            if chunk_end > next_boundary:
-                num_new_tokens = next_boundary - num_computed_tokens
-            elif chunk_end < prompt_end:
-                # Can't reach the boundary this step: nothing is cached mid-block,
-                # so just keep the runner's chunk_size alignment.
-                num_new_tokens = (num_new_tokens // chunk_size * chunk_size)
-        elif num_computed_tokens < prompt_end:
+        block_size = self._mamba_state_block_size
+        if self._align_to_mamba_block and block_size > 0 and block_size % chunk_size == 0:
+            # Round the chunk end down to the state grid, so one chunk may cover several
+            # blocks, and stop at the prompt's last full block so its state stays cacheable.
+            end = num_computed_tokens + num_new_tokens
+            if end < prompt_end:
+                aligned = end // block_size * block_size
+                end = (aligned if aligned > num_computed_tokens else
+                       num_computed_tokens + num_new_tokens // chunk_size * chunk_size)
+            last_cacheable = request.num_tokens - request.num_tokens % block_size
+            if num_computed_tokens < last_cacheable < end:
+                end = last_cacheable
+            return max(end - num_computed_tokens, 0)
+        if num_computed_tokens < prompt_end:
             remaining = prompt_end - num_computed_tokens
             if num_new_tokens < remaining:
                 # Partial prefill: round down so context_lens stays
                 # chunk_size-aligned after this step.
                 num_new_tokens = (num_new_tokens // chunk_size * chunk_size)
         return num_new_tokens
-
-    def _gdn_state_block_size(self) -> int:
-        """Tokens per mamba state block, from MambaSpec.block_size in the KV cache config.
-
-        This is the granularity the prefix cache hashes/reuses at, and the only one of
-        the three "block size" fields that applies here: cache_config.block_size (128 on
-        Gaudi for hybrid models) and cache_config.mamba_block_size are both unrelated to
-        it. Model- and parallelism-dependent; e.g. Qwen3.8-27B at TP=4 reports 896.
-        Returns 0 (caller keeps previous behaviour) if groups disagree or lack a MambaSpec.
-        """
-        cached = getattr(self, "_gdn_state_block_size_cached", None)
-        if cached is not None:
-            return cached
-        value = 0
-        try:
-            from vllm.v1.kv_cache_interface import MambaSpec
-            sizes = {
-                g.kv_cache_spec.block_size
-                for g in getattr(self.kv_cache_config, "kv_cache_groups", [])
-                if isinstance(g.kv_cache_spec, MambaSpec)
-            }
-            if len(sizes) == 1:
-                value = int(sizes.pop())
-        except Exception:
-            value = 0
-        self._gdn_state_block_size_cached = value
-        return value
 
     def _update_request_with_output(self, request: Request, new_token_ids: list[int],
                                     **kwargs) -> tuple[list[int], bool]:
