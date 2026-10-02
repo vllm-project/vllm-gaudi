@@ -2,6 +2,19 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.30.0
+
+This release is based on [vLLM 0.30.0](https://github.com/vllm-project/vllm/releases/tag/v0.30.0) and supports [Intel® Gaudi® Software v1.24.2](https://docs.habana.ai/en/v1.24.2/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.13. Key updates include:
+
+- Enabled the plugin on upstream [vLLM v0.30.0](https://github.com/vllm-project/vllm/releases/tag/v0.30.0), incorporating upstream API changes across MoE, MLA, KV cache, quantization, and serving.
+- Added support for GLM-5.2-FP8 with DeepSeek Sparse Attention (DSA) and Nemotron-H FP8 with quantization-aware Mamba and non-gated FP8 MoE.
+- Improved Qwen3.5/3.6 MoE token generation at low batch sizes with an opt-in gathered-expert MoE combine for FP8.
+- Improved Qwen3.5 GDN correctness with prefix caching and compact GDN, and fixed RoPE accuracy for very long contexts.
+- Reduced decode warmup memory by clamping decode block buckets to the physical KV cache size.
+- Added RHEL 10.2 Dockerfiles and strengthened supply-chain security with Cosign-signed release tarballs, OpenSSF Scorecard, Dependabot, and SHA-pinned GitHub Actions.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.30.0.md).
+
 ## 0.26.0
 
 This version is based on [vLLM 0.26.0](https://github.com/vllm-project/vllm/releases/tag/v0.26.0) and supports [Intel® Gaudi® Software v1.24.1](https://docs.habana.ai/en/v1.24.1/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.11.
