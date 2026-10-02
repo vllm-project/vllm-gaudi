@@ -209,6 +209,23 @@ def test_user_config_dump_stats_path(tmp_path, monkeypatch):
             FakeRunner(QWEN))
 
 
+def test_local_paths_are_resolved_against_the_caller_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "models" / "My-Model").mkdir(parents=True)
+    runner = FakeRunner(QWEN)
+    run_calibration(
+        CalibrationArgs(model="models/My-Model", output_dir="out", include_path="tasks", phases=("measure", )), runner)
+    model = str(tmp_path / "models" / "My-Model")
+    detect, measure = runner.calls[0][1], runner.calls[1][1]
+    assert detect["model"] == model
+    assert measure["model_args"]["pretrained"] == model
+    assert measure["eval"]["include_path"] == str(tmp_path / "tasks")
+    assert (tmp_path / "out" / "my-model" / "maxabs_measure_g3.json").is_file()
+    hub = FakeRunner(QWEN)
+    run_calibration(args(tmp_path / "hub", phases=("measure", )), hub)
+    assert hub.calls[0][1]["model"] == "Org/My-Model"
+
+
 def test_model_rejections(tmp_path):
     with pytest.raises(ValueError, match="encoder-decoder"):
         run_calibration(args(tmp_path), FakeRunner(ModelInfo(is_encoder_decoder=True, source="test")))

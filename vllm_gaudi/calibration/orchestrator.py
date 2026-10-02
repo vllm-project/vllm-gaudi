@@ -260,6 +260,14 @@ def detect_model_info(args: CalibrationArgs, runner: PhaseRunner) -> tuple[str, 
     return device, info
 
 
+def _resolve_local_paths(args: CalibrationArgs) -> None:
+    # The phases run in a scratch cwd, so local paths are made absolute against the caller's cwd.
+    if os.path.exists(args.model):
+        args.model = os.path.abspath(args.model)
+    if args.include_path is not None:
+        args.include_path = os.path.abspath(args.include_path)
+
+
 def _resolve_chat_template(args: CalibrationArgs, info: ModelInfo) -> None:
     if args.apply_chat_template and info.has_chat_template is False:
         logger.warning("%s has no chat template; running the tasks on raw prompts", args.model)
@@ -332,6 +340,7 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
     """
     args.validate()
     started = time.time()
+    _resolve_local_paths(args)
     device, info = detect_model_info(args, runner)
     if info.is_encoder_decoder:
         raise ValueError(f"{args.model} is an encoder-decoder model; INC calibration supports decoder-only models")
