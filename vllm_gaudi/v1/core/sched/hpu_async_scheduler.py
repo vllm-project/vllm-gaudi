@@ -138,6 +138,38 @@ class HPUAsyncScheduler(AsyncScheduler):
             for block_type in ("mamba", "gdn_attention", "linear_attention"))
 
     @cached_property
+    def _is_qwen3_5_hybrid(self) -> bool:
+        """Whether the served model is a Qwen3.5-style hybrid.
+
+        Only these models force ``cache_config.block_size`` to 128 while leaving
+        ``mamba_block_size`` large, so only they need chunk ends snapped to
+        ``mamba_block_size`` (see ``_mamba_block_aligned_split``). Local import
+        avoids a module-load cycle with platform.py.
+        """
+        from vllm_gaudi.platform import is_qwen3_5_hybrid_model
+        return is_qwen3_5_hybrid_model(self.vllm_config.model_config)
+
+    @cached_property
+    def _align_to_mamba_block(self) -> bool:
+        """Whether to snap prefill chunk ends to mamba_block_size.
+
+        True only for Qwen3.5-style hybrids running non-compact GDN with prefix
+        caching: those force cache_config.block_size to 128 while
+        mamba_block_size stays large, so mamba_chunk_size alignment never lands
+        on the align-mode SSM checkpoint grid. (Compact GDN is auto-disabled
+        under prefix caching, so this path is non-compact by construction; the
+        check is kept explicit.) Every other model keeps mamba_chunk_size
+        alignment. Model-lifetime constant, so computed once.
+        """
+        cache_config = self.vllm_config.cache_config
+        if not (cache_config.enable_prefix_caching and cache_config.mamba_block_size):
+            return False
+        if not self._is_qwen3_5_hybrid:
+            return False
+        from vllm_gaudi.platform import HpuPlatform
+        return not HpuPlatform._compact_gdn_active(self.vllm_config)
+
+    @cached_property
     def _mamba_align_chunk_size(self) -> int:
         """Chunk size to align chunked-prefill splits to, mirroring the runner's
         fallback (see ``mamba_chunk_size`` in hpu_model_runner.py).
@@ -160,12 +192,25 @@ class HPUAsyncScheduler(AsyncScheduler):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
-        """HPU override: align chunked-prefill splits to mamba_chunk_size.
+        """HPU override: align chunked-prefill splits so SSM checkpoints land.
 
-        The upstream implementation aligns to block_size (e.g. 768).  On HPU
-        the model runner requires context_lens to be a multiple of
-        mamba_chunk_size.  Since block_size must stay large for memory-layout
-        reasons, we substitute mamba_chunk_size here.
+        On HPU the model runner requires context_lens to be a multiple of
+        mamba_chunk_size, and the upstream aligner uses cache_config.block_size.
+
+        For most hybrids block_size == mamba_block_size, so aligning chunk ends
+        to mamba_chunk_size keeps the runner happy and checkpoints land on the
+        state grid; that behavior is retained unchanged.
+
+        Qwen3.5-style hybrids are special: HPU forces cache_config.block_size to
+        128 while mamba_block_size stays large (e.g. 896). In "align" cache mode
+        a reusable SSM state is checkpointed only when a step ends on a
+        mamba_block_size boundary, so clipping to mamba_chunk_size (128) strands
+        those checkpoints and prefix-cache hits collapse to
+        LCM(step budget, mamba_block_size). For these models we snap chunk ends
+        to mamba_block_size instead. mamba_block_size is a multiple of
+        mamba_chunk_size (runner-enforced), so the context_lens invariant still
+        holds; if a full block does not fit the step budget we fall back to
+        mamba_chunk_size alignment.
 
         Both the layer count and the chunk size must match the model runner's
         own logic exactly (see the cached properties above); a mismatch makes
@@ -173,19 +218,24 @@ class HPUAsyncScheduler(AsyncScheduler):
         """
         chunk_size = self._mamba_align_chunk_size
         num_mamba_layers = self._num_mamba_like_layers
-        if num_mamba_layers == 0 or not self.vllm_config.cache_config.enable_prefix_caching:
+        cache_config = self.vllm_config.cache_config
+        if num_mamba_layers == 0 or not cache_config.enable_prefix_caching:
             return super()._mamba_block_aligned_split(request, num_new_tokens, num_new_local_computed_tokens,
                                                       num_external_computed_tokens)
 
-        num_computed_tokens = (request.num_computed_tokens + num_new_local_computed_tokens +
-                               num_external_computed_tokens)
+        start = (request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens)
         prompt_end = max(request.num_prompt_tokens, request.num_tokens - 1)
-        if num_computed_tokens < prompt_end:
-            remaining = prompt_end - num_computed_tokens
-            if num_new_tokens < remaining:
+        if start < prompt_end and num_new_tokens < prompt_end - start:
+            if self._align_to_mamba_block:
+                # Snap the chunk end to the mamba_block_size grid; fall back to
+                # chunk_size alignment when a full block won't fit this step.
+                block_size = cache_config.mamba_block_size
+                aligned = (start + num_new_tokens) // block_size * block_size - start
+                num_new_tokens = aligned if aligned > 0 else (num_new_tokens // chunk_size * chunk_size)
+            else:
                 # Partial prefill: round down so context_lens stays
                 # chunk_size-aligned after this step.
-                num_new_tokens = (num_new_tokens // chunk_size * chunk_size)
+                num_new_tokens = num_new_tokens // chunk_size * chunk_size
         return num_new_tokens
 
     def _update_request_with_output(self, request: Request, new_token_ids: list[int],
