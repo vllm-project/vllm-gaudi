@@ -256,13 +256,6 @@ class HpuQwen4ExpForwardMetadata:
             return torch.tensor([self.ctx0 + self.qlen], dtype=torch.int64, device=device)
         return torch.full((self.num_real_reqs, ), 1, dtype=torch.int64, device=device)
 
-    def current_tokens(self, eos_token_id: int) -> torch.Tensor:
-        """[num_real_reqs] current-step token ids (decode)."""
-        # token rows are request-major: row r carries request r's token.
-        # (token ids are not exposed on the metadata; the caller passes the
-        # model's input_ids instead — see PLE forward.)
-        raise NotImplementedError("use input_ids from the model forward")
-
 
 def _get_hpu_metadata(num_tokens: int) -> HpuQwen4ExpForwardMetadata | None:
     forward_context = get_forward_context()
