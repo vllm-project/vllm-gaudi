@@ -162,13 +162,19 @@ def resolve_configs(preset: ResolvedPreset,
         base_dir: Directory a relative ``dump_stats_path`` is resolved against, normally the invoking cwd.
 
     Raises:
-        ValueError: If a user config is invalid, or two user configs differ in ``dump_stats_path`` or ``observer``.
+        ValueError: If a user config is invalid or has the mode of the other phase, or two user configs differ
+            in ``dump_stats_path`` or ``observer``.
     """
     measure, quant = build_configs(preset, layout, options)
     if measure_config:
         measure = load_user_config(measure_config, base_dir=base_dir)
+        if str(measure.get("mode", "")).upper() != "MEASURE":
+            raise ValueError(f"{measure_config}: --measure-config needs \"mode\": \"MEASURE\"")
     if quant_config:
         quant = load_user_config(quant_config, base_dir=base_dir)
+        # INC defaults the mode to QUANTIZE.
+        if str(quant.get("mode", "QUANTIZE")).upper() != "QUANTIZE":
+            raise ValueError(f"{quant_config}: --quant-config needs \"mode\": \"QUANTIZE\" or no mode")
     # dump_stats_path is required in a user config; INC defaults the observer to maxabs.
     for key, default, normalize in (("dump_stats_path", None, os.path.normpath), ("observer", DEFAULT_OBSERVER, str)):
         measure_value, quant_value = measure.get(key, default), quant.get(key, default)

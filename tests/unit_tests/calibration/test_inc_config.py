@@ -134,3 +134,25 @@ def test_resolve_configs_aligns_observer(tmp_path):
                                      quant_config=str(other),
                                      base_dir=tmp_path)
     assert "observer" not in measure and "observer" not in quant
+
+
+@pytest.mark.parametrize("option, mode", [("measure_config", None), ("measure_config", "QUANTIZE"),
+                                          ("quant_config", "MEASURE")])
+def test_resolve_configs_rejects_the_other_phase_mode(tmp_path, option, mode):
+    preset = resolve_preset(ModelInfo(model_type="llama"), "m")
+    layout = OutputLayout.create("/out", "m", "g3")
+    user = tmp_path / "user.json"
+    user.write_text(json.dumps({"dump_stats_path": "/s/inc", **({"mode": mode} if mode else {})}))
+    with pytest.raises(ValueError, match="mode"):
+        resolve_configs(preset, layout, base_dir=tmp_path, **{option: str(user)})
+
+
+def test_resolve_configs_accepts_quant_config_without_mode(tmp_path):
+    preset = resolve_preset(ModelInfo(model_type="llama"), "m")
+    user = tmp_path / "quant.json"
+    user.write_text(json.dumps({"dump_stats_path": "/s/inc"}))
+    _, quant = resolve_configs(preset,
+                               OutputLayout.create("/out", "m", "g3"),
+                               quant_config=str(user),
+                               base_dir=tmp_path)
+    assert "mode" not in quant
