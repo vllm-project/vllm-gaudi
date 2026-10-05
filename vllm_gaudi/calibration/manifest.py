@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """The calibration manifest: what was calibrated, how, and with which software.
 
-The manifest is written next to the measurement files, so a set of scales can always be
-traced back to the model, tasks, presets and library versions that produced it.
+The manifest is written to the device directory of the output layout and records the directory
+of the measurement files, so a set of scales can always be traced back to the model, tasks,
+presets and library versions that produced it. The two directories differ only when a custom
+config sets another ``dump_stats_path``.
 """
 
 import datetime
