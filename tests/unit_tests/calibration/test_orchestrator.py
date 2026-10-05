@@ -235,6 +235,16 @@ def test_model_rejections(tmp_path):
         run_calibration(args(tmp_path, expand_to_ep=4), FakeRunner(QWEN))
 
 
+def test_dry_run_records_the_quant_config_buffer(tmp_path):
+    buffer = tmp_path / "shared" / "quant_config.json"
+    manifest = run_calibration(
+        args(tmp_path / "out", device="g3", dry_run=True, multi_node=True, quant_config_buffer=str(buffer)),
+        FakeRunner(QWEN))
+    for phase in ("measure", "quantize"):
+        assert manifest["phases"][phase]["env"]["QUANT_CONFIG"] == str(buffer)
+    assert not buffer.exists()
+
+
 def test_quant_config_buffer_is_written_and_used(tmp_path):
     buffer = tmp_path / "shared" / "quant_config.json"
     buffer.parent.mkdir()
