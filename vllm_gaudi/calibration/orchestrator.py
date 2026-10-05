@@ -25,7 +25,7 @@ from vllm_gaudi.calibration import lmeval
 from vllm_gaudi.calibration.args import CalibrationArgs
 from vllm_gaudi.calibration.detect import ModelInfo
 from vllm_gaudi.calibration.expand import expand_dir
-from vllm_gaudi.calibration.inc_config import build_configs, load_user_config, write_json_atomic
+from vllm_gaudi.calibration.inc_config import resolve_configs, write_json_atomic
 from vllm_gaudi.calibration.layout import DEFAULT_OBSERVER, OutputLayout
 from vllm_gaudi.calibration.manifest import build_manifest, inventory, redact_env
 from vllm_gaudi.calibration.measurements import SCALES, list_measurement_files
@@ -278,20 +278,12 @@ def _resolve_chat_template(args: CalibrationArgs, info: ModelInfo) -> None:
 
 
 def _write_configs(args: CalibrationArgs, preset: ResolvedPreset, layout: OutputLayout) -> tuple[dict, dict]:
-    measure, quant = build_configs(preset, layout, args.quant_options)
-    if args.measure_config:
-        measure = load_user_config(args.measure_config, base_dir=os.getcwd())
-    if args.quant_config:
-        quant = load_user_config(args.quant_config, base_dir=os.getcwd())
-    # QUANTIZE reads the measurements from its own dump_stats_path, so a generated config follows a user one.
-    if args.measure_config and not args.quant_config:
-        quant["dump_stats_path"] = measure["dump_stats_path"]
-    elif args.quant_config and not args.measure_config:
-        measure["dump_stats_path"] = quant["dump_stats_path"]
-    elif os.path.normpath(measure["dump_stats_path"]) != os.path.normpath(quant["dump_stats_path"]):
-        raise ValueError(f"--measure-config and --quant-config have different dump_stats_path values "
-                         f"({measure['dump_stats_path']} and {quant['dump_stats_path']}); QUANTIZE would not find "
-                         "the measurements")
+    measure, quant = resolve_configs(preset,
+                                     layout,
+                                     args.quant_options,
+                                     measure_config=args.measure_config,
+                                     quant_config=args.quant_config,
+                                     base_dir=os.getcwd())
     write_json_atomic(layout.measure_config, measure)
     write_json_atomic(layout.quant_config, quant)
     Path(measure["dump_stats_path"]).parent.mkdir(parents=True, exist_ok=True)

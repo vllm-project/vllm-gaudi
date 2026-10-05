@@ -139,3 +139,42 @@ def load_user_config(path: str | os.PathLike[str], *, base_dir: str | os.PathLik
     if not os.path.isabs(dump):
         config["dump_stats_path"] = os.path.normpath(os.path.join(os.fspath(base_dir), dump))
     return config
+
+
+def resolve_configs(preset: ResolvedPreset,
+                    layout: OutputLayout,
+                    options: QuantOptions | None = None,
+                    *,
+                    measure_config: str | None = None,
+                    quant_config: str | None = None,
+                    base_dir: str | os.PathLike[str]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Returns the ``(measure, quant)`` configs of a run, with user configs replacing the generated ones.
+
+    QUANTIZE reads the measurements from its own ``dump_stats_path``, so a generated config takes
+    the path of a user config given for the other phase.
+
+    Args:
+        preset: The resolved model family preset.
+        layout: The output layout of the run.
+        options: Optional QUANTIZE settings.
+        measure_config: Path of the ``--measure-config`` file, if any.
+        quant_config: Path of the ``--quant-config`` file, if any.
+        base_dir: Directory a relative ``dump_stats_path`` is resolved against, normally the invoking cwd.
+
+    Raises:
+        ValueError: If a user config is invalid, or two user configs have different ``dump_stats_path`` values.
+    """
+    measure, quant = build_configs(preset, layout, options)
+    if measure_config:
+        measure = load_user_config(measure_config, base_dir=base_dir)
+    if quant_config:
+        quant = load_user_config(quant_config, base_dir=base_dir)
+    if measure_config and not quant_config:
+        quant["dump_stats_path"] = measure["dump_stats_path"]
+    elif quant_config and not measure_config:
+        measure["dump_stats_path"] = quant["dump_stats_path"]
+    elif os.path.normpath(measure["dump_stats_path"]) != os.path.normpath(quant["dump_stats_path"]):
+        raise ValueError(f"--measure-config and --quant-config have different dump_stats_path values "
+                         f"({measure['dump_stats_path']} and {quant['dump_stats_path']}); QUANTIZE would not find "
+                         "the measurements")
+    return measure, quant

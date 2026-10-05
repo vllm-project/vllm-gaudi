@@ -5,7 +5,8 @@ from typing import Any
 import pytest
 
 from vllm_gaudi.calibration.detect import ModelInfo
-from vllm_gaudi.calibration.inc_config import (QuantOptions, build_configs, load_user_config, write_json_atomic)
+from vllm_gaudi.calibration.inc_config import (QuantOptions, build_configs, load_user_config, resolve_configs,
+                                               write_json_atomic)
 from vllm_gaudi.calibration.layout import OutputLayout
 from vllm_gaudi.calibration.presets import resolve_preset
 
@@ -96,3 +97,19 @@ def test_load_user_config_rejects_invalid(tmp_path, content):
     cfg.write_text(content)
     with pytest.raises(ValueError):
         load_user_config(cfg, base_dir=tmp_path)
+
+
+def test_resolve_configs_aligns_dump_stats_path(tmp_path):
+    preset = resolve_preset(ModelInfo(model_type="llama"), "m")
+    layout = OutputLayout.create("/out", "m", "g3")
+    user = tmp_path / "measure.json"
+    user.write_text(json.dumps({"mode": "MEASURE", "dump_stats_path": "custom/inc_output"}))
+    measure, quant = resolve_configs(preset, layout, measure_config=str(user), base_dir=tmp_path)
+    assert quant["mode"] == "QUANTIZE"
+    assert measure["dump_stats_path"] == quant["dump_stats_path"] == str(tmp_path / "custom" / "inc_output")
+    generated = resolve_configs(preset, layout, base_dir=tmp_path)
+    assert generated == build_configs(preset, layout)
+    other = tmp_path / "quant.json"
+    other.write_text(json.dumps({"mode": "QUANTIZE", "dump_stats_path": "/elsewhere/inc_output"}))
+    with pytest.raises(ValueError, match="dump_stats_path"):
+        resolve_configs(preset, layout, measure_config=str(user), quant_config=str(other), base_dir=tmp_path)
