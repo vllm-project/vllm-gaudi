@@ -107,6 +107,21 @@ def args(**kwargs) -> CalibrationArgs:
             "tensor_parallel_size": 2
         }
     },
+    {
+        "engine_args": {
+            "model": "Other/Model"
+        }
+    },
+    {
+        "engine_args": {
+            "pipeline_parallel_size": 2
+        }
+    },
+    {
+        "engine_args": {
+            "data_parallel_size": 2
+        }
+    },
 ])
 def test_validate_rejects(kwargs):
     with pytest.raises(ValueError):
