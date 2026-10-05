@@ -56,13 +56,14 @@ Each run writes `<output_dir>/<model_name>/<device>/calibration_manifest.json`. 
 | `preset` | The resolved preset: blocklist, allowlist, scale method and format, engine arguments, environment, and notes. |
 | `tasks`, `limit`, `num_fewshot`, `apply_chat_template`, `fewshot_as_multiturn` | The lm-eval settings of the MEASURE phase. |
 | `tensor_parallel_size` | The `--tp` of the run. |
+| `stats_dir` | Directory of the measurement and scale files. It is the `<device>` directory unless a custom config sets another `dump_stats_path`. |
 | `configs` | Paths of the measure and quant configs. |
 | `model_args` | The lm-eval vLLM model arguments of each phase. |
 | `phases` | Per phase: `duration_s`, `metrics` (lm-eval results, `null` without evaluation), and `env` (variables the tool added or changed, with credential-like names redacted). For `--dry-run`, only `env`. |
 | `postprocess` | Number of KV cache inputs fixed per measurement file. |
 | `unify`, `expand` | Target world size and written files, when `--unify-to-tp` or `--expand-to-ep` was used. |
 | `serve_command` | The command printed at the end of the run. Not written for `--dry-run`. |
-| `files` | The INC output files in the `<device>` directory. |
+| `files` | The INC output files in `stats_dir`. |
 | `duration_s` | Total run time. |
 
 The `phases.quantize.metrics` entry holds the smoke evaluation results. Compare them with a BF16 run of the same task to spot an accuracy problem early. To evaluate the full task set instead, pass `--quantize-eval full`.

@@ -201,6 +201,8 @@ def test_user_config_dump_stats_path(tmp_path, monkeypatch):
     quant = json.loads((tmp_path / "out" / "my-model" / "maxabs_quant_g3.json").read_text())
     assert quant["mode"] == "QUANTIZE"
     assert quant["dump_stats_path"] == str(tmp_path / "custom" / "inc_output")
+    manifest = json.loads((tmp_path / "out" / "my-model" / "g3" / "calibration_manifest.json").read_text())
+    assert manifest["stats_dir"] == str(tmp_path / "custom")
     other = tmp_path / "quant.json"
     other.write_text(json.dumps({**custom, "mode": "QUANTIZE", "dump_stats_path": "/elsewhere/inc_output"}))
     with pytest.raises(ValueError, match="dump_stats_path"):
