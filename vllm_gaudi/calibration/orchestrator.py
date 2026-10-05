@@ -383,6 +383,9 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
     if args.dry_run:
         for phase in args.phases:
             cfg_path = layout.measure_config if phase == "measure" else layout.quant_config
+            # Records the buffer path the phases would use, without overwriting the shared file.
+            if args.quant_config_buffer is not None:
+                cfg_path = Path(os.path.abspath(args.quant_config_buffer))
             env = build_phase_env(os.environ,
                                   quant_config=str(cfg_path),
                                   tp=args.tp,
