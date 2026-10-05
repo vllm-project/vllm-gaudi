@@ -695,10 +695,30 @@ class InputBatch:
         # a synchronous copy, which stalls the host on every step.
         idx = async_h2d_copy(req_indices, dtype=torch.long, device=self.device)
         prompt_token_ids = None
+        # Fast path for trivial selections: the identity prefix
+        # (req_indices == [0..n)) and the single-row broadcast (all indices
+        # equal) can be updated and read with plain slices instead of the
+        # eager index-op family (index_copy_ updates and index_select
+        # gathers). The slices are semantically identical for these
+        # selections and avoid launching HPU eager index kernels in the
+        # common unpadded / single-request cases.
+        num_selected = len(req_indices)
+        identity_selection = req_indices == list(range(num_selected))
+        broadcast_selection = num_selected > 0 and req_indices.count(req_indices[0]) == num_selected
         if not skip_copy:
-            async_h2d_update(self.temperature_cpu_tensor, self.temperature, req_indices, indices_device=idx)
-            async_h2d_update(self.top_p_cpu_tensor, self.top_p, req_indices, indices_device=idx)
-            async_h2d_update(self.top_k_cpu_tensor, self.top_k, req_indices, indices_device=idx)
+            if identity_selection:
+                self.temperature[:num_selected].copy_(self.temperature_cpu_tensor[:num_selected], non_blocking=True)
+                self.top_p[:num_selected].copy_(self.top_p_cpu_tensor[:num_selected], non_blocking=True)
+                self.top_k[:num_selected].copy_(self.top_k_cpu_tensor[:num_selected], non_blocking=True)
+            elif broadcast_selection:
+                row = req_indices[0]
+                self.temperature[row].copy_(self.temperature_cpu_tensor[row], non_blocking=True)
+                self.top_p[row].copy_(self.top_p_cpu_tensor[row], non_blocking=True)
+                self.top_k[row].copy_(self.top_k_cpu_tensor[row], non_blocking=True)
+            else:
+                async_h2d_update(self.temperature_cpu_tensor, self.temperature, req_indices, indices_device=idx)
+                async_h2d_update(self.top_p_cpu_tensor, self.top_p, req_indices, indices_device=idx)
+                async_h2d_update(self.top_k_cpu_tensor, self.top_k, req_indices, indices_device=idx)
             if not self.no_penalties:
                 # Since syncing these tensors is expensive only copy them
                 # if necessary i.e. if there are requests which require
@@ -751,12 +771,25 @@ class InputBatch:
                              req_indices,
                              indices_device=idx)
             allowed_token_ids_mask = self.allowed_token_ids_mask.index_select(0, idx)
+        if identity_selection:
+            temperature = self.temperature[:num_selected]
+            top_p = None if self.no_top_p else self.top_p[:num_selected]
+            top_k = None if self.no_top_k else self.top_k[:num_selected]
+        elif broadcast_selection:
+            row = req_indices[0]
+            temperature = self.temperature[row].repeat(num_selected)
+            top_p = None if self.no_top_p else self.top_p[row].repeat(num_selected)
+            top_k = None if self.no_top_k else self.top_k[row].repeat(num_selected)
+        else:
+            temperature = self.temperature.index_select(0, idx)
+            top_p = None if self.no_top_p else self.top_p.index_select(0, idx)
+            top_k = None if self.no_top_k else self.top_k.index_select(0, idx)
         return SamplingMetadata(
-            temperature=self.temperature.index_select(0, idx),
+            temperature=temperature,
             all_greedy=self.all_greedy,
             all_random=self.all_random,
-            top_p=None if self.no_top_p else self.top_p.index_select(0, idx),
-            top_k=None if self.no_top_k else self.top_k.index_select(0, idx),
+            top_p=top_p,
+            top_k=top_k,
             generators={
                 i: self.generators[req_idx]
                 for i, req_idx in enumerate(req_indices) if self.generators.get(req_idx, None) is not None
