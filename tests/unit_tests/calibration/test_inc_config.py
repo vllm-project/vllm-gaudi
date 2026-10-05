@@ -113,3 +113,24 @@ def test_resolve_configs_aligns_dump_stats_path(tmp_path):
     other.write_text(json.dumps({"mode": "QUANTIZE", "dump_stats_path": "/elsewhere/inc_output"}))
     with pytest.raises(ValueError, match="dump_stats_path"):
         resolve_configs(preset, layout, measure_config=str(user), quant_config=str(other), base_dir=tmp_path)
+
+
+def test_resolve_configs_aligns_observer(tmp_path):
+    preset = resolve_preset(ModelInfo(model_type="llama"), "m")
+    layout = OutputLayout.create("/out", "m", "g3")
+    user = tmp_path / "measure.json"
+    user.write_text(json.dumps({"mode": "MEASURE", "observer": "maxabs_per_channel", "dump_stats_path": "/s/inc"}))
+    _, quant = resolve_configs(preset, layout, measure_config=str(user), base_dir=tmp_path)
+    assert quant["observer"] == "maxabs_per_channel"
+    # A user config without an observer gets INC's default, maxabs.
+    other = tmp_path / "quant.json"
+    other.write_text(json.dumps({"mode": "QUANTIZE", "dump_stats_path": "/s/inc"}))
+    with pytest.raises(ValueError, match="observer"):
+        resolve_configs(preset, layout, measure_config=str(user), quant_config=str(other), base_dir=tmp_path)
+    user.write_text(json.dumps({"mode": "MEASURE", "dump_stats_path": "/s/inc"}))
+    measure, quant = resolve_configs(preset,
+                                     layout,
+                                     measure_config=str(user),
+                                     quant_config=str(other),
+                                     base_dir=tmp_path)
+    assert "observer" not in measure and "observer" not in quant

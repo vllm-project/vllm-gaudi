@@ -150,8 +150,8 @@ def resolve_configs(preset: ResolvedPreset,
                     base_dir: str | os.PathLike[str]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Returns the ``(measure, quant)`` configs of a run, with user configs replacing the generated ones.
 
-    QUANTIZE reads the measurements from its own ``dump_stats_path``, so a generated config takes
-    the path of a user config given for the other phase.
+    QUANTIZE finds the measurements by a file name built from its own ``dump_stats_path`` and
+    ``observer``, so a generated config takes both from a user config given for the other phase.
 
     Args:
         preset: The resolved model family preset.
@@ -162,19 +162,21 @@ def resolve_configs(preset: ResolvedPreset,
         base_dir: Directory a relative ``dump_stats_path`` is resolved against, normally the invoking cwd.
 
     Raises:
-        ValueError: If a user config is invalid, or two user configs have different ``dump_stats_path`` values.
+        ValueError: If a user config is invalid, or two user configs differ in ``dump_stats_path`` or ``observer``.
     """
     measure, quant = build_configs(preset, layout, options)
     if measure_config:
         measure = load_user_config(measure_config, base_dir=base_dir)
     if quant_config:
         quant = load_user_config(quant_config, base_dir=base_dir)
-    if measure_config and not quant_config:
-        quant["dump_stats_path"] = measure["dump_stats_path"]
-    elif quant_config and not measure_config:
-        measure["dump_stats_path"] = quant["dump_stats_path"]
-    elif os.path.normpath(measure["dump_stats_path"]) != os.path.normpath(quant["dump_stats_path"]):
-        raise ValueError(f"--measure-config and --quant-config have different dump_stats_path values "
-                         f"({measure['dump_stats_path']} and {quant['dump_stats_path']}); QUANTIZE would not find "
-                         "the measurements")
+    # dump_stats_path is required in a user config; INC defaults the observer to maxabs.
+    for key, default, normalize in (("dump_stats_path", None, os.path.normpath), ("observer", DEFAULT_OBSERVER, str)):
+        measure_value, quant_value = measure.get(key, default), quant.get(key, default)
+        if measure_config and not quant_config:
+            quant[key] = measure_value
+        elif quant_config and not measure_config:
+            measure[key] = quant_value
+        elif normalize(measure_value) != normalize(quant_value):
+            raise ValueError(f"--measure-config and --quant-config have different {key} values "
+                             f"({measure_value} and {quant_value}); QUANTIZE would not find the measurements")
     return measure, quant
