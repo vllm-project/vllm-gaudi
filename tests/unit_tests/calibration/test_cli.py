@@ -97,3 +97,18 @@ def test_unify_subcommand(tmp_path):
     assert cli.main(["unify", "-m", str(tmp_path), "-r", "1"]) == 0
     unified = json.loads((tmp_path / f"{PREFIX}_0_1.json").read_text())
     assert unified["LocalRank"] == -1
+
+
+def test_print_config_aligns_user_config_like_run(tmp_path, monkeypatch, capsys):
+    from vllm_gaudi.calibration import detect
+    from vllm_gaudi.calibration.detect import ModelInfo
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(detect, "detect_model", lambda model, trust_remote_code: ModelInfo(model_type="llama"))
+    (tmp_path / "measure.json").write_text(json.dumps({"mode": "MEASURE", "dump_stats_path": "custom/inc_output"}))
+    assert cli.main(["print-config", "Org/My-Model", "-o", "out", "--device", "g3", "--measure-config",
+                     "measure.json"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    quant = printed[str(tmp_path / "out" / "my-model" / "maxabs_quant_g3.json")]
+    assert quant["mode"] == "QUANTIZE"
+    assert quant["dump_stats_path"] == str(tmp_path / "custom" / "inc_output")
