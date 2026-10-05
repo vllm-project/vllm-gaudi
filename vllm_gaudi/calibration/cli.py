@@ -15,6 +15,7 @@ import argparse
 import dataclasses
 import json
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from typing import Any
@@ -328,7 +329,7 @@ def _cmd_detect(ns: argparse.Namespace) -> int:
 
 def _cmd_print_config(ns: argparse.Namespace) -> int:
     from vllm_gaudi.calibration.detect import ModelInfo, detect_device, detect_model
-    from vllm_gaudi.calibration.inc_config import build_configs, load_user_config
+    from vllm_gaudi.calibration.inc_config import resolve_configs
     from vllm_gaudi.calibration.layout import OutputLayout
     from vllm_gaudi.calibration.presets import resolve_preset
 
@@ -348,11 +349,12 @@ def _cmd_print_config(ns: argparse.Namespace) -> int:
                             scale_method=ns.scale_method,
                             scale_format=ns.scale_format,
                             quantize_vision_tower=ns.quantize_vision_tower)
-    measure, quant = build_configs(preset, layout, _quant_options(ns))
-    if ns.measure_config:
-        measure = load_user_config(ns.measure_config, base_dir=".")
-    if ns.quant_config:
-        quant = load_user_config(ns.quant_config, base_dir=".")
+    measure, quant = resolve_configs(preset,
+                                     layout,
+                                     _quant_options(ns),
+                                     measure_config=ns.measure_config,
+                                     quant_config=ns.quant_config,
+                                     base_dir=os.getcwd())
     _emit({
         "model": info.to_dict(),
         "preset": preset.to_dict(),
