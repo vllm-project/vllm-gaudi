@@ -159,3 +159,8 @@ class CalibrationArgs:
                 self.unify_to_tp = 1
         if self.quant_config_buffer is not None and not self.multi_node:
             raise ValueError("--quant-config-buffer is only used with --multi-node")
+        # The checks and the serve command rely on the positional model and --tp.
+        owned = {"pretrained": "the MODEL argument", "tensor_parallel_size": "--tp"}
+        for key, option in owned.items():
+            if key in self.engine_args:
+                raise ValueError(f"--engine-arg {key} is not supported; use {option}")
