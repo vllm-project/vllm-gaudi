@@ -82,7 +82,7 @@ The options marked `unset` are written to the quant config only when given. `--b
 | `--dtype` | `bfloat16` | Model dtype. |
 | `--max-images` | `1` | Images per prompt, multimodal models only. |
 | `--image-max-side <pixels>` | `1280` | Multimodal models only. lm-eval resizes each image so that its longest side is at most this many pixels, keeping the aspect ratio. `0` keeps the original size. |
-| `--engine-arg KEY=VALUE` | none | Extra `vllm.LLM` argument. `VALUE` is parsed as JSON when possible (`true`, `0.5`, `{"a": 1}`), otherwise kept as a string. Overrides every other engine argument, except `pretrained` and `tensor_parallel_size`, which are rejected; use the `MODEL` argument and `--tp`. Repeatable. |
+| `--engine-arg KEY=VALUE` | none | Extra `vllm.LLM` argument. `VALUE` is parsed as JSON when possible (`true`, `0.5`, `{"a": 1}`), otherwise kept as a string. Overrides every other engine argument, except `pretrained`, `model`, `tensor_parallel_size`, `pipeline_parallel_size`, and `data_parallel_size`, which are rejected; use the `MODEL` argument and `--tp`. Repeatable. |
 | `--env KEY=VALUE` | none | Environment variable for the MEASURE and QUANTIZE phases. Overrides the tool and preset defaults. Repeatable. |
 
 #### Flow Options
