@@ -235,6 +235,14 @@ def test_model_rejections(tmp_path):
         run_calibration(args(tmp_path, expand_to_ep=4), FakeRunner(QWEN))
 
 
+def test_manifest_redacts_credential_engine_args(tmp_path):
+    runner = FakeRunner(QWEN)
+    manifest = run_calibration(args(tmp_path, engine_args={"hf_token": "hf_secret"}), runner)
+    assert manifest["model_args"]["measure"]["hf_token"] == "<redacted>"
+    assert "hf_secret" not in (tmp_path / "my-model" / "g3" / "calibration_manifest.json").read_text()
+    assert runner.calls[1][1]["model_args"]["hf_token"] == "hf_secret"
+
+
 def test_dry_run_records_the_quant_config_buffer(tmp_path):
     buffer = tmp_path / "shared" / "quant_config.json"
     manifest = run_calibration(
