@@ -179,15 +179,24 @@ def build_parser() -> argparse.ArgumentParser:
     unify.add_argument("-o", "--out", help="Output directory (default: in place).")
     unify.add_argument("--ep", action="store_true", help="Measurements were taken with expert parallelism.")
     unify.add_argument("--skip-scales", action="store_true", help="Unify the measure files only.")
+    unify.add_argument("--observer",
+                       default=DEFAULT_OBSERVER,
+                       help="INC observer in the file names, the observer of the measure config.")
 
     expand = sub.add_parser("expand", help="Expand a world size 1 MoE measurement to expert parallel ranks.")
     expand.add_argument("-m", "--measurements", required=True, help="Directory with the world size 1 measurement.")
     expand.add_argument("-w", "--world-size", type=int, required=True, help="Target expert parallel world size.")
     expand.add_argument("-o", "--out", help="Output directory (default: in place).")
+    expand.add_argument("--observer",
+                        default=DEFAULT_OBSERVER,
+                        help="INC observer in the file names, the observer of the measure config.")
 
     post = sub.add_parser("postprocess", help="Fix the KV cache inputs of attention matmuls in measurements.")
     post.add_argument("-m", "--measurements", required=True, help="Directory with the measurement files.")
     post.add_argument("-o", "--out", help="Output directory (default: in place).")
+    post.add_argument("--observer",
+                      default=DEFAULT_OBSERVER,
+                      help="INC observer in the file names, the observer of the measure config.")
 
     detect = sub.add_parser("detect", help="Print the device type and the detected model facts.")
     detect.add_argument("model", help="Local model directory or Hugging Face model ID.")
@@ -289,7 +298,12 @@ def _cmd_run(ns: argparse.Namespace) -> int:
 def _cmd_unify(ns: argparse.Namespace) -> int:
     from vllm_gaudi.calibration.unify import unify_dir
 
-    written = unify_dir(ns.measurements, ns.rank, ns.out, use_ep=ns.ep, skip_scales=ns.skip_scales)
+    written = unify_dir(ns.measurements,
+                        ns.rank,
+                        ns.out,
+                        use_ep=ns.ep,
+                        skip_scales=ns.skip_scales,
+                        observer=ns.observer)
     logger.info("Wrote %d files", len(written))
     return 0
 
@@ -297,7 +311,7 @@ def _cmd_unify(ns: argparse.Namespace) -> int:
 def _cmd_expand(ns: argparse.Namespace) -> int:
     from vllm_gaudi.calibration.expand import expand_dir
 
-    written = expand_dir(ns.measurements, ns.world_size, ns.out)
+    written = expand_dir(ns.measurements, ns.world_size, ns.out, observer=ns.observer)
     logger.info("Wrote %d files", len(written))
     return 0
 
@@ -305,7 +319,7 @@ def _cmd_expand(ns: argparse.Namespace) -> int:
 def _cmd_postprocess(ns: argparse.Namespace) -> int:
     from vllm_gaudi.calibration.postprocess import postprocess_dir
 
-    changes = postprocess_dir(ns.measurements, ns.out, observer=DEFAULT_OBSERVER)
+    changes = postprocess_dir(ns.measurements, ns.out, observer=ns.observer)
     logger.info("Fixed %d KV cache inputs in %d files", sum(changes.values()), len(changes))
     return 0
 
