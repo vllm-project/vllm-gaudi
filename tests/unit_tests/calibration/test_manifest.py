@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from vllm_gaudi.calibration.layout import MANIFEST_NAME
-from vllm_gaudi.calibration.manifest import MANIFEST_VERSION, build_manifest, inventory, redact_env
+from vllm_gaudi.calibration.manifest import MANIFEST_VERSION, build_manifest, inventory, redact_args, redact_env
 
 
 def test_redact_env_masks_credentials_only():
@@ -27,3 +27,32 @@ def test_build_manifest_header():
     assert manifest["model"] == "m"
     assert isinstance(manifest["versions"], dict)
     assert manifest["created_at"].endswith("+00:00")
+
+
+def test_redact_args_masks_credential_arguments_at_any_depth():
+    args = {
+        "measure": {
+            "hf_token": "hf_abc",
+            "tokenizer": "org/tok",
+            "max_num_batched_tokens": 8192,
+            "hf_overrides": {
+                "api_key": "x"
+            },
+            "kv_transfer": [{
+                "password": "p"
+            }],
+        }
+    }
+    assert redact_args(args) == {
+        "measure": {
+            "hf_token": "<redacted>",
+            "tokenizer": "org/tok",
+            "max_num_batched_tokens": 8192,
+            "hf_overrides": {
+                "api_key": "<redacted>"
+            },
+            "kv_transfer": [{
+                "password": "<redacted>"
+            }],
+        }
+    }

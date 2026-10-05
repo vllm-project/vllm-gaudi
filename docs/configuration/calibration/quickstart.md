@@ -58,7 +58,7 @@ Each run writes `<output_dir>/<model_name>/<device>/calibration_manifest.json`. 
 | `tensor_parallel_size` | The `--tp` of the run. |
 | `stats_dir` | Directory of the measurement and scale files. It is the `<device>` directory unless a custom config sets another `dump_stats_path`. |
 | `configs` | Paths of the measure and quant configs. |
-| `model_args` | The lm-eval vLLM model arguments of each phase. |
+| `model_args` | The lm-eval vLLM model arguments of each phase. Values of credential-like arguments, such as `hf_token`, are recorded as `<redacted>`. |
 | `phases` | Per phase: `duration_s`, `metrics` (lm-eval results, `null` without evaluation), and `env` (variables the tool added or changed, with credential-like names redacted). For `--dry-run`, only `env`. |
 | `postprocess` | Number of KV cache inputs fixed per measurement file. |
 | `unify`, `expand` | Target world size and written files, when `--unify-to-tp` or `--expand-to-ep` was used. |
