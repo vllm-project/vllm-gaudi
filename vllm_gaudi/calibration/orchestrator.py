@@ -27,7 +27,7 @@ from vllm_gaudi.calibration.detect import ModelInfo
 from vllm_gaudi.calibration.expand import expand_dir
 from vllm_gaudi.calibration.inc_config import resolve_configs, write_json_atomic
 from vllm_gaudi.calibration.layout import DEFAULT_OBSERVER, OutputLayout
-from vllm_gaudi.calibration.manifest import build_manifest, inventory, redact_env
+from vllm_gaudi.calibration.manifest import build_manifest, inventory, redact_args, redact_env
 from vllm_gaudi.calibration.measurements import SCALES, list_measurement_files
 from vllm_gaudi.calibration.postprocess import postprocess_dir
 from vllm_gaudi.calibration.presets import ResolvedPreset, resolve_preset
@@ -376,7 +376,7 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
             "measure": str(layout.measure_config),
             "quant": str(layout.quant_config)
         },
-        "model_args": model_args,
+        "model_args": redact_args(model_args),
         "phases": {},
     }
 
