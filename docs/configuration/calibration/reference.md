@@ -242,7 +242,7 @@ To see the resolved preset for a model, run `vllm-gaudi-calibrate print-config M
 - The tasks are validated in the phase process before the model is loaded. An unknown task fails the phase; use `list-tasks` to find valid names.
 - The QUANTIZE phase evaluates according to `--quantize-eval`: `smoke` runs the first task with `min(--smoke-limit, --limit)` samples, `full` runs all tasks with `--limit`, and `none` only loads the quantized model, which is enough for INC to write the scales.
 - If the tokenizer (or, for multimodal models, the processor) has no chat template, the tool logs a warning and runs the tasks on raw prompts, with `--no-chat-template` behavior.
-- Each phase uses seed `42`, the lm-eval vLLM model with `quantization="inc"`, and the KV cache dtype `auto` in MEASURE and `fp8_inc` in QUANTIZE.
+- Each phase uses seed `42`, the lm-eval vLLM model with `quantization="inc"`, and the KV cache dtype `auto` in MEASURE and `fp8_inc` in QUANTIZE. For a checkpoint that is already quantized, such as an FP8 checkpoint, the tool does not pass `quantization`, so vLLM keeps the method declared in the checkpoint, and `QUANT_CONFIG` enables INC on top of it. See [Serving the Calibrated Model](calibration.md#serving-the-calibrated-model).
 
 ## Environment Variables
 
