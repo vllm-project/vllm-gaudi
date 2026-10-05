@@ -110,7 +110,7 @@ The options marked `unset` are written to the quant config only when given. `--b
 Merges per-rank measurement and scale files to a smaller world size. The source world size is read from the `*_mod_list.json` files.
 
 ```text
-vllm-gaudi-calibrate unify -m DIR -r N [-o OUT] [--ep] [--skip-scales]
+vllm-gaudi-calibrate unify -m DIR -r N [-o OUT] [--ep] [--skip-scales] [--observer NAME]
 ```
 
 | Option | Default | Description |
@@ -120,13 +120,14 @@ vllm-gaudi-calibrate unify -m DIR -r N [-o OUT] [--ep] [--skip-scales]
 | `-o`, `--out` | in place | Output directory. |
 | `--ep` | off | The measurements were taken with expert parallelism. Experts of the merged ranks are concatenated instead of maxed. |
 | `--skip-scales` | off | Unify only the measurement files, not the scale files. |
+| `--observer` | `maxabs` | INC observer in the file names. Pass the `observer` of a custom measure config. |
 
 ### `expand`
 
 Splits a world size 1 MoE measurement into `N` expert parallel ranks. Every rank gets a copy of the measurement in which each fused MoE op keeps only the intermediate maxima of the experts that rank owns; all other nodes are copied unchanged. The number of experts must divide evenly by `N`. Only the measurement files are written; INC computes the scales from them when the model is served.
 
 ```text
-vllm-gaudi-calibrate expand -m DIR -w N [-o OUT]
+vllm-gaudi-calibrate expand -m DIR -w N [-o OUT] [--observer NAME]
 ```
 
 | Option | Default | Description |
@@ -134,19 +135,21 @@ vllm-gaudi-calibrate expand -m DIR -w N [-o OUT]
 | `-m`, `--measurements` | required | Directory with exactly one world size 1 measurement (`*_0_1.json`). |
 | `-w`, `--world-size` | required | Target expert parallel world size, at least 2. |
 | `-o`, `--out` | in place | Output directory. |
+| `--observer` | `maxabs` | INC observer in the file names. Pass the `observer` of a custom measure config. |
 
 ### `postprocess`
 
 Copies the input range of the KV cache modules (`k_cache`, `v_cache`, or `latent_cache_k` for MLA) into the second input of `matmul_qk` and `matmul_av`. `run` does this automatically after the MEASURE phase. The standalone command processes every measurement and scale file in the directory.
 
 ```text
-vllm-gaudi-calibrate postprocess -m DIR [-o OUT]
+vllm-gaudi-calibrate postprocess -m DIR [-o OUT] [--observer NAME]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-m`, `--measurements` | required | Directory with the measurement files. |
 | `-o`, `--out` | in place | Output directory. |
+| `--observer` | `maxabs` | INC observer in the file names. Pass the `observer` of a custom measure config. |
 
 ### `detect`
 

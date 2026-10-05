@@ -99,6 +99,18 @@ def test_unify_subcommand(tmp_path):
     assert unified["LocalRank"] == -1
 
 
+@pytest.mark.parametrize("command", [["unify", "-r", "1"], ["postprocess"]])
+def test_standalone_commands_take_the_observer(tmp_path, command):
+    from .measurement_data import PREFIX, write_measure_run
+
+    write_measure_run(tmp_path, world=2)
+    for path in tmp_path.iterdir():
+        path.rename(path.with_name(path.name.replace(PREFIX, "inc_output_hooks_maxabs_per_channel")))
+    assert cli.main([command[0], "-m", str(tmp_path), *command[1:], "--observer", "maxabs_per_channel"]) == 0
+    if command[0] == "unify":
+        assert (tmp_path / "inc_output_hooks_maxabs_per_channel_0_1.json").is_file()
+
+
 def test_print_config_aligns_user_config_like_run(tmp_path, monkeypatch, capsys):
     from vllm_gaudi.calibration import detect
     from vllm_gaudi.calibration.detect import ModelInfo
