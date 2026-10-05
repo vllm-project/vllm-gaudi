@@ -371,6 +371,7 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
         "apply_chat_template": args.apply_chat_template,
         "fewshot_as_multiturn": args.fewshot_as_multiturn,
         "tensor_parallel_size": args.tp,
+        "stats_dir": str(stats_dir),
         "configs": {
             "measure": str(layout.measure_config),
             "quant": str(layout.quant_config)
