@@ -21,6 +21,8 @@ MANIFEST_VERSION = 1
 TRACKED_DISTRIBUTIONS = ("vllm", "vllm_gaudi", "lm_eval", "neural_compressor_pt", "neural_compressor_3x_pt",
                          "neural_compressor", "torch", "habana_torch_plugin", "transformers")
 _SECRET_RE = re.compile(r"TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL", re.IGNORECASE)
+# Narrower for argument names, so max_num_batched_tokens or tokenizer stay readable.
+_SECRET_ARG_RE = re.compile(r"(^|_)token$|secret|password|credential|api_key", re.IGNORECASE)
 
 
 def collect_versions(distributions: tuple[str, ...] = TRACKED_DISTRIBUTIONS) -> dict[str, str]:
@@ -37,6 +39,18 @@ def collect_versions(distributions: tuple[str, ...] = TRACKED_DISTRIBUTIONS) -> 
 def redact_env(env: Mapping[str, str]) -> dict[str, str]:
     """Masks values of variables whose names look like credentials."""
     return {key: "<redacted>" if _SECRET_RE.search(key) else value for key, value in env.items()}
+
+
+def redact_args(value: Any) -> Any:
+    """Masks values of arguments whose names look like credentials, such as ``hf_token``, at any depth."""
+    if isinstance(value, Mapping):
+        return {
+            key: "<redacted>" if isinstance(key, str) and _SECRET_ARG_RE.search(key) else redact_args(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_args(item) for item in value]
+    return value
 
 
 def inventory(directory: Path) -> list[str]:
