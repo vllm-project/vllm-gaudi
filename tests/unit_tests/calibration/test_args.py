@@ -97,6 +97,16 @@ def args(**kwargs) -> CalibrationArgs:
     {
         "quant_config_buffer": "buf.json"
     },
+    {
+        "engine_args": {
+            "pretrained": "Other/Model"
+        }
+    },
+    {
+        "engine_args": {
+            "tensor_parallel_size": 2
+        }
+    },
 ])
 def test_validate_rejects(kwargs):
     with pytest.raises(ValueError):
