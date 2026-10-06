@@ -197,6 +197,11 @@ class HPUAsyncScheduler(AsyncScheduler):
         Both the layer count and the chunk size must match the model runner's
         own logic exactly (see the cached properties above); a mismatch makes
         the runner assert on an unaligned context_lens.
+
+        For Qwen3.5 hybrids on non-compact GDN with prefix caching
+        (``_align_to_mamba_block``), chunk ends are additionally placed on the
+        mamba state grid (``_mamba_state_block_size``), so the state slot a
+        step writes holds exactly the tokens its block hash claims.
         """
         chunk_size = self._mamba_align_chunk_size
         num_mamba_layers = self._num_mamba_like_layers
@@ -214,8 +219,15 @@ class HPUAsyncScheduler(AsyncScheduler):
             end = num_computed_tokens + num_new_tokens
             if end < prompt_end:
                 aligned = end // block_size * block_size
-                end = (aligned if aligned > num_computed_tokens else
-                       num_computed_tokens + num_new_tokens // chunk_size * chunk_size)
+                if aligned > num_computed_tokens:
+                    end = aligned
+                else:
+                    end = num_computed_tokens + num_new_tokens // chunk_size * chunk_size
+            # A chunk starting mid-block (after a sub-block chunk) must stop at the next
+            # boundary: running past it leaves that block holding the sub-block state,
+            # which is then hashed as covering the full block.
+            if num_computed_tokens < prompt_end and num_computed_tokens % block_size:
+                end = min(end, (num_computed_tokens // block_size + 1) * block_size)
             last_cacheable = request.num_tokens - request.num_tokens % block_size
             if num_computed_tokens < last_cacheable < end:
                 end = last_cacheable
