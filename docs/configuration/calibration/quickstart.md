@@ -26,7 +26,14 @@ Calibrate a vision-language model with the same command. The tool detects the mo
 vllm-gaudi-calibrate run Qwen/Qwen2.5-VL-3B-Instruct -o ./fp8_output
 ```
 
-If the MEASURE phase of Qwen2.5-VL stops with an `mm_embeddings` assertion, see [Multimodal Measure Phase Stops on mmmu_val](troubleshooting.md#multimodal-measure-phase-stops-on-mmmu_val).
+On Qwen2.5-VL, the default `mmmu_val` run currently stops at about prompt 430 of 900 with an `mm_embeddings` assertion, because of an issue in the HPU image path that also affects runs without calibration. Until it is fixed, calibrate the language model of Qwen2.5-VL on text tasks and keep the vision tower in BF16:
+
+```bash
+vllm-gaudi-calibrate run Qwen/Qwen2.5-VL-3B-Instruct -o ./fp8_output \
+    --modality text --tasks pile_10k gsm8k --blocklist lm_head visual
+```
+
+See [Multimodal Measure Phase Stops on mmmu_val](troubleshooting.md#multimodal-measure-phase-stops-on-mmmu_val) for details.
 
 `MODEL` is a Hugging Face model ID or a local model directory. For a model that needs more than one card, add `--tp N`. The command runs the MEASURE phase, the QUANTIZE phase, and a short smoke evaluation of the quantized model. With the defaults, the MEASURE phase processes 512 samples of each task (`--limit`).
 
