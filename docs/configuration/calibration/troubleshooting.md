@@ -46,7 +46,7 @@ The same models fail outside calibration too, with `a and b must have same reduc
 
 ## Multimodal Measure Phase Stops on mmmu_val
 
-On Qwen2.5-VL, the engine can die in the middle of the `mmmu_val` task, in the measure phase as well as in a plain lm-eval run:
+On Qwen2.5-VL, the engine dies at about prompt 430 of the 900 prompts of `mmmu_val`, in the measure phase as well as in a plain lm-eval run:
 
 ```text
 AssertionError: Expected number of multimodal embeddings to match number of input items: 1, but got len(mm_embeddings)=0 instead.
