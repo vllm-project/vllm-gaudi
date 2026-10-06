@@ -274,10 +274,11 @@ class InputBatch:
         # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
         # In preemption scenario, we want num_prompt_tokens to also include the tokens emitted before preemption,
         # as that is used as basis for recomputing prefill.
-        # This also assumes that preemption is complete and reduces num_computed_tokens to 0 and preempted sequences
-        # don't retain any originally used cache blocks.
-        if request.num_computed_tokens == 0:
-            self.num_prompt_tokens[req_index] = num_prompt_tokens + len(request.output_token_ids)
+        # With prefix caching a resumed request can have num_computed_tokens > 0 (cache hit on its own blocks),
+        # so detect recompute by any gap beyond the last known token rather than num_computed_tokens == 0.
+        num_known_tokens = num_prompt_tokens + len(request.output_token_ids)
+        if request.num_computed_tokens < num_known_tokens - 1:
+            self.num_prompt_tokens[req_index] = num_known_tokens
 
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
