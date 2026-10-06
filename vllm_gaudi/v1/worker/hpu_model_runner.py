@@ -4092,6 +4092,44 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         htorch.core.mark_step()
         return sampler_output, sampling_metadata
 
+    # ---- Chunked-prefill sample-gate helpers ----
+
+    def _f2_prefill_chunk_gate_active(self) -> bool:
+        # Gate is async-scheduling-scoped by construction (invalid_req_
+        # indices only populated on this path) and env-switchable for
+        # A/B rollout.
+        return (self.use_async_scheduling
+                and os.environ.get('VLLM_GAUDI_PREFILL_CHUNK_GATE', '1') == '1')
+
+    def _f2_batch_all_discarded(self,
+                                req_id: list[str],
+                                logits_requests) -> bool:
+        # True ONLY if stock itself discards every sampled row of this
+        # prefill batch part: async-scheduling partial-chunk forcing marks
+        # the input-batch row INVALID in input preparation (:2758-2759,
+        # before the sample_tokens loop). Reusing stock's own discard
+        # decision keeps the gate inside proven semantics — any batch
+        # with a real (non-invalid) row (completion chunk, merged
+        # completing+partial pair, catch-up decode-through-prefill,
+        # dummy/DP pads) always samples via the stock path.
+        if not req_id:
+            # No requests in this part: nothing to sample for stock
+            # either (numel gate would have skipped) — not our case.
+            return False
+        req_id_to_index = self.input_batch.req_id_to_index
+        invalid = self.invalid_req_indices
+        for rid in req_id:
+            idx = req_id_to_index.get(rid)
+            if idx is None or idx not in invalid:
+                return False
+        # Degenerate guard: logits_requests must match the batch rows
+        # fed to the sampler (it is the per-row request list built from
+        # the same contents in _form_prefill_batch). If shapes disagree,
+        # fall back to the stock path.
+        if logits_requests is not None and len(logits_requests) > len(req_id):
+            return False
+        return True
+
     def _pool(
         self,
         hidden_states: torch.Tensor,
@@ -4550,13 +4588,37 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # This can happen with chunked prefill when a chunk does
                     # not complete the prompt and no logits are generated.
                     if logits_device.numel() > 0:
-                        with self.profiler.record_event('internal', "sampler"):
-                            sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device, req_id,
-                                                                                   logits_device.shape[0],
-                                                                                   logits_requests)
-                            prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
-                            prefill_sampled_requests.extend(logits_requests)
-                            logprobs_segments.append((list(logits_requests), sampler_output.logprobs_tensors))
+                        # Chunked-prefill sample gate: under async
+                        # scheduling every non-completing chunk still
+                        # gets ONE forced partial logit whose sampled
+                        # row is marked INVALID in input preparation
+                        # and discarded at every consumer -- the
+                        # per-chunk sampling-yield launch chain
+                        # (metadata H2D refresh + selective metadata +
+                        # sampler) is pure host launch waste for these
+                        # chunks. Skip it, batch-part by batch-part,
+                        # ONLY when stock itself discards every row of
+                        # this batch (see _f2_batch_all_discarded).
+                        if (not self.use_structured_output
+                                and self._f2_prefill_chunk_gate_active()
+                                and self._f2_batch_all_discarded(
+                                    req_id, logits_requests)):
+                            # Constant-effect clause: stock's first
+                            # batch_changed pass refreshes sampling-param
+                            # rows; preserve that refresh (full
+                            # non-eager refresh covers the row-0 write).
+                            if batch_changed:
+                                self.input_batch.refresh_sampling_metadata()
+                            htorch.core.mark_step()
+                        else:
+                            with self.profiler.record_event('internal', "sampler"):
+                                sampler_output, sampling_metadata = self._run_sampling(
+                                    batch_changed, logits_device, req_id,
+                                    logits_device.shape[0],
+                                    logits_requests)
+                                prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
+                                prefill_sampled_requests.extend(logits_requests)
+                                logprobs_segments.append((list(logits_requests), sampler_output.logprobs_tensors))
                 if self.is_driver_worker and self.profiler.enabled:
                     # Stop recording 'execute_model_generic' event
                     self.profiler.end()
