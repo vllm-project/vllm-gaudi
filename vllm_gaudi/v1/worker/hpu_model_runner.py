@@ -5956,7 +5956,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # same grid as real traffic, guaranteeing a warmup cache hit.
                 processor_inputs = self._build_raw_image_processor_inputs(processor, modality, count, width, height)
             else:
-                processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                processor_inputs = processor.get_dummy_inputs(
                     seq_len=self.model_config_copy.max_model_len,
                     mm_counts={modality: count},
                     mm_options=mm_options,
@@ -5965,10 +5965,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
         else:
             # Fallback to default options
-            dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
-                self.model_config_copy,
-                mm_counts={modality: count},
-                processor=self._get_mm_warmup_processor(),
+            dummy_mm_inputs = self._get_mm_warmup_processor().get_dummy_mm_inputs(
+                {modality: count},
             )
 
         return dummy_mm_inputs
