@@ -196,6 +196,15 @@ def _drop_stray_tensor_refs(model) -> None:
                 mod.__dict__[attr_name] = _clear(obj)
 
 
+def _finalize_inc(runner) -> None:
+    # Raising here would skip destroy_model_parallel() in WorkerProc.shutdown, and
+    # shutdown_inc() runs at most once per process, so a failed measurement dump is final.
+    try:
+        runner.shutdown_inc()
+    except Exception:
+        logger.warning("INC finalization failed during worker shutdown", exc_info=True)
+
+
 def _release_runner_host_memory(runner, finalize_inc: bool = False, fallback_model=None) -> None:
     """Drop the runner's model weights/buffers so stale host memory can't survive a swap.
 
@@ -221,8 +230,7 @@ def _release_runner_host_memory(runner, finalize_inc: bool = False, fallback_mod
         borrowed = getattr(runner, "model", None) is None and fallback_model is not None
         if borrowed:
             runner.model = fallback_model
-        with contextlib.suppress(Exception):
-            runner.shutdown_inc()
+        _finalize_inc(runner)
         if borrowed:
             runner.model = None
     if hasattr(runner, "kv_caches"):
@@ -380,9 +388,8 @@ class HPUWorker(WorkerBase):
         if _process_is_exiting():
             # The HPU device may already be released here; allocating or synchronizing
             # on it re-creates the device and segfaults. The OS reclaims memory anyway.
-            if self.model_runner is not None:
-                with contextlib.suppress(Exception):
-                    getattr(self.model_runner, 'shutdown_inc', lambda: None)()
+            if self.model_runner is not None and hasattr(self.model_runner, "shutdown_inc"):
+                _finalize_inc(self.model_runner)
             self._loaded_model_ref = None
             return
         if self.model_runner is not None:

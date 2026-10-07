@@ -632,6 +632,28 @@ def test_external_launcher_gathers_reports_from_every_rank(monkeypatch):
     assert host_headroom.collect_host_headroom_reports(core, False) == [local]
 
 
+@pytest.mark.parametrize(("backend", "dp_size", "warned"), [("mp", 2, True), ("mp", 1, False),
+                                                            ("external_launcher", 2, False)])
+def test_host_headroom_reports_warn_that_dp_engines_are_not_summed(monkeypatch, backend, dp_size, warned):
+    import torch.distributed as dist
+    from vllm.distributed import parallel_state
+
+    from vllm_gaudi.v1.worker import host_headroom
+
+    report = {"host": "h", "host_id": "h/b/1", "required_bytes": _GIB, "headroom_bytes": 12 * _GIB}
+    monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(dist, "all_gather_object", Mock())
+    logger = Mock()
+    monkeypatch.setattr(host_headroom, "logger", logger)
+    core = SimpleNamespace(
+        collective_rpc=lambda method, kwargs=None: [report],
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend=backend, data_parallel_size=dp_size)))
+
+    assert host_headroom.collect_host_headroom_reports(core, False) == [report]
+    assert logger.warning_once.called is warned
+
+
 def test_worker_reports_no_host_requirement_when_model_already_sleeping(monkeypatch):
     from vllm_gaudi.v1.worker import hpu_worker as hw
 
@@ -872,6 +894,49 @@ def test_release_runner_host_memory_finalizes_inc_with_fallback_model_when_runne
     assert seen == [model]
     assert model.weight.numel() == 0
     assert runner.model is None
+
+
+def test_release_runner_host_memory_logs_inc_finalization_failure_and_still_releases(monkeypatch):
+    from vllm_gaudi.v1.worker import hpu_worker as hw
+
+    logger = Mock()
+    monkeypatch.setattr(hw, "logger", logger)
+    model = torch.nn.Module()
+    model.register_parameter("weight", torch.nn.Parameter(torch.ones(4)))
+
+    def _fail():
+        raise OSError("dump_stats_path is not writable")
+
+    runner = SimpleNamespace(model=model, shutdown_inc=_fail)
+
+    hw._release_runner_host_memory(runner, finalize_inc=True)
+
+    logger.warning.assert_called_once()
+    assert logger.warning.call_args.kwargs == {"exc_info": True}
+    assert model.weight.numel() == 0
+    assert runner.model is None
+
+
+def test_worker_shutdown_at_process_exit_logs_inc_finalization_failure(monkeypatch):
+    from vllm_gaudi.v1.worker import hpu_worker as hw
+
+    monkeypatch.setattr(hw, "_process_is_exiting", lambda: True)
+    logger = Mock()
+    monkeypatch.setattr(hw, "logger", logger)
+    worker = hw.HPUWorker.__new__(hw.HPUWorker)
+    worker._model_runner_stash = {}
+    worker._model_runner_state_stash = {}
+    worker._loaded_model_ref = object()
+
+    def _fail():
+        raise OSError("disk full")
+
+    worker.model_runner = SimpleNamespace(model=object(), shutdown_inc=_fail)
+
+    worker.shutdown()
+
+    logger.warning.assert_called_once()
+    assert worker._loaded_model_ref is None
 
 
 def test_process_is_exiting_once_main_thread_has_stopped(monkeypatch):
