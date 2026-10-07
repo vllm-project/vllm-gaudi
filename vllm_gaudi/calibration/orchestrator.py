@@ -143,16 +143,20 @@ def remove_previous_outputs(dump: str, observer: str, *, scales_only: bool) -> N
 
     INC QUANTIZE reuses existing scale files and computes scales only for the modules missing
     from them, so a rerun would keep the old scales. New measurements make every derived file
-    stale, so before MEASURE all files go, before QUANTIZE only the scales.
+    stale, so before MEASURE all files go, of any observer, before QUANTIZE only the scales.
     """
     directory = Path(dump).parent
     if not directory.is_dir():
         return
     prefix = f"{Path(dump).name}_hooks_"
-    old = [
-        f.path for f in list_measurement_files(directory, observer)
-        if f.prefix.startswith(prefix) and (f.kind == SCALES or not scales_only)
-    ]
+    if scales_only:
+        old = [
+            f.path for f in list_measurement_files(directory, observer)
+            if f.prefix.startswith(prefix) and f.kind == SCALES
+        ]
+    else:
+        # An earlier run may have used another observer, which the parser would not recognize.
+        old = [p for p in sorted(directory.iterdir()) if p.is_file() and p.name.startswith(prefix)]
     if old:
         logger.info("Removing %d files of an earlier run from %s", len(old), directory)
         for path in old:
@@ -286,9 +290,10 @@ def _resolve_local_paths(args: CalibrationArgs) -> None:
         args.model = os.path.abspath(args.model)
     if args.include_path is not None:
         args.include_path = os.path.abspath(args.include_path)
-    tokenizer = args.engine_args.get("tokenizer")
-    if isinstance(tokenizer, str) and os.path.exists(tokenizer):
-        args.engine_args["tokenizer"] = os.path.abspath(tokenizer)
+    for key in ("tokenizer", "hf_config_path"):
+        value = args.engine_args.get(key)
+        if isinstance(value, str) and os.path.exists(value):
+            args.engine_args[key] = os.path.abspath(value)
     # A relative download_dir would land in the scratch cwd, which is deleted after each phase.
     if isinstance(args.engine_args.get("download_dir"), str):
         args.engine_args["download_dir"] = os.path.abspath(args.engine_args["download_dir"])

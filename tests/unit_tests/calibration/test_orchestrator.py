@@ -126,6 +126,22 @@ def test_measurements_of_an_earlier_run_are_removed(tmp_path):
     assert [p.name for p in stats.iterdir()] == ["notes.txt"]
 
 
+def test_rerun_removes_outputs_of_another_observer(tmp_path):
+    stats = tmp_path / "my-model" / "g3"
+    stats.mkdir(parents=True)
+    write_measure_run(stats, 1)  # an earlier run with the default maxabs observer
+    custom = tmp_path / "measure.json"
+    custom.write_text(
+        json.dumps({
+            "mode": "MEASURE",
+            "observer": "maxabs_per_channel",
+            "dump_stats_path": str(stats / "inc_output")
+        }))
+    with pytest.raises(CalibrationError):
+        run_calibration(args(tmp_path, measure_config=str(custom)), FakeRunner(QWEN, write_measurements=False))
+    assert not [p.name for p in stats.iterdir() if p.name.startswith("inc_output_hooks_")]
+
+
 def test_quantize_only_run_removes_old_scales(tmp_path):
     stats = tmp_path / "my-model" / "g3"
     stats.mkdir(parents=True)
@@ -216,6 +232,7 @@ def test_local_paths_are_resolved_against_the_caller_cwd(tmp_path, monkeypatch):
     (tmp_path / "models" / "My-Model").mkdir(parents=True)
     runner = FakeRunner(QWEN)
     (tmp_path / "tok").mkdir()
+    (tmp_path / "config.json").write_text("{}")
     run_calibration(
         CalibrationArgs(model="models/My-Model",
                         output_dir="out",
@@ -223,6 +240,7 @@ def test_local_paths_are_resolved_against_the_caller_cwd(tmp_path, monkeypatch):
                         phases=("measure", ),
                         engine_args={
                             "tokenizer": "tok",
+                            "hf_config_path": "config.json",
                             "download_dir": "cache"
                         }), runner)
     model = str(tmp_path / "models" / "My-Model")
@@ -231,6 +249,8 @@ def test_local_paths_are_resolved_against_the_caller_cwd(tmp_path, monkeypatch):
     assert measure["model_args"]["pretrained"] == model
     assert measure["eval"]["include_path"] == str(tmp_path / "tasks")
     assert measure["model_args"]["tokenizer"] == str(tmp_path / "tok")
+    assert measure["model_args"]["hf_config_path"] == str(tmp_path / "config.json")
+    assert detect["loading_args"]["hf_config_path"] == str(tmp_path / "config.json")
     assert measure["model_args"]["download_dir"] == str(tmp_path / "cache")
     assert (tmp_path / "out" / "my-model" / "maxabs_measure_g3.json").is_file()
     hub = FakeRunner(QWEN)
