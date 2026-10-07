@@ -417,8 +417,7 @@ def _cpu_faithful_async_h2d_update(source, dest, indices, device="cpu"):
 def _patch_h2d_update_for_cpu(monkeypatch, device: str):
     if device != "cpu":
         return
-    monkeypatch.setattr(hib_module, "async_h2d_update",
-                        _cpu_faithful_async_h2d_update)
+    monkeypatch.setattr(hib_module, "async_h2d_update", _cpu_faithful_async_h2d_update)
 
 
 def _make_selective_batch(device: str, n_reqs: int, penalties: bool = False) -> InputBatch:
@@ -433,9 +432,7 @@ def _make_selective_batch(device: str, n_reqs: int, penalties: bool = False) -> 
         kernel_block_sizes=[128],
     )
     for i in range(n_reqs):
-        sampling_params = SamplingParams(temperature=0.5 + 0.01 * i,
-                                         top_p=0.9 - 0.01 * i,
-                                         top_k=17 + i)
+        sampling_params = SamplingParams(temperature=0.5 + 0.01 * i, top_p=0.9 - 0.01 * i, top_k=17 + i)
         if penalties:
             sampling_params.frequency_penalty = 0.5 + 0.01 * i
             sampling_params.presence_penalty = 0.25 + 0.01 * i
@@ -461,28 +458,23 @@ def _selection(req_indices: list[int]) -> list[tuple[str, list[int]]]:
     return [(f"r{i}", []) for i in req_indices]
 
 
-def _expected_gather(input_batch: InputBatch, req_indices: list[int],
-                     device: torch.device):
+def _expected_gather(input_batch: InputBatch, req_indices: list[int], device: torch.device):
     """Reference semantics: the index-gather the fast paths replace, read
     off the host-side CPU tensors so the expected values are independent of
     which update branch ran."""
     temperature = input_batch.temperature_cpu_tensor[req_indices].to(device)
-    top_p = (None if input_batch.no_top_p
-             else input_batch.top_p_cpu_tensor[req_indices].to(device))
-    top_k = (None if input_batch.no_top_k
-             else input_batch.top_k_cpu_tensor[req_indices].to(device))
+    top_p = (None if input_batch.no_top_p else input_batch.top_p_cpu_tensor[req_indices].to(device))
+    top_k = (None if input_batch.no_top_k else input_batch.top_k_cpu_tensor[req_indices].to(device))
     return temperature, top_p, top_k
 
 
 def _same(a: Optional[torch.Tensor], b: Optional[torch.Tensor]) -> bool:
-    return (a is None and b is None) or (a is not None and b is not None
-                                         and torch.equal(a, b))
+    return (a is None and b is None) or (a is not None and b is not None and torch.equal(a, b))
 
 
 @pytest.mark.parametrize("device", SELECTIVE_DEVICES)
 @pytest.mark.parametrize("num_selected", [1, 2, 3, 4, 5, 6, 7, 8])
-def test_selective_sampling_metadata_identity_equivalence(
-        device: str, num_selected: int, monkeypatch):
+def test_selective_sampling_metadata_identity_equivalence(device: str, num_selected: int, monkeypatch):
     """Identity-prefix fast path (req_indices == [0..n)).
 
     Result fields are byte-equal to the index-gather semantics and the
@@ -506,8 +498,7 @@ def test_selective_sampling_metadata_identity_equivalence(
 
 @pytest.mark.parametrize("device", SELECTIVE_DEVICES)
 @pytest.mark.parametrize("num_selected", [1, 2, 3, 8])
-def test_selective_sampling_metadata_skip_copy_equivalence(
-        device: str, num_selected: int, monkeypatch):
+def test_selective_sampling_metadata_skip_copy_equivalence(device: str, num_selected: int, monkeypatch):
     """skip_copy=True (parameters already on device from a prior pass).
 
     After an identity call with skip_copy=False populates the rows, a
@@ -519,8 +510,7 @@ def test_selective_sampling_metadata_skip_copy_equivalence(
     req_indices = list(range(num_selected))
 
     input_batch.make_selective_sampling_metadata(_selection(req_indices))
-    metadata = input_batch.make_selective_sampling_metadata(
-        _selection(req_indices), skip_copy=True)
+    metadata = input_batch.make_selective_sampling_metadata(_selection(req_indices), skip_copy=True)
 
     exp_t, exp_p, exp_k = _expected_gather(input_batch, req_indices, metadata.temperature.device)
     assert _same(metadata.temperature, exp_t)
@@ -531,8 +521,7 @@ def test_selective_sampling_metadata_skip_copy_equivalence(
 @pytest.mark.parametrize("device", SELECTIVE_DEVICES)
 @pytest.mark.parametrize("num_selected", [1, 2, 4, 17])
 @pytest.mark.parametrize("row", [0, 2, 5])
-def test_selective_sampling_metadata_broadcast_equivalence(
-        device: str, num_selected: int, row: int, monkeypatch):
+def test_selective_sampling_metadata_broadcast_equivalence(device: str, num_selected: int, row: int, monkeypatch):
     """Broadcast fast path: all-equal indices (decode `pad_to` shape).
 
     Exercises both halves of the branch that sampler warmup never reaches:
@@ -552,14 +541,12 @@ def test_selective_sampling_metadata_broadcast_equivalence(
     assert _same(metadata.top_k, exp_k)
     # The repeat must actually be n rows of the single selected row.
     assert metadata.temperature.shape == (num_selected, )
-    assert torch.equal(metadata.temperature,
-                       metadata.temperature[0:1].expand(num_selected).contiguous())
+    assert torch.equal(metadata.temperature, metadata.temperature[0:1].expand(num_selected).contiguous())
 
 
 @pytest.mark.parametrize("device", SELECTIVE_DEVICES)
 @pytest.mark.parametrize("req_indices", [[3, 1, 0, 2], [0, 0, 1, 1, 2], [7, 5, 3]])
-def test_selective_sampling_metadata_nonidentity_unchanged(
-        device: str, req_indices: list[int], monkeypatch):
+def test_selective_sampling_metadata_nonidentity_unchanged(device: str, req_indices: list[int], monkeypatch):
     """Non-trivial selections (permutation / mixed repeat / subset).
 
     These must keep taking the untouched index-op path; results are
@@ -608,12 +595,9 @@ def test_selective_sampling_metadata_penalties_active_values(device: str, monkey
 
     assert not input_batch.no_penalties
     dev = metadata.frequency_penalties.device
-    assert torch.equal(metadata.frequency_penalties,
-                       input_batch.frequency_penalties_cpu_tensor[req_indices].to(dev))
-    assert torch.equal(metadata.presence_penalties,
-                       input_batch.presence_penalties_cpu_tensor[req_indices].to(dev))
-    assert torch.equal(metadata.repetition_penalties,
-                       input_batch.repetition_penalties_cpu_tensor[req_indices].to(dev))
+    assert torch.equal(metadata.frequency_penalties, input_batch.frequency_penalties_cpu_tensor[req_indices].to(dev))
+    assert torch.equal(metadata.presence_penalties, input_batch.presence_penalties_cpu_tensor[req_indices].to(dev))
+    assert torch.equal(metadata.repetition_penalties, input_batch.repetition_penalties_cpu_tensor[req_indices].to(dev))
 
 
 @pytest.mark.parametrize("device", SELECTIVE_DEVICES)
@@ -627,16 +611,13 @@ def test_selective_sampling_metadata_skip_copy_with_penalties(device: str, monke
     req_indices = [0, 1, 2]
 
     input_batch.make_selective_sampling_metadata(_selection(req_indices))
-    metadata = input_batch.make_selective_sampling_metadata(
-        _selection(req_indices), skip_copy=True)
+    metadata = input_batch.make_selective_sampling_metadata(_selection(req_indices), skip_copy=True)
 
     assert metadata.prompt_token_ids is not None
     assert tuple(metadata.prompt_token_ids.shape[0:1]) == (len(req_indices), )
     dev = metadata.temperature.device
-    assert torch.equal(metadata.prompt_token_ids,
-                       input_batch._make_prompt_token_ids_cpu_tensor()[req_indices].to(dev))
-    assert torch.equal(metadata.frequency_penalties,
-                       input_batch.frequency_penalties_cpu_tensor[req_indices].to(dev))
+    assert torch.equal(metadata.prompt_token_ids, input_batch._make_prompt_token_ids_cpu_tensor()[req_indices].to(dev))
+    assert torch.equal(metadata.frequency_penalties, input_batch.frequency_penalties_cpu_tensor[req_indices].to(dev))
 
 
 # ---------------------------------------------------------------------------
@@ -649,10 +630,16 @@ def test_selective_sampling_metadata_skip_copy_with_penalties(device: str, monke
 # truth table; they bind the unbound runner methods to a duck-typed
 # instance, so they need no model, no scheduler and no device.
 
+
 class _GateFakeInputBatch:
 
     def __init__(self):
-        self.req_id_to_index = {"r-walk": 0, "r-done": 1, "r-mix": 2}
+        # r-logp stands for a request whose sampling_params.logprobs is
+        # set: its row is invalid (so the invalid-row check alone would
+        # skip the part) but stock would have produced a real
+        # logprobs_tensors for it, so the part must take the stock path.
+        self.req_id_to_index = {"r-walk": 0, "r-done": 1, "r-mix": 2, "r-logp": 3}
+        self.num_logprobs = {"r-logp": 1}
         self.refresh_calls = 0
 
     def refresh_sampling_metadata(self):
@@ -660,15 +647,18 @@ class _GateFakeInputBatch:
 
 
 class _GateFakeRunner:
-    _f2_prefill_chunk_gate_active = HPUModelRunner._f2_prefill_chunk_gate_active
-    _f2_batch_all_discarded = HPUModelRunner._f2_batch_all_discarded
+    _prefill_chunk_gate_active = HPUModelRunner._prefill_chunk_gate_active
+    _prefill_part_all_discarded = HPUModelRunner._prefill_part_all_discarded
+    _prefill_gate_placeholder = HPUModelRunner._prefill_gate_placeholder
 
     def __init__(self, async_mode: bool = True):
         self.use_async_scheduling = async_mode
         self.use_structured_output = False
+        self.device = torch.device("cpu")
         self.input_batch = _GateFakeInputBatch()
-        # Stock marks the forced partial-chunk row of "r-walk" invalid.
-        self.invalid_req_indices = [0]
+        # Stock marks the forced partial-chunk rows of "r-walk" and
+        # "r-logp" invalid.
+        self.invalid_req_indices = [0, 3]
 
 
 GATE_ENV = "VLLM_GAUDI_PREFILL_CHUNK_GATE"
@@ -684,37 +674,42 @@ def test_prefill_chunk_gate_env_switch(monkeypatch, env_value: str, expected: bo
         monkeypatch.setenv(GATE_ENV, env_value)
     else:
         monkeypatch.delenv(GATE_ENV, raising=False)
-    assert runner._f2_prefill_chunk_gate_active() is expected
+    assert runner._prefill_chunk_gate_active() is expected
 
 
 def test_prefill_chunk_gate_requires_async_scheduling(monkeypatch):
     """With async scheduling off the gate is inactive regardless of env."""
     monkeypatch.setenv(GATE_ENV, "1")
     runner = _GateFakeRunner(async_mode=False)
-    assert runner._f2_prefill_chunk_gate_active() is False
+    assert runner._prefill_chunk_gate_active() is False
 
 
-@pytest.mark.parametrize("req_id,logits_requests,expected,case", [
-    # Every sampled row invalid -> stock would discard it all -> skip.
-    (["r-walk"], ["r-walk"], True, "all-invalid walk chunk"),
-    # A completion row is real -> never skip.
-    (["r-done"], ["r-done"], False, "completion chunk"),
-    # Merged completing + partial pair keeps the real row -> sample stock.
-    (["r-walk", "r-done"], ["r-walk", "r-done"], False, "mixed pair"),
-    # Unknown request id (defensive) -> fall back to the stock path.
-    (["r-ghost"], ["r-ghost"], False, "unknown request"),
-    # No rows at all -> not the gate's case (numel gate upstream).
-    ([], [], False, "empty batch part"),
-    # Degenerate shape: logits_requests longer than the batch rows.
-    (["r-walk"], ["r-walk", "r-extra"], False, "logits_requests longer than rows"),
-])
+@pytest.mark.parametrize(
+    "req_id,logits_requests,expected,case",
+    [
+        # Every sampled row invalid -> stock would discard it all -> skip.
+        (["r-walk"], ["r-walk"], True, "all-invalid walk chunk"),
+        # A completion row is real -> never skip.
+        (["r-done"], ["r-done"], False, "completion chunk"),
+        # Merged completing + partial pair keeps the real row -> sample stock.
+        (["r-walk", "r-done"], ["r-walk", "r-done"], False, "mixed pair"),
+        # Unknown request id (defensive) -> fall back to the stock path.
+        (["r-ghost"], ["r-ghost"], False, "unknown request"),
+        # No rows at all -> not the gate's case (numel gate upstream).
+        ([], [], False, "empty batch part"),
+        # Degenerate shape: logits_requests longer than the batch rows.
+        (["r-walk"], ["r-walk", "r-extra"], False, "logits_requests longer than rows"),
+        # Invalid row that asked for sampled-token logprobs: skipping would
+        # silently drop its requested logprobs -> stock path.
+        (["r-logp"], ["r-logp"], False, "sampled-token logprobs requested"),
+    ])
 def test_batch_all_discarded_truth_table(req_id, logits_requests, expected, case, monkeypatch):
-    """`_f2_batch_all_discarded` returns True only when stock's own
+    """`_prefill_part_all_discarded` returns True only when stock's own
     invalid_req_indices decision marks every sampled row of this batch
     part invalid (case: {case})."""
     assert case
     runner = _GateFakeRunner()
-    assert runner._f2_batch_all_discarded(req_id, logits_requests) is expected
+    assert runner._prefill_part_all_discarded(req_id, logits_requests) is expected
 
 
 def test_gate_predicate_composition(monkeypatch):
@@ -723,12 +718,10 @@ def test_gate_predicate_composition(monkeypatch):
     gate activation and the all-discarded check."""
     monkeypatch.setenv(GATE_ENV, "1")
     runner = _GateFakeRunner()
-    skip = ((not runner.use_structured_output)
-            and runner._f2_prefill_chunk_gate_active()
-            and runner._f2_batch_all_discarded(["r-walk"], ["r-walk"]))
+    skip = ((not runner.use_structured_output) and runner._prefill_chunk_gate_active()
+            and runner._prefill_part_all_discarded(["r-walk"], ["r-walk"]))
     assert skip is True
     runner.use_structured_output = True
-    skip = ((not runner.use_structured_output)
-            and runner._f2_prefill_chunk_gate_active()
-            and runner._f2_batch_all_discarded(["r-walk"], ["r-walk"]))
+    skip = ((not runner.use_structured_output) and runner._prefill_chunk_gate_active()
+            and runner._prefill_part_all_discarded(["r-walk"], ["r-walk"]))
     assert skip is False

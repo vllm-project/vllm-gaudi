@@ -4094,24 +4094,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     # ---- Chunked-prefill sample-gate helpers ----
 
-    def _f2_prefill_chunk_gate_active(self) -> bool:
+    def _prefill_chunk_gate_active(self) -> bool:
         # Gate is async-scheduling-scoped by construction (invalid_req_
         # indices only populated on this path) and env-switchable for
         # A/B rollout.
-        return (self.use_async_scheduling
-                and os.environ.get('VLLM_GAUDI_PREFILL_CHUNK_GATE', '1') == '1')
+        return (self.use_async_scheduling and os.environ.get('VLLM_GAUDI_PREFILL_CHUNK_GATE', '1') == '1')
 
-    def _f2_batch_all_discarded(self,
-                                req_id: list[str],
-                                logits_requests) -> bool:
+    def _prefill_part_all_discarded(self, req_id: list[str], logits_requests) -> bool:
         # True ONLY if stock itself discards every sampled row of this
         # prefill batch part: async-scheduling partial-chunk forcing marks
-        # the input-batch row INVALID in input preparation (:2758-2759,
-        # before the sample_tokens loop). Reusing stock's own discard
-        # decision keeps the gate inside proven semantics — any batch
-        # with a real (non-invalid) row (completion chunk, merged
-        # completing+partial pair, catch-up decode-through-prefill,
-        # dummy/DP pads) always samples via the stock path.
+        # the input-batch row INVALID in input preparation (see
+        # _extract_prefill_batch_contents, before the sample_tokens
+        # loop). Reusing stock's own discard decision keeps the gate
+        # inside proven semantics — any batch with a real (non-invalid)
+        # row (completion chunk, merged completing+partial pair, catch-up
+        # decode-through-prefill, dummy/DP pads) always samples via the
+        # stock path.
         if not req_id:
             # No requests in this part: nothing to sample for stock
             # either (numel gate would have skipped) — not our case.
@@ -4122,13 +4120,41 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             idx = req_id_to_index.get(rid)
             if idx is None or idx not in invalid:
                 return False
+            # Sampled-token logprobs parity: stock would run the sampler
+            # and produce a real logprobs_tensors for a request that
+            # asked for logprobs; skipping the part would silently drop
+            # them. Such parts always take the stock path. (This is
+            # sampling_params.logprobs via input_batch.num_logprobs, NOT
+            # num_prompt_logprobs — prefill-token logprobs are gathered
+            # from hidden states, untouched by this skip.)
+            if self.input_batch.num_logprobs.get(rid) is not None:
+                return False
         # Degenerate guard: logits_requests must match the batch rows
         # fed to the sampler (it is the per-row request list built from
         # the same contents in _form_prefill_batch). If shapes disagree,
         # fall back to the stock path.
-        if logits_requests is not None and len(logits_requests) > len(req_id):
-            return False
-        return True
+        return logits_requests is None or len(logits_requests) <= len(req_id)
+
+    def _prefill_gate_placeholder(self, logits_device: torch.Tensor, logits_requests) -> torch.Tensor:
+        # Row-alignment placeholder contributed by a gated (skipped)
+        # batch part. The async output tensor is the positional concat of
+        # the per-part sampled rows (see the sampled_token_ids assembly)
+        # while downstream consumers index it by INPUT-BATCH ROW:
+        # get_output() clears row i for every i in invalid_req_indices,
+        # and prev_req_id_to_index maps each surviving request to its
+        # input-batch row for the next step's async splice/scatter.
+        # Dropping a skipped part's rows would shift every later part's
+        # rows and make those consumers clear/read the wrong request's
+        # token. One placeholder row per would-be sampler row (same
+        # length and dtype as the sampler's flattened int32 output) keeps
+        # position == row; stock's own consumers guarantee the values are
+        # never read: get_output() clears them (their rows are in
+        # invalid_req_indices) and prev_req_id_to_index excludes them.
+        # -1 is this file's async-splice sentinel (see the placeholder
+        # append in the async post-processing block), so even a
+        # hypothetical mis-read is sentinel-typeable.
+        num_rows = len(logits_requests) if logits_requests is not None else logits_device.shape[0]
+        return torch.full((num_rows, ), -1, dtype=torch.int32, device=self.device)
 
     def _pool(
         self,
@@ -4598,24 +4624,37 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         # sampler) is pure host launch waste for these
                         # chunks. Skip it, batch-part by batch-part,
                         # ONLY when stock itself discards every row of
-                        # this batch (see _f2_batch_all_discarded).
-                        if (not self.use_structured_output
-                                and self._f2_prefill_chunk_gate_active()
-                                and self._f2_batch_all_discarded(
-                                    req_id, logits_requests)):
+                        # this batch (see _prefill_part_all_discarded).
+                        if (not self.use_structured_output and self._prefill_chunk_gate_active()
+                                and self._prefill_part_all_discarded(req_id, logits_requests)):
                             # Constant-effect clause: stock's first
                             # batch_changed pass refreshes sampling-param
                             # rows; preserve that refresh (full
                             # non-eager refresh covers the row-0 write).
                             if batch_changed:
                                 self.input_batch.refresh_sampling_metadata()
+                            # Row-alignment clause: the async output is
+                            # the positional concat of the per-part
+                            # rows while consumers index it by input-
+                            # batch row, so the skipped part must still
+                            # contribute one placeholder row per would-be
+                            # sampler row (values dead downstream; see
+                            # _prefill_gate_placeholder).
+                            prefill_sampled_token_ids.append(
+                                self._prefill_gate_placeholder(logits_device, logits_requests))
+                            prefill_sampled_requests.extend(logits_requests)
+                            # Logprobs parity: _build_logprobs_output is
+                            # req-id-keyed and drops None segments, so a
+                            # None segment mirrors the stock no-logprobs
+                            # case (the predicate above already keeps
+                            # logprobs-requesting parts on the stock
+                            # path).
+                            logprobs_segments.append((list(logits_requests), None))
                             htorch.core.mark_step()
                         else:
                             with self.profiler.record_event('internal', "sampler"):
                                 sampler_output, sampling_metadata = self._run_sampling(
-                                    batch_changed, logits_device, req_id,
-                                    logits_device.shape[0],
-                                    logits_requests)
+                                    batch_changed, logits_device, req_id, logits_device.shape[0], logits_requests)
                                 prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
                                 prefill_sampled_requests.extend(logits_requests)
                                 logprobs_segments.append((list(logits_requests), sampler_output.logprobs_tensors))
