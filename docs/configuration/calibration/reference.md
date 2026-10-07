@@ -107,7 +107,7 @@ The options marked `unset` are written to the quant config only when given. `--b
 
 ### `unify`
 
-Merges per-rank measurement and scale files to a smaller world size. The source world size is read from the `*_mod_list.json` files.
+Merges per-rank measurement and scale files to a smaller world size. The source world size is read from the `*_mod_list.json` files. Scale files of the target world size that are already in the output directory are removed first, so that, without source scales or with `--skip-scales`, INC computes new scales instead of reusing old ones.
 
 ```text
 vllm-gaudi-calibrate unify -m DIR -r N [-o OUT] [--ep] [--skip-scales] [--observer NAME]
@@ -124,7 +124,7 @@ vllm-gaudi-calibrate unify -m DIR -r N [-o OUT] [--ep] [--skip-scales] [--observ
 
 ### `expand`
 
-Splits a world size 1 MoE measurement into `N` expert parallel ranks. Every rank gets a copy of the measurement in which each fused MoE op keeps only the intermediate maxima of the experts that rank owns; all other nodes are copied unchanged. The number of experts must divide evenly by `N`. Only the measurement files are written; INC computes the scales from them when the model is served.
+Splits a world size 1 MoE measurement into `N` expert parallel ranks. Every rank gets a copy of the measurement in which each fused MoE op keeps only the intermediate maxima of the experts that rank owns; all other nodes are copied unchanged. The number of experts must divide evenly by `N`. Only the measurement files are written; INC computes the scales from them when the model is served. Scale files of the target world size that are already in the output directory are removed first, because INC would reuse them instead of computing new ones.
 
 ```text
 vllm-gaudi-calibrate expand -m DIR -w N [-o OUT] [--observer NAME]

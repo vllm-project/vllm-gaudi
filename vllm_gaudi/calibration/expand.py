@@ -14,7 +14,7 @@ from typing import Any
 
 from vllm_gaudi.calibration.layout import DEFAULT_OBSERVER
 from vllm_gaudi.calibration.measurements import (MEASURE, fused_moe_ops, list_measurement_files, load_json,
-                                                 local_expert_num, select, write_measurement)
+                                                 remove_scales, local_expert_num, select, write_measurement)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,8 @@ def expand_dir(measurements_dir: str | os.PathLike[str],
         raise ValueError(f"Expected exactly one world size 1 measurement in {source}, found "
                          f"{[f.path.name for f in sources]}; unify the measurements to world size 1 first")
     data = load_json(sources[0].path)
+    # Expand writes measurements only; INC must compute the scales from them, not reuse old ones.
+    remove_scales(target, [sources[0].prefix], target_world, observer)
 
     written = []
     for ep_rank in range(target_world):
