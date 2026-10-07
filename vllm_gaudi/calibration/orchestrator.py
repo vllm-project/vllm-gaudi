@@ -173,13 +173,22 @@ def check_measurements(dump: str, observer: str, tp: int) -> None:
             f"Directory contents: {present}")
 
 
-def check_scales(dump: str, observer: str, scale_method: str, tp: int) -> None:
-    """Warns when the QUANTIZE phase left no scale files; INC can still compute them when serving."""
-    stems = [f"{dump}_hooks_{observer}_{scale_method.upper()}_{rank}_{tp}" for rank in range(tp)]
-    missing = [Path(s).name + ext for s in stems for ext in (".json", ".npz") if not Path(s + ext).is_file()]
+def check_scales(dump: str, observer: str, tp: int) -> None:
+    """Warns when the QUANTIZE phase left no scale files; INC can still compute them when serving.
+
+    Any scale method counts: INC names the files after the method it resolved, which can come from
+    its own defaults or a per-op config, so the name is not predicted here.
+    """
+    directory = Path(dump).parent
+    prefix = f"{Path(dump).name}_hooks_{observer}_"
+    found = {(f.rank, f.ext)
+             for f in list_measurement_files(directory, observer)
+             if f.kind == SCALES and f.world == tp and f.prefix.startswith(prefix)} if directory.is_dir() else set()
+    missing = [f"rank {rank} .{ext}" for rank in range(tp) for ext in ("json", "npz") if (rank, ext) not in found]
     if missing:
-        logger.warning("The quantize phase did not write %s; INC will compute the scales when the model is served",
-                       missing)
+        logger.warning(
+            "The quantize phase did not write scale files for %s in %s; INC will compute the scales when "
+            "the model is served", missing, directory)
 
 
 def _engine_args(args: CalibrationArgs, preset: ResolvedPreset) -> dict[str, Any]:
@@ -266,6 +275,12 @@ def _resolve_local_paths(args: CalibrationArgs) -> None:
         args.model = os.path.abspath(args.model)
     if args.include_path is not None:
         args.include_path = os.path.abspath(args.include_path)
+    tokenizer = args.engine_args.get("tokenizer")
+    if isinstance(tokenizer, str) and os.path.exists(tokenizer):
+        args.engine_args["tokenizer"] = os.path.abspath(tokenizer)
+    # A relative download_dir would land in the scratch cwd, which is deleted after each phase.
+    if isinstance(args.engine_args.get("download_dir"), str):
+        args.engine_args["download_dir"] = os.path.abspath(args.engine_args["download_dir"])
 
 
 def _resolve_chat_template(args: CalibrationArgs, info: ModelInfo) -> None:
@@ -423,7 +438,7 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
             evaluation = _eval_spec(args, tasks, args.limit)
         remove_previous_outputs(dump, observer, scales_only=True)
         spawn("quantize", quant_cfg, layout.quant_config, evaluation)
-        check_scales(dump, observer, quant_cfg.get("scale_method", preset.scale_method), args.tp)
+        check_scales(dump, observer, args.tp)
 
     serve_world = args.tp
     use_ep = _expert_parallel(args, preset)

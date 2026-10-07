@@ -215,17 +215,41 @@ def test_local_paths_are_resolved_against_the_caller_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "models" / "My-Model").mkdir(parents=True)
     runner = FakeRunner(QWEN)
+    (tmp_path / "tok").mkdir()
     run_calibration(
-        CalibrationArgs(model="models/My-Model", output_dir="out", include_path="tasks", phases=("measure", )), runner)
+        CalibrationArgs(model="models/My-Model",
+                        output_dir="out",
+                        include_path="tasks",
+                        phases=("measure", ),
+                        engine_args={
+                            "tokenizer": "tok",
+                            "download_dir": "cache"
+                        }), runner)
     model = str(tmp_path / "models" / "My-Model")
     detect, measure = runner.calls[0][1], runner.calls[1][1]
     assert detect["model"] == model
     assert measure["model_args"]["pretrained"] == model
     assert measure["eval"]["include_path"] == str(tmp_path / "tasks")
+    assert measure["model_args"]["tokenizer"] == str(tmp_path / "tok")
+    assert measure["model_args"]["download_dir"] == str(tmp_path / "cache")
     assert (tmp_path / "out" / "my-model" / "maxabs_measure_g3.json").is_file()
     hub = FakeRunner(QWEN)
     run_calibration(args(tmp_path / "hub", phases=("measure", )), hub)
     assert hub.calls[0][1]["model"] == "Org/My-Model"
+
+
+def test_check_scales_accepts_any_scale_method(tmp_path, caplog):
+    dump = str(tmp_path / "inc_output")
+    # A custom quant config without scale_method: INC picks the method, here UNIT_SCALE.
+    write_rank(tmp_path, f"{PREFIX}_UNIT_SCALE", 0, 2, {})
+    write_rank(tmp_path, f"{PREFIX}_UNIT_SCALE", 1, 2, {})
+    with caplog.at_level("WARNING"):
+        orchestrator.check_scales(dump, "maxabs", 2)
+    assert "did not write" not in caplog.text
+    (tmp_path / f"{PREFIX}_UNIT_SCALE_1_2.npz").unlink()
+    with caplog.at_level("WARNING"):
+        orchestrator.check_scales(dump, "maxabs", 2)
+    assert "rank 1 .npz" in caplog.text
 
 
 def test_model_rejections(tmp_path):
