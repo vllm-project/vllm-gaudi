@@ -141,6 +141,26 @@ def test_expand_dir(tmp_path):
     assert {f.world for f in list_measurement_files(tmp_path)} == {1, 2, 4}
 
 
+def test_expand_dir_removes_stale_target_scales(tmp_path):
+    write_measure_run(tmp_path, world=2)
+    unify_dir(tmp_path, 1, use_ep=True)
+    stale = write_rank(tmp_path, SCALES_PREFIX, 3, 4, {LINEAR: {"inputs": [9.0]}})
+    other_world = write_rank(tmp_path, SCALES_PREFIX, 0, 2, {LINEAR: {"inputs": [1.0]}})
+    expand_dir(tmp_path, 4)
+    assert not stale.exists() and not stale.with_suffix(".npz").exists()
+    assert other_world.exists()
+
+
+@pytest.mark.parametrize("skip_scales", [False, True])
+def test_unify_dir_removes_stale_target_scales(tmp_path, skip_scales):
+    # No source scales (or --skip-scales): old target scales must not survive next to new measurements.
+    write_measure_run(tmp_path, world=2)
+    stale = write_rank(tmp_path, SCALES_PREFIX, 0, 1, {LINEAR: {"inputs": [9.0]}})
+    unify_dir(tmp_path, 1, skip_scales=skip_scales)
+    assert not stale.exists() and not stale.with_suffix(".npz").exists()
+    assert (tmp_path / f"{PREFIX}_0_1.json").is_file()
+
+
 def test_expand_dir_errors(tmp_path):
     with pytest.raises(ValueError, match="at least 2"):
         expand_dir(tmp_path, 1)
