@@ -15,8 +15,8 @@ from typing import Any
 
 from vllm_gaudi.calibration.layout import DEFAULT_OBSERVER
 from vllm_gaudi.calibration.measurements import (MEASURE, MOD_LIST, SCALES, MeasurementFile, fused_moe_ops,
-                                                 is_moe_experts, list_measurement_files, load_json, local_expert_num,
-                                                 select, split_expert_name, write_measurement)
+                                                 remove_scales, is_moe_experts, list_measurement_files, load_json,
+                                                 local_expert_num, select, split_expert_name, write_measurement)
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +175,8 @@ def unify_dir(measurements_dir: str | os.PathLike[str],
     groups = build_groups(world, target_world)
     logger.info("Unifying world size %d to %d, rank groups %s", world, target_world, groups)
 
+    # The target world's scales are written again below or, without source scales, left to INC.
+    remove_scales(target, {f.prefix for f in select(files, kind=MEASURE, world=world)}, target_world, observer)
     written = _unify_kind(files, groups, world, target, kind=MEASURE, use_ep=use_ep)
     if not written:
         raise ValueError(f"No measurement files of world size {world} found in {source}")
