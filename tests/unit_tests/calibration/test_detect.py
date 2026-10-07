@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from vllm_gaudi.calibration.detect import (ModelInfo, classify_hf_config, detect_device, device_from_name,
+from vllm_gaudi.calibration.detect import (ModelInfo, classify_hf_config, detect_device, detect_model, device_from_name,
                                            find_num_experts, find_quant_method, has_multimodal_subconfig)
 
 
@@ -67,3 +67,41 @@ def test_model_info_round_trip():
     data = info.to_dict()
     assert data["architectures"] == ["LlamaForCausalLM"]
     assert ModelInfo.from_dict({**data, "unknown": 1}) == info
+
+
+def test_detect_model_forwards_loading_args(monkeypatch):
+    calls = {}
+
+    class FakeModelConfig:
+
+        def __init__(self, **kwargs):
+            calls["model_config"] = kwargs
+            self.hf_config = SimpleNamespace(model_type="llama", architectures=["LlamaForCausalLM"])
+            self.is_multimodal_model = False
+            self.is_encoder_decoder = False
+
+    class FakeAutoTokenizer:
+
+        @staticmethod
+        def from_pretrained(name, **kwargs):
+            calls["tokenizer"] = (name, kwargs)
+            return SimpleNamespace(chat_template="{{ messages }}")
+
+    vllm_config = ModuleType("vllm.config")
+    vllm_config.ModelConfig = FakeModelConfig
+    transformers = ModuleType("transformers")
+    transformers.AutoTokenizer = FakeAutoTokenizer
+    monkeypatch.setitem(sys.modules, "vllm", ModuleType("vllm"))
+    monkeypatch.setitem(sys.modules, "vllm.config", vllm_config)
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    loading = {"revision": "abc", "tokenizer": "/tok", "hf_token": "hf_x", "max_model_len": 8}
+    info = detect_model("Org/Gated", False, loading)
+    assert calls["model_config"] == {
+        "model": "Org/Gated",
+        "trust_remote_code": False,
+        "revision": "abc",
+        "tokenizer": "/tok",
+        "hf_token": "hf_x"
+    }
+    assert calls["tokenizer"] == ("/tok", {"trust_remote_code": False, "revision": "abc", "token": "hf_x"})
+    assert info.has_chat_template is True
