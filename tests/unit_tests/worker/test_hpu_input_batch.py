@@ -725,3 +725,159 @@ def test_gate_predicate_composition(monkeypatch):
     skip = ((not runner.use_structured_output) and runner._prefill_chunk_gate_active()
             and runner._prefill_part_all_discarded(["r-walk"], ["r-walk"]))
     assert skip is False
+
+
+# ---------------------------------------------------------------------------
+# Chunked-prefill gate: [invalid part, valid part] output assembly
+# ---------------------------------------------------------------------------
+#
+# Under async scheduling the step's `sampled_token_ids` is the POSITIONAL
+# concat of the per-part sampled rows, while every downstream consumer
+# indexes it by INPUT-BATCH ROW: get_output() clears row i for each i in
+# invalid_req_indices, prev_req_id_to_index maps each surviving request to
+# its input-batch row, and the next step splices/scatters sampled tokens
+# through that map (update_async_output_token_ids, input-id scatter). A
+# gated part that simply DROPS its rows shifts every later part's rows by
+# its row count, so the consumers clear or read the wrong request's
+# token. These rows pin the reviewer's [invalid part, valid part] layout:
+# fresh request A admitted into a freed low row on a non-completing chunk
+# (part 0, invalid -> gate) + request B completing its final chunk in the
+# same step as a separate part (part 1, valid -> stock sampler).
+
+
+def _assemble_prefill_parts(runner, parts):
+    """Mirror the prefill sampling loop of HPUModelRunner.sample_tokens for
+    device-free constructed batch parts.
+
+    Each part is (req_id, logits_requests, sampled_rows): `sampled_rows`
+    is what the stock sampler would contribute (list of token ids, one
+    per logits row). The gate decision, the placeholder tensor and the
+    predicate are the REAL runner helpers; only the branch glue around
+    them (append/extend) is mirrored here because the callsite sits deep
+    inside sample_tokens. Returns the assembled async tensor exactly as
+    the torch.cat(decode + prefill parts).view(-1, 1) at the callsite.
+    """
+    prefill_sampled_token_ids = []
+    for req_id, logits_requests, sampled_rows in parts:
+        # One forced partial logit row per request in the part (async
+        # partial-chunk forcing, see _extract_prefill_batch_contents).
+        logits_device = torch.zeros(len(logits_requests), 1, dtype=torch.float32)
+        if (not runner.use_structured_output and runner._prefill_chunk_gate_active()
+                and runner._prefill_part_all_discarded(req_id, logits_requests)):
+            prefill_sampled_token_ids.append(runner._prefill_gate_placeholder(logits_device, logits_requests))
+        else:
+            # Stock: sampler output is int32 (Sampler casts before
+            # unsqueeze) and the callsite stores .flatten().
+            prefill_sampled_token_ids.append(torch.tensor(sampled_rows, dtype=torch.int32))
+    if prefill_sampled_token_ids:
+        return torch.cat(prefill_sampled_token_ids).view(-1, 1)
+    return torch.empty((0, 1), dtype=torch.int32)
+
+
+def _get_output_clear(assembled, invalid_req_indices):
+    """Replicates AsyncHPUModelRunnerOutput.get_output()'s clear contract
+    (the wrapper itself needs an HPU copy stream, unavailable deviceless):
+    tolist the assembled tensor and clear the entry at every invalid ROW.
+    Returns the per-row list of surviving token ids."""
+    valid_sampled_token_ids = assembled.tolist()
+    for i in invalid_req_indices:
+        if i < len(valid_sampled_token_ids):
+            valid_sampled_token_ids[i].clear()
+    return valid_sampled_token_ids
+
+
+def _reviewer_layout_runner():
+    """A at row 0: fresh chunked-prefill part, non-completing chunk ->
+    stock marks its row INVALID. B at row 1: final chunk -> valid. Two
+    separate parts (merge refused for a history-carrying part), exactly
+    the layout from the review."""
+    runner = _GateFakeRunner()
+    runner.input_batch.req_id_to_index = {"A": 0, "B": 1}
+    runner.input_batch.num_logprobs = {}
+    runner.invalid_req_indices = [0]
+    return runner
+
+
+def test_chunk_gate_invalid_then_valid_part_row_alignment(monkeypatch):
+    """The [invalid part, valid part] pin: with the gate skipping part 0,
+    the assembly must still have one row per input-batch row so that
+    get_output's row-indexed clear leaves B's token at row 1."""
+    monkeypatch.setenv(GATE_ENV, "1")
+    runner = _reviewer_layout_runner()
+    t_b = 777
+    assembled = _assemble_prefill_parts(
+        runner,
+        [
+            (["A"], ["A"], [-1]),  # gate-skipped partial-chunk part (invalid row 0)
+            (["B"], ["B"], [t_b])
+        ],  # completion part via stock sampler (row 1)
+    )
+    # a. one row per input-batch row (2), not 1: the dropped-row class
+    # shifts every later row and is the defect being pinned.
+    assert assembled.shape[0] == 2
+    # d. placeholder rows are sentinel-valued and dtype-match the stock
+    # int32 flatten so a drift breaks loudly here.
+    assert assembled.dtype == torch.int32
+    assert assembled[0].item() == -1
+    # b. get_output clears ONLY position 0 (row of the invalid request).
+    surviving = _get_output_clear(assembled, runner.invalid_req_indices)
+    assert surviving[0] == []
+    assert surviving[1] == [t_b]
+    # c. prev_req_id_to_index (built excluding invalid rows, same rule as
+    # the runner) must find B's token at its own row.
+    prev_req_id_to_index = {"B": 1}  # A excluded: row 0 is invalid
+    assert surviving[prev_req_id_to_index["B"]] == [t_b]
+
+    # Reproduction of the pinned defect: assembling the same step the way
+    # the gate did BEFORE the placeholder-row fix (skip = contribute no
+    # rows) yields a size-1 tensor whose row-indexed consumers hit B's
+    # token with A's clear — the exact reviewer layout.
+    defective = torch.cat([torch.tensor([t_b], dtype=torch.int32)]).view(-1, 1)
+    defective_surviving = _get_output_clear(defective, runner.invalid_req_indices)
+    assert defective.shape[0] == 1  # row 1 no longer exists
+    # get_output's row-0 clear consumed B's only row:
+    assert defective_surviving[0] == []
+    # ...and the next-step splice would index past the end:
+    with pytest.raises(IndexError):
+        _ = defective_surviving[prev_req_id_to_index["B"]]
+
+
+def test_chunk_gate_gate_off_assembly_matches_stock_positions(monkeypatch):
+    """Equivalence row: with the gate disabled (env 0) the same layout
+    takes the stock path for both parts; row positions must be identical
+    to the gated assembly (stock always contributes one row per prefill
+    request, so position == row on both arms)."""
+    monkeypatch.setenv(GATE_ENV, "0")
+    runner = _reviewer_layout_runner()
+    t_b = 777
+    stock_assembled = _assemble_prefill_parts(
+        runner,
+        [(["A"], ["A"], [42]), (["B"], ["B"], [t_b])],
+    )
+    monkeypatch.setenv(GATE_ENV, "1")
+    gated_assembled = _assemble_prefill_parts(
+        runner,
+        [(["A"], ["A"], [42]), (["B"], ["B"], [t_b])],
+    )
+    assert stock_assembled.shape == gated_assembled.shape == (2, 1)
+    stock_surviving = _get_output_clear(stock_assembled, runner.invalid_req_indices)
+    gated_surviving = _get_output_clear(gated_assembled, runner.invalid_req_indices)
+    # B's token survives at the same row index on both arms.
+    assert stock_surviving[1] == gated_surviving[1] == [t_b]
+    assert stock_surviving[0] == gated_surviving[0] == []
+
+
+def test_chunk_gate_more_rows_than_requests_placeholder_count(monkeypatch):
+    """A part whose logits carry more rows than requests (multi-logit
+    degenerate shape) still contributes one placeholder per sampler row
+    when logits_requests is None; with logits_requests set the count
+    follows it, mirroring the sampled-row count the stock path extends."""
+    monkeypatch.setenv(GATE_ENV, "1")
+    runner = _reviewer_layout_runner()
+    logits_device = torch.zeros(3, 1, dtype=torch.float32)
+    ph = runner._prefill_gate_placeholder(logits_device, None)
+    assert ph.shape == (3, )
+    ph2 = runner._prefill_gate_placeholder(logits_device, ["A"])
+    assert ph2.shape == (1, )
+    assert ph.dtype == torch.int32 and ph2.dtype == torch.int32
+    assert bool((ph == -1).all()) and bool((ph2 == -1).all())
