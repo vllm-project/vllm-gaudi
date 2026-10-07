@@ -24,9 +24,14 @@ logger = init_logger()
 # implementation — useful for debugging accuracy issues.
 _USE_LEGACY_PHASE_B = os.getenv("VLLM_GDN_LEGACY_PHASE_B", "0") == "1"
 
-# Set VLLM_GDN_COMPUTE_FP32=1 to use float32 instead of bfloat16 for GDN
-# compute ops (preprocess casts, decode path, state buffers).  bf16 is
-# the default for performance; fp32 is useful for debugging accuracy.
+# Set VLLM_GDN_COMPUTE_FP32=0 to attempt bfloat16 instead of float32 for
+# GDN compute ops (preprocess casts, decode path, state buffers).  NOTE:
+# fp32 is the DEFAULT and is load-bearing for correctness: on at least
+# one GDN model line (measured: Qwen3.8-27B-FP8, TP=4), bf16 compute
+# silently corrupts output (degenerate token storm, no engine-side
+# error row).  bf16 state STORAGE (--mamba-ssm-cache-dtype) is
+# unaffected; the cliff is specific to state COMPUTE.  Do not re-enable
+# bf16 compute without a numerics analysis.
 _GDN_COMPUTE_DTYPE = torch.float32 if os.getenv("VLLM_GDN_COMPUTE_FP32", "1") == "1" else torch.bfloat16
 
 # Set VLLM_GDN_EXACT_SOLVE=1 to use exact row-by-row forward substitution
@@ -82,7 +87,8 @@ def hpu_chunk_gdr_preprocess(
     if scale is None:
         scale = k.shape[-1]**-0.5
 
-    # Compute dtype controlled by VLLM_GDN_COMPUTE_FP32 env var (default: bf16)
+    # Compute dtype controlled by VLLM_GDN_COMPUTE_FP32 env var (default:
+    # fp32 — see the env-var note above for the correctness cliff)
     qf = q.reshape(-1, H, Kdim).to(_GDN_COMPUTE_DTYPE)
     kf = k.reshape(-1, H, Kdim).to(_GDN_COMPUTE_DTYPE)
     vf = v.reshape(-1, HV, Vdim).to(_GDN_COMPUTE_DTYPE)
@@ -611,7 +617,8 @@ def hpu_fused_recurrent_gated_delta_rule(
         h_batch = _eager_read_state(final_state, sidx, _GDN_COMPUTE_DTYPE)
 
         # Flatten token axis.
-        # Compute dtype controlled by VLLM_GDN_COMPUTE_FP32 env var (default: bf16)
+        # Compute dtype controlled by VLLM_GDN_COMPUTE_FP32 env var (default:
+        # fp32 — see the env-var note above for the correctness cliff)
         qf = q.reshape(-1, H, Kdim).to(_GDN_COMPUTE_DTYPE)
         kf = k.reshape(-1, H, Kdim).to(_GDN_COMPUTE_DTYPE)
         vf = v.reshape(-1, HV, Vdim).to(_GDN_COMPUTE_DTYPE)
