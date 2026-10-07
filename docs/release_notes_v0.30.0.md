@@ -37,6 +37,7 @@ This release is based on [vLLM v0.30.0](https://github.com/vllm-project/vllm/rel
 
 ## Attention and KV Cache
 
+- Aligned prefill chunks to the Mamba state-block grid for non-compact GDN with prefix caching, restoring prefix-cache reuse and preventing reuse of stale recurrent state. ([#1842](https://github.com/vllm-project/vllm-gaudi/pull/1842))
 - Fixed Qwen3.5 GDN recurrent-state load/store slots with prefix caching when compact GDN is disabled. ([#1827](https://github.com/vllm-project/vllm-gaudi/pull/1827))
 - Fixed the Qwen3.5 GDN `mamba_chunk_size` alignment bypass with prefix caching. ([#1815](https://github.com/vllm-project/vllm-gaudi/pull/1815))
 - Disabled Synapse persistent-input reuse for compact GDN to prevent recurrent-state corruption. ([#1753](https://github.com/vllm-project/vllm-gaudi/pull/1753))
@@ -79,6 +80,7 @@ This release is based on [vLLM v0.30.0](https://github.com/vllm-project/vllm/rel
 
 ## Fixes
 
+- Fixed preempted requests that resume with partially cached KV blocks under prefix caching sampling a token for every recomputed position, which caused OOM for large-vocabulary models and duplicated output. ([#1848](https://github.com/vllm-project/vllm-gaudi/pull/1848))
 - Fixed sampling penalties under async scheduling. ([#1761](https://github.com/vllm-project/vllm-gaudi/pull/1761))
 - Preserved stale in-flight output after async-scheduling preemption. ([#1794](https://github.com/vllm-project/vllm-gaudi/pull/1794))
 - Fixed the decode-block clamp misdetecting hybrid and sliding-window models. ([#1745](https://github.com/vllm-project/vllm-gaudi/pull/1745))
@@ -107,6 +109,8 @@ This release is based on [vLLM v0.30.0](https://github.com/vllm-project/vllm/rel
 
 | PR | Title | Author |
 | --- | --- | --- |
+| [#1842](https://github.com/vllm-project/vllm-gaudi/pull/1842) | Align prefill chunks to the mamba state block for non-compact GDN + prefix caching | @jiminha |
+| [#1848](https://github.com/vllm-project/vllm-gaudi/pull/1848) | Fix num already computed tokens | @jkaniecki |
 | [#1827](https://github.com/vllm-project/vllm-gaudi/pull/1827) | [Qwen3.5] COMPACT_GDN=0 with prefix cache support | @jiminha |
 | [#1824](https://github.com/vllm-project/vllm-gaudi/pull/1824) | Add record_logical_topk_ready() empty call for upstream compatibility | @jkaniecki |
 | [#1815](https://github.com/vllm-project/vllm-gaudi/pull/1815) | [Qwen3.5/GDN] Fix mamba_chunk_size alignment bypass with prefix caching | @yeonsily |
