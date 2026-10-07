@@ -23,6 +23,7 @@ from vllm.model_executor.models.qwen2_5_vl import (
 
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -246,12 +247,14 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
         vision_config: Qwen2_5_VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ):
         super().__init__(
             vision_config=vision_config,
             norm_eps=norm_eps,
             quant_config=quant_config,
+            input_norm=input_norm,
             prefix=prefix,
         )
 
@@ -281,7 +284,9 @@ class Qwen2_5_VisionTransformerStaticShape(Qwen2_5_VisionTransformer):
         cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
         cu_seqlens: list = []
 
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        # With mm_device_do_normalize the processor sends raw uint8 pixels;
+        # input_norm rescales/normalizes them (or only casts otherwise).
+        hidden_states = self.input_norm(x.to(device=self.device), self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
         window_index_id = 0
@@ -501,6 +506,7 @@ class HpuQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
                 self.config.vision_config,
                 norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -572,7 +578,7 @@ class HpuQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            pixel_values = image_input["pixel_values"]
 
             image_embeds = self.visual.get_image_embeds(
                 pixel_values,
@@ -594,7 +600,7 @@ class HpuQwen2_5_VLForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(self.visual.dtype)
+            pixel_values_videos = video_input["pixel_values_videos"]
             video_embeds = self.visual.get_image_embeds(
                 pixel_values_videos,
                 grid_thw=grid_thw,

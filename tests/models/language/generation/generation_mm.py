@@ -138,6 +138,13 @@ def start_test(model_card_path: str):
             for response in responses:
                 print(f"{response.outputs[0].text}")
                 print("=" * 80)
+
+            # Guards against the model silently ignoring the media content.
+            expected_keywords = [k.lower() for k in config.get("expected_keywords", [])]
+            for response in responses:
+                text = response.outputs[0].text.lower()
+                if expected_keywords and not any(k in text for k in expected_keywords):
+                    raise AssertionError(f"Response does not mention any of {expected_keywords}: {text!r}")
         except Exception as e:
             logger.error("Error during test with modality %(modality)s: %(e)s", dict(modality=modality, e=e))
 
