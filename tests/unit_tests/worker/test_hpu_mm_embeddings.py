@@ -4,6 +4,7 @@
 
 Tests the multimodal embedding position computation introduced in PR #1126,
 which fixes prefill batching for 2D padded [bs, padded_seq] token layouts.
+Also covers _execute_mm_encoder with prefix-cached (stripped) mm items.
 """
 
 import sys
@@ -32,7 +33,9 @@ if "habana_frameworks" not in sys.modules:
     if not hasattr(torch, "hpu"):
         torch.hpu = MagicMock()
 
-from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalBatchedField, MultiModalFeatureSpec, MultiModalFieldElem,
+                                    MultiModalKwargsItem, PlaceholderRange)
+from vllm.multimodal.utils import strip_covered_mm_data
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
@@ -282,3 +285,50 @@ class TestGatherMmEmbeddings2DPadded:
         # padded version should NOT have mm at contiguous position 11
         # (that falls in padding region of req_0)
         assert is_padded[11].item() is False
+
+
+def _make_pixel_mm_feature(identifier: str, offset: int, length: int) -> MultiModalFeatureSpec:
+    """An image feature carrying a pixel payload plus keep_on_cpu M-RoPE metadata."""
+    data = MultiModalKwargsItem({
+        "pixel_values":
+        MultiModalFieldElem(data=torch.empty(4), field=MultiModalBatchedField()),
+        "image_grid_thw":
+        MultiModalFieldElem(data=torch.ones(1, 3, dtype=torch.long), field=MultiModalBatchedField(keep_on_cpu=True)),
+    })
+    return MultiModalFeatureSpec(data=data,
+                                 modality="image",
+                                 identifier=identifier,
+                                 mm_position=PlaceholderRange(offset=offset, length=length))
+
+
+class TestExecuteMmEncoderPrefixCached:
+    """_execute_mm_encoder must not encode items the scheduler stripped."""
+
+    def test_covered_item_is_not_encoded(self):
+        # A repeated image fully inside a prefix-cache hit whose encoder output was
+        # already evicted: the scheduler strips its pixels (M-RoPE keeps grid_thw).
+        num_computed = 256
+        features = strip_covered_mm_data(
+            [_make_pixel_mm_feature("hash_cached", 0, 100),
+             _make_pixel_mm_feature("hash_new", 300, 50)],
+            num_computed,
+            uses_mrope=True,
+        )
+        assert list(features[0].data.keys()) == ["image_grid_thw"]
+
+        def embed_multimodal(**kwargs):
+            # Like the real model: no pixel payload -> no embeddings.
+            if "pixel_values" not in kwargs:
+                return []
+            return [torch.zeros(50, HIDDEN_SIZE) for _ in range(kwargs["pixel_values"].shape[0])]
+
+        requests = {"req_0": _make_request_state("req_0", 400, features, num_computed_tokens=num_computed)}
+        runner = _make_mock_runner(requests, encoder_cache={})
+        runner.pin_memory = False
+        runner.model = MagicMock()
+        runner.model.embed_multimodal.side_effect = embed_multimodal
+
+        HPUModelRunner._execute_mm_encoder(runner, _make_scheduler_output({"req_0": 144}), ["req_0"])
+
+        assert runner.model.embed_multimodal.call_count == 1
+        assert set(runner.encoder_cache) == {"hash_new"}

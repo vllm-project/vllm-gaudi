@@ -2047,6 +2047,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mm_hash = mm_feature.identifier
                 if mm_hash in self.encoder_cache:
                     continue
+                # A span fully covered by computed (e.g. prefix-cached) tokens is
+                # never gathered, and the scheduler strips its pixel payload
+                # (strip_covered_mm_data), so there is nothing to encode.
+                pos_info = mm_feature.mm_position
+                if mm_feature.data is None or pos_info.offset + pos_info.length <= req_state.num_computed_tokens:
+                    continue
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
