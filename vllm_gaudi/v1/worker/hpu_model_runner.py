@@ -833,7 +833,14 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 if mamba_mixer is None:
                     mamba_mixer = getattr(layer, 'mixer', None)
                 if mamba_mixer is not None:
-                    mamba_mixer.cache_group_idx = group_idx
+                    # A 0-dim tensor, not a Python int, as in the linear_attn
+                    # branch below: dynamo specializes on int VALUES, so with N
+                    # mamba cache groups every compiled graph containing a mamba
+                    # layer was compiled N times per shape. Consumers MUST index
+                    # with index_select (see _select_cache_group in
+                    # hpu_mamba_mixer2): t[idx] with a 0-dim tensor makes dynamo
+                    # call .item(), which breaks the graph.
+                    mamba_mixer.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
             elif 'linear_attn' in layer_name:
                 layer_idx = int(layer_name.split('.')[-2])
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
@@ -2911,7 +2918,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if len(has_initial_states_cpu) < target_bs:
                 pad_his = torch.zeros(target_bs - len(has_initial_states_cpu), dtype=has_initial_states_cpu.dtype)
                 has_initial_states_cpu = torch.cat([has_initial_states_cpu, pad_his])
-            prep_initial_states = torch.any(has_initial_states_cpu)
+            # A Python bool, not a 0-dim tensor: hpu_mamba_mixer2 branches on it
+            # with a plain `if`, and branching on a tensor is a data-dependent
+            # graph break in every mamba layer (fatal under fullgraph). The
+            # value is computed on the host, so bool() needs no device sync.
+            prep_initial_states = bool(torch.any(has_initial_states_cpu))
 
             # The code below carefully constructs the chunks such that:
             # 1. Chunks contain tokens from a *single* sequence only.
