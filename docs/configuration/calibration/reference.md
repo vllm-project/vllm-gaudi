@@ -61,7 +61,7 @@ The options marked `unset` are written to the quant config only when given. `--b
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--tasks TASK [TASK ...]` | `pile_10k gsm8k` (text), `mmmu_val` (multimodal) | lm-eval tasks, groups, or tags fed to the model. |
-| `--limit` | `512` | Samples per task. Must be at least 1. |
+| `--limit` | `512` | Samples per task; for a group or tag, per subtask. Must be at least 1. |
 | `--num-fewshot` | task default | Number of few-shot examples. |
 | `--max-gen-toks` | `256` | Generation budget for tasks that do not set their own. |
 | `--include-path DIR` | none | Directory with custom lm-eval task YAML files. |
@@ -238,7 +238,7 @@ To see the resolved preset for a model, run `vllm-gaudi-calibrate print-config M
 | Text | `pile_10k gsm8k` |
 | Multimodal | `mmmu_val` |
 
-- `--limit` is the number of samples per task, not in total, and it is always honored. With the text defaults, the MEASURE phase processes up to 1024 samples.
+- `--limit` is the number of samples per task, not in total, and it is always honored. For a group or tag, lm-eval applies it to each subtask. With the text defaults, the MEASURE phase processes up to 1024 samples; the multimodal default, the `mmmu_val` group of 30 subtasks with 30 samples each, processes all 900.
 - The tasks are validated in the phase process before the model is loaded. An unknown task fails the phase; use `list-tasks` to find valid names.
 - The QUANTIZE phase evaluates according to `--quantize-eval`: `smoke` runs the first task with `min(--smoke-limit, --limit)` samples, `full` runs all tasks with `--limit`, and `none` only loads the quantized model, which is enough for INC to write the scales.
 - If the tokenizer (or, for multimodal models, the processor) has no chat template, the tool logs a warning and runs the tasks on raw prompts, with `--no-chat-template` behavior.

@@ -25,7 +25,7 @@ The data comes from [lm-eval](https://github.com/EleutherAI/lm-evaluation-harnes
 | Modality | Default tasks | Samples |
 |----------|---------------|---------|
 | Text | `pile_10k gsm8k` | 512 per task (`--limit`) |
-| Multimodal | `mmmu_val` | 512 per task (`--limit`) |
+| Multimodal | `mmmu_val` | all 900: `mmmu_val` is a group of 30 subtasks with 30 samples each, and `--limit` applies to each subtask |
 
 `pile_10k` is a loglikelihood task that exercises prefill, and `gsm8k` is a generation task that also exercises decode and the KV cache. You can choose other tasks with `--tasks`, or provide your own lm-eval task YAML files with `--include-path`. For details, see [Default Tasks and Limits](reference.md#default-tasks-and-limits) and [Custom Calibration Data](advanced.md#custom-calibration-data).
 
