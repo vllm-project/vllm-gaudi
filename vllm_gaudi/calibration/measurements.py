@@ -11,6 +11,7 @@ Every JSON file has a binary twin (``.npz``) holding the same nodes as numpy arr
 """
 
 import json
+import logging
 import os
 import re
 from collections.abc import Iterable
@@ -25,6 +26,8 @@ from vllm_gaudi.calibration.layout import DEFAULT_OBSERVER
 MEASURE = "measure"
 SCALES = "scales"
 MOD_LIST = "mod_list"
+
+logger = logging.getLogger(__name__)
 
 _FILENAME_RE = re.compile(r"^(?P<prefix>.+)_(?P<rank>\d+)_(?P<world>\d+)(?P<mod_list>_mod_list)?\.(?P<ext>json|npz)$")
 
@@ -96,6 +99,34 @@ def select(files: Iterable[MeasurementFile],
         f for f in files
         if (kind is None or f.kind == kind) and (world is None or f.world == world) and (ext is None or f.ext == ext)
     ]
+
+
+def remove_scales(directory: str | os.PathLike[str],
+                  measure_prefixes: Iterable[str],
+                  world: int,
+                  observer: str = DEFAULT_OBSERVER) -> list[Path]:
+    """Removes the scale files of one world size derived from the given measurements.
+
+    INC reuses existing scale files and computes scales only for the modules missing from them,
+    so scales left from earlier measurements must go when the measurements of that world size
+    are rewritten.
+
+    Returns:
+        The removed files.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return []
+    prefixes = tuple(f"{prefix}_" for prefix in measure_prefixes)
+    stale = [
+        f.path for f in select(list_measurement_files(directory, observer), kind=SCALES, world=world, ext=None)
+        if f.prefix.startswith(prefixes)
+    ]
+    for path in stale:
+        path.unlink()
+    if stale:
+        logger.info("Removed %d scale files of world size %d from %s", len(stale), world, directory)
+    return stale
 
 
 def load_json(path: str | os.PathLike[str]) -> dict[str, Any]:
