@@ -9,6 +9,7 @@ meant to run inside the ``detect`` child process.
 
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -153,17 +154,37 @@ def detect_device() -> str:
     return device_from_name(hthpu.get_device_name())
 
 
-def _detect_chat_template(model: str, trust_remote_code: bool, is_multimodal: bool) -> bool | None:
+# ``--engine-arg`` keys that change which model artifacts are loaded; detection must see the same ones.
+MODEL_LOADING_ARGS = ("revision", "code_revision", "tokenizer", "tokenizer_revision", "hf_token", "hf_overrides",
+                      "hf_config_path", "config_format")
+
+
+def _hub_kwargs(loading_args: Mapping[str, Any], revision_key: str = "revision") -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    revision = loading_args.get(revision_key) or loading_args.get("revision")
+    if revision is not None:
+        kwargs["revision"] = revision
+    if loading_args.get("hf_token") is not None:
+        kwargs["token"] = loading_args["hf_token"]
+    return kwargs
+
+
+def _detect_chat_template(model: str, trust_remote_code: bool, is_multimodal: bool,
+                          loading_args: Mapping[str, Any]) -> bool | None:
     try:
         from transformers import AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(loading_args.get("tokenizer") or model,
+                                                  trust_remote_code=trust_remote_code,
+                                                  **_hub_kwargs(loading_args, "tokenizer_revision"))
         if getattr(tokenizer, "chat_template", None):
             return True
         if is_multimodal:
             from transformers import AutoProcessor
 
-            processor = AutoProcessor.from_pretrained(model, trust_remote_code=trust_remote_code)
+            processor = AutoProcessor.from_pretrained(model,
+                                                      trust_remote_code=trust_remote_code,
+                                                      **_hub_kwargs(loading_args))
             return bool(getattr(processor, "chat_template", None))
         return False
     except (ImportError, OSError, ValueError, KeyError) as exc:
@@ -171,12 +192,16 @@ def _detect_chat_template(model: str, trust_remote_code: bool, is_multimodal: bo
         return None
 
 
-def detect_model(model: str, trust_remote_code: bool = False) -> ModelInfo:
+def detect_model(model: str,
+                 trust_remote_code: bool = False,
+                 loading_args: Mapping[str, Any] | None = None) -> ModelInfo:
     """Inspects a model with vLLM, falling back to transformers when vLLM is absent.
 
     Args:
         model: Local model directory or Hugging Face model ID.
         trust_remote_code: Forwarded to the config loaders.
+        loading_args: :data:`MODEL_LOADING_ARGS` from ``--engine-arg``, so detection loads the
+            same revision, tokenizer and credentials as the phases.
 
     Returns:
         The classified model facts.
@@ -186,8 +211,9 @@ def detect_model(model: str, trust_remote_code: bool = False) -> ModelInfo:
     except ImportError:
         ModelConfig = None  # type: ignore[assignment,misc]
 
+    loading_args = {k: v for k, v in (loading_args or {}).items() if k in MODEL_LOADING_ARGS}
     if ModelConfig is not None:
-        model_config = ModelConfig(model=model, trust_remote_code=trust_remote_code)
+        model_config = ModelConfig(model=model, trust_remote_code=trust_remote_code, **loading_args)
         hf_config = model_config.hf_config
         is_multimodal = bool(model_config.is_multimodal_model)
         is_encoder_decoder = bool(model_config.is_encoder_decoder)
@@ -196,7 +222,7 @@ def detect_model(model: str, trust_remote_code: bool = False) -> ModelInfo:
         from transformers import AutoConfig
 
         logger.warning("vllm is not importable; detecting %s with transformers only", model)
-        hf_config = AutoConfig.from_pretrained(model, trust_remote_code=trust_remote_code)
+        hf_config = AutoConfig.from_pretrained(model, trust_remote_code=trust_remote_code, **_hub_kwargs(loading_args))
         is_multimodal = has_multimodal_subconfig(hf_config)
         is_encoder_decoder = bool(getattr(hf_config, "is_encoder_decoder", False))
         source = "transformers"
@@ -205,6 +231,6 @@ def detect_model(model: str, trust_remote_code: bool = False) -> ModelInfo:
         hf_config,
         is_multimodal=is_multimodal,
         is_encoder_decoder=is_encoder_decoder,
-        has_chat_template=_detect_chat_template(model, trust_remote_code, is_multimodal),
+        has_chat_template=_detect_chat_template(model, trust_remote_code, is_multimodal, loading_args),
         source=source,
     )

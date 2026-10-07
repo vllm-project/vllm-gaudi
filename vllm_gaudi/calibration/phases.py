@@ -45,7 +45,8 @@ def phase_detect(spec: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if spec.get("detect_device", True):
         result["device"] = detect.detect_device()
-    result["model"] = detect.detect_model(spec["model"], spec.get("trust_remote_code", False)).to_dict()
+    result["model"] = detect.detect_model(spec["model"], spec.get("trust_remote_code", False),
+                                          spec.get("loading_args")).to_dict()
     return result
 
 

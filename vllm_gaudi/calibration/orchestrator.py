@@ -23,7 +23,7 @@ from typing import Any, Protocol
 
 from vllm_gaudi.calibration import lmeval
 from vllm_gaudi.calibration.args import CalibrationArgs
-from vllm_gaudi.calibration.detect import ModelInfo
+from vllm_gaudi.calibration.detect import MODEL_LOADING_ARGS, ModelInfo
 from vllm_gaudi.calibration.expand import expand_dir
 from vllm_gaudi.calibration.inc_config import resolve_configs, write_json_atomic
 from vllm_gaudi.calibration.layout import DEFAULT_OBSERVER, OutputLayout
@@ -57,7 +57,8 @@ def build_phase_env(base_env: Mapping[str, str], *, quant_config: str | None, tp
     """Returns the environment of a phase child.
 
     Precedence, lowest first: the inherited environment, the tool defaults, the preset,
-    then ``--env``. ``QUANT_CONFIG`` is always the phase's own config, or absent.
+    then ``--env``. The defaults and the preset apply only to the INC phases; ``--env`` also
+    applies to detection. ``QUANT_CONFIG`` is always the phase's own config, or absent.
     """
     env = dict(base_env)
     env.pop("QUANT_CONFIG", None)
@@ -66,7 +67,8 @@ def build_phase_env(base_env: Mapping[str, str], *, quant_config: str | None, tp
         if tp > 1:
             env.update(TP_ENV_DEFAULTS)
         env.update(preset_env)
-        env.update(user_env)
+    env.update(user_env)
+    if quant_config is not None:
         env["QUANT_CONFIG"] = quant_config
     return env
 
@@ -253,8 +255,17 @@ def detect_model_info(args: CalibrationArgs, runner: PhaseRunner) -> tuple[str, 
     The output directory does not exist yet, so the phase output goes to the console only.
     In ``--dry-run`` with ``--device`` a failed detection falls back to the model name.
     """
-    spec = {"model": args.model, "trust_remote_code": args.trust_remote_code, "detect_device": args.device is None}
-    env = build_phase_env(os.environ, quant_config=None, tp=1, preset_env={}, user_env={})
+    spec = {
+        "model": args.model,
+        "trust_remote_code": args.trust_remote_code,
+        "detect_device": args.device is None,
+        "loading_args": {
+            k: v
+            for k, v in args.engine_args.items() if k in MODEL_LOADING_ARGS
+        },
+    }
+    # --env applies here too, for example HF_TOKEN for a gated model; the preset is not known yet.
+    env = build_phase_env(os.environ, quant_config=None, tp=1, preset_env={}, user_env=args.env)
     try:
         result = runner("detect", spec, env, None)
         info = ModelInfo.from_dict(result["model"])

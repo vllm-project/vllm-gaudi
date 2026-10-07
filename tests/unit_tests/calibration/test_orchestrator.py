@@ -238,6 +238,24 @@ def test_local_paths_are_resolved_against_the_caller_cwd(tmp_path, monkeypatch):
     assert hub.calls[0][1]["model"] == "Org/My-Model"
 
 
+def test_detect_gets_loading_args_and_user_env(tmp_path):
+    runner = FakeRunner(QWEN)
+    run_calibration(
+        args(tmp_path,
+             dry_run=True,
+             device="g3",
+             engine_args={
+                 "hf_token": "hf_x",
+                 "revision": "abc",
+                 "max_model_len": 8
+             },
+             env={"HF_TOKEN": "hf_y"}), runner)
+    name, spec, env = runner.calls[0]
+    assert name == "detect"
+    assert spec["loading_args"] == {"hf_token": "hf_x", "revision": "abc"}
+    assert env["HF_TOKEN"] == "hf_y"
+
+
 def test_check_scales_accepts_any_scale_method(tmp_path, caplog):
     dump = str(tmp_path / "inc_output")
     # A custom quant config without scale_method: INC picks the method, here UNIT_SCALE.
