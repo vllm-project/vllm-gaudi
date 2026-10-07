@@ -10,6 +10,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 SKIP_HOST_GUARD_ENV = "VLLM_GAUDI_SKIP_SLEEP_HOST_GUARD"
 HOST_RESERVE_ENV = "VLLM_GAUDI_SLEEP_HOST_RESERVE_MB"
 _DEFAULT_HOST_RESERVE_MB = 1024
@@ -180,6 +184,10 @@ def _host_shortfall(worker_reports: Any) -> str | None:
     ``HPUWorker.check_sleep_host_headroom``. Workers on one host share its memory and move
     their shards to CPU concurrently, so requirements are summed per host and compared
     with the smallest headroom reported on that host. Missing or malformed reports pass.
+
+    Only the reports of one engine are seen here. With ``data_parallel_size > 1`` outside
+    ``external_launcher``, every DP engine runs its own guard and they sleep concurrently, so
+    DP engines that share a host are not summed and can still exhaust it together.
     """
     if not isinstance(worker_reports, (list, tuple)):
         return None
@@ -221,10 +229,17 @@ def collect_host_headroom_reports(engine_core: Any, trim: bool) -> list[Any]:
     With ``external_launcher`` each rank runs its own engine and ``collective_rpc`` only
     reaches the local worker, so the reports are all-gathered over the world group to give
     every rank the same decision. Every rank calls ``sleep`` together in that mode.
+    Other backends do not gather across DP engines; see ``_host_shortfall``.
     """
     reports = list(engine_core.collective_rpc("check_sleep_host_headroom", kwargs={"trim": trim}) or [])
     parallel_config = getattr(getattr(engine_core, "vllm_config", None), "parallel_config", None)
     if getattr(parallel_config, "distributed_executor_backend", None) != "external_launcher":
+        dp_size = getattr(parallel_config, "data_parallel_size", 1)
+        if isinstance(dp_size, int) and dp_size > 1:
+            logger.warning_once(
+                "Host memory guard covers only this engine's workers; with data_parallel_size=%d the "
+                "other DP engines on the same host are not counted, so concurrent sleep can still "
+                "exhaust host memory.", dp_size)
         return reports
     import torch.distributed as dist
     from vllm.distributed.parallel_state import get_world_group
