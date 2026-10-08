@@ -176,7 +176,9 @@ def _construct_cached_request_state(req_id_suffix: int):
         mm_features=[],
         block_ids=([], ),
         generator=None,
-        num_computed_tokens=len(output_token_ids),
+        # A decoding request has computed every known token except the last one.
+        num_computed_tokens=max(0,
+                                len(prompt_token_ids) + len(output_token_ids) - 1),
         output_token_ids=output_token_ids,
     )
 
@@ -375,3 +377,40 @@ def test_no_token_bleed_across_requests_in_input_batch(device: str):
     # No token from one request appears in the other's slot.
     assert not (set(prompt_a) & set(row_b))
     assert not (set(prompt_b) & set(row_a))
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("num_computed_tokens, expect_folded", [(0, True), (5, True), (11, False)])
+def test_resumed_request_num_prompt_tokens(device: str, num_computed_tokens: int, expect_folded: bool):
+    """
+    A request with prompt=8 and output=4 (N=12) that has a gap before N-1 is
+    recomputing after preemption, so its output tokens are folded into the
+    prompt. With computed == N-1 it is a running decode and keeps its prompt.
+    """
+    input_batch: InputBatch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        pin_memory=is_pin_memory_available(),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        kernel_block_sizes=[1],
+    )
+    prompt = list(range(8))
+    output = [100, 101, 102, 103]
+    req_index = input_batch.add_request(
+        CachedRequestState(
+            req_id="req",
+            prompt_token_ids=prompt,
+            sampling_params=_create_sampling_params(),
+            pooling_params=None,
+            mm_features=[],
+            block_ids=([], ),
+            generator=None,
+            num_computed_tokens=num_computed_tokens,
+            output_token_ids=output,
+        ))
+
+    expected = len(prompt) + len(output) if expect_folded else len(prompt)
+    assert input_batch.num_prompt_tokens[req_index] == expected
