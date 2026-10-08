@@ -18,7 +18,9 @@ from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
+import vllm_gaudi.v1.worker.hpu_input_batch as hib_module
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
+from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
@@ -375,3 +377,507 @@ def test_no_token_bleed_across_requests_in_input_batch(device: str):
     # No token from one request appears in the other's slot.
     assert not (set(prompt_a) & set(row_b))
     assert not (set(prompt_b) & set(row_a))
+
+
+# ---------------------------------------------------------------------------
+# make_selective_sampling_metadata: trivial-selection fast paths
+# ---------------------------------------------------------------------------
+#
+# `make_selective_sampling_metadata` takes two fast paths for trivial
+# selections -- the identity prefix (req_indices == [0..n)) and the
+# all-equal broadcast (the decode `pad_to` shape, where a single request's
+# row index is repeated to the logits bucket size) -- and updates/reads the
+# sampling-param buffers with plain slices instead of the eager index-op
+# family (torch.tensor(idx) + index_copy_ updates and tensor[req_indices]
+# gathers). The battery below pins the fast-path results byte-equal to the
+# index-gather semantics they replace.
+#
+# The broadcast branch (the 0-d `copy_` update and the `.repeat` read in
+# `make_selective_sampling_metadata`) is never reached by sampler warmup:
+# `warmup_sampler` maps the dummy requests to indices 0..n-1 with
+# pad_to == batch_size, so it only ever takes the identity branch. The
+# broadcast rows below are the explicit coverage for it.
+
+_HAS_HPU = hasattr(torch, "hpu") and torch.hpu.is_available()
+# On Gaudi hardware (the `hpu_unit_tests` CI job) this is ['hpu'] and
+# `async_h2d_update` is the real helper. On a host without a device the
+# battery falls back to CPU with a CPU-faithful stand-in for
+# `async_h2d_update` (the real helper hardcodes device="hpu"); the stand-in
+# mirrors vllm_gaudi.utils.async_h2d_update and is applied identically to
+# every code path under test, so equivalence assertions stay exact.
+SELECTIVE_DEVICES = ["hpu"] if _HAS_HPU else ["cpu"]
+
+
+def _cpu_faithful_async_h2d_update(source, dest, indices, device="cpu"):
+    idx = torch.tensor(indices, dtype=torch.long, device=dest.device)
+    vals = source[indices].to(dest.device, non_blocking=True)
+    dest.index_copy_(0, idx, vals)
+
+
+def _patch_h2d_update_for_cpu(monkeypatch, device: str):
+    if device != "cpu":
+        return
+    monkeypatch.setattr(hib_module, "async_h2d_update", _cpu_faithful_async_h2d_update)
+
+
+def _make_selective_batch(device: str, n_reqs: int, penalties: bool = False) -> InputBatch:
+    input_batch = InputBatch(
+        max_num_reqs=64,
+        max_model_len=128,
+        max_num_batched_tokens=64,
+        device=torch.device(device),
+        pin_memory=False,
+        vocab_size=1000,
+        block_sizes=[128],
+        kernel_block_sizes=[128],
+    )
+    for i in range(n_reqs):
+        sampling_params = SamplingParams(temperature=0.5 + 0.01 * i, top_p=0.9 - 0.01 * i, top_k=17 + i)
+        if penalties:
+            sampling_params.frequency_penalty = 0.5 + 0.01 * i
+            sampling_params.presence_penalty = 0.25 + 0.01 * i
+            sampling_params.repetition_penalty = 1.0 + 0.05 * (i + 1)
+        input_batch.add_request(
+            CachedRequestState(
+                req_id=f"r{i}",
+                prompt_token_ids=list(range(i, i + 32)),
+                mm_features=[],
+                sampling_params=sampling_params,
+                pooling_params=None,
+                generator=None,
+                block_ids=([[i]]),
+                num_computed_tokens=32,
+                output_token_ids=[],
+            ))
+    return input_batch
+
+
+def _selection(req_indices: list[int]) -> list[tuple[str, list[int]]]:
+    # The same selection read by the identity check: request "r{i}" lives at
+    # input-batch row i in the batch built by _make_selective_batch.
+    return [(f"r{i}", []) for i in req_indices]
+
+
+def _expected_gather(input_batch: InputBatch, req_indices: list[int], device: torch.device):
+    """Reference semantics: the index-gather the fast paths replace, read
+    off the host-side CPU tensors so the expected values are independent of
+    which update branch ran."""
+    temperature = input_batch.temperature_cpu_tensor[req_indices].to(device)
+    top_p = (None if input_batch.no_top_p else input_batch.top_p_cpu_tensor[req_indices].to(device))
+    top_k = (None if input_batch.no_top_k else input_batch.top_k_cpu_tensor[req_indices].to(device))
+    return temperature, top_p, top_k
+
+
+def _same(a: Optional[torch.Tensor], b: Optional[torch.Tensor]) -> bool:
+    return (a is None and b is None) or (a is not None and b is not None and torch.equal(a, b))
+
+
+@pytest.mark.parametrize("device", SELECTIVE_DEVICES)
+@pytest.mark.parametrize("num_selected", [1, 2, 3, 4, 5, 6, 7, 8])
+def test_selective_sampling_metadata_identity_equivalence(device: str, num_selected: int, monkeypatch):
+    """Identity-prefix fast path (req_indices == [0..n)).
+
+    Result fields are byte-equal to the index-gather semantics and the
+    device buffers hold the host values for the selected rows. This is the
+    shape warmup also exercises (pad_to == batch_size), plus the unpadded
+    multi-request selection.
+    """
+    _patch_h2d_update_for_cpu(monkeypatch, device)
+    input_batch = _make_selective_batch(device, n_reqs=8)
+    req_indices = list(range(num_selected))
+
+    metadata = input_batch.make_selective_sampling_metadata(_selection(req_indices))
+
+    exp_t, exp_p, exp_k = _expected_gather(input_batch, req_indices, metadata.temperature.device)
+    assert _same(metadata.temperature, exp_t)
+    assert _same(metadata.top_p, exp_p)
+    assert _same(metadata.top_k, exp_k)
+    assert torch.equal(input_batch.temperature[req_indices],
+                       input_batch.temperature_cpu_tensor[req_indices].to(metadata.temperature.device))
+
+
+@pytest.mark.parametrize("device", SELECTIVE_DEVICES)
+@pytest.mark.parametrize("num_selected", [1, 2, 3, 8])
+def test_selective_sampling_metadata_skip_copy_equivalence(device: str, num_selected: int, monkeypatch):
+    """skip_copy=True (parameters already on device from a prior pass).
+
+    After an identity call with skip_copy=False populates the rows, a
+    skip_copy call over the same selection must return byte-equal fields
+    without re-updating.
+    """
+    _patch_h2d_update_for_cpu(monkeypatch, device)
+    input_batch = _make_selective_batch(device, n_reqs=8)
+    req_indices = list(range(num_selected))
+
+    input_batch.make_selective_sampling_metadata(_selection(req_indices))
+    metadata = input_batch.make_selective_sampling_metadata(_selection(req_indices), skip_copy=True)
+
+    exp_t, exp_p, exp_k = _expected_gather(input_batch, req_indices, metadata.temperature.device)
+    assert _same(metadata.temperature, exp_t)
+    assert _same(metadata.top_p, exp_p)
+    assert _same(metadata.top_k, exp_k)
+
+
+@pytest.mark.parametrize("device", SELECTIVE_DEVICES)
+@pytest.mark.parametrize("num_selected", [1, 2, 4, 17])
+@pytest.mark.parametrize("row", [0, 2, 5])
+def test_selective_sampling_metadata_broadcast_equivalence(device: str, num_selected: int, row: int, monkeypatch):
+    """Broadcast fast path: all-equal indices (decode `pad_to` shape).
+
+    Exercises both halves of the branch that sampler warmup never reaches:
+    the 0-d `copy_` row update and the `.repeat` read. The result must be
+    byte-equal to selecting the same row n times via the index path.
+    """
+    _patch_h2d_update_for_cpu(monkeypatch, device)
+    input_batch = _make_selective_batch(device, n_reqs=8)
+    req_indices = [row] * num_selected
+
+    metadata = input_batch.make_selective_sampling_metadata(_selection(req_indices))
+
+    dev = metadata.temperature.device
+    exp_t, exp_p, exp_k = _expected_gather(input_batch, req_indices, dev)
+    assert _same(metadata.temperature, exp_t)
+    assert _same(metadata.top_p, exp_p)
+    assert _same(metadata.top_k, exp_k)
+    # The repeat must actually be n rows of the single selected row.
+    assert metadata.temperature.shape == (num_selected, )
+    assert torch.equal(metadata.temperature, metadata.temperature[0:1].expand(num_selected).contiguous())
+
+
+@pytest.mark.parametrize("device", SELECTIVE_DEVICES)
+@pytest.mark.parametrize("req_indices", [[3, 1, 0, 2], [0, 0, 1, 1, 2], [7, 5, 3]])
+def test_selective_sampling_metadata_nonidentity_unchanged(device: str, req_indices: list[int], monkeypatch):
+    """Non-trivial selections (permutation / mixed repeat / subset).
+
+    These must keep taking the untouched index-op path; results are
+    byte-equal to the reference gather.
+    """
+    _patch_h2d_update_for_cpu(monkeypatch, device)
+    input_batch = _make_selective_batch(device, n_reqs=8)
+
+    metadata = input_batch.make_selective_sampling_metadata(_selection(req_indices))
+
+    exp_t, exp_p, exp_k = _expected_gather(input_batch, req_indices, metadata.temperature.device)
+    assert _same(metadata.temperature, exp_t)
+    assert _same(metadata.top_p, exp_p)
+    assert _same(metadata.top_k, exp_k)
+
+
+@pytest.mark.parametrize("device", SELECTIVE_DEVICES)
+def test_selective_sampling_metadata_no_penalties_fields_none(device: str, monkeypatch):
+    """Regression guard: with no request carrying penalties, the three
+    penalty fields must be None instead of gathers of host-stale device
+    memory. Pre-fix code gathered them unconditionally; this row fails on
+    that behavior and pins the None-if-unset convention already used for
+    top_p/top_k in the same constructor.
+    """
+    _patch_h2d_update_for_cpu(monkeypatch, device)
+    input_batch = _make_selective_batch(device, n_reqs=4, penalties=False)
+
+    metadata = input_batch.make_selective_sampling_metadata(_selection([0, 1, 2, 3]))
+
+    assert input_batch.no_penalties
+    assert metadata.frequency_penalties is None
+    assert metadata.presence_penalties is None
+    assert metadata.repetition_penalties is None
+
+
+@pytest.mark.parametrize("device", SELECTIVE_DEVICES)
+def test_selective_sampling_metadata_penalties_active_values(device: str, monkeypatch):
+    """Penalties-active regression: when any request sets a penalty the
+    fields stay byte-equal to the index-gather of the live buffers.
+    """
+    _patch_h2d_update_for_cpu(monkeypatch, device)
+    input_batch = _make_selective_batch(device, n_reqs=4, penalties=True)
+    req_indices = [0, 1, 2, 3]
+
+    metadata = input_batch.make_selective_sampling_metadata(_selection(req_indices))
+
+    assert not input_batch.no_penalties
+    dev = metadata.frequency_penalties.device
+    assert torch.equal(metadata.frequency_penalties, input_batch.frequency_penalties_cpu_tensor[req_indices].to(dev))
+    assert torch.equal(metadata.presence_penalties, input_batch.presence_penalties_cpu_tensor[req_indices].to(dev))
+    assert torch.equal(metadata.repetition_penalties, input_batch.repetition_penalties_cpu_tensor[req_indices].to(dev))
+
+
+@pytest.mark.parametrize("device", SELECTIVE_DEVICES)
+def test_selective_sampling_metadata_skip_copy_with_penalties(device: str, monkeypatch):
+    """skip_copy + penalties: prompt_token_ids must still be produced from
+    the cached host tensor even though the row updates are skipped, and
+    penalty fields must stay byte-equal to the live buffers.
+    """
+    _patch_h2d_update_for_cpu(monkeypatch, device)
+    input_batch = _make_selective_batch(device, n_reqs=4, penalties=True)
+    req_indices = [0, 1, 2]
+
+    input_batch.make_selective_sampling_metadata(_selection(req_indices))
+    metadata = input_batch.make_selective_sampling_metadata(_selection(req_indices), skip_copy=True)
+
+    assert metadata.prompt_token_ids is not None
+    assert tuple(metadata.prompt_token_ids.shape[0:1]) == (len(req_indices), )
+    dev = metadata.temperature.device
+    assert torch.equal(metadata.prompt_token_ids, input_batch._make_prompt_token_ids_cpu_tensor()[req_indices].to(dev))
+    assert torch.equal(metadata.frequency_penalties, input_batch.frequency_penalties_cpu_tensor[req_indices].to(dev))
+
+
+# ---------------------------------------------------------------------------
+# Chunked-prefill sample gate predicates (HPUModelRunner helpers)
+# ---------------------------------------------------------------------------
+#
+# The gate skips the per-chunk sampling chain for async-scheduling
+# chunked-prefill chunks whose every sampled row stock itself discards
+# (row marked invalid in input preparation). These rows pin the predicate
+# truth table; they bind the unbound runner methods to a duck-typed
+# instance, so they need no model, no scheduler and no device.
+
+
+class _GateFakeInputBatch:
+
+    def __init__(self):
+        # r-logp stands for a request whose sampling_params.logprobs is
+        # set: its row is invalid (so the invalid-row check alone would
+        # skip the part) but stock would have produced a real
+        # logprobs_tensors for it, so the part must take the stock path.
+        self.req_id_to_index = {"r-walk": 0, "r-done": 1, "r-mix": 2, "r-logp": 3}
+        self.num_logprobs = {"r-logp": 1}
+        self.refresh_calls = 0
+
+    def refresh_sampling_metadata(self):
+        self.refresh_calls += 1
+
+
+class _GateFakeRunner:
+    _prefill_chunk_gate_active = HPUModelRunner._prefill_chunk_gate_active
+    _prefill_part_all_discarded = HPUModelRunner._prefill_part_all_discarded
+    _prefill_gate_placeholder = HPUModelRunner._prefill_gate_placeholder
+
+    def __init__(self, async_mode: bool = True):
+        self.use_async_scheduling = async_mode
+        self.use_structured_output = False
+        self.device = torch.device("cpu")
+        self.input_batch = _GateFakeInputBatch()
+        # Stock marks the forced partial-chunk rows of "r-walk" and
+        # "r-logp" invalid.
+        self.invalid_req_indices = [0, 3]
+
+
+GATE_ENV = "VLLM_GAUDI_PREFILL_CHUNK_GATE"
+
+
+@pytest.mark.parametrize("env_value,expected", [("1", True), ("0", False), (None, True)])
+def test_prefill_chunk_gate_env_switch(monkeypatch, env_value: str, expected: bool):
+    """The gate is env-switchable for staged rollout (default on; =0
+    restores stock behavior exactly); async-scheduling is a precondition by
+    construction (invalid_req_indices is only populated on that path)."""
+    runner = _GateFakeRunner()
+    if env_value is not None:
+        monkeypatch.setenv(GATE_ENV, env_value)
+    else:
+        monkeypatch.delenv(GATE_ENV, raising=False)
+    assert runner._prefill_chunk_gate_active() is expected
+
+
+def test_prefill_chunk_gate_requires_async_scheduling(monkeypatch):
+    """With async scheduling off the gate is inactive regardless of env."""
+    monkeypatch.setenv(GATE_ENV, "1")
+    runner = _GateFakeRunner(async_mode=False)
+    assert runner._prefill_chunk_gate_active() is False
+
+
+@pytest.mark.parametrize(
+    "req_id,logits_requests,expected,case",
+    [
+        # Every sampled row invalid -> stock would discard it all -> skip.
+        (["r-walk"], ["r-walk"], True, "all-invalid walk chunk"),
+        # A completion row is real -> never skip.
+        (["r-done"], ["r-done"], False, "completion chunk"),
+        # Merged completing + partial pair keeps the real row -> sample stock.
+        (["r-walk", "r-done"], ["r-walk", "r-done"], False, "mixed pair"),
+        # Unknown request id (defensive) -> fall back to the stock path.
+        (["r-ghost"], ["r-ghost"], False, "unknown request"),
+        # No rows at all -> not the gate's case (numel gate upstream).
+        ([], [], False, "empty batch part"),
+        # Degenerate shape: logits_requests longer than the batch rows.
+        (["r-walk"], ["r-walk", "r-extra"], False, "logits_requests longer than rows"),
+        # Invalid row that asked for sampled-token logprobs: skipping would
+        # silently drop its requested logprobs -> stock path.
+        (["r-logp"], ["r-logp"], False, "sampled-token logprobs requested"),
+    ])
+def test_batch_all_discarded_truth_table(req_id, logits_requests, expected, case, monkeypatch):
+    """`_prefill_part_all_discarded` returns True only when stock's own
+    invalid_req_indices decision marks every sampled row of this batch
+    part invalid (case: {case})."""
+    assert case
+    runner = _GateFakeRunner()
+    assert runner._prefill_part_all_discarded(req_id, logits_requests) is expected
+
+
+def test_gate_predicate_composition(monkeypatch):
+    """Structured output keeps the stock sampling path unconditionally:
+    the callsite predicate conjoins not-use-structured-output with the
+    gate activation and the all-discarded check."""
+    monkeypatch.setenv(GATE_ENV, "1")
+    runner = _GateFakeRunner()
+    skip = ((not runner.use_structured_output) and runner._prefill_chunk_gate_active()
+            and runner._prefill_part_all_discarded(["r-walk"], ["r-walk"]))
+    assert skip is True
+    runner.use_structured_output = True
+    skip = ((not runner.use_structured_output) and runner._prefill_chunk_gate_active()
+            and runner._prefill_part_all_discarded(["r-walk"], ["r-walk"]))
+    assert skip is False
+
+
+# ---------------------------------------------------------------------------
+# Chunked-prefill gate: [invalid part, valid part] output assembly
+# ---------------------------------------------------------------------------
+#
+# Under async scheduling the step's `sampled_token_ids` is the POSITIONAL
+# concat of the per-part sampled rows, while every downstream consumer
+# indexes it by INPUT-BATCH ROW: get_output() clears row i for each i in
+# invalid_req_indices, prev_req_id_to_index maps each surviving request to
+# its input-batch row, and the next step splices/scatters sampled tokens
+# through that map (update_async_output_token_ids, input-id scatter). A
+# gated part that simply DROPS its rows shifts every later part's rows by
+# its row count, so the consumers clear or read the wrong request's
+# token. These rows pin the reviewer's [invalid part, valid part] layout:
+# fresh request A admitted into a freed low row on a non-completing chunk
+# (part 0, invalid -> gate) + request B completing its final chunk in the
+# same step as a separate part (part 1, valid -> stock sampler).
+
+
+def _assemble_prefill_parts(runner, parts):
+    """Mirror the prefill sampling loop of HPUModelRunner.sample_tokens for
+    device-free constructed batch parts.
+
+    Each part is (req_id, logits_requests, sampled_rows): `sampled_rows`
+    is what the stock sampler would contribute (list of token ids, one
+    per logits row). The gate decision, the placeholder tensor and the
+    predicate are the REAL runner helpers; only the branch glue around
+    them (append/extend) is mirrored here because the callsite sits deep
+    inside sample_tokens. Returns the assembled async tensor exactly as
+    the torch.cat(decode + prefill parts).view(-1, 1) at the callsite.
+    """
+    prefill_sampled_token_ids = []
+    for req_id, logits_requests, sampled_rows in parts:
+        # One forced partial logit row per request in the part (async
+        # partial-chunk forcing, see _extract_prefill_batch_contents).
+        logits_device = torch.zeros(len(logits_requests), 1, dtype=torch.float32)
+        if (not runner.use_structured_output and runner._prefill_chunk_gate_active()
+                and runner._prefill_part_all_discarded(req_id, logits_requests)):
+            prefill_sampled_token_ids.append(runner._prefill_gate_placeholder(logits_device, logits_requests))
+        else:
+            # Stock: sampler output is int32 (Sampler casts before
+            # unsqueeze) and the callsite stores .flatten().
+            prefill_sampled_token_ids.append(torch.tensor(sampled_rows, dtype=torch.int32))
+    if prefill_sampled_token_ids:
+        return torch.cat(prefill_sampled_token_ids).view(-1, 1)
+    return torch.empty((0, 1), dtype=torch.int32)
+
+
+def _get_output_clear(assembled, invalid_req_indices):
+    """Replicates AsyncHPUModelRunnerOutput.get_output()'s clear contract
+    (the wrapper itself needs an HPU copy stream, unavailable deviceless):
+    tolist the assembled tensor and clear the entry at every invalid ROW.
+    Returns the per-row list of surviving token ids."""
+    valid_sampled_token_ids = assembled.tolist()
+    for i in invalid_req_indices:
+        if i < len(valid_sampled_token_ids):
+            valid_sampled_token_ids[i].clear()
+    return valid_sampled_token_ids
+
+
+def _reviewer_layout_runner():
+    """A at row 0: fresh chunked-prefill part, non-completing chunk ->
+    stock marks its row INVALID. B at row 1: final chunk -> valid. Two
+    separate parts (merge refused for a history-carrying part), exactly
+    the layout from the review."""
+    runner = _GateFakeRunner()
+    runner.input_batch.req_id_to_index = {"A": 0, "B": 1}
+    runner.input_batch.num_logprobs = {}
+    runner.invalid_req_indices = [0]
+    return runner
+
+
+def test_chunk_gate_invalid_then_valid_part_row_alignment(monkeypatch):
+    """The [invalid part, valid part] pin: with the gate skipping part 0,
+    the assembly must still have one row per input-batch row so that
+    get_output's row-indexed clear leaves B's token at row 1."""
+    monkeypatch.setenv(GATE_ENV, "1")
+    runner = _reviewer_layout_runner()
+    t_b = 777
+    assembled = _assemble_prefill_parts(
+        runner,
+        [
+            (["A"], ["A"], [-1]),  # gate-skipped partial-chunk part (invalid row 0)
+            (["B"], ["B"], [t_b])
+        ],  # completion part via stock sampler (row 1)
+    )
+    # a. one row per input-batch row (2), not 1: the dropped-row class
+    # shifts every later row and is the defect being pinned.
+    assert assembled.shape[0] == 2
+    # d. placeholder rows are sentinel-valued and dtype-match the stock
+    # int32 flatten so a drift breaks loudly here.
+    assert assembled.dtype == torch.int32
+    assert assembled[0].item() == -1
+    # b. get_output clears ONLY position 0 (row of the invalid request).
+    surviving = _get_output_clear(assembled, runner.invalid_req_indices)
+    assert surviving[0] == []
+    assert surviving[1] == [t_b]
+    # c. prev_req_id_to_index (built excluding invalid rows, same rule as
+    # the runner) must find B's token at its own row.
+    prev_req_id_to_index = {"B": 1}  # A excluded: row 0 is invalid
+    assert surviving[prev_req_id_to_index["B"]] == [t_b]
+
+    # Reproduction of the pinned defect: assembling the same step the way
+    # the gate did BEFORE the placeholder-row fix (skip = contribute no
+    # rows) yields a size-1 tensor whose row-indexed consumers hit B's
+    # token with A's clear — the exact reviewer layout.
+    defective = torch.cat([torch.tensor([t_b], dtype=torch.int32)]).view(-1, 1)
+    defective_surviving = _get_output_clear(defective, runner.invalid_req_indices)
+    assert defective.shape[0] == 1  # row 1 no longer exists
+    # get_output's row-0 clear consumed B's only row:
+    assert defective_surviving[0] == []
+    # ...and the next-step splice would index past the end:
+    with pytest.raises(IndexError):
+        _ = defective_surviving[prev_req_id_to_index["B"]]
+
+
+def test_chunk_gate_gate_off_assembly_matches_stock_positions(monkeypatch):
+    """Equivalence row: with the gate disabled (env 0) the same layout
+    takes the stock path for both parts; row positions must be identical
+    to the gated assembly (stock always contributes one row per prefill
+    request, so position == row on both arms)."""
+    monkeypatch.setenv(GATE_ENV, "0")
+    runner = _reviewer_layout_runner()
+    t_b = 777
+    stock_assembled = _assemble_prefill_parts(
+        runner,
+        [(["A"], ["A"], [42]), (["B"], ["B"], [t_b])],
+    )
+    monkeypatch.setenv(GATE_ENV, "1")
+    gated_assembled = _assemble_prefill_parts(
+        runner,
+        [(["A"], ["A"], [42]), (["B"], ["B"], [t_b])],
+    )
+    assert stock_assembled.shape == gated_assembled.shape == (2, 1)
+    stock_surviving = _get_output_clear(stock_assembled, runner.invalid_req_indices)
+    gated_surviving = _get_output_clear(gated_assembled, runner.invalid_req_indices)
+    # B's token survives at the same row index on both arms.
+    assert stock_surviving[1] == gated_surviving[1] == [t_b]
+    assert stock_surviving[0] == gated_surviving[0] == []
+
+
+def test_chunk_gate_more_rows_than_requests_placeholder_count(monkeypatch):
+    """A part whose logits carry more rows than requests (multi-logit
+    degenerate shape) still contributes one placeholder per sampler row
+    when logits_requests is None; with logits_requests set the count
+    follows it, mirroring the sampled-row count the stock path extends."""
+    monkeypatch.setenv(GATE_ENV, "1")
+    runner = _reviewer_layout_runner()
+    logits_device = torch.zeros(3, 1, dtype=torch.float32)
+    ph = runner._prefill_gate_placeholder(logits_device, None)
+    assert ph.shape == (3, )
+    ph2 = runner._prefill_gate_placeholder(logits_device, ["A"])
+    assert ph2.shape == (1, )
+    assert ph.dtype == torch.int32 and ph2.dtype == torch.int32
+    assert bool((ph == -1).all()) and bool((ph2 == -1).all())
