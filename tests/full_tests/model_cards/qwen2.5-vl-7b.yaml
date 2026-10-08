@@ -9,6 +9,8 @@ test_config:                                # List of test configurations. - mod
     input_data_config:                      # Configuration for the input data
       num_prompts: 4                        # Number of samples to run
       media_source: default                 # Source of the data to load
+    # Every answer must mention what is in the default image (cherry_blossom)
+    expected_keywords: ["tower", "blossom", "cherry"]
   - modality: video
     extra_engine_args:
       mm_processor_kwargs:
