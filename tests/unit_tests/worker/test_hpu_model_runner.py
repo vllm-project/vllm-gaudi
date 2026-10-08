@@ -48,6 +48,8 @@ def test_kv_cache_group_isinstance_unwraps_uniform_specs():
     assert not _kv_cache_group_isinstance(wrapped_full, SlidingWindowSpec)
     assert _kv_cache_group_isinstance(wrapped_sliding, SlidingWindowSpec)
     assert not _kv_cache_group_isinstance(wrapped_sliding, FullAttentionSpec)
+    assert not _kv_cache_group_isinstance(wrapped_full, FullAttentionSpec, unwrap_uniform=False)
+    assert not _kv_cache_group_isinstance(wrapped_sliding, SlidingWindowSpec, unwrap_uniform=False)
 
 
 def initialize_kv_cache(runner: HPUModelRunner):

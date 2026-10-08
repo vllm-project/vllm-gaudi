@@ -142,7 +142,12 @@ def _kv_cache_group_specs(kv_cache_spec: KVCacheSpec) -> tuple[KVCacheSpec, ...]
     return (kv_cache_spec, )
 
 
-def _kv_cache_group_isinstance(kv_cache_spec: KVCacheSpec, spec_type: type[KVCacheSpec]) -> bool:
+def _kv_cache_group_isinstance(kv_cache_spec: KVCacheSpec,
+                               spec_type: type[KVCacheSpec],
+                               *,
+                               unwrap_uniform: bool = True) -> bool:
+    if not unwrap_uniform:
+        return isinstance(kv_cache_spec, spec_type)
     specs = _kv_cache_group_specs(kv_cache_spec)
     return bool(specs) and all(isinstance(spec, spec_type) for spec in specs)
 
@@ -1486,13 +1491,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Mirrors the GDN compact slot machinery (_gdn_req_to_base_slot) exactly:
         # allocate on admission, free on finish, free_list identical across TP ranks.
         _swa_compact_requested = (os.environ.get('VLLM_SWA_COMPACT', '0') == '1')
-        _swa_torch_compile_enabled = (not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager)
+        _swa_torch_compile_enabled = (not is_fake_hpu() and not htorch.utils.internal.is_lazy()
+                                      and not self.model_config.enforce_eager)
         self._swa_compact_enabled = (
             _swa_compact_requested and self._get_model_type() == 'gemma4' and _swa_torch_compile_enabled)
         if _swa_compact_requested and not self._swa_compact_enabled:
             logger.warning_once("VLLM_SWA_COMPACT=1 requires Gemma4 in torch.compile mode; compact SWA is disabled "
-                                "for model_type=%s, is_lazy=%s, enforce_eager=%s.", self._get_model_type(),
-                                htorch.utils.internal.is_lazy(), self.model_config.enforce_eager)
+                                "for model_type=%s, is_fake_hpu=%s, is_lazy=%s, enforce_eager=%s.",
+                                self._get_model_type(), is_fake_hpu(), htorch.utils.internal.is_lazy(),
+                                self.model_config.enforce_eager)
         self._swa_slot_free_list: list[int] = []  # stack of free slot IDs
         self._swa_req_to_slot: dict[str, int] = {}
         self._swa_W = 0  # window blocks per request (sliding_window//block_size + 1)
@@ -2827,7 +2834,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return 0
 
         for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            if _kv_cache_group_isinstance(group.kv_cache_spec, AttentionSpec):
+            if _kv_cache_group_isinstance(
+                    group.kv_cache_spec, AttentionSpec, unwrap_uniform=self._swa_compact_enabled):
                 return gid
 
     def _get_attention_block_table_for_kernel(self) -> torch.Tensor:
@@ -3277,9 +3285,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if window_token_slots is not None else None
         logits_indices = async_h2d_copy(logits_indices, dtype=torch.int32)
         context_lens = async_h2d_copy(context_lens, dtype=torch.int32)
+        use_context_blocks = target_blocks > 0 and (not self._swa_compact_enabled or has_context)
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() \
-            if target_blocks > 0 and has_context else None
+            if use_context_blocks else None
         window_context_blocks_t = None
         # Only keep the last window_size // block_size context blocks per sequence.
         # window_context_blocks_raw was sliced from the UNPADDED per-request block
@@ -3290,7 +3299,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # window_context_blocks_raw is set either by the COMPACT path (compact ids,
         # EDIT ④) or the legacy gemma4 path (global ids). Both pad to a fixed
         # sliding_block_size-wide bucket.
-        if window_context_blocks_raw is not None and target_blocks > 0 and has_context:
+        if window_context_blocks_raw is not None and use_context_blocks:
             window_context_blocks = align_and_pad(window_context_blocks_raw, (target_bs, sliding_block_size),
                                                   itertools.repeat(-1))
             window_context_blocks_t = async_h2d_copy(window_context_blocks, dtype=torch.int32).flatten()
@@ -6075,7 +6084,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # distribution so every prepared decode bucket is reusable.
                 # Padded batch buckets can be larger than the active block count;
                 # those extra rows are padding, not zero-block requests.
-                active_decode_bs = min(decode_bs, decode_num_blocks)
+                active_decode_bs = (
+                    min(decode_bs, decode_num_blocks) if self._swa_compact_enabled else decode_bs)
                 decode_seq_lengths = self._generate_seq_lengths(active_decode_bs, decode_num_blocks,
                                                                 decode_block_size)
                 block_id = 0
@@ -6978,7 +6988,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             selected_attn_kernel_sizes = [
                 kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
-                if _kv_cache_group_isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
+                if _kv_cache_group_isinstance(kv_cache_group.kv_cache_spec,
+                                              FullAttentionSpec,
+                                              unwrap_uniform=self._swa_compact_enabled)
             ]
             if selected_attn_kernel_sizes:
                 self.attn_block_size = selected_attn_kernel_sizes[0]
