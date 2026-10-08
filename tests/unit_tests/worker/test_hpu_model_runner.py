@@ -15,15 +15,39 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len, get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor,
+                                        SlidingWindowSpec, UniformTypeKVCacheSpecs)
 from vllm.v1.sample.metadata import SamplingMetadata
 import vllm_gaudi.extension.environment as environment
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
+from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, _kv_cache_group_isinstance,
+                                                   _resolve_swa_compact_slot)
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 
 BLOCK_SIZE = 128
 NUM_BLOCKS = 10
 DEVICE = current_platform.device_type
+
+
+def test_resolve_swa_compact_slot_uses_scratch_for_dp_dummy():
+    req_to_slot = {"live": 0}
+
+    assert _resolve_swa_compact_slot("live", req_to_slot, max_num_seqs=4) == 0
+    assert _resolve_swa_compact_slot("-1", req_to_slot, max_num_seqs=4) == 4
+    with pytest.raises(RuntimeError, match="has no assigned slot"):
+        _resolve_swa_compact_slot("missing", req_to_slot, max_num_seqs=4)
+
+
+def test_kv_cache_group_isinstance_unwraps_uniform_specs():
+    common = dict(block_size=BLOCK_SIZE, num_kv_heads=2, head_size=64, dtype=torch.bfloat16)
+    full_spec = FullAttentionSpec(**common)
+    sliding_spec = SlidingWindowSpec(**common, sliding_window=1024)
+    wrapped_full = UniformTypeKVCacheSpecs(block_size=BLOCK_SIZE, kv_cache_specs={"full": full_spec})
+    wrapped_sliding = UniformTypeKVCacheSpecs(block_size=BLOCK_SIZE, kv_cache_specs={"sliding": sliding_spec})
+
+    assert _kv_cache_group_isinstance(wrapped_full, FullAttentionSpec)
+    assert not _kv_cache_group_isinstance(wrapped_full, SlidingWindowSpec)
+    assert _kv_cache_group_isinstance(wrapped_sliding, SlidingWindowSpec)
+    assert not _kv_cache_group_isinstance(wrapped_sliding, FullAttentionSpec)
 
 
 def initialize_kv_cache(runner: HPUModelRunner):

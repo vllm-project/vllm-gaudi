@@ -27,7 +27,9 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, set_random_seed)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec,
+                                            SlidingWindowSpec, UniformTypeKVCacheSpecs)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
@@ -337,7 +339,7 @@ class HPUWorker(WorkerBase):
         kv_cache_spec = self.model_runner.get_kv_cache_spec()  # type: ignore[union-attr]
         single_kv_block_size_bytes = 0
         for layer_name, layer_spec in kv_cache_spec.items():
-            if isinstance(layer_spec, FullAttentionSpec):
+            if isinstance(layer_spec, (FullAttentionSpec, SlidingWindowSpec)):
                 dtype = layer_spec.dtype
                 if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
                     os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
@@ -496,6 +498,78 @@ class HPUWorker(WorkerBase):
                     "mamba_state=%d, ratio=%.3f)", format_bytes(available), format_bytes(adjusted), attn_page_size,
                     mamba_state_per_block, ratio)
                 available = adjusted
+
+        # EDIT #1832-② (VLLM_SWA_COMPACT, Gemma4 torch.compile-gated): sliding-window layers are
+        # physically allocated as a COMPACT fixed pool (max_num_seqs*W blocks each,
+        # see initialize_kv_cache), NOT num_blocks. But upstream sizes
+        # num_blocks = available // sum(all layers' page_size), assuming every layer
+        # costs num_blocks. Re-report `available` so upstream's division yields a
+        # num_blocks the HPU split-allocation fits:
+        #   physical(nb) = nb*n_full*page + n_sliding*compact_blocks*page <= usable
+        #   upstream: nb = available_report // (n_total*page)
+        #   => available_report = (n_total/n_full) * (usable - n_sliding*compact_blocks*page)
+        if self.model_runner._swa_compact_enabled:  # type: ignore[union-attr]
+            _max_seqs = self.model_runner._swa_max_num_seqs  # type: ignore[union-attr]
+            _full_layer_names = {
+                _name for _name, _spec in kv_cache_spec.items() if isinstance(_spec, FullAttentionSpec)
+            }
+            _sliding_layer_names = {
+                _name for _name, _spec in kv_cache_spec.items() if isinstance(_spec, SlidingWindowSpec)
+            }
+            if _full_layer_names and _sliding_layer_names:
+                if self.scheduler_config.disable_hybrid_kv_cache_manager:
+                    raise ValueError("VLLM_SWA_COMPACT requires the hybrid KV cache manager; "
+                                     "remove --disable-hybrid-kv-cache-manager")
+
+                _groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+                _resolved_specs: dict[str, KVCacheSpec] = {}
+                for _group in _groups:
+                    _group_spec = _group.kv_cache_spec
+                    for _layer_name in _group.layer_names:
+                        if isinstance(_group_spec, UniformTypeKVCacheSpecs):
+                            _resolved_specs[_layer_name] = _group_spec.kv_cache_specs[_layer_name]
+                        else:
+                            _resolved_specs[_layer_name] = _group_spec
+
+                _expected_layer_names = _full_layer_names | _sliding_layer_names
+                if not _expected_layer_names.issubset(_resolved_specs):
+                    _missing = sorted(_expected_layer_names - _resolved_specs.keys())
+                    raise ValueError(f"SWA compact KV groups are missing layers: {_missing}")
+
+                _bytes_per_block = max(
+                    sum(_resolved_specs[_layer_name].page_size_bytes for _layer_name in _group.layer_names)
+                    for _group in _groups)
+                _full_per_block = sum(_resolved_specs[_name].page_size_bytes for _name in _full_layer_names)
+                _sliding_fixed = 0
+                for _name in _sliding_layer_names:
+                    _resolved_spec = _resolved_specs[_name]
+                    if not isinstance(_resolved_spec, SlidingWindowSpec):
+                        raise ValueError(f"SWA compact layer {_name} resolved to incompatible "
+                                         f"spec type {type(_resolved_spec).__name__}")
+                    _window_blocks = (_resolved_spec.sliding_window // _resolved_spec.block_size) + 1
+                    _scratch_blocks = math.ceil(self.scheduler_config.max_num_batched_tokens /
+                                                _resolved_spec.block_size)
+                    _sliding_fixed += (_max_seqs * _window_blocks + _scratch_blocks) \
+                        * _resolved_spec.page_size_bytes
+                _raw_dummy_bytes = sum(kv_cache_spec[_name].page_size_bytes for _name in _expected_layer_names)
+                _resolved_dummy_bytes = sum(_resolved_specs[_name].page_size_bytes for _name in _expected_layer_names)
+                _dummy_reserve_deficit = max(0, _resolved_dummy_bytes - _raw_dummy_bytes)
+                _usable = available - _dummy_reserve_deficit
+                if _usable <= _sliding_fixed + _full_per_block:
+                    raise ValueError("Insufficient KV memory for SWA compact fixed storage and one full block: "
+                                     f"usable={format_bytes(_usable)}, "
+                                     f"sliding_fixed={format_bytes(_sliding_fixed)}, "
+                                     f"full_block={format_bytes(_full_per_block)}, "
+                                     f"dummy_reserve_deficit={format_bytes(_dummy_reserve_deficit)}")
+                _nb_target = int((_usable - _sliding_fixed) // _full_per_block)
+                _report = _nb_target * _bytes_per_block
+                logger.info(
+                    "SWA_COMPACT remap: usable=%s sliding_fixed=%s full_per_block=%s dummy_deficit=%s "
+                    "n_full=%d n_sliding=%d bytes/blk=%s nb_target=%d -> report=%s",
+                    format_bytes(_usable), format_bytes(_sliding_fixed), format_bytes(_full_per_block),
+                    format_bytes(_dummy_reserve_deficit), len(_full_layer_names), len(_sliding_layer_names),
+                    format_bytes(_bytes_per_block), _nb_target, format_bytes(_report))
+                available = _report
 
         # Core vLLM's determine_available_memory contract returns an int
         # (bytes). Most models route through get_num_blocks() which casts to

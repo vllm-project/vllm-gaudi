@@ -30,7 +30,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 
 logger = init_logger()
 
-
 def _set_fetch_by_id(kv_cache, value: bool) -> None:
     """Toggle id-based KV fetch (vs. the contiguous-PA zero-copy slice) on a KV cache.
 
@@ -596,6 +595,17 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size)
         slot_mapping = attn_metadata.slot_mapping.flatten() if attn_metadata.slot_mapping is not None else None
+        # EDIT #1832-④ (VLLM_SWA_COMPACT): sliding-window layers store KV in a small
+        # per-request COMPACT tensor, so their WRITE must use the remapped
+        # window_slot_mapping instead of the FULL group's global slot_mapping.
+        # The READ side (window_block_list) is already routed below. Full-attention
+        # layers (self.sliding_window is None) are untouched and keep slot_mapping.
+        _wsm = getattr(attn_metadata, "window_slot_mapping", None)
+        if self.sliding_window and _wsm is not None:
+            slot_mapping = _wsm.flatten()
+        defer_cache_write = bool(attn_metadata.is_prompt and self.sliding_window and _wsm is not None
+                     and self.kv_sharing_target_layer_name is None and isinstance(kv_cache, tuple)
+                     and key is not None and value is not None)
         key_cache = None
         value_cache = None
         k_scales = None
@@ -609,7 +619,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 value = value.to(value_cache.dtype)
             if key is not None and query.dtype != key.dtype:
                 query = query.to(key.dtype)
-            if self.kv_sharing_target_layer_name is None:
+            if self.kv_sharing_target_layer_name is None and not defer_cache_write:
                 # Reshape the input keys and values and store them in the cache.
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory profiling run.
@@ -625,7 +635,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                            scales=v_scales,
                                            block_size=attn_metadata.block_size,
                                            is_prompt=attn_metadata.is_prompt)
-            elif slot_mapping is not None and (attn_metadata.is_prompt or seq_len > 1):
+            elif (self.kv_sharing_target_layer_name is not None
+                and slot_mapping is not None
+                and (attn_metadata.is_prompt or seq_len > 1)):
                 # KV sharing (YOCO): the local key/value are absent (vllm#54917)
                 # or un-normed/un-RoPE'd on older vLLM. Either way read the
                 # target layer's normalized+RoPE'd K/V back from the shared
@@ -707,6 +719,20 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                        position_bias=position_bias,
                                        valid_seq_lengths=attn_metadata.seq_lens_tensor,
                                        **common_args)
+
+            if defer_cache_write:
+                self.k_cache(key,
+                             key_cache,
+                             slot_mapping,
+                             scales=k_scales,
+                             block_size=attn_metadata.block_size,
+                             is_prompt=True)
+                self.v_cache(value,
+                             value_cache,
+                             slot_mapping,
+                             scales=v_scales,
+                             block_size=attn_metadata.block_size,
+                             is_prompt=True)
 
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
