@@ -94,6 +94,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                               mamba_chunks_to_block_mapping=None,
                               seqlens_offsets_for_blocks=None,
                               window_block_list=None,
+                              window_slot_mapping=None,
                               image_seg_ids=None):
         return cls(is_prompt=True,
                    block_list=block_list,
@@ -119,6 +120,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
                    seqlens_offsets_for_blocks=seqlens_offsets_for_blocks,
                    window_block_list=window_block_list,
+                   window_slot_mapping=window_slot_mapping,
                    image_seg_ids=image_seg_ids)
 
     @classmethod
@@ -138,7 +140,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              load_indices_tensor=None,
                              store_indices_tensor=None,
                              query_start_loc=None,
-                             seq_lens_tensor=None):
+                             seq_lens_tensor=None,
+                             window_slot_mapping=None):
         return cls(is_prompt=False,
                    block_mapping=None,
                    alibi_blocks=None,
@@ -151,6 +154,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    window_block_list=window_block_list,
                    window_block_usage=window_block_usage,
                    window_block_groups=window_block_groups,
+                   window_slot_mapping=window_slot_mapping,
                    chunked_block_list=chunked_block_list,
                    chunked_block_usage=chunked_block_usage,
                    chunked_block_groups=chunked_block_groups,

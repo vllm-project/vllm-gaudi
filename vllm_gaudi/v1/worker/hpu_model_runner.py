@@ -72,6 +72,7 @@ from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
+    SlidingWindowSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -131,6 +132,33 @@ from vllm_gaudi.extension.logger import logger as init_logger
 from vllm.model_executor.models.bert import _encode_token_type_ids
 
 logger = init_logger()
+
+_DP_DUMMY_PREFILL_REQ_ID = "-1"
+
+
+def _kv_cache_group_specs(kv_cache_spec: KVCacheSpec) -> tuple[KVCacheSpec, ...]:
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        return tuple(kv_cache_spec.kv_cache_specs.values())
+    return (kv_cache_spec, )
+
+
+def _kv_cache_group_isinstance(kv_cache_spec: KVCacheSpec,
+                               spec_type: type[KVCacheSpec],
+                               *,
+                               unwrap_uniform: bool = True) -> bool:
+    if not unwrap_uniform:
+        return isinstance(kv_cache_spec, spec_type)
+    specs = _kv_cache_group_specs(kv_cache_spec)
+    return bool(specs) and all(isinstance(spec, spec_type) for spec in specs)
+
+
+def _resolve_swa_compact_slot(req_id: str, req_to_slot: dict[str, int], max_num_seqs: int) -> int:
+    slot = req_to_slot.get(req_id)
+    if slot is not None:
+        return slot
+    if req_id == _DP_DUMMY_PREFILL_REQ_ID:
+        return max_num_seqs
+    raise RuntimeError(f"SWA compact request {req_id!r} has no assigned slot")
 
 
 def is_interleaved(config: Any) -> bool:
@@ -1161,7 +1189,8 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
         'attn_bias', 'seq_lens_tensor', 'context_lens_tensor', 'block_list', 'block_mapping', 'block_usage',
         'slot_mapping', 'is_prompt', 'block_size', 'block_groups', 'window_block_list', 'window_block_mapping',
-        'window_block_usage', 'window_block_groups', 'window_attn_bias', 'chunked_block_mapping', 'chunked_attn_bias',
+        'window_block_usage', 'window_block_groups', 'window_attn_bias', 'window_slot_mapping', 'chunked_block_mapping',
+        'chunked_attn_bias',
         'chunked_block_list', 'chunked_block_usage', 'chunked_block_groups', 'prep_initial_states',
         'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor',
         'query_start_loc', 'query_start_loc_p', 'padding_mask_flat', 'blocks_caching_range',
@@ -1453,6 +1482,42 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._gdn_slot_free_list: list[int] = []  # stack of free base-slot IDs
         self._gdn_req_to_base_slot: dict[str, int] = {}
 
+        # EDIT #1832-④ (VLLM_SWA_COMPACT, Gemma4 torch.compile): per-request STABLE compact slot for
+        # sliding-window layers. Each sliding layer's physical tensor holds
+        # max_num_seqs*W blocks; a request assigned slot `s` owns compact blocks
+        # [s*W, s*W+W-1]. The map is keyed on req_id (NOT the transient input_batch
+        # row) so a request's compact KV stays put across condense()/row moves —
+        # this is what the ring prototype got wrong (cross-request contamination).
+        # Mirrors the GDN compact slot machinery (_gdn_req_to_base_slot) exactly:
+        # allocate on admission, free on finish, free_list identical across TP ranks.
+        _swa_compact_requested = (os.environ.get('VLLM_SWA_COMPACT', '0') == '1')
+        _swa_torch_compile_enabled = (not is_fake_hpu() and not htorch.utils.internal.is_lazy()
+                                      and not self.model_config.enforce_eager)
+        self._swa_compact_enabled = (
+            _swa_compact_requested and self._get_model_type() == 'gemma4' and _swa_torch_compile_enabled)
+        if _swa_compact_requested and not self._swa_compact_enabled:
+            logger.warning_once("VLLM_SWA_COMPACT=1 requires Gemma4 in torch.compile mode; compact SWA is disabled "
+                                "for model_type=%s, is_fake_hpu=%s, is_lazy=%s, enforce_eager=%s.",
+                                self._get_model_type(), is_fake_hpu(), htorch.utils.internal.is_lazy(),
+                                self.model_config.enforce_eager)
+        self._swa_slot_free_list: list[int] = []  # stack of free slot IDs
+        self._swa_req_to_slot: dict[str, int] = {}
+        self._swa_W = 0  # window blocks per request (sliding_window//block_size + 1)
+        self._swa_max_num_seqs = self.scheduler_config.max_num_seqs
+        if self._swa_compact_enabled:
+            for _profile_env in ("VLLM_PROFILE_PROMPT", "VLLM_PROFILE_DECODE"):
+                if _profile_cfg := os.environ.get(_profile_env):
+                    self._swa_max_num_seqs = max(self._swa_max_num_seqs, int(_profile_cfg.split(",")[0]))
+        self._swa_pad_block_id = -1
+        self._swa_pad_slot_id = -1
+        # EDIT #1832-④: full-group virtual-block-split multiplier
+        # (= FullAttentionSpec.block_size // attn_block_size). For gemma4-MM the full
+        # heads are 2x wider so the full group's manager block_size (256) is split
+        # into 2 kernel blocks (128), making the full group's PHYSICAL tensor hold
+        # num_blocks*2 kernel blocks (initialize_kv_cache). Keep _PAD_BLOCK_ID after
+        # all physical kernel blocks by scaling the sentinel with this multiplier.
+        self._swa_full_kernel_mult = 1
+
         # Lazy initialization
         # self.model: nn.Module  # set after load_model
         self.kv_caches: list[torch.Tensor] = []
@@ -1538,6 +1603,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.max_cudagraph_capture_size is None:
             self.max_cudagraph_capture_size = self.max_num_batched_tokens
         self.use_prefix_caching = (self.vllm_config.cache_config.enable_prefix_caching)
+        if self._swa_compact_enabled and self.use_prefix_caching:
+            raise ValueError("VLLM_SWA_COMPACT does not support prefix caching: "
+                             "prefix hits do not materialize KV in the request's compact slot. "
+                             "Disable --enable-prefix-caching or unset VLLM_SWA_COMPACT.")
+        if self._swa_compact_enabled and self.vllm_config.kv_transfer_config is not None:
+            raise ValueError(
+                "VLLM_SWA_COMPACT does not support KV transfer/offloading: "
+                "connector block IDs are not remapped to request-local compact slots. "
+                "Remove --kv-transfer-config or unset VLLM_SWA_COMPACT.")
         self.bucketing_manager = HPUBucketingManager()
         max_num_prefill_seqs = self.max_num_seqs if self.use_merged_prefill \
                                else self.max_prefill_batch_size
@@ -1761,10 +1835,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(self.vllm_config)
             elif isinstance(attn_module, Attention):
                 if attn_module.attn_type == AttentionType.DECODER:
-                    kv_cache_spec[layer_name] = FullAttentionSpec(block_size=block_size,
-                                                                  num_kv_heads=attn_module.num_kv_heads,
-                                                                  head_size=attn_module.head_size,
-                                                                  dtype=self.kv_cache_dtype)
+                    # EDIT #1832-① (VLLM_SWA_COMPACT, Gemma4 torch.compile-gated): sliding-window
+                    # decoder layers get a SlidingWindowSpec so upstream groups them
+                    # into sliding kv_cache_groups and SlidingWindowManager handles
+                    # eviction/order. Everything else stays FullAttentionSpec.
+                    _sw = getattr(attn_module, 'sliding_window', None)
+                    if self._swa_compact_enabled and _sw is not None:
+                        kv_cache_spec[layer_name] = SlidingWindowSpec(
+                            block_size=block_size,
+                            num_kv_heads=attn_module.num_kv_heads,
+                            head_size=attn_module.head_size,
+                            dtype=self.kv_cache_dtype,
+                            sliding_window=_sw)
+                    else:
+                        kv_cache_spec[layer_name] = FullAttentionSpec(block_size=block_size,
+                                                                      num_kv_heads=attn_module.num_kv_heads,
+                                                                      head_size=attn_module.head_size,
+                                                                      dtype=self.kv_cache_dtype)
                 elif attn_module.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
                     # encoder-only attention does not need KV cache.
                     continue
@@ -1857,6 +1944,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 else:
                     logger.warning("GDN_COMPACT free finished req=%s has NO slot! "
                                    "Possible leak.", req_id)
+
+        # A preempted request restarts from token zero, so its old compact KV is
+        # unusable and its slot can be recycled. Temporarily unscheduled requests
+        # are absent from both sets and retain their slot.
+        if self._swa_compact_enabled and self._swa_slot_free_list is not None \
+                and len(self._swa_req_to_slot) > 0:
+            released_req_ids = set(scheduler_output.finished_req_ids)
+            released_req_ids.update(scheduler_output.preempted_req_ids or set())
+            for req_id in sorted(released_req_ids):
+                slot = self._swa_req_to_slot.pop(req_id, None)
+                if (slot is not None and 0 <= slot < self._swa_max_num_seqs
+                        and slot not in self._swa_slot_free_list):
+                    self._swa_slot_free_list.append(slot)
 
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
@@ -2000,6 +2100,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self._gdn_req_to_base_slot[req_id] = base_slot
                     logger.debug("GDN_COMPACT alloc req=%s base_slot=%d free_list_len=%d", req_id, base_slot,
                                  len(self._gdn_slot_free_list))
+
+        # EDIT #1832-④: allocate SWA compact slots for newly added requests (mirror
+        # of the GDN block above). req_ids_to_add preserves scheduler order, so the
+        # pop() sequence is deterministic and identical across TP ranks.
+        if self._swa_compact_enabled:
+            for req_id in req_ids_to_add:
+                if req_id not in self._swa_req_to_slot:
+                    if len(self._swa_slot_free_list) > 0:
+                        slot = self._swa_slot_free_list.pop()
+                    else:
+                        raise RuntimeError("SWA compact slot pool exhausted; refusing to alias "
+                                           f"request {req_id!r} onto another request's KV")
+                    self._swa_req_to_slot[req_id] = slot
+                    logger.debug("SWA_COMPACT alloc req=%s slot=%d free_list_len=%d", req_id, slot,
+                                 len(self._swa_slot_free_list))
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -2481,7 +2596,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                       slot_mapping,
                                       batch_size,
                                       block_size=None,
-                                      force_non_contiguous=False):
+                                      force_non_contiguous=False,
+                                      pad_block_id=None):
         """Build paged attention buffers for decode.
 
         Args:
@@ -2491,6 +2607,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 slice-based fetch.
         """
         block_size = self.attn_block_size if block_size is None else block_size
+        pad_block_id = self._PAD_BLOCK_ID if pad_block_id is None else pad_block_id
         last_block_usage = [slot[0] % block_size + 1 for slot in slot_mapping]
         block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
         block_usage = [[block_size] * (len(bt) - 1) + [lbu] for bt, lbu in zip(block_tables, last_block_usage) if bt]
@@ -2550,7 +2667,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             def padding_fn(tensor, pad_value):
                 return pad_list(tensor, block_bucket_size, itertools.repeat(pad_value))
 
-        block_list = padding_fn(block_list, self._PAD_BLOCK_ID)
+        block_list = padding_fn(block_list, pad_block_id)
         block_groups = padding_fn(block_groups, -1)
         block_usage = padding_fn(block_usage, 1)
 
@@ -2696,19 +2813,59 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             target_bs * target_seq <= self.max_num_tokens
 
     def _get_attention_group_id_for_hybrid(self):
+        # EDIT #1832-④ (VLLM_SWA_COMPACT, Gemma4 torch.compile): with SlidingWindowSpec the config
+        # has multiple attention groups [Sliding×5, Full×1]. The plain block_list /
+        # slot_mapping path (built from block_table[this_gid]) must carry the FULL
+        # group's GLOBAL block table so FULL attention layers get their complete
+        # (un-evicted) context. Sliding layers are served separately via the compact
+        # window_block_list / window_slot_mapping (ring remap). Without this the
+        # default gid=0 returns the FIRST sliding group, so full layers would read a
+        # window-pruned table and break on long context (the ④a multi-chunk bug).
+        # NOTE: SlidingWindowSpec and FullAttentionSpec are *sibling* subclasses of
+        # AttentionSpec (neither inherits the other), so isinstance(.,FullAttentionSpec)
+        # cleanly excludes sliding groups.
+        if (self._swa_compact_enabled
+                and len(self.kv_cache_config.kv_cache_groups) > 0):
+            for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
+                if _kv_cache_group_isinstance(group.kv_cache_spec, FullAttentionSpec):
+                    return gid
+
         if self.num_mamba_like_layers == 0 or len(self.kv_cache_config.kv_cache_groups) == 0:
             return 0
 
         for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, AttentionSpec):
+            if _kv_cache_group_isinstance(
+                    group.kv_cache_spec, AttentionSpec, unwrap_uniform=self._swa_compact_enabled):
                 return gid
+
+    def _get_attention_block_table_for_kernel(self) -> torch.Tensor:
+        group_id = self._get_attention_group_id_for_hybrid()
+        group_block_table = self.input_batch.block_table[group_id]
+        block_table = group_block_table.get_cpu_tensor()
+        if not self._swa_compact_enabled:
+            return block_table
+
+        group_spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+        if not _kv_cache_group_isinstance(group_spec, FullAttentionSpec):
+            return block_table
+
+        # MultiGroupBlockTable already expands each manager block to consecutive
+        # kernel blocks. Resolve the manager ID while preserving the kernel offset.
+        blocks_per_kv_block = group_block_table.blocks_per_kv_block
+
+        def resolve_kernel_block(block_id: int) -> int:
+            manager_block_id, kernel_offset = divmod(block_id, blocks_per_kv_block)
+            return self._resolve_block(manager_block_id) * blocks_per_kv_block + kernel_offset
+
+        block_table = block_table.clone()
+        block_table.apply_(resolve_kernel_block)
+        return block_table
 
     def _extract_prefill_batch_contents(self, num_prefills, num_decodes, num_scheduled_tokens, warmup=False):
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
         num_reqs = num_prefills + num_decodes
-        block_table_cpu_tensor = self.input_batch.block_table[
-            self._get_attention_group_id_for_hybrid()].get_cpu_tensor()
+        block_table_cpu_tensor = self._get_attention_block_table_for_kernel()
         all_batch_contents = [BatchContents()]
 
         for batch_idx in range(num_decodes, num_reqs):
@@ -2722,7 +2879,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             num_blocks = round_up(seq_num_computed_tokens + seq_num_scheduled_tokens,
                                   self.attn_block_size) // self.attn_block_size
             blocks = block_table_cpu_tensor[batch_idx, :num_blocks].tolist()
-            if not warmup:
+            if not warmup and not self._swa_compact_enabled:
                 blocks = [self._resolve_block(b) for b in blocks]
             #NOTE(kzawora): In non-preemption scenario,
             # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
@@ -2814,7 +2971,45 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         context_blocks: list = [blocks[:num] for blocks, num in zip(contents.blocks, num_context_blocks)]
         num_context_blocks = [len(b) for b in context_blocks]
         context_groups = [[i] * b for i, b in enumerate(num_context_blocks)]
-        if self.interleaved_sliding_window and self._get_model_type() == "gemma4":
+        window_token_slots = None
+        window_context_blocks_raw = None
+        _swa_compact_pf = self._swa_compact_enabled and self._swa_W > 0
+        if _swa_compact_pf:
+            # EDIT #1832-④ (VLLM_SWA_COMPACT): sliding-window layers use a COMPACT
+            # per-request physical region of W=_swa_W blocks at stable slot `s`
+            # (s = self._swa_req_to_slot[req_id]). Here `token_slots`/`context_blocks`
+            # above hold the FULL group's GLOBAL ids (attn_gid routes to full) for the
+            # full-attention layers; the sliding layers instead read/write the compact
+            # region. We delegate WHICH blocks are live/ordered to upstream (full group
+            # context_blocks give the logical length) and compute only WHERE each sits.
+            _W = self._swa_W
+            _cap = _W * slot_block_size
+            # The virtual slot after the live pool maps DP dummy prefills to
+            # the separately allocated scratch blocks.
+            _slots = [
+                _resolve_swa_compact_slot(rid, self._swa_req_to_slot, self._swa_max_num_seqs) for rid in req_ids
+            ]
+            # WRITE: compact slot for each scheduled token at absolute position `pos`.
+            # slot = s*cap + (pos mod cap)  ==  (s*W + (pos//bs mod W))*bs + pos%bs.
+            # Stable per (req, pos) regardless of batch composition or eviction.
+            window_token_slots = []
+            for s, positions in zip(_slots, token_positions):
+                first_retained = max(0, len(positions) - _cap)
+                retained = [s * _cap + (pos % _cap) for pos in positions[first_retained:]]
+                window_token_slots.append([self._swa_pad_slot_id] * first_retained + retained)
+            # READ: compact context blocks for the sliding window. Keep the last
+            # sliding_block_size logical blocks (a window ending at a non-block-aligned
+            # boundary straddles sliding_window//bs + 1 blocks). Map each logical block
+            # index `j` -> compact block s*W + (j mod W). Using the logical INDEX (not
+            # the global id) makes the mapping collision-free for any <=W-block window
+            # and identical to the WRITE region.
+            sliding_block_size = self.sliding_window // self.attn_block_size + 1
+            window_context_blocks_raw = []
+            for s, blocks in zip(_slots, context_blocks):
+                n = len(blocks)
+                start = max(0, n - sliding_block_size)
+                window_context_blocks_raw.append([s * _W + (j % _W) for j in range(start, n)])
+        elif self.interleaved_sliding_window and self._get_model_type() == "gemma4":
             # Keep one extra block: a `sliding_window`-token window that ends at an
             # arbitrary (non-block-aligned) context boundary straddles
             # `sliding_window // block_size + 1` blocks.
@@ -2859,6 +3054,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
         token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
+        # EDIT #1832-④: pad the sliding WRITE slots identically to token_slots so the
+        # kernel sees one compact write slot per scheduled token (padding -> dummy).
+        if window_token_slots is not None:
+            window_token_slots = align_and_pad(window_token_slots, (target_bs, target_seq),
+                                               itertools.repeat(self._swa_pad_slot_id))
+            scratch_slot = self._swa_pad_slot_id
+            for row in window_token_slots:
+                for index, slot in enumerate(row):
+                    if slot == self._swa_pad_slot_id:
+                        row[index] = scratch_slot
+                        scratch_slot += 1
+            assert scratch_slot - self._swa_pad_slot_id <= self.max_num_tokens
         token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
         context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
         context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
@@ -3068,14 +3275,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             seqlens_offsets_for_blocks = None
             mamba_chunks_to_block_mapping = None
 
+        has_context = any(context_lens)
         query_lens = async_h2d_copy(query_lens, dtype=torch.int32)
         token_ids = async_h2d_copy(token_ids, dtype=torch.int32)
         token_positions = async_h2d_copy(token_positions, dtype=torch.int32)
         token_slots = async_h2d_copy(token_slots, dtype=torch.int64)
+        # EDIT #1832-④: sliding WRITE slots -> device (None unless COMPACT prefill).
+        window_token_slots_t = async_h2d_copy(window_token_slots, dtype=torch.int64) \
+            if window_token_slots is not None else None
         logits_indices = async_h2d_copy(logits_indices, dtype=torch.int32)
         context_lens = async_h2d_copy(context_lens, dtype=torch.int32)
+        use_context_blocks = target_blocks > 0 and (not self._swa_compact_enabled or has_context)
         context_blocks_t: Optional[torch.tensor]
-        context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if target_blocks > 0 else None
+        context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() \
+            if use_context_blocks else None
         window_context_blocks_t = None
         # Only keep the last window_size // block_size context blocks per sequence.
         # window_context_blocks_raw was sliced from the UNPADDED per-request block
@@ -3083,7 +3296,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # request's real last-window blocks. Pad it to (target_bs, sliding_block_size)
         # -- a fixed-width bucket independent of target_blocks -- rather than reusing
         # context_blocks' batch-wide target_blocks shape.
-        if self.interleaved_sliding_window and self._get_model_type() == "gemma4" and target_blocks > 0:
+        # window_context_blocks_raw is set either by the COMPACT path (compact ids,
+        # EDIT ④) or the legacy gemma4 path (global ids). Both pad to a fixed
+        # sliding_block_size-wide bucket.
+        if window_context_blocks_raw is not None and use_context_blocks:
             window_context_blocks = align_and_pad(window_context_blocks_raw, (target_bs, sliding_block_size),
                                                   itertools.repeat(-1))
             window_context_blocks_t = async_h2d_copy(window_context_blocks, dtype=torch.int32).flatten()
@@ -3110,6 +3326,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             mamba_chunks_to_block_mapping=mamba_chunks_to_block_mapping,
             seqlens_offsets_for_blocks=seqlens_offsets_for_blocks,
             window_block_list=window_context_blocks_t,
+            window_slot_mapping=window_token_slots_t,
             image_seg_ids=image_seg_ids_t)
         return PrefillInputData(request_ids=[req_ids],
                                 prompt_lens=[query_lens],
@@ -3120,7 +3337,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 logits_requests=[logits_requests])
 
     def _create_dummy_prefill_batch_contents(self, num_prefills: int) -> list[PrefillInputData]:
-        req_id = str(-1)
+        req_id = _DP_DUMMY_PREFILL_REQ_ID
         context_len = 127 if has_kv_transfer_group() else 0
         query_len = 1 if has_kv_transfer_group() else 128
         prompt_tokens = 128
@@ -3262,7 +3479,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         block_number[:num_decodes] = torch.gather(input=block_table_cpu_tensor,
                                                   dim=1,
                                                   index=(index // decode_block_size))
-        block_number.apply_(self._resolve_block)
+        if not self._swa_compact_enabled:
+            block_number.apply_(self._resolve_block)
 
         block_offsets = padded_index % decode_block_size
         slot_mapping = block_number * decode_block_size + block_offsets
@@ -3304,7 +3522,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         logits_indices[:num_decodes] = query_start_loc_cpu[1:num_decodes + 1] - 1
 
         positions_device = async_h2d_copy(positions, device=self.device)
-        block_tables_list = self._resolve_all_blocks(block_tables_list)
+        if not self._swa_compact_enabled:
+            block_tables_list = self._resolve_all_blocks(block_tables_list)
+
+        _swa_compact_dec = self._swa_compact_enabled and self._swa_W > 0
 
         # CONTEXT_LENS [batch_size]
         block_list, block_groups, block_usage = \
@@ -3313,9 +3534,61 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 slot_mapping.tolist(),
                 padded_batch_size * num_tokens,
                 block_size=decode_block_size,
+                force_non_contiguous=_swa_compact_dec,
             )
 
-        if self.interleaved_sliding_window:
+        window_slot_mapping = None
+        if _swa_compact_dec:
+            # EDIT #1832-④ (VLLM_SWA_COMPACT): sliding layers read/write a COMPACT
+            # per-request region of _W blocks at the request's STABLE slot `s`
+            # (keyed on req_id, not the transient decode row). block_tables_list holds
+            # the FULL group's global ids (attn_gid routes to full); we map the live
+            # window onto the compact region by LOGICAL index so the ring's
+            # cross-request / wrap-order bugs cannot occur. One block_table per
+            # (decode_row x num_tokens); the row's req_id gives its slot.
+            _W = self._swa_W
+            _bs = decode_block_size
+            _cap = _W * _bs
+            # Stable slot per real decode row. Padding rows use the dedicated
+            # compact pad slot and never address a serving request's region.
+            _dec_req_ids = self.input_batch.req_ids[:num_decodes]
+            _row_slot = [self._swa_req_to_slot[rid] for rid in _dec_req_ids]
+            # block_tables_list has num_decodes*num_tokens entries (row-major by
+            # decode row, repeated num_tokens). Recover the owning decode row per
+            # entry to pick its slot.
+            window_block_tables = []
+            for entry_idx, block_table in enumerate(block_tables_list):
+                dec_row = (entry_idx // num_tokens) if num_tokens > 0 else entry_idx
+                s = _row_slot[dec_row]
+                n = len(block_table)
+                start = max(0, n - _W)
+                # map logical block index j -> compact block s*W + (j mod W)
+                window_block_tables.append([s * _W + (j % _W) for j in range(start, n)])
+            # WRITE slots: for each (padded) row's decode token at absolute position
+            # `pos` (padded_index), compact slot = s*cap + (pos mod cap).
+            _rows_slot_t = torch.zeros((padded_batch_size, 1), dtype=torch.int64)
+            _rows_slot_t[:num_decodes, 0] = torch.tensor(_row_slot, dtype=torch.int64)
+            compact_slots = _rows_slot_t * _cap + (padded_index % _cap)
+            valid_counts = torch.tensor(num_tokens_per_req, dtype=torch.int64).view(-1, 1)
+            token_offsets = torch.arange(num_tokens, dtype=torch.int64).view(1, -1)
+            valid_tokens = token_offsets < valid_counts
+            assert compact_slots.numel() <= self.max_num_tokens
+            scratch_slots = (self._swa_pad_slot_id
+                             + torch.arange(compact_slots.numel(), dtype=torch.int64).view_as(compact_slots))
+            window_slot_mapping = torch.where(
+                valid_tokens, compact_slots, scratch_slots)
+            if num_tokens > 1:
+                window_slot_mapping = window_slot_mapping.view(-1, 1)
+            # Sliding window compact blocks are scattered (not identity), so force
+            # gather-by-id fetch.
+            window_block_list, window_block_groups, window_block_usage = \
+                self.get_habana_paged_attn_buffers(
+                    window_block_tables, slot_mapping.tolist(),
+                    padded_batch_size * num_tokens,
+                    block_size=decode_block_size,
+                    force_non_contiguous=True,
+                    pad_block_id=self._swa_pad_block_id)
+        elif self.interleaved_sliding_window:
             sliding_block_size = (self.sliding_window // decode_block_size)
 
             # Adjust sliding block size for specific model types
@@ -3400,6 +3673,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                    device=self.device) if self.interleaved_sliding_window else None
         window_block_groups_device = async_h2d_copy(window_block_groups,
                                                     device=self.device) if self.interleaved_sliding_window else None
+        # EDIT #1832-④: sliding WRITE slots -> device (None unless COMPACT decode).
+        window_slot_mapping_device = async_h2d_copy(window_slot_mapping,
+                                                    device=self.device) if window_slot_mapping is not None else None
         chunked_block_list_device = async_h2d_copy(chunked_block_list,
                                                    device=self.device) if self.model_has_chunked_attention else None
         chunked_block_usage_device = async_h2d_copy(chunked_block_usage,
@@ -3451,6 +3727,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             window_block_list=window_block_list_device,
             window_block_usage=window_block_usage_device,
             window_block_groups=window_block_groups_device,
+            window_slot_mapping=window_slot_mapping_device,
             chunked_block_list=chunked_block_list_device,
             chunked_block_usage=chunked_block_usage_device,
             chunked_block_groups=chunked_block_groups_device,
@@ -3486,7 +3763,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return DecodeInputData(num_decodes=0), None
         return self._create_decode_input_data(
             num_decodes, num_scheduled_tokens, self.input_batch.num_computed_tokens_cpu[:num_decodes],
-            self.input_batch.block_table[self._get_attention_group_id_for_hybrid()].get_cpu_tensor(),
+            self._get_attention_block_table_for_kernel(),
             scheduler_output), None
 
     def _create_dummy_decode_input_data(self) -> DecodeInputData:
@@ -4228,6 +4505,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         self.run_defragmenter(scheduler_output, warmup_mode)
 
+        self.warmup_mode = warmup_mode
         batch_changed = self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group() or warmup_mode:
@@ -5627,10 +5905,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_blocks = round_up(total_tokens_for_blocks, self.block_size) // self.block_size
 
         req_id = f'{len(requests)}'
+        # EDIT #1832-④: the dummy request's block_ids must have ONE entry per KV cache
+        # group, because our SlidingWindowSpec path makes gemma4 a multi-group model
+        # ([Sliding×5, Full×1]) and forces may_reinitialize_input_batch so the
+        # MultiGroupBlockTable has 6 tables. The original code only built the
+        # per-group list when num_mamba_like_layers>0, so gemma4 (0 mamba layers) got
+        # a single-element block_ids and add_row() hit IndexError on block_ids[1]
+        # during warmup. Use the per-group form whenever there is >1 group.
+        _multi_group = (self.num_mamba_like_layers > 0
+                        or (self._swa_compact_enabled
+                            and len(self.kv_cache_config.kv_cache_groups) > 1))
         block_ids = [[block_id] *
                      (round_up(total_tokens_for_blocks, g.kv_cache_spec.block_size) // g.kv_cache_spec.block_size)
-                     for g in self.kv_cache_config.kv_cache_groups] if self.num_mamba_like_layers > 0 else [[block_id] *
-                                                                                                            num_blocks]
+                     for g in self.kv_cache_config.kv_cache_groups] if _multi_group else [[block_id] *
+                                                                                          num_blocks]
         if self.is_pooling_model:
             model = cast(VllmModelForPooling, self.get_model())
             if hasattr(self.model_config, 'task') and self.model_config.task is not None:
@@ -5773,7 +6061,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # initialize_kv_cache aligns attn page size to mamba page size,
             # causing warmup to record wrong num_blocks otherwise.
             decode_block_size = self.attn_block_size
-            if self.use_contiguous_pa:
+            if self.use_contiguous_pa and not self._swa_compact_enabled:
                 # For sliding window models, each dummy sequence needs at least
                 # sliding_block_size blocks to properly warmup the window_block_list
                 # bucket sizes. With force_non_contiguous=True, the bucket is based
@@ -5789,7 +6077,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # block_id as the allocation base which must be valid.
                 block_id = min(decode_num_blocks - 1, self.kv_cache_config.num_blocks - 1)
             else:
-                decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
+                # Compact SWA resolves full-group blocks to a sparse physical
+                # address space. Runtime full attention therefore uses the
+                # active block count (gather mode), not max(block_id)+1, as its
+                # graph shape. Build warmup requests with the same active-count
+                # distribution so every prepared decode bucket is reusable.
+                # Padded batch buckets can be larger than the active block count;
+                # those extra rows are padding, not zero-block requests.
+                active_decode_bs = (
+                    min(decode_bs, decode_num_blocks) if self._swa_compact_enabled else decode_bs)
+                decode_seq_lengths = self._generate_seq_lengths(active_decode_bs, decode_num_blocks,
+                                                                decode_block_size)
                 block_id = 0
 
             for dsl in decode_seq_lengths:
@@ -6663,7 +6961,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # kernel block sizes; for other hybrid (mamba) models we still need to
         # reinitialize so that MultiGroupBlockTable has one entry per group.
         #kernel_block_sizes: list[int] = []
-        if self.num_gdn > 0 or self.num_mamba_like_layers > 0:
+        # EDIT #1832-④a (VLLM_SWA_COMPACT): gemma4 is not a mamba hybrid
+        # (num_mamba_like_layers==0) so the multi-group block-table path below was
+        # skipped and MultiGroupBlockTable had a SINGLE table. With SlidingWindowSpec
+        # there are multiple attention groups (full + sliding), each needing its own
+        # block table so sliding layers index their COMPACT pool. Force the
+        # reinit + kernel_block_sizes computation when compact SWA is on and the
+        # config actually produced >1 KV cache group.
+        _swa_compact_multigroup = (
+            self._swa_compact_enabled
+            and any(_kv_cache_group_isinstance(g.kv_cache_spec, SlidingWindowSpec)
+                    for g in kv_cache_config.kv_cache_groups)
+            and len(kv_cache_config.kv_cache_groups) > 1)
+        if self.num_gdn > 0 or self.num_mamba_like_layers > 0 or _swa_compact_multigroup:
             kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
             self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
@@ -6678,7 +6988,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             selected_attn_kernel_sizes = [
                 kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
-                if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
+                if _kv_cache_group_isinstance(kv_cache_group.kv_cache_spec,
+                                              FullAttentionSpec,
+                                              unwrap_uniform=self._swa_compact_enabled)
             ]
             if selected_attn_kernel_sizes:
                 self.attn_block_size = selected_attn_kernel_sizes[0]
@@ -6883,10 +7195,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # allocation across all layers (num_blocks * bytes_per_block),
                     # not a per-layer size. Use the engine block count directly.
                     num_blocks = kv_cache_config.num_blocks
-                    if isinstance(kv_cache_spec, FullAttentionSpec):
-                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
-                                                                              kv_cache_spec.num_kv_heads,
-                                                                              kv_cache_spec.head_size)
+                    # EDIT #1832-③ (VLLM_SWA_COMPACT, Gemma4 torch.compile-gated): sliding-window
+                    # groups get a COMPACT physical pool (max_num_seqs*W blocks),
+                    # not num_blocks. Upstream SlidingWindowManager caps per-request
+                    # live blocks at ~W, so a per-request ring region of W blocks
+                    # suffices; EDIT ④ maps upstream's live block list onto it.
+                    _alloc_blocks = num_blocks
+                    if self._swa_compact_enabled and isinstance(kv_cache_spec, SlidingWindowSpec):
+                        _W = (kv_cache_spec.sliding_window // kv_cache_spec.block_size) + 1
+                        _scratch_blocks = round_up(self.max_num_tokens, kv_cache_spec.block_size) \
+                            // kv_cache_spec.block_size
+                        _alloc_blocks = self._swa_max_num_seqs * _W + _scratch_blocks
+                        logger.warning("SWA_COMPACT: layer=%s SHRINK blocks %d -> %d (W=%d sw=%d bs=%d)",
+                                       layer_name, num_blocks, _alloc_blocks, _W,
+                                       kv_cache_spec.sliding_window, kv_cache_spec.block_size)
+                    if isinstance(kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec)):
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                            _alloc_blocks + 1, kv_cache_spec.block_size, kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size)
                         # here attn does not share kv cache tensor, so we create separate tensors
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         vc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
@@ -6940,10 +7266,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # the authoritative per-layer block count for every model
                     # (including heterogeneous ones like Gemma4).
                     num_blocks = kv_cache_config.num_blocks
-                    if isinstance(kv_cache_spec, FullAttentionSpec):
-                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
-                                                                              kv_cache_spec.num_kv_heads,
-                                                                              kv_cache_spec.head_size)
+                    # EDIT #1832-③ (VLLM_SWA_COMPACT, Gemma4 torch.compile-gated): compact pool for sliding.
+                    _alloc_blocks = num_blocks
+                    if self._swa_compact_enabled and isinstance(kv_cache_spec, SlidingWindowSpec):
+                        _W = (kv_cache_spec.sliding_window // kv_cache_spec.block_size) + 1
+                        _scratch_blocks = round_up(self.max_num_tokens, kv_cache_spec.block_size) \
+                            // kv_cache_spec.block_size
+                        _alloc_blocks = self._swa_max_num_seqs * _W + _scratch_blocks
+                        logger.warning("SWA_COMPACT: layer=%s SHRINK blocks %d -> %d (W=%d sw=%d bs=%d)",
+                                       layer_name, num_blocks, _alloc_blocks, _W,
+                                       kv_cache_spec.sliding_window, kv_cache_spec.block_size)
+                    if isinstance(kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec)):
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                            _alloc_blocks + 1, kv_cache_spec.block_size, kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size)
                         v_cache_shape = None if self.model_config.use_mla else kv_cache_shape
                         dtype = kv_cache_spec.dtype
                         if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
@@ -6965,7 +7301,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 torch.ones(kv_scales_shape, dtype=torch.bfloat16, device=self.device) * min_val \
                                 if create_dynamic_scales else None
                             value_scales_on_hidden = torch.ones(
-                                [num_blocks + 1, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size],
+                                [_alloc_blocks + 1, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size],
                                 dtype=torch.bfloat16,
                                 device=self.device) * min_val if create_dynamic_scales else None
                             value_scales = (value_scales_on_T,
@@ -7001,11 +7337,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
 
-        self._PAD_BLOCK_ID = num_blocks
-        self._PAD_SLOT_ID = num_blocks * self.attn_block_size
-        self._MAMBA_PAD_BLOCK_ID = num_blocks
-        self._dummy_num_blocks = num_blocks
-
         # Initialize the GDN compact slot free-list.
         # The free-list contains base-slot IDs [0..max_num_reqs-1].
         # For request with base_slot `s` in group `g` (0-indexed within
@@ -7019,6 +7350,48 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list_len=%d",
                         len(self._compact_gdn_group_ids), gdn_max_reqs, compact_total, num_blocks + 1,
                         len(self._gdn_slot_free_list))
+
+        # EDIT #1832-④: initialize the SWA compact slot free-list. Sliding-window
+        # layer tensors were allocated with self.max_num_seqs*_W blocks (see EDIT ③),
+        # so there are exactly self.max_num_seqs stable slots [0..max_num_seqs-1],
+        # each owning _W consecutive compact blocks. _W = sliding_window//block_size+1
+        # (read off the first SlidingWindowSpec group, matching the EDIT ③ alloc).
+        if self._swa_compact_enabled:
+            _w = 0
+            _fkm = 1
+            for g in kv_cache_config.kv_cache_groups:
+                for group_spec in _kv_cache_group_specs(g.kv_cache_spec):
+                    if isinstance(group_spec, SlidingWindowSpec):
+                        group_w = (group_spec.sliding_window // group_spec.block_size) + 1
+                        if _w not in (0, group_w):
+                            raise ValueError("SWA compact requires one sliding-window block capacity across groups")
+                        _w = group_w
+                    elif isinstance(group_spec, FullAttentionSpec) and _fkm == 1 and self.attn_block_size > 0:
+                        _fkm = group_spec.block_size // self.attn_block_size
+            self._swa_W = _w
+            # Full-group virtual-block-split multiplier (block_size//attn_block_size).
+            # For gemma4-MM the full group's manager block_size (256) splits into 2
+            # kernel blocks (128); its physical tensor holds num_blocks*mult kernel
+            # blocks. The full-cache pad sentinel must therefore follow all of those
+            # kernel blocks rather than using the scheduler-block count directly.
+            self._swa_full_kernel_mult = _fkm
+            if _w > 0:
+                _swa_slots = self._swa_max_num_seqs
+                _scratch_blocks = round_up(self.max_num_tokens, self.attn_block_size) // self.attn_block_size
+                self._swa_pad_block_id = _swa_slots * _w
+                self._swa_pad_slot_id = self._swa_pad_block_id * self.attn_block_size
+                self._swa_slot_free_list = list(range(_swa_slots - 1, -1, -1))
+                self._swa_req_to_slot.clear()
+                logger.info("SWA compact: W=%d slots=%d pad_block=%d "
+                            "(compact blocks/layer=%d, scratch=%d) free_list_len=%d full_kernel_mult=%d",
+                            _w, _swa_slots, self._swa_pad_block_id,
+                            self._swa_pad_block_id + _scratch_blocks, _scratch_blocks,
+                            len(self._swa_slot_free_list), _fkm)
+
+        self._PAD_BLOCK_ID = num_blocks * self._swa_full_kernel_mult
+        self._PAD_SLOT_ID = self._PAD_BLOCK_ID * self.attn_block_size
+        self._MAMBA_PAD_BLOCK_ID = num_blocks
+        self._dummy_num_blocks = num_blocks
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))
