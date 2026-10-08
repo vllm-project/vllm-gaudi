@@ -1404,15 +1404,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if not os.environ.get("VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"):
                     os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"] = "0"
                 if not os.environ.get("VLLM_COMPACT_GDN"):
-                    # Auto-disable compact GDN for incompatible modes.
-                    if self.vllm_config.kv_transfer_config is not None:
-                        os.environ["VLLM_COMPACT_GDN"] = "0"
-                        logger.warning("Compact GDN auto-disabled: incompatible with PD disaggregated serving")
-                    else:
-                        os.environ["VLLM_COMPACT_GDN"] = "1"
+                    # Auto-disable compact GDN for incompatible modes:
+                    # prefix caching and PD disaggregated serving.
+                    incompatible = (self.vllm_config.kv_transfer_config is not None
+                                    or self.vllm_config.cache_config.enable_prefix_caching)
+                    os.environ["VLLM_COMPACT_GDN"] = "0" if incompatible else "1"
+                    if incompatible:
+                        logger.warning_once("Compact GDN auto-disabled: incompatible with "
+                                            "prefix caching / PD disaggregated serving")
                 if os.environ.get("VLLM_COMPACT_GDN", "0") in ("1", "true") \
                         and self.vllm_config.cache_config.enable_prefix_caching:
-                    logger.warning("Compact GDN mode does not support prefix caching.")
+                    logger.warning_once("Compact GDN mode does not support prefix caching.")
                 logger.info(
                     "GDN layers detected (%d): "
                     "VLLM_USE_HYBRID_CACHE=%s, "
@@ -5954,7 +5956,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # same grid as real traffic, guaranteeing a warmup cache hit.
                 processor_inputs = self._build_raw_image_processor_inputs(processor, modality, count, width, height)
             else:
-                processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                processor_inputs = processor.get_dummy_inputs(
                     seq_len=self.model_config_copy.max_model_len,
                     mm_counts={modality: count},
                     mm_options=mm_options,
@@ -5963,10 +5965,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
         else:
             # Fallback to default options
-            dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
-                self.model_config_copy,
-                mm_counts={modality: count},
-                processor=self._get_mm_warmup_processor(),
+            dummy_mm_inputs = self._get_mm_warmup_processor().get_dummy_mm_inputs(
+                {modality: count},
             )
 
         return dummy_mm_inputs
