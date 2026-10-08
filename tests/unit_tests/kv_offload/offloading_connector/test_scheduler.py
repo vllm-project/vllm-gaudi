@@ -47,15 +47,11 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.run(decoded_tokens=[0] * (offloaded_block_size + 1))
 
     # 1 more block (+ token for kicking off offloading)
-    # now check touch was called with all 6 blocks
     runner.manager.prepare_store.side_effect = (lambda block_hashes, req_context: generate_store_output(block_hashes))
     runner.run(
         decoded_tokens=[0] * (offloaded_block_size + 1),
         expected_stored_gpu_block_indexes=(15, 16, 17),
     )
-    runner.manager.touch.assert_called()
-    block_hashes1 = list(runner.manager.touch.call_args.args[0])
-    assert len(block_hashes1) == 6
 
     # terminate request
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
@@ -63,13 +59,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     # create a new request differing only on the last token
     runner.new_request(token_ids=[0] * (offloaded_block_size * 6 - 1) + [1])
     runner.run(decoded_tokens=[0])
-    runner.manager.touch.assert_called()
-    block_hashes2 = list(runner.manager.touch.call_args.args[0])
-    assert len(block_hashes2) == 6
-
-    # verify hashes are the same, except for the last block
-    assert block_hashes1[:5] == block_hashes2[:5]
-    assert block_hashes1[5] != block_hashes2[5]
+    runner.manager.touch.assert_not_called()
 
     # terminate request
     runner.run(

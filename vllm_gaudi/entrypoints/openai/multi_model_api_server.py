@@ -149,6 +149,9 @@ class MultiModelEngineClient(EngineClient):
     async def sleep(self, level: int = 1, mode: str = "abort") -> None:
         await self._engine.sleep(level=level, mode=mode)
 
+    async def release_kv_cache_memory(self) -> None:
+        await self._engine.release_kv_cache_memory()
+
     async def wake_up(self, tags: list[str] | None = None) -> None:
         await self._engine.wake_up(tags=tags)
 

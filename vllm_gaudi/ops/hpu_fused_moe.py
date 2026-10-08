@@ -836,6 +836,8 @@ def create_fused_moe_router(
     # Deepseek V4 vision routing bias parameters
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
+    # sequence-parallel padding parameters (upstream vLLM PR 56079+)
+    skip_padding: bool = False,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -883,6 +885,12 @@ def create_fused_moe_router(
     Hash Indices Table:
         hash_indices_table: Used to map input_ids to experts, needed for
             Deepseek V4
+
+    Sequence-parallel padding arguments (upstream vLLM PR 56079+):
+        skip_padding: Whether grouped routing should invalidate padding rows.
+            Forwarded to GroupedTopKRouter for signature parity; the guard it
+            enables (VLLM_MOE_SKIP_PADDING + a DeepEP-v2-kernel forward
+            context) is not exercised on HPU, so this is a no-op here.
 
     Vision routing bias arguments (upstream vLLM PR 54566+):
         bias_vl: Vision routing bias for image tokens (Deepseek V4).
@@ -932,6 +940,7 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
+            skip_padding=skip_padding,
         )
         return grouped_topk_router
 

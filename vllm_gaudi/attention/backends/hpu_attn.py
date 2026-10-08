@@ -270,6 +270,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                     "Contiguous PA and defragmenter are not supported with DSA attention backend, "
                     "rerun with VLLM_CONTIGUOUS_PA=0.")
 
+    def record_logical_topk_ready(self) -> None:
+        pass
+
     def forward_mha(  # type: ignore
             self, q: torch.Tensor, latent_vec_k: torch.Tensor, k_cache: torch.Tensor,
             attn_metadata: HPUAttentionMetadata) -> torch.Tensor:
