@@ -40,7 +40,8 @@ QWEN3_5_HYBRID_ARCHS = frozenset({
 
 
 def retain_envs(var_name):
-    retain_var_list = ['GLOO_SOCKET_IFNAME', 'HCCL_SOCKET_IFNAME', 'NCCL_SOCKET_IFNAME']
+    # QUANT_CONFIG must reach Ray workers so INC runs on every node, not only the driver's.
+    retain_var_list = ['GLOO_SOCKET_IFNAME', 'HCCL_SOCKET_IFNAME', 'NCCL_SOCKET_IFNAME', 'QUANT_CONFIG']
     return ('HPU' in var_name or 'RAY' in var_name or 'VLLM' in var_name or var_name in retain_var_list)
 
 

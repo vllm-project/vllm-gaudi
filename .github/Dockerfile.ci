@@ -22,6 +22,8 @@ RUN git checkout ${VLLM_COMMIT_ARG}
 # Test dependencies
 RUN pip install pytest pytest_asyncio pytest-timeout
 RUN pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
+# Calibration dependencies (ray for lm-eval's multimodal vLLM model)
+RUN pip install -r /workspace/vllm-gaudi/calibration/requirements.txt
 # decord: video-decoding backend required by the ERNIE-4.5-VL trust_remote_code
 # modeling file (run_ernie4.5_vl_test). Upstream vLLM pins it in
 # requirements/test/cuda.in (x86_64); vllm-gaudi does not install that file, so
