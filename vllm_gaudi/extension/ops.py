@@ -29,6 +29,7 @@ FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 if is_hpu_gaudi2:
     FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
 
+import functools
 import logging
 import os
 
@@ -1557,6 +1558,32 @@ class MoeWNA16Matmul(torch.nn.Module):
         raise NotImplementedError()
 
 
+@functools.cache
+def _int4_moe_schema():
+    """Schema of the bridge's int4_fused_weights overload, or None if it has none."""
+    try:
+        return torch.ops.hpu.mixture_of_experts.int4_fused_weights._schema
+    except (AttributeError, RuntimeError):
+        # Bridge predates the int4_fused_weights overload altogether.
+        return None
+
+
+def int4_moe_native_available() -> bool:
+    """Whether this bridge provides mixture_of_experts.int4_fused_weights at all."""
+    return _int4_moe_schema() is not None
+
+
+# compressed-tensors stores 4-bit codes as uint4b8 (value + 8), while
+# int4_fused_weights reads signed two's-complement nibbles. (c - 8) & 0xF == c ^ 8
+# for 4 bits, so a whole int32-packed word converts with one XOR by 0x88888888.
+_UINT4B8_TO_INT4_XOR = -2004318072  # 0x88888888 as a signed int32
+
+
+def rebias_uint4b8_to_int4_(packed: torch.Tensor) -> torch.Tensor:
+    """In place: int32-packed uint4b8 codes -> signed int4 nibbles (self-inverse)."""
+    return packed.bitwise_xor_(torch.tensor(_UINT4B8_TO_INT4_XOR, dtype=torch.int32, device=packed.device))
+
+
 class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
     """ Mixture of Experts for compressed int4 WNA16
 
@@ -1580,6 +1607,10 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         self.experts_min = experts_min
         self.experts_max = experts_max
         self.native_int4 = native_int4
+        # Set once the packed codes were rebiased to signed nibbles for the int4
+        # kernel. convert_from_uint4 would then decode them wrongly, so the bf16
+        # dequant path must refuse to run.
+        self.codes_signed = False
         self._cached_int4: Optional[tuple] = None
         if MAX_EXPERTS_PER_SLICE > 0:
             max_expert_per_slice = MAX_EXPERTS_PER_SLICE
@@ -1590,14 +1621,28 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         self.num_expert_per_group = self.num_experts // self.moe_n_slice
 
     def supports_native_int4(self) -> tuple[bool, str]:
-        """Whether these weights can be fed to int4_fused_weights."""
+        """Whether these weights can be fed to int4_fused_weights on this runtime.
 
+        Must hold before the quant method rebiases the codes: after that only the
+        int4 kernel can read them.
+        """
+
+        if not int4_moe_native_available():
+            return False, "this Habana PyTorch bridge has no mixture_of_experts.int4_fused_weights overload"
         # The overload takes no g_idx, so activation reordering cannot be
         # expressed. Silently dropping g_idx would corrupt output, so refuse.
         for name, mods in (("w13", self.w13_list), ("w2", self.w2_list)):
             if any(getattr(m, "g_idx", None) is not None for m in mods):
                 return False, (f"{name} has g_idx set (actorder); int4_fused_weights has no g_idx argument")
         return True, ""
+
+    def _apply(self, fn, *args, **kwargs):
+        # A device/dtype migration must not leave the cache pinning the tensors it
+        # held before: they would stay alive next to the migrated copies (the
+        # expert weights twice on the device) and feed stale weights to the
+        # kernel. Drop it; the next forward rebuilds it from the current tensors.
+        self._cached_int4 = None
+        return super()._apply(fn, *args, **kwargs)
 
     def _cache_weight_lists(self) -> None:
         """Freeze the per-expert packed-weight and scale tuples for the int4 path."""
@@ -1663,6 +1708,9 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
 
         if self.native_int4:
             return self._forward_native_int4(x, topk_ids, topk_weights, permuted_weights, activation)
+        if self.codes_signed:
+            raise RuntimeError("WNA16 MoE: the packed weights were rebiased to signed int4 for int4_fused_weights; "
+                               "the bf16 dequantization path would decode them wrongly.")
 
         w13_list = []
         w2_list = []

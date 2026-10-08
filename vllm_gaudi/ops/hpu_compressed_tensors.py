@@ -52,7 +52,7 @@ import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi import envs
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
-                                      VllmMixtureOfExpertsOpWNA16)
+                                      VllmMixtureOfExpertsOpWNA16, rebias_uint4b8_to_int4_)
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.ops.hpu_fused_moe import (
     _normalize_moe_activation,
@@ -821,6 +821,20 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         # EMULATION sentinel so those inherited paths take the generic branch.
         self.wna16_backend = WNA16MoEBackend.EMULATION
 
+    def _native_int4_refusal(self) -> Optional[str]:
+        """Why this checkpoint cannot take the native int4 path, or None if it can.
+
+        Covers what is known from the quant config alone; the op's
+        supports_native_int4 adds the runtime and g_idx checks once weights exist.
+        """
+        if not get_config().wna16_native_int4_moe:
+            return "VLLM_WNA16_NATIVE_INT4_MOE is not set"
+        if self.num_bits != 4:
+            # int4_fused_weights reads 4-bit nibbles and the load-time rebias is
+            # nibble-wise, so e.g. w8a16 must stay on the dequant path.
+            return f"{self.num_bits}-bit weights; int4_fused_weights is 4-bit only"
+        return None
+
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
         extra_weight_attrs["intermediate_size_full"] = intermediate_size_per_partition * layer.moe_config.tp_size
@@ -1026,6 +1040,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         ep_shift = layer.moe_config.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
+        refusal = self._native_int4_refusal()
         want_native_int4 = get_config().wna16_native_int4_moe
         layer.moe_op = VllmMixtureOfExpertsOpWNA16(
             num_experts,
@@ -1047,18 +1062,17 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
         # Decide the execution path only after the weights (and any g_idx) are
         # attached, since eligibility depends on them. Fall back rather than
-        # fail: the bf16 dequant path is always correct, just slower.
-        ok, why = layer.moe_op.supports_native_int4() if want_native_int4 else (False, "")
+        # fail: the bf16 dequant path is always correct, just slower. Every check
+        # runs before the rebias below, which is the point of no return.
+        ok, why = (False, refusal) if refusal else layer.moe_op.supports_native_int4()
         if ok:
             # int4_fused_weights reads the codes as signed int4 two's complement,
-            # while compressed-tensors stores uint4b8 (value + 8). Rebias once
-            # here -- (c - 8) & 0xF == c ^ 8 for 4 bits, so the whole packed word
-            # is one XOR with 0x88888888 (-2004318072 as signed int32). Only safe
-            # because the bf16 dequant path is not used once the native path is
-            # active.
-            xor = torch.tensor(-2004318072, dtype=torch.int32, device=layer.w13_weight_packed.device)
-            layer.w13_weight_packed.data.bitwise_xor_(xor)
-            layer.w2_weight_packed.data.bitwise_xor_(xor)
+            # while compressed-tensors stores uint4b8 (value + 8). Rebias once here.
+            # The bf16 dequant path can no longer decode them afterwards; the op
+            # refuses it from now on (codes_signed).
+            rebias_uint4b8_to_int4_(layer.w13_weight_packed.data)
+            rebias_uint4b8_to_int4_(layer.w2_weight_packed.data)
+            layer.moe_op.codes_signed = True
             layer.moe_op._cache_weight_lists()
         else:
             layer.moe_op.native_int4 = False

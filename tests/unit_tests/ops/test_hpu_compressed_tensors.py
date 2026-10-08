@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 import habana_frameworks.torch as htorch
+from types import SimpleNamespace
 from utils import get_data_path, create_row_parallel_linear, create_fused_moe
 from unittest.mock import MagicMock
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
@@ -11,6 +13,11 @@ from vllm_gaudi.ops.hpu_compressed_tensors import (HPUCompressedTensorsLinearMet
                                                    HPUCompressedTensorsW8A8Int8_BF16Fallback,
                                                    HPUCompressedTensorsW8A8Fp8MoEMethod)
 from vllm_gaudi.utils import HPUCompileConfig
+import vllm_gaudi.extension.ops as hpu_ext_ops
+import vllm_gaudi.ops.hpu_compressed_tensors as hpu_ct
+from vllm_gaudi.extension.ops import int4_moe_native_available, rebias_uint4b8_to_int4_
+from vllm.model_executor.layers.quantization.utils.quant_utils import pack_quantized_values_into_int32
+from vllm.scalar_type import scalar_types
 from vllm.forward_context import ForwardContext, override_forward_context
 from safetensors import safe_open
 
@@ -313,15 +320,16 @@ def test_compressed_tensors_linear_method_wna16(default_vllm_config: None, dist_
     torch.testing.assert_close(ref_output, out, atol=1e-3, rtol=1e-3)
 
 
-def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_init):
-    config = {
+def _wna16_moe_quant_config(actorder=None):
+    """compressed-tensors config of a symmetric, group-128 w4a16 MoE checkpoint."""
+    return CompressedTensorsConfig.from_config({
         'config_groups': {
             'group_0': {
                 'input_activations': None,
                 'output_activations': None,
                 'targets': ['Linear'],
                 'weights': {
-                    'actorder': 'weight',
+                    'actorder': actorder,
                     'block_structure': None,
                     'dynamic': False,
                     'group_size': 128,
@@ -340,63 +348,190 @@ def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_ini
         'kv_cache_scheme': None,
         'quant_method': 'compressed-tensors',
         'quantization_status': 'compressed'
-    }
-    oot_quant_config = CompressedTensorsConfig.from_config(config)
+    })
 
-    # Prepare FusedMoE layer with oot HPUCompressedTensorsWNA16MoEMethod
-    oot_op = create_fused_moe(oot_quant_config).to("hpu")
-    assert isinstance(oot_op.routed_experts.quant_method, HPUCompressedTensorsWNA16MoEMethod)
 
+def _load_moe_wna16_reference_weights(experts):
     # Weights were extracted from first FusedMoE layer of RedHatAI/Qwen3-30B-A3B-quantized.w4a16
     # (with adjusted shapes, to make tensors smaller)
     with safe_open(get_data_path("data/compressed_tensors/moe_wna16.safetensors"), framework="pt", device="hpu") as f:
         w2_weight_packed = f.get_tensor("w2_weight_packed")
         w2_weight_packed = torch.swapaxes(w2_weight_packed, 0, 1).repeat(128, 1, 1)
-        oot_op.routed_experts.w2_weight_packed.copy_(w2_weight_packed)
+        experts.w2_weight_packed.copy_(w2_weight_packed)
 
         w13_weight_packed = f.get_tensor("w13_weight_packed")
         w13_weight_packed = torch.swapaxes(w13_weight_packed, 0, 1).repeat(128, 1, 1)
-        oot_op.routed_experts.w13_weight_packed.copy_(w13_weight_packed)
+        experts.w13_weight_packed.copy_(w13_weight_packed)
 
         w2_weight_scale = f.get_tensor("w2_weight_scale")
         w2_weight_scale = torch.swapaxes(w2_weight_scale, 0, 1).repeat(128, 1, 1)
-        oot_op.routed_experts.w2_weight_scale.copy_(w2_weight_scale)
+        experts.w2_weight_scale.copy_(w2_weight_scale)
 
         w13_weight_scale = f.get_tensor("w13_weight_scale")
         w13_weight_scale = torch.swapaxes(w13_weight_scale, 0, 1).repeat(128, 1, 1)
-        oot_op.routed_experts.w13_weight_scale.copy_(w13_weight_scale)
+        experts.w13_weight_scale.copy_(w13_weight_scale)
 
         w2_weight_shape = torch.tensor([512, 256], dtype=torch.bfloat16, device="hpu")
-        oot_op.routed_experts.w2_weight_shape.copy_(w2_weight_shape.repeat(128, 1))
+        experts.w2_weight_shape.copy_(w2_weight_shape.repeat(128, 1))
 
         w13_weight_shape = torch.tensor([256, 512], dtype=torch.bfloat16, device="hpu")
-        oot_op.routed_experts.w13_weight_shape.copy_(w13_weight_shape.repeat(128, 1))
+        experts.w13_weight_shape.copy_(w13_weight_shape.repeat(128, 1))
 
-    oot_op.routed_experts.quant_method.process_weights_after_loading(oot_op.routed_experts)
 
-    if not htorch.utils.internal.is_lazy():
-        compile_config = HPUCompileConfig()
-        oot_op = torch.compile(oot_op, **compile_config.get_compile_args())
-
-    # Input and expected output
+def _load_moe_wna16_reference_io():
     # Output tensor holds data that was returned by cuda impl of CompressedTensorsWNA16MarlinMoEMethod for given input
     # (CompressedTensorsWNA16MarlinMoEMethod was triggered offline with the same input as below to get the ref_output)
     with safe_open(get_data_path("data/compressed_tensors/moe_wna16.safetensors"), framework="pt", device="hpu") as f:
-        hidden_states = f.get_tensor("hidden_states")
-        router_logits = f.get_tensor("router_logits")
-        ref_output = f.get_tensor("ref_output")
+        return f.get_tensor("hidden_states"), f.get_tensor("router_logits"), f.get_tensor("ref_output")
 
-    # Execute layer
+
+def _run_fused_moe(oot_op, hidden_states, router_logits):
+    if not htorch.utils.internal.is_lazy():
+        compile_config = HPUCompileConfig()
+        oot_op = torch.compile(oot_op, **compile_config.get_compile_args())
     ctx = ForwardContext(
         no_compile_layers={oot_op.layer_name: oot_op},
         attn_metadata={},
         slot_mapping={},
     )
     with override_forward_context(ctx):
-        out = oot_op.forward(hidden_states, router_logits)
+        return oot_op.forward(hidden_states, router_logits)
+
+
+def _dequant_uint4b8(codes, scales, group_size):
+    """[E, out, in] uint4b8 codes (value + 8) and [E, out, in / group] scales -> float32 weights."""
+    return (codes.float() - 8) * scales.float().repeat_interleave(group_size, dim=-1)
+
+
+def test_compressed_tensors_wna16_moe_method(default_vllm_config: None, dist_init):
+    # Prepare FusedMoE layer with oot HPUCompressedTensorsWNA16MoEMethod
+    oot_op = create_fused_moe(_wna16_moe_quant_config(actorder='weight')).to("hpu")
+    assert isinstance(oot_op.routed_experts.quant_method, HPUCompressedTensorsWNA16MoEMethod)
+
+    _load_moe_wna16_reference_weights(oot_op.routed_experts)
+    oot_op.routed_experts.quant_method.process_weights_after_loading(oot_op.routed_experts)
+
+    hidden_states, router_logits, ref_output = _load_moe_wna16_reference_io()
+    out = _run_fused_moe(oot_op, hidden_states, router_logits)
 
     # Check correctness
     torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
+
+
+def test_compressed_tensors_wna16_moe_method_native_int4(default_vllm_config: None, dist_init, monkeypatch):
+    """The native int4 kernel reproduces the dequant-path reference, and the dequant path then refuses to run."""
+    if not int4_moe_native_available():
+        pytest.skip("this Habana PyTorch bridge has no mixture_of_experts.int4_fused_weights")
+    monkeypatch.setattr(hpu_ct, "get_config", lambda: SimpleNamespace(wna16_native_int4_moe=True))
+
+    oot_op = create_fused_moe(_wna16_moe_quant_config(actorder='weight')).to("hpu")
+    experts = oot_op.routed_experts
+    _load_moe_wna16_reference_weights(experts)
+    experts.quant_method.process_weights_after_loading(experts)
+    assert experts.moe_op.native_int4
+    assert experts.moe_op.codes_signed
+
+    hidden_states, router_logits, ref_output = _load_moe_wna16_reference_io()
+    out = _run_fused_moe(oot_op, hidden_states, router_logits)
+    # Same tolerance as the dequant path (measured max abs diff 3e-5).
+    torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
+
+    # The codes are signed nibbles now: convert_from_uint4 would decode them wrongly.
+    experts.moe_op.native_int4 = False
+    topk_ids = torch.zeros(hidden_states.shape[0], 8, dtype=torch.int64, device="hpu")
+    topk_weights = torch.full((hidden_states.shape[0], 8), 1 / 8, dtype=torch.bfloat16, device="hpu")
+    with pytest.raises(RuntimeError, match="rebiased"):
+        experts.moe_op(hidden_states, topk_ids, topk_weights, permuted_weights=False, activation="silu")
+
+
+def test_wna16_rebias_uint4b8_to_int4():
+    """uint4b8 codes (value + 8) become the two's-complement nibbles int4_fused_weights reads."""
+    values = torch.arange(-8, 8, dtype=torch.int32).repeat(2, 1)  # every int4 value
+    packed = pack_quantized_values_into_int32(values + 8, scalar_types.uint4b8, packed_dim=1)
+    original = packed.clone()
+
+    rebias_uint4b8_to_int4_(packed)
+    nibbles = torch.stack([(packed >> (4 * i)) & 0xF for i in range(8)], dim=-1).reshape(values.shape)
+    torch.testing.assert_close(torch.where(nibbles >= 8, nibbles - 16, nibbles), values)
+
+    rebias_uint4b8_to_int4_(packed)  # self-inverse
+    torch.testing.assert_close(packed, original)
+
+
+@pytest.mark.parametrize("reason", ["g_idx", "w8a16", "no_overload"])
+def test_compressed_tensors_wna16_moe_method_native_int4_refusals(default_vllm_config: None, dist_init, monkeypatch,
+                                                                  reason):
+    """Checkpoints the int4 kernel cannot run fall back to the dequant path with their codes untouched."""
+    monkeypatch.setattr(hpu_ct, "get_config", lambda: SimpleNamespace(wna16_native_int4_moe=True))
+    if reason == "no_overload":
+        monkeypatch.setattr(hpu_ext_ops, "int4_moe_native_available", lambda: False)
+
+    oot_op = create_fused_moe(_wna16_moe_quant_config()).to("hpu")
+    experts = oot_op.routed_experts
+    if reason == "g_idx":
+        # vLLM's config parser now rejects actorder="group" checkpoints, so set it on
+        # the method to exercise the op's own guard (process attaches the g_idx).
+        experts.quant_method.actorder = "group"
+    elif reason == "w8a16":
+        # Only the bit width matters for this decision; the 4-bit layer keeps the shapes simple.
+        experts.quant_method.num_bits = 8
+    for param in (experts.w13_weight_packed, experts.w2_weight_packed):
+        param.data.copy_(torch.randint(-2**31, 2**31 - 1, param.shape, dtype=torch.int32))
+    expected_w13 = experts.quant_method.gptq_hpu_moe_repack(experts.w13_weight_packed)
+
+    experts.quant_method.process_weights_after_loading(experts)
+
+    assert not experts.moe_op.native_int4
+    assert not experts.moe_op.codes_signed
+    torch.testing.assert_close(experts.w13_weight_packed.data, expected_w13)  # not rebiased
+
+
+@pytest.mark.parametrize("native_int4", [False, True], ids=["dequant", "native_int4"])
+def test_compressed_tensors_wna16_moe_method_non_gated_matches_dense_reference(default_vllm_config: None, dist_init,
+                                                                               monkeypatch, native_int4):
+    """Squared-ReLU (non-gated) experts on the real kernels against y = sum_k p_k * W2 relu(W1 x)^2.
+
+    Both the dequant path and the native int4 kernel are gated-only, so they run
+    the w1 -> w3 mirror; each must match the dense reference.
+    """
+    if native_int4 and not int4_moe_native_available():
+        pytest.skip("this Habana PyTorch bridge has no mixture_of_experts.int4_fused_weights")
+    monkeypatch.setattr(hpu_ct, "get_config", lambda: SimpleNamespace(wna16_native_int4_moe=native_int4))
+    torch.manual_seed(0)
+    num_experts, hidden, intermediate, group, top_k = 128, 512, 256, 128, 8  # create_fused_moe sizes
+
+    oot_op = create_fused_moe(_wna16_moe_quant_config(), activation="relu2_no_mul").to("hpu")
+    experts = oot_op.routed_experts
+    up_codes = torch.randint(0, 16, (num_experts, intermediate, hidden), dtype=torch.int32)
+    down_codes = torch.randint(0, 16, (num_experts, hidden, intermediate), dtype=torch.int32)
+    up_scales = (torch.rand(num_experts, intermediate, hidden // group) * 0.01 + 0.005).to(torch.bfloat16)
+    down_scales = (torch.rand(num_experts, hidden, intermediate // group) * 0.01 + 0.005).to(torch.bfloat16)
+    # Checkpoint layout, packed along the input dim. For non-gated experts the
+    # loader fills only the first I rows of w13.
+    experts.w13_weight_packed.data[:, :intermediate].copy_(
+        pack_quantized_values_into_int32(up_codes, scalar_types.uint4b8, packed_dim=2))
+    experts.w13_weight_scale.data[:, :intermediate].copy_(up_scales)
+    experts.w2_weight_packed.data.copy_(pack_quantized_values_into_int32(down_codes, scalar_types.uint4b8,
+                                                                         packed_dim=2))
+    experts.w2_weight_scale.data.copy_(down_scales)
+    experts.quant_method.process_weights_after_loading(experts)
+    assert experts.moe_op.native_int4 is native_int4
+
+    hidden_states = torch.randn(4, hidden, dtype=torch.bfloat16)
+    router_logits = torch.randn(4, num_experts, dtype=torch.bfloat16)
+    out = _run_fused_moe(oot_op, hidden_states.to("hpu"), router_logits.to("hpu")).float().cpu()
+
+    w1 = _dequant_uint4b8(up_codes, up_scales, group)
+    w2 = _dequant_uint4b8(down_codes, down_scales, group)
+    topk_p, topk_ids = torch.softmax(router_logits.float(), dim=-1).topk(top_k, dim=-1)
+    topk_p = topk_p / topk_p.sum(dim=-1, keepdim=True)
+    x = hidden_states.float()
+    ref = torch.zeros_like(x)
+    for t in range(x.shape[0]):
+        for p, e in zip(topk_p[t], topk_ids[t]):
+            ref[t] += p * (w2[e] @ torch.relu(w1[e] @ x[t]).square())
+    rel_err = ((out - ref).norm() / ref.norm()).item()
+    assert rel_err < 2e-2, f"relative error vs the dense reference: {rel_err:.4f}"
 
 
 def test_compressed_tensors_linear_method_w8a8int8_bf16fallback_static_per_channel(default_vllm_config: None,

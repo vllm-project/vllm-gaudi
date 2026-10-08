@@ -47,7 +47,7 @@ def create_row_parallel_linear(input_size, output_size, quant_config=None):
                              disable_tp=False)
 
 
-def create_fused_moe(quant_config=None):
+def create_fused_moe(quant_config=None, activation="silu"):
     return FusedMoE(num_experts=128,
                     top_k=8,
                     hidden_size=512,
@@ -65,7 +65,7 @@ def create_fused_moe(quant_config=None):
                     routed_scaling_factor=1.0,
                     e_score_correction_bias=None,
                     apply_router_weight_on_input=False,
-                    activation="silu",
+                    activation=activation,
                     enable_eplb=False,
                     num_redundant_experts=0,
                     has_bias=False,
