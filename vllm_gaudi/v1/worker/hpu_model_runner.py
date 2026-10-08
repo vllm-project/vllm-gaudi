@@ -4534,10 +4534,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 # Collect prefill hidden states for prompt logprobs.
                 # req_id is a list of request IDs in this prefill batch.
+                # Some models (e.g. DeepSeek-V2) return [batch * seq, hidden];
+                # restore the batch dim so [i] selects one request's tokens.
+                prompt_hidden_states = non_flattened_hidden_states
+                if prompt_hidden_states.dim() == 2:
+                    prompt_hidden_states = prompt_hidden_states.view(*token_ids.shape, -1)
                 for i, rid in enumerate(req_id):
                     if rid in self.input_batch.num_prompt_logprobs:
                         prefill_hidden_states_for_logprobs[rid] = \
-                            non_flattened_hidden_states[i]
+                            prompt_hidden_states[i]
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
