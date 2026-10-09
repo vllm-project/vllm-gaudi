@@ -306,6 +306,76 @@ def test_update_block_size_for_backend_realigns_mamba_page_size(monkeypatch):
         "not the stale value (512) aligned to the old block_size=128")
 
 
+def _non_hybrid_vllm_config(block_size, user_specified):
+    return SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="llama4")),
+        cache_config=SimpleNamespace(block_size=block_size, user_specified_block_size=user_specified),
+    )
+
+
+def test_update_block_size_restores_hpu_default_after_multi_backend_selection():
+    """Llama-4 keeps two backends, so upstream selection returns the default
+    block size of 16 and the HPU guard must put 128 back.
+
+    Only the backend list is patched. The real Platform selection runs, and
+    the restore log must fire. A pin that never selects 16 leaves the
+    preferred 128 in place without logging, and this test fails.
+    """
+    from vllm.platforms import Platform
+    from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionBackendV1
+
+    class _ChunkedLocalHPUAttentionBackendV1(HPUAttentionBackendV1):
+        pass
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="llama4"),
+            is_hybrid=False,
+        ),
+        cache_config=SimpleNamespace(
+            block_size=128,
+            user_specified_block_size=False,
+            kv_cache_dtype_skip_layers=None,
+        ),
+    )
+
+    with patch.object(
+            Platform,
+            "_find_non_ssm_backends",
+            return_value=[HPUAttentionBackendV1, _ChunkedLocalHPUAttentionBackendV1],
+    ), patch("vllm_gaudi.platform.logger") as log:
+        HpuPlatform.update_block_size_for_backend(vllm_config)
+
+    assert vllm_config.cache_config.block_size == 128
+    log.info.assert_any_call("Restoring HPU block_size to 128 after multi-backend default selection.")
+
+
+def test_update_block_size_keeps_user_specified_block_size():
+    from vllm.platforms import Platform
+
+    vllm_config = _non_hybrid_vllm_config(block_size=16, user_specified=True)
+
+    with patch.object(Platform, "update_block_size_for_backend"):
+        HpuPlatform.update_block_size_for_backend(vllm_config)
+
+    assert vllm_config.cache_config.block_size == 16
+
+
+def test_update_block_size_keeps_non_default_backend_selection():
+    """Hybrid alignment may legitimately choose a block size other than 16."""
+    from vllm.platforms import Platform
+
+    vllm_config = _non_hybrid_vllm_config(block_size=128, user_specified=False)
+
+    def _select_larger_block_size(vllm_config):
+        vllm_config.cache_config.block_size = 1152
+
+    with patch.object(Platform, "update_block_size_for_backend", _select_larger_block_size):
+        HpuPlatform.update_block_size_for_backend(vllm_config)
+
+    assert vllm_config.cache_config.block_size == 1152
+
+
 def test_check_and_update_config_does_not_rescale_granitemoehybrid_mamba_page_size(monkeypatch):
     """Regression: check_and_update_config must NOT rescale mamba_page_size_padded
     for granitemoehybrid models.
