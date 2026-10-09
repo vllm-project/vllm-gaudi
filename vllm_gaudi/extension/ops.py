@@ -1636,11 +1636,58 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
                 return False, (f"{name} has g_idx set (actorder); int4_fused_weights has no g_idx argument")
         return True, ""
 
+    def bind_expert_weights(self, layer: torch.nn.Module, with_g_idx: Optional[bool] = None) -> None:
+        """(Re)point every per-expert tensor at the layer's registered Parameters.
+
+        The per-expert tensors are plain-attribute views into the layer's stacked
+        Parameters (w13_weight_packed, w13_weight_scale, ...), so all experts share
+        one storage per Parameter. nn.Module.to() moves only the Parameters: after a
+        CPU-first or INC load the views still point at the old storage, and the
+        model runner's stray-tensor sweep would copy each of them to the device
+        separately, a second full copy of the expert weights. Re-slicing them from
+        the (moved) Parameters keeps a single copy.
+
+        with_g_idx=None keeps whatever was bound before.
+        """
+        if with_g_idx is None:
+            with_g_idx = any(getattr(m, "g_idx", None) is not None for m in self.w13_list)
+        for expert_id in range(self.num_experts):
+            w13, w2 = self.w13_list[expert_id], self.w2_list[expert_id]
+            w13.set_weight_packed(layer.w13_weight_packed.data[expert_id])
+            w2.set_weight_packed(layer.w2_weight_packed.data[expert_id])
+            w13.set_weight_scale(layer.w13_weight_scale.data[expert_id])
+            w2.set_weight_scale(layer.w2_weight_scale.data[expert_id])
+            w13.set_zero_point(layer.w13_zero_point.data)
+            w2.set_zero_point(layer.w2_zero_point.data)
+            if with_g_idx:
+                w13.set_g_idx(layer.w13_weight_g_idx.data[expert_id])
+                w2.set_g_idx(layer.w2_weight_g_idx.data[expert_id])
+        # Rebuild from the views just bound, never from stale ones.
+        self._cached_int4 = None
+        if self.native_int4:
+            self._cache_weight_lists()
+
+    def expert_weights_stale(self, layer: torch.nn.Module) -> bool:
+        """Whether the per-expert views no longer alias the layer's Parameters."""
+
+        def _storage_id(t: torch.Tensor) -> int:
+            try:
+                return t.untyped_storage().data_ptr()
+            except Exception:
+                return t.data_ptr()
+
+        view = getattr(self.w13_list[0], "weight_packed", None) if self.num_experts else None
+        param = getattr(layer, "w13_weight_packed", None)
+        if not isinstance(view, torch.Tensor) or not isinstance(param, torch.Tensor):
+            return False
+        return _storage_id(view) != _storage_id(param)
+
     def _apply(self, fn, *args, **kwargs):
         # A device/dtype migration must not leave the cache pinning the tensors it
         # held before: they would stay alive next to the migrated copies (the
         # expert weights twice on the device) and feed stale weights to the
-        # kernel. Drop it; the next forward rebuilds it from the current tensors.
+        # kernel. Drop it; bind_expert_weights rebuilds it once the per-expert
+        # views point at the migrated Parameters (the model runner does that).
         self._cached_int4 = None
         return super()._apply(fn, *args, **kwargs)
 

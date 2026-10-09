@@ -1048,17 +1048,9 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             experts_max,
             native_int4=want_native_int4,
         )
-        for expert_id in range(layer.local_num_experts):
-            layer.moe_op.w13_list[expert_id].set_weight_packed(layer.w13_weight_packed.data[expert_id])
-            layer.moe_op.w2_list[expert_id].set_weight_packed(layer.w2_weight_packed.data[expert_id])
-            layer.moe_op.w13_list[expert_id].set_weight_scale(layer.w13_weight_scale.data[expert_id])
-            layer.moe_op.w2_list[expert_id].set_weight_scale(layer.w2_weight_scale.data[expert_id])
-            layer.moe_op.w13_list[expert_id].set_zero_point(layer.w13_zero_point.data)
-            layer.moe_op.w2_list[expert_id].set_zero_point(layer.w2_zero_point.data)
-
-            if self.actorder == "group":
-                layer.moe_op.w13_list[expert_id].set_g_idx(layer.w13_weight_g_idx.data[expert_id])
-                layer.moe_op.w2_list[expert_id].set_g_idx(layer.w2_weight_g_idx.data[expert_id])
+        # Per-expert views into the stacked Parameters. The model runner calls the
+        # same method again after moving the model, so the two cannot drift apart.
+        layer.moe_op.bind_expert_weights(layer, with_g_idx=self.actorder == "group")
 
         # Decide the execution path only after the weights (and any g_idx) are
         # attached, since eligibility depends on them. Fall back rather than
