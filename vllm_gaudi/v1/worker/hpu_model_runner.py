@@ -1165,7 +1165,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'chunked_block_list', 'chunked_block_usage', 'chunked_block_groups', 'prep_initial_states',
         'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor',
         'query_start_loc', 'query_start_loc_p', 'padding_mask_flat', 'blocks_caching_range',
-        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks', 'image_seg_ids'
+        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks', 'image_seg_ids', 'indexer_block_index'
     ])
     return attention_metadata
 
@@ -1274,6 +1274,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.enable_bucketing = get_config().use_bucketing
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.skip_warmup = get_config().skip_warmup
+        # DSA indexer top-k width; None for models without a sparse attention indexer.
+        self.dsa_index_topk = getattr(self.model_config.hf_text_config, "index_topk", None)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -3314,6 +3316,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 block_size=decode_block_size,
             )
 
+        indexer_block_index = None
+        if self.dsa_index_topk is not None and num_tokens == 1:
+            index_width = self._dsa_index_width(padded_batch_size, block_list.shape[0],
+                                                max((len(bt) for bt in block_tables_list), default=0),
+                                                decode_block_size)
+            if index_width is not None:
+                indexer_block_index = self._build_dsa_block_index(block_tables_list, padded_batch_size,
+                                                                  block_list.shape[0], index_width)
+
         if self.interleaved_sliding_window:
             sliding_block_size = (self.sliding_window // decode_block_size)
 
@@ -3457,6 +3468,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             store_indices_tensor=store_indices_tensor,
             seq_lens_tensor=seq_lens_tensor,
             query_start_loc=query_start_loc_p,
+            indexer_block_index=async_h2d_copy(indexer_block_index, device=self.device)
+            if indexer_block_index is not None else None,
         )
 
         return DecodeInputData(num_decodes=num_decodes,
@@ -5595,6 +5608,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     else:
                         decode_cfg = (batch_size, 1, num_blocks)
                     self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
+                    if not is_prompt:
+                        for longest in self._dsa_warmup_req_blocks(batch_size, num_blocks, self.attn_block_size):
+                            self._prepare_dummy_scenario(None, decode_cfg, decode_longest_blocks=longest)
                 # TODO(kzawora): align_workers
                 used_mem = mem_prof.consumed_device_memory
                 total_mem += used_mem
@@ -5670,6 +5686,45 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             num_scheduled_tokens[req_id] = scheduled_tokens
 
+    def _dsa_index_width(self, num_rows, num_blocks, max_req_blocks, block_size):
+        """Static per-request block width for the DSA decode indexer, or None to rank over all blocks.
+
+        Widths grow x4 from the smallest one holding index_topk slots, bounding both padding waste
+        and the number of graph variants per decode bucket.
+        """
+        if self.dsa_index_topk is None or num_rows <= 1:
+            return None
+        width = cdiv(self.dsa_index_topk, block_size)
+        while width < max_req_blocks:
+            width *= 4
+        return width if width < num_blocks else None
+
+    def _dsa_warmup_req_blocks(self, batch_size, num_blocks, block_size):
+        """Longest-request block counts that make warmup hit every DSA index width of a decode bucket."""
+        if self.dsa_index_topk is None or batch_size <= 1 or self.speculative_config:
+            return []
+        # The default warmup scenario: one block per request for contiguous PA, else an even split.
+        default_longest = 1 if self.use_contiguous_pa else cdiv(num_blocks, batch_size)
+        natural = self._dsa_index_width(batch_size, num_blocks, default_longest, block_size)
+        longest_cap = num_blocks if self.use_contiguous_pa else num_blocks - (batch_size - 1)
+        req_blocks = []
+        width = cdiv(self.dsa_index_topk, block_size)
+        while width < num_blocks:
+            longest = min(width, longest_cap)
+            if width != natural and self._dsa_index_width(batch_size, num_blocks, longest, block_size) == width:
+                req_blocks.append(longest)
+            width *= 4
+        return req_blocks
+
+    def _build_dsa_block_index(self, block_tables, num_rows, num_blocks, width):
+        index = np.full((num_rows, width), num_blocks, dtype=np.int32)
+        offset = 0
+        for row, table in enumerate(block_tables):
+            # Contiguous PA lays block_list out by block id; otherwise it is the flattened tables.
+            index[row, :len(table)] = table if self.use_contiguous_pa else range(offset, offset + len(table))
+            offset += len(table)
+        return torch.from_numpy(index)
+
     def _generate_seq_lengths(self, num_samples, num_blocks, block_size):
         # For contiguous PA, cap num_blocks to physical KV cache size because
         # block_id = num_blocks - 1 must be a valid physical block.
@@ -5721,7 +5776,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ctx_list = ctx_list if len(ctx_list) > 0 else [0] * len(prompt_list)
         return prompt_list, ctx_list
 
-    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
+    def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg, decode_longest_blocks=None):
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
 
@@ -5787,8 +5842,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # Cap block_id at physical pool — contiguous PA uses
                 # block_id as the allocation base which must be valid.
                 block_id = min(decode_num_blocks - 1, self.kv_cache_config.num_blocks - 1)
+                if decode_longest_blocks:
+                    decode_seq_lengths[0] = min(decode_longest_blocks * decode_block_size, self.max_model_len) - 1
             else:
-                decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
+                if decode_longest_blocks:
+                    decode_seq_lengths = [decode_longest_blocks * decode_block_size - 1] + \
+                        (self._generate_seq_lengths(decode_bs - 1, decode_num_blocks - decode_longest_blocks,
+                                                    decode_block_size) if decode_bs > 1 else [])
+                else:
+                    decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
                 block_id = 0
 
             for dsl in decode_seq_lengths:
@@ -6320,8 +6382,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         if not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager:
             multiplier = 5 if self.compile_config.regional_compilation else 1
+            dsa_variants = sum(
+                len(self._dsa_warmup_req_blocks(bs, blocks, self.attn_block_size))
+                for bs, _, blocks in self.bucketing_manager.decode_buckets)
             cache_size_limit = 1 + multiplier * (len(self.bucketing_manager.prompt_buckets) +
-                                                 len(self.bucketing_manager.decode_buckets))
+                                                 len(self.bucketing_manager.decode_buckets) + dsa_variants)
             torch._dynamo.config.cache_size_limit = max(cache_size_limit, torch._dynamo.config.cache_size_limit)
             # Multiply by 8 to follow the original default ratio between
             # the cache_size_limit and accumulated_cache_size_limit

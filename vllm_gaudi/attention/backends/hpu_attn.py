@@ -262,13 +262,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         self.topk_indices_buffer = kwargs.get('topk_indices_buffer')
         self.is_sparse = self.topk_indices_buffer is not None
-        if self.is_sparse:
-            if kv_cache_dtype == 'fp8_inc':
+        if self.is_sparse and kv_cache_dtype == 'fp8_inc':
                 raise NotImplementedError("fp8 kv cache is not supported with DSA attention backend")
-            if get_config().use_contiguous_pa or get_config().defrag:
-                raise NotImplementedError(
-                    "Contiguous PA and defragmenter are not supported with DSA attention backend, "
-                    "rerun with VLLM_CONTIGUOUS_PA=0.")
 
     def record_logical_topk_ready(self) -> None:
         pass
@@ -381,7 +376,6 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         flat_idx = topk_indices.clamp(min=0).reshape(-1)
         selected = k_cache[flat_idx].view(batch_size, topk, self.kv_lora_rank + self.qk_rope_head_dim)
-        selected = selected.masked_fill(pad_mask.unsqueeze(-1), 0)
         logits = torch.bmm(q, selected.transpose(1, 2)).float() * self.scale
         logits = logits.masked_fill(pad_mask.unsqueeze(1), torch.finfo(torch.float32).min)
         attn = logits.softmax(dim=-1).masked_fill(pad_mask.unsqueeze(1), 0).to(q.dtype)
