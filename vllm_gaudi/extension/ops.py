@@ -29,6 +29,7 @@ FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 if is_hpu_gaudi2:
     FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
 
+import functools
 import logging
 import os
 
@@ -1557,10 +1558,47 @@ class MoeWNA16Matmul(torch.nn.Module):
         raise NotImplementedError()
 
 
-class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
-    """ Mixture of Experts for compressed int4 WNA16 """
+@functools.cache
+def _int4_moe_schema():
+    """Schema of the bridge's int4_fused_weights overload, or None if it has none."""
+    try:
+        return torch.ops.hpu.mixture_of_experts.int4_fused_weights._schema
+    except (AttributeError, RuntimeError):
+        # Bridge predates the int4_fused_weights overload altogether.
+        return None
 
-    def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8):
+
+def int4_moe_native_available() -> bool:
+    """Whether this bridge provides mixture_of_experts.int4_fused_weights at all."""
+    return _int4_moe_schema() is not None
+
+
+# compressed-tensors stores 4-bit codes as uint4b8 (value + 8), while
+# int4_fused_weights reads signed two's-complement nibbles. (c - 8) & 0xF == c ^ 8
+# for 4 bits, so a whole int32-packed word converts with one XOR by 0x88888888.
+_UINT4B8_TO_INT4_XOR = -2004318072  # 0x88888888 as a signed int32
+
+
+def rebias_uint4b8_to_int4_(packed: torch.Tensor) -> torch.Tensor:
+    """In place: int32-packed uint4b8 codes -> signed int4 nibbles (self-inverse)."""
+    return packed.bitwise_xor_(torch.tensor(_UINT4B8_TO_INT4_XOR, dtype=torch.int32, device=packed.device))
+
+
+class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
+    """ Mixture of Experts for compressed int4 WNA16
+
+    Two execution paths, selected by the quant method:
+
+    * native_int4=False: reconstruct every local expert with
+      convert_from_uint4 and call the bf16 .fused_weights overload. The
+      only option for checkpoints with g_idx.
+
+    * native_int4=True: pass the packed int4 straight to
+      .int4_fused_weights overload, so nothing is dequantized. Requires the codes
+      rebiased to signed nibbles, which the quant method does once at load.
+    """
+
+    def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8, native_int4: bool = False):
         super().__init__()
         self.w13_list = torch.nn.ModuleList([MoeWNA16Matmul() for _ in range(num_experts)])
         self.w2_list = torch.nn.ModuleList([MoeWNA16Matmul() for _ in range(num_experts)])
@@ -1568,6 +1606,12 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         self.num_experts = num_experts
         self.experts_min = experts_min
         self.experts_max = experts_max
+        self.native_int4 = native_int4
+        # Set once the packed codes were rebiased to signed nibbles for the int4
+        # kernel. convert_from_uint4 would then decode them wrongly, so the bf16
+        # dequant path must refuse to run.
+        self.codes_signed = False
+        self._cached_int4: Optional[tuple] = None
         if MAX_EXPERTS_PER_SLICE > 0:
             max_expert_per_slice = MAX_EXPERTS_PER_SLICE
         else:
@@ -1575,6 +1619,129 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         self.moe_n_slice = 1 if self.num_experts <= max_expert_per_slice \
                 else self.num_experts // max_expert_per_slice
         self.num_expert_per_group = self.num_experts // self.moe_n_slice
+
+    def supports_native_int4(self) -> tuple[bool, str]:
+        """Whether these weights can be fed to int4_fused_weights on this runtime.
+
+        Must hold before the quant method rebiases the codes: after that only the
+        int4 kernel can read them.
+        """
+
+        if not int4_moe_native_available():
+            return False, "this Habana PyTorch bridge has no mixture_of_experts.int4_fused_weights overload"
+        # The overload takes no g_idx, so activation reordering cannot be
+        # expressed. Silently dropping g_idx would corrupt output, so refuse.
+        for name, mods in (("w13", self.w13_list), ("w2", self.w2_list)):
+            if any(getattr(m, "g_idx", None) is not None for m in mods):
+                return False, (f"{name} has g_idx set (actorder); int4_fused_weights has no g_idx argument")
+        return True, ""
+
+    def bind_expert_weights(self, layer: torch.nn.Module, with_g_idx: Optional[bool] = None) -> None:
+        """(Re)point every per-expert tensor at the layer's registered Parameters.
+
+        The per-expert tensors are plain-attribute views into the layer's stacked
+        Parameters (w13_weight_packed, w13_weight_scale, ...), so all experts share
+        one storage per Parameter. nn.Module.to() moves only the Parameters: after a
+        CPU-first or INC load the views still point at the old storage, and the
+        model runner's stray-tensor sweep would copy each of them to the device
+        separately, a second full copy of the expert weights. Re-slicing them from
+        the (moved) Parameters keeps a single copy.
+
+        with_g_idx=None keeps whatever was bound before.
+        """
+        if with_g_idx is None:
+            with_g_idx = any(getattr(m, "g_idx", None) is not None for m in self.w13_list)
+        for expert_id in range(self.num_experts):
+            w13, w2 = self.w13_list[expert_id], self.w2_list[expert_id]
+            w13.set_weight_packed(layer.w13_weight_packed.data[expert_id])
+            w2.set_weight_packed(layer.w2_weight_packed.data[expert_id])
+            w13.set_weight_scale(layer.w13_weight_scale.data[expert_id])
+            w2.set_weight_scale(layer.w2_weight_scale.data[expert_id])
+            w13.set_zero_point(layer.w13_zero_point.data)
+            w2.set_zero_point(layer.w2_zero_point.data)
+            if with_g_idx:
+                w13.set_g_idx(layer.w13_weight_g_idx.data[expert_id])
+                w2.set_g_idx(layer.w2_weight_g_idx.data[expert_id])
+        # Rebuild from the views just bound, never from stale ones.
+        self._cached_int4 = None
+        if self.native_int4:
+            self._cache_weight_lists()
+
+    def expert_weights_stale(self, layer: torch.nn.Module) -> bool:
+        """Whether the per-expert views no longer alias the layer's Parameters."""
+
+        def _storage_id(t: torch.Tensor) -> int:
+            try:
+                return t.untyped_storage().data_ptr()
+            except Exception:
+                return t.data_ptr()
+
+        view = getattr(self.w13_list[0], "weight_packed", None) if self.num_experts else None
+        param = getattr(layer, "w13_weight_packed", None)
+        if not isinstance(view, torch.Tensor) or not isinstance(param, torch.Tensor):
+            return False
+        return _storage_id(view) != _storage_id(param)
+
+    def _apply(self, fn, *args, **kwargs):
+        # A device/dtype migration must not leave the cache pinning the tensors it
+        # held before: they would stay alive next to the migrated copies (the
+        # expert weights twice on the device) and feed stale weights to the
+        # kernel. Drop it; bind_expert_weights rebuilds it once the per-expert
+        # views point at the migrated Parameters (the model runner does that).
+        self._cached_int4 = None
+        return super()._apply(fn, *args, **kwargs)
+
+    def _cache_weight_lists(self) -> None:
+        """Freeze the per-expert packed-weight and scale tuples for the int4 path."""
+
+        self._cached_int4 = (
+            tuple(m.weight_packed for m in self.w13_list),
+            tuple(m.weight_packed for m in self.w2_list),
+            tuple(m.weight_scale for m in self.w13_list),
+            tuple(m.weight_scale for m in self.w2_list),
+        )
+
+    def _forward_native_int4(self, x, topk_ids, topk_weights, permuted_weights, activation):
+        """No dequantization: packed int4 goes straight to the fused kernel."""
+
+        if self._cached_int4 is None:
+            self._cache_weight_lists()
+        w13_p, w2_p, w13_s, w2_s = self._cached_int4
+
+        def call(lo, hi, sl):
+            return torch.ops.hpu.mixture_of_experts.int4_fused_weights(
+                hidden_states=x,
+                expert_routing_table=topk_ids,
+                router_weights=topk_weights,
+                w12=list(w13_p[sl]),
+                w3=list(w2_p[sl]),
+                d_scale_w12=list(w13_s[sl]),
+                d_scale_w3=list(w2_s[sl]),
+                # No zero point: symmetric int4 needs none once the codes are
+                # signed, and the overload rejects a packed int32 one.
+                zero_point_w12=None,
+                zero_point_w3=None,
+                # Everything below is keyword-only in this overload's schema.
+                permuted_weights=permuted_weights,
+                activation=activation,
+                experts_min=lo,
+                experts_max=hi,
+                # Codes are read as signed int4 nibbles, not compressed-tensors'
+                # uint4b8 (value + 8) -- hence the rebias at load.
+                is_signed=True,
+            )
+
+        if self.moe_n_slice == 1:
+            return call(self.experts_min, self.experts_max, slice(None))
+
+        final_hidden_states = None
+        for i in range(self.moe_n_slice):
+            sl = slice(i * self.num_expert_per_group, (i + 1) * self.num_expert_per_group)
+            min_expert = self.experts_min + i * self.num_expert_per_group
+            slice_out = call(min_expert, min_expert + self.num_expert_per_group - 1, sl)
+            htorch.core.mark_step()
+            final_hidden_states = slice_out if i == 0 else final_hidden_states + slice_out
+        return final_hidden_states
 
     def forward(
         self,
@@ -1585,6 +1752,13 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         activation="silu",
     ):
         activation = _as_activation_str(activation)
+
+        if self.native_int4:
+            return self._forward_native_int4(x, topk_ids, topk_weights, permuted_weights, activation)
+        if self.codes_signed:
+            raise RuntimeError("WNA16 MoE: the packed weights were rebiased to signed int4 for int4_fused_weights; "
+                               "the bf16 dequantization path would decode them wrongly.")
+
         w13_list = []
         w2_list = []
         for j in range(self.num_experts):
