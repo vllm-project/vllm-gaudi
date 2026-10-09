@@ -311,16 +311,42 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
 def _model_has_moe_experts(model: torch.nn.Module) -> bool:
     """Return True if the model has any fused-MoE op with per-expert weight views.
 
-    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase``) whose
-    per-expert ``MoeMatmul.weight`` attributes are plain-tensor views that go
-    stale after ``model.to(device)`` and must be rebound. Dense models (e.g.
-    Llama-3.3-70B) have none, so the INC pre-stage ``model.to('hpu')`` + rebind
-    is pure overhead for them -- and worse, it eagerly materializes the full
-    (pre-quantization) weights on a single card, OOMing large dense models
-    before ``convert()`` can shrink them.
+    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase`` or the
+    WNA16 ``VllmMixtureOfExpertsOpWNA16``) whose per-expert weight attributes are
+    plain-tensor views that go stale after ``model.to(device)`` and must be
+    rebound. Dense models (e.g. Llama-3.3-70B) have none, so the INC pre-stage
+    ``model.to('hpu')`` + rebind is pure overhead for them -- and worse, it eagerly
+    materializes the full (pre-quantization) weights on a single card, OOMing
+    large dense models before ``convert()`` can shrink them.
     """
-    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
-    return any(isinstance(getattr(module, "moe_op", None), VllmMixtureOfExpertsOpBase) for module in model.modules())
+    from vllm_gaudi.extension.ops import (  # local to avoid circular import
+        VllmMixtureOfExpertsOpBase, VllmMixtureOfExpertsOpWNA16)
+    return any(
+        isinstance(getattr(module, "moe_op", None), (VllmMixtureOfExpertsOpBase, VllmMixtureOfExpertsOpWNA16))
+        for module in model.modules())
+
+
+def _rebind_wna16_moe_expert_weights(model: torch.nn.Module) -> None:
+    """Re-point WNA16 per-expert views at the parent layer's moved Parameters.
+
+    ``VllmMixtureOfExpertsOpWNA16`` keeps per-expert packed weights, scales,
+    zero points (and g_idx) as plain-attribute views into the layer's stacked
+    ``w13_weight_packed`` / ``w13_weight_scale`` / ... Parameters, plus a
+    ``_cached_int4`` tuple of the same views. After ``model.to(device)`` those
+    views still alias the old storage; ``_move_remaining_tensors_to_device``
+    would then copy every per-expert view (and the cache) separately, leaving
+    two or three copies of the expert weights on the device. Rebinding first
+    keeps one. A no-op when the views already alias the Parameters.
+    """
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpWNA16  # local to avoid circular import
+    rebound = 0
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if isinstance(moe_op, VllmMixtureOfExpertsOpWNA16) and moe_op.expert_weights_stale(module):
+            moe_op.bind_expert_weights(module)
+            rebound += 1
+    if rebound:
+        logger.info("Rebound WNA16 MoE expert weights to the moved Parameters on %d ops", rebound)
 
 
 def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
@@ -337,8 +363,11 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
     Call this AFTER model.to(device) and BEFORE
     _move_remaining_tensors_to_device so that the stray scan finds all
     MoeMatmul.weight tensors already on the correct device and skips them.
+    WNA16 ops keep their own attribute layout; see
+    _rebind_wna16_moe_expert_weights.
     """
     from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
+    _rebind_wna16_moe_expert_weights(model)
     for module in model.modules():
         moe_op = getattr(module, "moe_op", None)
         if not isinstance(moe_op, VllmMixtureOfExpertsOpBase):
@@ -4959,6 +4988,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Preparing model with INC took %.4f GB", self.model_memory_usage / float(2**30))
         elif not is_fake_hpu():
             self.model = self.model.to("hpu")
+            # A CPU-first load leaves WNA16 per-expert views on the host; without
+            # this they would stay there (no stray-tensor sweep on this path).
+            _rebind_wna16_moe_expert_weights(self.model)
             htcore.mark_step()
 
         apply_model_specific_patches(self)

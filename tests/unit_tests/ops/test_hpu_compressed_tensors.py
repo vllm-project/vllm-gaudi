@@ -444,6 +444,64 @@ def test_compressed_tensors_wna16_moe_method_native_int4(default_vllm_config: No
         experts.moe_op(hidden_states, topk_ids, topk_weights, permuted_weights=False, activation="silu")
 
 
+@pytest.mark.parametrize("native_int4", [False, True], ids=["dequant", "native_int4"])
+def test_compressed_tensors_wna16_moe_method_cpu_first_migration(default_vllm_config: None, dist_init, monkeypatch,
+                                                                 native_int4):
+    """A CPU-first (or INC) load keeps a single device copy of the WNA16 expert weights.
+
+    Replays the model runner's sequence: process the weights on the host,
+    model.to("hpu"), _rebind_moe_expert_weights, then the
+    _move_remaining_tensors_to_device sweep. Every per-expert view, zero point
+    and _cached_int4 entry must alias the moved Parameters (one storage each)
+    instead of being copied to the device separately, and the layer must still
+    reproduce the reference output.
+    """
+    from vllm_gaudi.v1.worker.hpu_model_runner import (_model_has_moe_experts, _move_remaining_tensors_to_device,
+                                                       _rebind_moe_expert_weights)
+    if native_int4 and not int4_moe_native_available():
+        pytest.skip("this Habana PyTorch bridge has no mixture_of_experts.int4_fused_weights")
+    monkeypatch.setattr(hpu_ct, "get_config", lambda: SimpleNamespace(wna16_native_int4_moe=native_int4))
+
+    def storage(t):
+        try:
+            return t.untyped_storage().data_ptr()
+        except Exception:
+            return t.data_ptr()
+
+    oot_op = create_fused_moe(_wna16_moe_quant_config(actorder='weight'))  # stays on the host
+    experts = oot_op.routed_experts
+    _load_moe_wna16_reference_weights(experts)
+    experts.quant_method.process_weights_after_loading(experts)
+    assert experts.w13_weight_packed.device.type == "cpu"
+    assert experts.moe_op.native_int4 is native_int4
+    assert _model_has_moe_experts(oot_op)
+
+    oot_op = oot_op.to("hpu")
+    _rebind_moe_expert_weights(oot_op)
+    _move_remaining_tensors_to_device(oot_op, "hpu")
+
+    op = experts.moe_op
+    for weights, packed, scale, zero_point in ((op.w13_list, experts.w13_weight_packed, experts.w13_weight_scale,
+                                                experts.w13_zero_point),
+                                               (op.w2_list, experts.w2_weight_packed, experts.w2_weight_scale,
+                                                experts.w2_zero_point)):
+        assert packed.device.type == "hpu"
+        for m in weights:
+            assert storage(m.weight_packed) == storage(packed)
+            assert storage(m.weight_scale) == storage(scale)
+            assert storage(m.zero_point) == storage(zero_point)
+    if native_int4:
+        w13_p, w2_p, w13_s, w2_s = op._cached_int4
+        assert {storage(t) for t in w13_p} == {storage(experts.w13_weight_packed)}
+        assert {storage(t) for t in w2_p} == {storage(experts.w2_weight_packed)}
+        assert {storage(t) for t in w13_s} == {storage(experts.w13_weight_scale)}
+        assert {storage(t) for t in w2_s} == {storage(experts.w2_weight_scale)}
+
+    hidden_states, router_logits, ref_output = _load_moe_wna16_reference_io()
+    out = _run_fused_moe(oot_op, hidden_states, router_logits)
+    torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
+
+
 def test_wna16_rebias_uint4b8_to_int4():
     """uint4b8 codes (value + 8) become the two's-complement nibbles int4_fused_weights reads."""
     values = torch.arange(-8, 8, dtype=torch.int32).repeat(2, 1)  # every int4 value
