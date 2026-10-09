@@ -314,19 +314,40 @@ def _non_hybrid_vllm_config(block_size, user_specified):
 
 
 def test_update_block_size_restores_hpu_default_after_multi_backend_selection():
-    """Llama-4 has two attention backends. Upstream then keeps the default
-    block size of 16, after the runner has already snapshotted 128."""
+    """Llama-4 keeps two backends, so upstream selection returns the default
+    block size of 16 and the HPU guard must put 128 back.
+
+    Only the backend list is patched. The real Platform selection runs, and
+    the restore log must fire. A pin that never selects 16 leaves the
+    preferred 128 in place without logging, and this test fails.
+    """
     from vllm.platforms import Platform
+    from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionBackendV1
 
-    vllm_config = _non_hybrid_vllm_config(block_size=128, user_specified=False)
+    class _ChunkedLocalHPUAttentionBackendV1(HPUAttentionBackendV1):
+        pass
 
-    def _select_default_block_size(vllm_config):
-        vllm_config.cache_config.block_size = 16
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="llama4"),
+            is_hybrid=False,
+        ),
+        cache_config=SimpleNamespace(
+            block_size=128,
+            user_specified_block_size=False,
+            kv_cache_dtype_skip_layers=None,
+        ),
+    )
 
-    with patch.object(Platform, "update_block_size_for_backend", _select_default_block_size):
+    with patch.object(
+            Platform,
+            "_find_non_ssm_backends",
+            return_value=[HPUAttentionBackendV1, _ChunkedLocalHPUAttentionBackendV1],
+    ), patch("vllm_gaudi.platform.logger") as log:
         HpuPlatform.update_block_size_for_backend(vllm_config)
 
     assert vllm_config.cache_config.block_size == 128
+    log.info.assert_any_call("Restoring HPU block_size to 128 after multi-backend default selection.")
 
 
 def test_update_block_size_keeps_user_specified_block_size():
