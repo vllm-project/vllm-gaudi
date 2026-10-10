@@ -36,6 +36,8 @@ The following configurations have been validated to function with IntelÂ® GaudiÂ
 | [meta-llama/Meta-Llama-3.1-405B](https://huggingface.co/meta-llama/Meta-Llama-3.1-405B)     | 8    | BF16, FP8    |Gaudi 3|
 | [meta-llama/Meta-Llama-3.1-405B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-405B-Instruct)     | 8    | BF16, FP8    |Gaudi 3|
 | [meta-llama/Meta-Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct)     | 4, 8  | BF16, FP8    | Gaudi 3|
+| [microsoft/phi-4](https://huggingface.co/microsoft/phi-4)     | 1, 2    | BF16    | Gaudi 3|
+| [microsoft/Phi-4-mini-instruct](https://huggingface.co/microsoft/Phi-4-mini-instruct)     | 1, 2    | BF16    | Gaudi 3|
 | [mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2)     | 1   | BF16    | Gaudi 3|
 | [mistralai/Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3)     | 1  | BF16    | Gaudi 3|
 | [mistralai/Mistral-Large-3-675B-Instruct-2512](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512)     | 8    | BF16, FP8    | Gaudi 3|
@@ -63,3 +65,6 @@ The following configurations have been validated to function with IntelÂ® GaudiÂ
 | [ibm-granite/granite-4.0-h-small](https://huggingface.co/ibm-granite/granite-4.0-h-small)     | 1    |  BF16    | Gaudi 3|
 | [tencent/Hunyuan-7B-Instruct](https://huggingface.co/tencent/Hunyuan-7B-Instruct)     | 1    | BF16, FP8    | Gaudi 3|
 | [tencent/Hunyuan-A13B-Instruct](https://huggingface.co/tencent/Hunyuan-A13B-Instruct)     | 1    | BF16, FP8    | Gaudi 3|
+
+!!! note
+    Phi-4-mini: use `--max-model-len 4096` unless long context is needed; above 4096 the LongRoPE long factors apply to all requests.

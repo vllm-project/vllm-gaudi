@@ -7526,7 +7526,7 @@ class HPUAttentionMetadataProcessor:
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
 
-        if self.interleaved_sliding_window:
+        if self.sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
             self.slice_size = int(with_default(get_config().PT_HPU_SDPA_BC_FACTOR, "1024"))
@@ -7874,7 +7874,10 @@ class HPUAttentionMetadataProcessor:
         """
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
-            if self.interleaved_sliding_window:
+            # Non-interleaved SWA otherwise passes window_size to FusedSDPA, which aligns the causal mask
+            # top-left: wrong once the prompt has context (APC hit, chunked prefill), so bias it here.
+            # Remove once FusedSDPA or upstream supports bottom-right causal alignment with window_size.
+            if self.interleaved_sliding_window or (self.sliding_window and attn_metadata.block_list is not None):
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, device, dtype)
             if model_has_chunked_attention:
