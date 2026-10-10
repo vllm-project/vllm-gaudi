@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Iterable
+from functools import cached_property
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.request import Request, RequestStatus
@@ -118,6 +119,40 @@ class HPUAsyncScheduler(AsyncScheduler):
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
+    @cached_property
+    def _num_mamba_like_layers(self) -> int:
+        """Count of mamba-like layers, computed exactly as the model runner
+        does (see ``num_mamba_like_layers`` in hpu_model_runner.py).
+
+        Hybrid GDN / linear-attention models (e.g. Qwen3.5, Qwen3-Next) type
+        their layers "gdn_attention"/"linear_attention", so a "mamba"-only query
+        returns 0. Summing all three keeps this scheduler override in lock-step
+        with the runner; otherwise the override self-disables and the runner
+        asserts ``context_lens[0] % mamba_chunk_size == 0`` on an unaligned
+        value, killing every TP worker. Layer typing is fixed for the model's
+        lifetime, so this is cached (computed once per scheduler instance).
+        """
+        model_config = self.vllm_config.model_config
+        return sum(
+            model_config.get_num_layers_by_block_type(self.vllm_config.parallel_config, block_type)
+            for block_type in ("mamba", "gdn_attention", "linear_attention"))
+
+    @cached_property
+    def _mamba_align_chunk_size(self) -> int:
+        """Chunk size to align chunked-prefill splits to, mirroring the runner's
+        fallback (see ``mamba_chunk_size`` in hpu_model_runner.py).
+
+        ``get_mamba_chunk_size()`` returns the Mamba1 default (2048) when the HF
+        config declares neither ``mamba_chunk_size`` nor ``chunk_size``, but the
+        runner falls back to 128 in that case. Aligning to 2048 would round
+        every sub-2048 partial prefill chunk down to 0.
+        """
+        model_config = self.vllm_config.model_config
+        hf_text_config = model_config.hf_text_config
+        chunk_size_is_explicit = (getattr(hf_text_config, "mamba_chunk_size", None) is not None
+                                  or getattr(hf_text_config, "chunk_size", None) is not None)
+        return model_config.get_mamba_chunk_size() if chunk_size_is_explicit else 128
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -129,12 +164,15 @@ class HPUAsyncScheduler(AsyncScheduler):
 
         The upstream implementation aligns to block_size (e.g. 768).  On HPU
         the model runner requires context_lens to be a multiple of
-        mamba_chunk_size (e.g. 256).  Since block_size must stay large for
-        memory-layout reasons, we substitute mamba_chunk_size here.
+        mamba_chunk_size.  Since block_size must stay large for memory-layout
+        reasons, we substitute mamba_chunk_size here.
+
+        Both the layer count and the chunk size must match the model runner's
+        own logic exactly (see the cached properties above); a mismatch makes
+        the runner assert on an unaligned context_lens.
         """
-        chunk_size = self.vllm_config.model_config.get_mamba_chunk_size()
-        num_mamba_layers = self.vllm_config.model_config.get_num_layers_by_block_type(
-            self.vllm_config.parallel_config, "mamba")
+        chunk_size = self._mamba_align_chunk_size
+        num_mamba_layers = self._num_mamba_like_layers
         if num_mamba_layers == 0 or not self.vllm_config.cache_config.enable_prefix_caching:
             return super()._mamba_block_aligned_split(request, num_new_tokens, num_new_local_computed_tokens,
                                                       num_external_computed_tokens)
