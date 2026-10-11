@@ -5355,7 +5355,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         model = cast(VllmModelForPooling, self.get_model())
         device = self.device
         for (bs, query_len, num_blocks) in self.bucketing_manager.prompt_buckets:
-            if bs == 0 or query_len == 0:
+            # Pooling runs whole prompts with context_len=0, so ctx>0 buckets are never used.
+            if bs == 0 or query_len == 0 or num_blocks != 0:
                 continue
 
             total_tokens = bs * query_len
@@ -5399,7 +5400,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 )
 
             # flattened = hidden_states.view(-1, hidden_states.shape[-1])
-            num_scheduled_tokens_np = np.full(query_len, bs)
+            num_scheduled_tokens_np = np.full(bs, query_len, dtype=np.int32)
             prompt_lens_cpu = torch.tensor(num_scheduled_tokens_np, dtype=torch.int32, device="cpu")
             prompt_token_ids = dummy_input_ids.view(bs, query_len).to(device=device, dtype=torch.int32)
             supported_tasks = self.get_supported_pooling_tasks()
@@ -6359,16 +6360,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self.supports_mm_inputs and use_torch_compile and not mm_warmup_outside:
                 self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
-            if not self.model_config.enforce_eager and not self.is_pooling_model:
+            if not self.model_config.enforce_eager and self.is_pooling_model:
+                # warmup_graphs uses generation-only dummy scenarios, so pooling has its own warmup.
+                self.warmup_pooler()
+            elif not self.model_config.enforce_eager:
                 assert self.mem_margin is not None, \
                     ("HabanaWorker.determine_num_available_blocks needs "
                      "to be called before warming up the model.")
 
-                if self.is_pooling_model:
-                    self.warmup_pooler()
-                else:
-                    self.warmup_sampler()
-                    self.defragmenter.warmup()
+                self.warmup_sampler()
+                self.defragmenter.warmup()
 
                 # TODO(kzawora): align_workers
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
