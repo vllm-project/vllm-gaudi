@@ -120,12 +120,18 @@ class InputBatch:
         # use DCP (cp_world_size == 1), so max_num_blocks reduces to
         # cdiv(max_model_len, block_size) per KV cache group.
         max_num_blocks = [cdiv(max_model_len, block_size) for block_size in block_sizes]
+        # vLLM #57169 removed kernel_block_sizes and the split of a KV block
+        # into smaller kernel blocks from MultiGroupBlockTable. Refuse a split
+        # rather than build a table of KV block ids the kernel would misread.
+        split = [(b, k) for b, k in zip(block_sizes, kernel_block_sizes) if k != b]
+        if split:
+            raise NotImplementedError(f"(block_size, kernel_block_size) pairs {split} need a KV block split "
+                                      "that vLLM #57169 removed from MultiGroupBlockTable")
         self.block_table = MultiGroupBlockTable(max_num_reqs=max_num_reqs,
                                                 max_num_batched_tokens=max_num_batched_tokens,
                                                 pin_memory=pin_memory,
                                                 device=device,
                                                 block_sizes=block_sizes,
-                                                kernel_block_sizes=kernel_block_sizes,
                                                 max_num_blocks=max_num_blocks)
 
         # Sampling-related.
