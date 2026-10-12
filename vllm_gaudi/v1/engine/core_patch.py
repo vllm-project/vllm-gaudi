@@ -21,6 +21,8 @@ from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.structured_output import StructuredOutputManager
 
+from vllm_gaudi.v1.worker.host_headroom import collect_host_headroom_reports, guard_host_headroom
+
 logger = init_logger(__name__)
 _QUANT_CONFIG_UNCHANGED = object()
 
@@ -261,6 +263,19 @@ def install_engine_core_patch() -> None:
             _normalize_reconfigure_config_for_platform(new_config)
             logger.info("[gaudi_reconfigure] start: target_model=%s", new_config.model_config.model)
             memory_before_mb = _collect_total_hpu_used_memory_mb(self)
+
+            if not getattr(self.model_executor, "is_sleeping", False):
+
+                def _collect_headroom_reports(trim: bool) -> Any:
+                    try:
+                        return collect_host_headroom_reports(self, trim)
+                    except Exception as exc:  # pragma: no cover - best effort
+                        logger.warning("[gaudi_reconfigure] host headroom check unavailable: %s", exc)
+                        return None
+
+                guard_host_headroom(_collect_headroom_reports,
+                                    action="Reconfigure",
+                                    outcome="the current model stays loaded")
 
             # Pause scheduling and clear caches to avoid mixed state.
             try:
