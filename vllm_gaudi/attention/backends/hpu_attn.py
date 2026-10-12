@@ -263,7 +263,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         self.topk_indices_buffer = kwargs.get('topk_indices_buffer')
         self.is_sparse = self.topk_indices_buffer is not None
         if self.is_sparse and kv_cache_dtype == 'fp8_inc':
-                raise NotImplementedError("fp8 kv cache is not supported with DSA attention backend")
+            raise NotImplementedError("fp8 kv cache is not supported with DSA attention backend")
 
     def record_logical_topk_ready(self) -> None:
         pass

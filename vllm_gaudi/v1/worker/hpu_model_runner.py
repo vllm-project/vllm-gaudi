@@ -5706,15 +5706,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # The default warmup scenario: one block per request for contiguous PA, else an even split.
         default_longest = 1 if self.use_contiguous_pa else cdiv(num_blocks, batch_size)
         natural = self._dsa_index_width(batch_size, num_blocks, default_longest, block_size)
-        longest_cap = num_blocks if self.use_contiguous_pa else num_blocks - (batch_size - 1)
+        longest_cap = min(cdiv(self.max_model_len, block_size),
+                          num_blocks if self.use_contiguous_pa else num_blocks - (batch_size - 1))
         req_blocks = []
         width = cdiv(self.dsa_index_topk, block_size)
-        while width < num_blocks:
-            longest = min(width, longest_cap)
-            if width != natural and self._dsa_index_width(batch_size, num_blocks, longest, block_size) == width:
+        while True:
+            # One block past the largest width below num_blocks takes the batch-wide (None) path.
+            target = width if width < num_blocks else None
+            longest = min(width if target is not None else width // 4 + 1, longest_cap)
+            if target != natural and self._dsa_index_width(batch_size, num_blocks, longest, block_size) == target:
                 req_blocks.append(longest)
+            if target is None:
+                return req_blocks
             width *= 4
-        return req_blocks
 
     def _build_dsa_block_index(self, block_tables, num_rows, num_blocks, width):
         index = np.full((num_rows, width), num_blocks, dtype=np.int32)
@@ -5846,7 +5850,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     decode_seq_lengths[0] = min(decode_longest_blocks * decode_block_size, self.max_model_len) - 1
             else:
                 if decode_longest_blocks:
-                    decode_seq_lengths = [decode_longest_blocks * decode_block_size - 1] + \
+                    decode_seq_lengths = [min(decode_longest_blocks * decode_block_size, self.max_model_len) - 1] + \
                         (self._generate_seq_lengths(decode_bs - 1, decode_num_blocks - decode_longest_blocks,
                                                     decode_block_size) if decode_bs > 1 else [])
                 else:

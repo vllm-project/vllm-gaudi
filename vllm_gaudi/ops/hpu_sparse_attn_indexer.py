@@ -60,8 +60,8 @@ def forward_hpu(self, hidden_states, q, k, weights):
     if block_index is not None:
         # Rank each request over only its own blocks; the appended row pads short requests.
         # Flat int32 index_select: 2-D int64 gathers fail to compile on HPU.
-        scores = torch.cat((scores.masked_fill(~valid, -torch.inf),
-                            torch.full((1, block_size), -torch.inf, device=scores.device)))
+        pad_row = torch.full((1, block_size), -torch.inf, device=scores.device)
+        scores = torch.cat((scores.masked_fill(~valid, -torch.inf), pad_row))
         flat_index = block_index.flatten()
         candidates = scores.index_select(0, flat_index).view(batch_size, -1)
         selected_scores, indices = candidates.topk(self.topk_tokens, dim=-1)
