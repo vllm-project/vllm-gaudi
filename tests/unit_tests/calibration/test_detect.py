@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import sys
+from typing import Any
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -70,7 +71,7 @@ def test_model_info_round_trip():
 
 
 def test_detect_model_forwards_loading_args(monkeypatch):
-    calls = {}
+    calls: dict[str, Any] = {}
 
     class FakeModelConfig:
 
@@ -88,9 +89,9 @@ def test_detect_model_forwards_loading_args(monkeypatch):
             return SimpleNamespace(chat_template="{{ messages }}")
 
     vllm_config = ModuleType("vllm.config")
-    vllm_config.ModelConfig = FakeModelConfig
+    vllm_config.ModelConfig = FakeModelConfig  # type: ignore[attr-defined]
     transformers = ModuleType("transformers")
-    transformers.AutoTokenizer = FakeAutoTokenizer
+    transformers.AutoTokenizer = FakeAutoTokenizer  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "vllm", ModuleType("vllm"))
     monkeypatch.setitem(sys.modules, "vllm.config", vllm_config)
     monkeypatch.setitem(sys.modules, "transformers", transformers)
