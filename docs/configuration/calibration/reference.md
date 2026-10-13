@@ -215,7 +215,7 @@ A preset holds the settings that differ between model families. The tool matches
 | Preset | `model_type` | Name regex fallback | Blocklist | `scale_format` | Engine arguments | Environment |
 |--------|--------------|---------------------|-----------|----------------|------------------|-------------|
 | `mixtral` | `mixtral` | `^mixtral` | `self_attn`, `lm_head` | `CONST` | | |
-| `deepseek` | `deepseek_v2`, `deepseek_v3` | `^deepseek` | `lm_head`, `mlp\.gate\b` | `scalar` | `enable_expert_parallel=True` | |
+| `deepseek` | `deepseek_v2`, `deepseek_v3`, `deepseek_v32` | `^deepseek` | `lm_head`, `mlp\.gate\b` | `scalar` | `enable_expert_parallel=True` | |
 | `granite4` | `granitemoehybrid` | `^granite-4` | `mamba`, `self_attn` | INC default | `gpu_memory_utilization=0.1`, `max_model_len=2048` | `VLLM_CONTIGUOUS_PA=false` |
 | `default` | any other | | none | INC default | | |
 
