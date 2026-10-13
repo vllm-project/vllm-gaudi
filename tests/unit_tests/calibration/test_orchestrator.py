@@ -187,7 +187,12 @@ def test_preset_and_user_env_reach_the_phase(tmp_path):
 def test_engine_arg_expert_parallel_drives_unify_and_serve(tmp_path, monkeypatch):
     deepseek = ModelInfo(model_type="deepseek_v2", is_moe=True, num_experts=64, has_chat_template=True, source="test")
     seen = []
-    monkeypatch.setattr(orchestrator, "unify_dir", lambda *a, **kw: seen.append(kw["use_ep"]) or [])
+
+    def fake_unify(*a, **kw):
+        seen.append(kw["use_ep"])
+        return []
+
+    monkeypatch.setattr(orchestrator, "unify_dir", fake_unify)
     manifest = run_calibration(args(tmp_path, tp=4, unify_to_tp=2), FakeRunner(deepseek))
     assert seen == [True]
     assert manifest["serve_command"].endswith("--tensor-parallel-size 2 --enable-expert-parallel")
