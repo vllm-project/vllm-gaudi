@@ -5850,8 +5850,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     decode_seq_lengths[0] = min(decode_longest_blocks * decode_block_size, self.max_model_len) - 1
             else:
                 if decode_longest_blocks:
+                    other_blocks = min(decode_num_blocks - decode_longest_blocks,
+                                       (decode_bs - 1) * decode_longest_blocks)
                     decode_seq_lengths = [min(decode_longest_blocks * decode_block_size, self.max_model_len) - 1] + \
-                        (self._generate_seq_lengths(decode_bs - 1, decode_num_blocks - decode_longest_blocks,
+                        (self._generate_seq_lengths(decode_bs - 1, other_blocks,
                                                     decode_block_size) if decode_bs > 1 else [])
                 else:
                     decode_seq_lengths = self._generate_seq_lengths(decode_bs, decode_num_blocks, decode_block_size)
