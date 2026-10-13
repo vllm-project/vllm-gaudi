@@ -11,6 +11,7 @@ from vllm_gaudi.calibration.presets import VISION_TOWER_NAMES, resolve_preset, s
         ("mixtral", "mixtral-8x7b-instruct-v0.1", "mixtral"),
         ("deepseek_v3", "deepseek-r1", "deepseek"),
         ("deepseek_v2", "deepseek-v2-lite", "deepseek"),
+        ("deepseek_v32", "deepseek-v3.2", "deepseek"),
         ("granitemoehybrid", "granite-4.0-h-small", "granite4"),
         ("llama", "llama-3.1-8b-instruct", "default"),
         ("qwen2_5_vl", "qwen2.5-vl-3b-instruct", "default"),
