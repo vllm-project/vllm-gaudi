@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -211,6 +212,25 @@ def test_quantized_checkpoint_keeps_its_quantization(tmp_path):
     assert "--quantization" not in manifest["serve_command"]
     manifest = run_calibration(args(tmp_path), FakeRunner(QWEN))
     assert "--quantization inc" in manifest["serve_command"]
+
+
+def test_serve_command_keeps_model_loading_args(tmp_path):
+    loading = {
+        "revision": "abc123",
+        "tokenizer": "/my tok",
+        "hf_overrides": {
+            "rope_scaling": None
+        },
+        "hf_token": "hf_secret",
+        "max_model_len": 8,
+    }
+    manifest = run_calibration(args(tmp_path, engine_args=loading), FakeRunner(QWEN))
+    argv = shlex.split(manifest["serve_command"])
+    assert argv[argv.index("--revision") + 1] == "abc123"
+    assert argv[argv.index("--tokenizer") + 1] == "/my tok"
+    assert json.loads(argv[argv.index("--hf-overrides") + 1]) == {"rope_scaling": None}
+    assert "hf_secret" not in manifest["serve_command"]
+    assert "--max-model-len" not in argv
 
 
 def test_user_config_dump_stats_path(tmp_path, monkeypatch):

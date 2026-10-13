@@ -342,8 +342,15 @@ def serve_command(args: CalibrationArgs,
 
     The measurement files of an expert parallel run hold the experts of each rank, so the
     model must be served with expert parallelism as well, unless it was unified to one card.
+    The model loading arguments are kept so the same artifacts are served; ``hf_token`` is not
+    printed.
     """
     parts = [f"QUANT_CONFIG={shlex.quote(str(layout.quant_config))}", "vllm", "serve", shlex.quote(args.model)]
+    for key in MODEL_LOADING_ARGS:
+        value = args.engine_args.get(key)
+        if key == "hf_token" or value is None:
+            continue
+        parts += [f"--{key.replace('_', '-')}", shlex.quote(value if isinstance(value, str) else json.dumps(value))]
     if quantization is not None:
         parts += ["--quantization", quantization]
     parts += ["--kv-cache-dtype", "fp8_inc", "--tensor-parallel-size", str(serve_world)]
