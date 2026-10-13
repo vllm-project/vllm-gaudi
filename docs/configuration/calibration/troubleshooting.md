@@ -89,9 +89,9 @@ This is expected for base models. If the template exists but cannot be detected,
 
 ## Environment Variables on Ray
 
-With `--multi-node`, the plugin forwards to the Ray workers only the variables whose names contain `HPU`, `RAY`, or `VLLM`, plus `GLOO_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`, `NCCL_SOCKET_IFNAME`, and `QUANT_CONFIG`. Symptoms of a missing variable on the workers are missing measurement files from the ranks on other nodes, or workers that cannot reach the Hugging Face Hub or the model cache.
+With `--multi-node`, only some variables reach the Ray workers: vLLM forwards the `VLLM_`, `HF_`, `HUGGING_FACE_`, `NCCL_`, `UCX_`, `LMCACHE_`, and `FLASH_ATTENTION_` prefixes, and the plugin adds the names that contain `HPU`, `RAY`, or `VLLM`, plus `GLOO_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`, `NCCL_SOCKET_IFNAME`, and `QUANT_CONFIG`. See [Environment Forwarding to Ray Workers](advanced.md#environment-forwarding-to-ray-workers). Symptoms of a missing variable on the workers are missing measurement files from the ranks on other nodes, or workers that cannot reach the Hugging Face Hub or the model cache.
 
-- Set other variables, such as `HF_HOME` or `HF_TOKEN`, on every node before `ray start`.
+- Set other variables on every node before `ray start`. `HF_HOME` is forwarded, so it must point to a path that exists on every node.
 - If your setup does not forward `QUANT_CONFIG`, use `--quant-config-buffer` with a file on the shared file system, and export `QUANT_CONFIG` to that file on every node before `ray start`. See [Shared Config Buffer](advanced.md#shared-config-buffer).
 
 ## Multi-Node Run Hangs at Startup
