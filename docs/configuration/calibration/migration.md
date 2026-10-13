@@ -70,6 +70,7 @@ The old scripts read a `.pkl` dataset (`-d`) or downloaded a Hugging Face datase
 | Image size | Images kept their original size. | lm-eval resizes images to a longest side of 1280 pixels, which bounds the vision encoder memory. Pass `--image-max-side 0` to keep the original size. |
 | `--limit` | Ignored on the Hugging Face dataset path, which forced 1 sample with batch size 1 and 32 output tokens. | Always honored, 512 samples per task by default. |
 | `max_model_len` | 2048 on the Hugging Face dataset path. | 4096 for text models, 8192 for multimodal models, 2048 for the `granite4` preset. |
+| Custom model code | The text model scripts always loaded the model and tokenizer with `trust_remote_code=True`. | Off by default. Pass `--trust-remote-code` for a model that needs its own code; the printed serve command then includes it too. |
 | Fused MoE detection in unify and expand | Any node whose name contains `moe` was treated as a fused MoE op, including Mixtral's `block_sparse_moe.gate`. | Only nodes with per-expert child nodes are fused MoE ops. |
 | MoE with `--tp` > 1 and no unify | No warning. | A reminder is logged that serving with another world size needs `--unify-to-tp`. |
 | Multi-node `QUANT_CONFIG` | You exported `QUANT_CONFIG` to a shared buffer file on every node before `ray start`. | The tool sets `QUANT_CONFIG` for each phase and the plugin forwards it to the Ray workers. `--quant-config-buffer` keeps the old buffer approach available. See [Shared Config Buffer](advanced.md#shared-config-buffer). |
