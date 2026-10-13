@@ -76,7 +76,7 @@ MODEL_FAMILY_PRESETS: tuple[ModelFamilyPreset, ...] = (
     ),
     ModelFamilyPreset(
         name="deepseek",
-        model_types=frozenset({"deepseek_v2", "deepseek_v3"}),
+        model_types=frozenset({"deepseek_v2", "deepseek_v3", "deepseek_v32"}),
         name_pattern=r"^deepseek",
         blocklist_names=("lm_head", r"mlp\.gate\b"),
         scale_format="scalar",
