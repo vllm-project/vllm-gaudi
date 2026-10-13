@@ -119,7 +119,7 @@ You do not need to export `QUANT_CONFIG` before starting Ray. The tool sets it f
 
 ### Environment Forwarding to Ray Workers
 
-The plugin forwards to the Ray workers the environment variables whose names contain `HPU`, `RAY`, or `VLLM`, plus `GLOO_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`, `NCCL_SOCKET_IFNAME`, and `QUANT_CONFIG`. This covers the variables the tool sets (see [Environment Variables](reference.md#environment-variables)). Other variables are not forwarded, including `--env` variables whose names do not match, and variables such as `HF_HOME` or `HF_TOKEN`. Set them on each node before `ray start`.
+vLLM forwards to the Ray workers the environment variables whose names start with `VLLM_`, `HF_`, `HUGGING_FACE_`, `NCCL_`, `UCX_`, `LMCACHE_`, or `FLASH_ATTENTION_`, so `HF_HOME` and `HF_TOKEN` reach the workers. The plugin adds the variables whose names contain `HPU`, `RAY`, or `VLLM`, plus `GLOO_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`, `NCCL_SOCKET_IFNAME`, and `QUANT_CONFIG`. This covers the variables the tool sets (see [Environment Variables](reference.md#environment-variables)). Other variables are not forwarded, including `--env` variables whose names match none of these. Set them on each node before `ray start`, or name them in vLLM's `VLLM_RAY_EXTRA_ENV_VARS_TO_COPY`.
 
 ### Shared Config Buffer
 
