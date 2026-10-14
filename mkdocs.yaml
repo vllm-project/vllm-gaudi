@@ -127,4 +127,5 @@ use_directory_urls: false
 extra:
   PT_VERSION: "2.13.0"
   VERSION: "1.24.2"
+  SYNAPSE_REVISION: "481"
   # VLLM_VERSION is set automatically by main.py from the latest git tag
