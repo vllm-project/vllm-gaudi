@@ -640,6 +640,7 @@ jobs:
           issue-number: ${{ inputs.pr_number }}
           body: |
             ### ✅ CI Passed
+            Tested commit: **`${{ inputs.head_sha }}`**
             All checks passed successfully against the following vllm commit:
             **`${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}`**
 
