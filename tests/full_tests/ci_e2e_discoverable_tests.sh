@@ -452,6 +452,23 @@ _run_gsm8k_gemma4_26b_test() {
     echo "✅ Test with gemma-4-26B-A4B-it passed."
 }
 
+# GSM8K on phi-4
+_run_gsm8k_phi4_test() {
+    echo "➡️ Testing GSM8K on phi-4..."
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/phi-4.yaml"
+    echo "✅ Test with phi-4 passed."
+}
+
+# GSM8K on phi-4 with TP=2
+_run_gsm8k_phi4_tp2_test() {
+    echo "➡️ Testing GSM8K on phi-4 with TP=2..."
+    TP_SIZE=2 \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/phi-4.yaml"
+    echo "✅ Test with phi-4 TP=2 passed."
+}
+
 # --- Spec decode tests ---
 # Tests below check if speculative decoding is matching accept rate specified as an argument.
 # If the accept rate is below the threshold, the test will fail. The same applies for accuracy rate.
@@ -572,6 +589,13 @@ run_gsm8k_gemma4_parallel() {
     _run_parallel_on_card_slices gemma4 \
         _run_gsm8k_gemma4_26b_test 4 \
         _run_gsm8k_gemma4_31b_test 4
+}
+
+# GSM8K on phi-4 (1 card) and phi-4 TP=2 (2 cards), warmup ON
+run_gsm8k_phi4_parallel() {
+    _run_parallel_on_card_slices phi4 \
+        _run_gsm8k_phi4_test 1 \
+        _run_gsm8k_phi4_tp2_test 2
 }
 
 # Spec decode: eagle3 num_spec_2 / eagle3 / ngram (1 card each)
