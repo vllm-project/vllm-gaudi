@@ -10,11 +10,6 @@ on:
     branches:
       - main
       - releases/**
-  merge_group:
-    types: [checks_requested]
-    branches:
-      - main
-      - releases/**
 
 # Least-privilege default; execute_pre_merge opts into the actions/PR/issues
 # scopes it needs at the job level.
@@ -22,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pre-merge-trigger-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  group: pre-merge-trigger-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -42,11 +37,10 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
-            const pr         = context.payload.pull_request;
-            const mergeGroup = context.payload.merge_group;
+            const pr = context.payload.pull_request;
 
-            if (!pr && !mergeGroup) {
-              core.info('Manual trigger - no PR/merge_group context, nothing to do');
+            if (!pr) {
+              core.setFailed('No pull request in the event payload; nothing dispatched');
               return;
             }
 
@@ -94,47 +88,19 @@ jobs:
               }
             }
 
-            let headSha, baseRef, prNumber, prTitle, isDraft, skipTests, isMergeGroup;
-
-            if (pr) {
-              headSha      = pr.head.sha;
-              baseRef      = pr.base.ref;
-              prNumber     = String(pr.number);
-              prTitle      = pr.title;
-              isDraft      = String(pr.draft);
-              skipTests    = await skipTestsFromLabel(
-                context.repo.owner, context.repo.repo, prNumber, pr.labels,
-              );
-              isMergeGroup = 'false';
-            } else {
-              // merge_group: base_ref arrives as refs/heads/main → strip prefix
-              headSha      = mergeGroup.head_sha;
-              baseRef      = mergeGroup.base_ref.replace(/^refs\/heads\//, '');
-              // Extract PR number from head_ref: refs/heads/gh-readonly-queue/main/pr-123-<sha>
-              const match  = mergeGroup.head_ref.match(/\/pr-(\d+)-/);
-              if (!match) {
-                core.setFailed(`Cannot extract PR number from merge_group head_ref: '${mergeGroup.head_ref}'. Expected format: refs/heads/gh-readonly-queue/<branch>/pr-<number>-<sha>`);
-                return;
-              }
-              prNumber     = match[1];
-              isDraft      = 'false';
-              isMergeGroup = 'true';
-              // Fetch PR details via API (title and labels are not in the merge_group payload)
-              const { data: pullRequest } = await github.rest.pulls.get({
-                owner: context.repo.owner,
-                repo:  context.repo.repo,
-                pull_number: parseInt(prNumber, 10),
-              });
-              prTitle   = pullRequest.title;
-              skipTests = await skipTestsFromLabel(
-                context.repo.owner, context.repo.repo, prNumber, pullRequest.labels,
-              );
-            }
+            const headSha   = pr.head.sha;
+            const baseRef   = pr.base.ref;
+            const prNumber  = String(pr.number);
+            const prTitle   = pr.title;
+            const isDraft   = String(pr.draft);
+            const skipTests = await skipTestsFromLabel(
+              context.repo.owner, context.repo.repo, prNumber, pr.labels,
+            );
 
             // Only maintainers may steer runner pool or override upstream vllm ref.
             const TRUSTED = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
-            const assoc   = pr ? pr.author_association : 'NONE';
-            const trusted = TRUSTED.has(assoc) || isMergeGroup === 'true';
+            const assoc   = pr.author_association;
+            const trusted = TRUSTED.has(assoc);
 
             const useHourlyRunner = String(
               trusted && /\[FIX_FOR_VLLM_LATEST\]/.test(prTitle),
@@ -190,7 +156,7 @@ jobs:
                 pr_title:             prTitle,
                 is_draft:             isDraft,
                 skip_tests:           skipTests,
-                is_merge_group:       isMergeGroup,
+                is_merge_group:       'false',  // still a required input of pre-merge.yaml
                 use_hourly_runner:    useHourlyRunner,
                 vllm_ref_override:    vllmRefOverride,
               },
