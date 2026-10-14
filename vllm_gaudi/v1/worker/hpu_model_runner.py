@@ -6030,12 +6030,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             from vllm.multimodal.processing import TimingContext
             dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
         else:
-            # Fallback to default options
-            dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
-                self.model_config_copy,
-                mm_counts={modality: count},
-                processor=self._get_mm_warmup_processor(),
-            )
+            # Fallback to default options. vllm#57674 moved get_dummy_mm_inputs
+            # from MultiModalRegistry onto the processor.
+            dummy_mm_inputs = self._get_mm_warmup_processor().get_dummy_mm_inputs(mm_counts={modality: count})
 
         return dummy_mm_inputs
 
