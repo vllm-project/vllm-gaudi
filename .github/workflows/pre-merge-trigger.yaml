@@ -1,5 +1,9 @@
 name: Pre-merge trigger
 
+# Full head SHA, so approvers see exactly which commit they approve. Kept
+# distinct from the dispatched run's "PR #<n> [<sha>]" title.
+run-name: "Pre-merge for #${{ github.event.pull_request.number }} at ${{ github.event.pull_request.head.sha }}: ${{ github.event.pull_request.title }}"
+
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
