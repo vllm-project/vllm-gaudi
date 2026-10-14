@@ -2047,6 +2047,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mm_hash = mm_feature.identifier
                 if mm_hash in self.encoder_cache:
                     continue
+                # A span fully covered by computed (e.g. prefix-cached) tokens is
+                # never gathered, and the scheduler strips its pixel payload
+                # (strip_covered_mm_data), so there is nothing to encode.
+                pos_info = mm_feature.mm_position
+                if mm_feature.data is None or pos_info.offset + pos_info.length <= req_state.num_computed_tokens:
+                    continue
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
@@ -5962,12 +5968,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             from vllm.multimodal.processing import TimingContext
             dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
         else:
-            # Fallback to default options
-            dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
-                self.model_config_copy,
-                mm_counts={modality: count},
-                processor=self._get_mm_warmup_processor(),
-            )
+            # Fallback to default options. vllm#57674 moved get_dummy_mm_inputs
+            # from MultiModalRegistry onto the processor.
+            dummy_mm_inputs = self._get_mm_warmup_processor().get_dummy_mm_inputs(mm_counts={modality: count})
 
         return dummy_mm_inputs
 
