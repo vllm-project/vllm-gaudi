@@ -126,13 +126,19 @@ jobs:
 
             // 0. Sweep any previous in-flight pre-merge.yaml runs for this PR.
             //    A prior trigger may have been killed by cancel-in-progress
-            //    before it could clean up its own dispatched run.
+            //    before it could clean up its own dispatched run. The same
+            //    listing is the "before" snapshot for the fallback in step 2.
+            const runQuery = {
+              owner: context.repo.owner, repo: context.repo.repo,
+              workflow_id: 'pre-merge.yaml', branch: baseRef,
+              event: 'workflow_dispatch', per_page: 100,
+            };
+            let knownRunIds = null;
+            let notBefore   = NaN;  // GitHub server time of the snapshot
             try {
-              const { data: prev } = await github.rest.actions.listWorkflowRuns({
-                owner: context.repo.owner, repo: context.repo.repo,
-                workflow_id: 'pre-merge.yaml', branch: baseRef,
-                event: 'workflow_dispatch', per_page: 50,
-              });
+              const { data: prev, headers } = await github.rest.actions.listWorkflowRuns(runQuery);
+              knownRunIds = new Set(prev.workflow_runs.map(r => r.id));
+              notBefore   = Date.parse(headers.date);
               for (const r of prev.workflow_runs) {
                 if (['completed', 'cancelled'].includes(r.status)) continue;
                 if (r.display_title?.includes(`#${prNumber} `)) {
@@ -143,12 +149,14 @@ jobs:
               core.warning(`Could not list previous runs: ${e.message}`);
             }
 
-            // 1. Dispatch to base branch
-            await github.rest.actions.createWorkflowDispatch({
+            // 1. Dispatch to base branch. return_run_details makes the API
+            //    answer 200 with the new run's id instead of an empty 204.
+            const { data: dispatched } = await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo:  context.repo.repo,
               workflow_id: 'pre-merge.yaml',
               ref:   baseRef,
+              return_run_details: true,
               inputs: {
                 pr_number:            prNumber,
                 head_sha:             headSha,
@@ -162,53 +170,53 @@ jobs:
               },
             });
 
-            // 2. Find the dispatched run. Match on PR# + SHA so two PRs sharing
-            //    a head SHA can't be confused. Initial "not yet listed" window
-            //    is capped at 30 × 1 s before falling back to the slower poll.
-            const titleKey = `#${prNumber} [${headSha}]`;
-
-            let runId;
-            for (let i = 0; i < 30; i++) {
+            // 2. Identify the dispatched run: the id from the dispatch response,
+            //    or else exactly one run that is new since the snapshot and
+            //    matches everything this dispatch set. Never use any other run.
+            const title  = `PR #${prNumber} [${headSha}]`;
+            const isOurs = r =>
+              !knownRunIds.has(r.id) &&
+              r.event === 'workflow_dispatch' &&
+              r.head_branch === baseRef &&
+              r.triggering_actor?.login === 'github-actions[bot]' &&
+              r.display_title === title &&
+              Date.parse(r.created_at) >= notBefore;
+            const listOurs = async () => {
               try {
-                const { data } = await github.rest.actions.listWorkflowRuns({
-                  owner: context.repo.owner, repo: context.repo.repo,
-                  workflow_id: 'pre-merge.yaml', branch: baseRef,
-                  event: 'workflow_dispatch', per_page: 50,
-                });
-                const run = data.workflow_runs.find(r => r.display_title?.includes(titleKey));
-                if (run) {
-                  runId = run.id;
-                  core.info(`Found run ${runId}: ${run.html_url}`);
-                  core.setOutput('run_id', String(runId));
-                  break;
-                }
-                core.info(`Run not yet listed (attempt ${i + 1}/30)`);
+                const { data } = await github.rest.actions.listWorkflowRuns(runQuery);
+                return data.workflow_runs.filter(isOurs);
               } catch (e) {
                 core.warning(`listWorkflowRuns transient error: ${e.message}`);
+                return [];
               }
-              await new Promise(r => setTimeout(r, 1000));
-            }
+            };
 
-            if (!runId) {
-              // Best-effort: sweep anything matching our titleKey before giving up.
-              try {
-                const { data } = await github.rest.actions.listWorkflowRuns({
-                  owner: context.repo.owner, repo: context.repo.repo,
-                  workflow_id: 'pre-merge.yaml', branch: baseRef,
-                  event: 'workflow_dispatch', per_page: 50,
-                });
-                for (const r of data.workflow_runs) {
-                  if (['completed', 'cancelled'].includes(r.status)) continue;
-                  if (r.display_title?.includes(titleKey)) {
-                    await cancelDispatchedRun(r.id, 'lookup timeout, late match');
-                  }
-                }
-              } catch (e) {
-                core.warning(`Fallback cancel lookup failed: ${e.message}`);
-              }
-              core.setFailed('Could not find dispatched run within 30 seconds');
+            let runId = Number(dispatched?.workflow_run_id);
+            if (Number.isSafeInteger(runId) && runId > 0) {
+              core.info(`Dispatched run ${runId}: ${dispatched.html_url}`);
+            } else if (!knownRunIds || Number.isNaN(notBefore)) {
+              core.setFailed('Dispatch returned no run id and no run snapshot exists; cannot identify the run');
               return;
+            } else {
+              core.info('Dispatch returned no run id; looking for the new run');
+              let found = [];
+              for (let i = 0; i < 30 && found.length === 0; i++) {
+                found = await listOurs();
+                if (found.length === 0) await new Promise(r => setTimeout(r, 1000));
+              }
+              if (found.length !== 1) {
+                // Best-effort: cancel late or ambiguous matches before giving up.
+                if (found.length === 0) found = await listOurs();
+                for (const r of found) await cancelDispatchedRun(r.id, 'run not identified');
+                core.setFailed(found.length > 1
+                  ? `Found ${found.length} matching runs; cannot tell which one was dispatched`
+                  : 'Could not find dispatched run within 30 seconds');
+                return;
+              }
+              runId = found[0].id;
+              core.info(`Found run ${runId}: ${found[0].html_url}`);
             }
+            core.setOutput('run_id', String(runId));
 
             // 3. Poll until complete (12 h max)
             for (let i = 0; i < 4320; i++) {
