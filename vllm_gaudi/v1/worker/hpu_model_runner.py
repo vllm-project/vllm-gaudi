@@ -6786,6 +6786,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mamba_state_cache[key] = tensors
             return tensors
 
+        # Kernel blocks per KV-manager block in the attention tensors. Only the
+        # hybrid cache splits manager blocks; the other layouts keep one each.
+        attn_kernel_blocks_per_kv_block: set[int] = set()
         if self.use_hybrid_cache and self.num_mamba_like_layers > 0:
             # Build layer_name -> spec lookup for skipping raw buffer
             # allocation for GDN/linear_attention groups (they use
@@ -6852,6 +6855,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         # spec.block_size/kernel_block_size kernel blocks.
                         # The flat tensor must accommodate all kernel blocks.
                         blocks_per_kv_block = kv_cache_spec.block_size // attn_kernel_block_size
+                        attn_kernel_blocks_per_kv_block.add(blocks_per_kv_block)
                         num_kernel_blocks = num_blocks * blocks_per_kv_block
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_kernel_blocks + 1,
                                                                               attn_kernel_block_size,
@@ -7052,8 +7056,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
 
-        self._PAD_BLOCK_ID = num_blocks
-        self._PAD_SLOT_ID = num_blocks * self.attn_block_size
+        # The attention tensors hold num_blocks * split kernel blocks followed
+        # by one pad block, and block tables and slot mappings address kernel
+        # blocks, so the pad ids must as well: counted in KV-manager blocks the
+        # pad block would be a real one, and padded decode lanes would overwrite
+        # its KV. The mamba state tensors have num_blocks + 1 slots.
+        split = min(attn_kernel_blocks_per_kv_block, default=1)
+        if len(attn_kernel_blocks_per_kv_block) > 1:
+            logger.warning(
+                "Attention groups split KV blocks into different numbers of kernel blocks (%s); "
+                "padded decode lanes use kernel block %d.", sorted(attn_kernel_blocks_per_kv_block), num_blocks * split)
+        self._PAD_BLOCK_ID = num_blocks * split
+        self._PAD_SLOT_ID = self._PAD_BLOCK_ID * self.attn_block_size
         self._MAMBA_PAD_BLOCK_ID = num_blocks
         self._dummy_num_blocks = num_blocks
 
