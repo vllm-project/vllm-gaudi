@@ -2,15 +2,19 @@
 # Used by: pre-merge.yaml, hourly-ci.yaml, create-release-branch.yaml
 #
 # Build args:
-#   VLLM_COMMIT_ARG - the upstream vLLM commit to checkout and test against
-#   PT_VERSION      - PyTorch version (must match the base image)
+#   VLLM_COMMIT_ARG    - the upstream vLLM commit to checkout and test against
+#   PT_VERSION         - PyTorch version (must match the base image)
+#   TORCHAUDIO_VERSION - CPU torchaudio wheel; set separately because no torchaudio
+#                        release exists past 2.11.0 (move it to PT_VERSION once one does)
 
-ARG PT_VERSION=2.11.0
-ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.24.1/ubuntu24.04/habanalabs/pytorch-upstream-installer-${PT_VERSION}:latest
+ARG PT_VERSION=2.13.0
+ARG TORCHAUDIO_VERSION=2.11.0
+ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.24.2/ubuntu24.04/habanalabs/pytorch-upstream-installer-${PT_VERSION}:latest
 FROM ${BASE_IMAGE}
 
 ARG VLLM_COMMIT_ARG
 ARG PT_VERSION
+ARG TORCHAUDIO_VERSION
 
 COPY ./ /workspace/vllm-gaudi
 WORKDIR /workspace
@@ -42,9 +46,9 @@ RUN python3 -m pip install -e tests/vllm_test_utils
 WORKDIR /workspace/vllm-gaudi
 RUN pip install -e .
 
-# Install torchaudio (CPU wheel, matching PyTorch version in base image)
-# torchaudio is imported from upstream vLLM code
-RUN pip install --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${PT_VERSION}
+# Install torchaudio (CPU wheel); torchaudio is imported from upstream vLLM code.
+# --no-deps keeps the base image's torch despite torchaudio's torch==X.Y.Z pin.
+RUN pip install --no-deps --extra-index-url https://download.pytorch.org/whl/cpu torchaudio==${TORCHAUDIO_VERSION}
 
 # Create convenience symlinks
 WORKDIR /workspace
