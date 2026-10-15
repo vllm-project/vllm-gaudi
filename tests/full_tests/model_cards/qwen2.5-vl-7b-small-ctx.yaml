@@ -20,3 +20,5 @@ test_config:
     input_data_config:
       num_prompts: 1
       media_source: default
+    # Every answer must mention what is in the default image (cherry_blossom)
+    expected_keywords: ["tower", "blossom", "cherry"]

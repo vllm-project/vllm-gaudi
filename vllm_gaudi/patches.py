@@ -92,6 +92,7 @@ Currently:
   transformers SDPA attention (e.g., vision encoders in Gemma4 models).
 """
 
+import functools
 import gc
 import inspect
 from typing import Callable, Optional
@@ -866,6 +867,35 @@ def _patch_inc_quantization_config() -> None:
     register_quantization_config("inc")(_FakeINCConfig)
 
 
+def _patch_engine_core_sleep_host_guard() -> None:
+    """Refuse ``EngineCore.sleep`` before it pauses scheduling when the model would not fit in host memory.
+
+    HPU sleep moves the weights to CPU, so this is where the container can be OOM-killed.
+    The check runs in the engine process on the reports of all workers: a worker raising
+    inside the ``sleep`` RPC would leave the other workers' replies queued in
+    MultiprocExecutor and shift every later collective RPC by one. All reports are
+    collected before any worker moves its shard, so they share one headroom measurement.
+    """
+    from vllm.v1.engine.core import EngineCore
+
+    from vllm_gaudi.v1.worker.host_headroom import collect_host_headroom_reports, guard_host_headroom
+
+    original_sleep = EngineCore.sleep
+    if getattr(original_sleep, "_hpu_host_guard", False):
+        return
+
+    @functools.wraps(original_sleep)
+    def _hpu_sleep(self, level: int = 1, *args, **kwargs):
+        if level >= 1:
+            guard_host_headroom(lambda trim: collect_host_headroom_reports(self, trim),
+                                action="Sleep",
+                                outcome="the model stays on HPU")
+        return original_sleep(self, level, *args, **kwargs)
+
+    _hpu_sleep._hpu_host_guard = True  # type: ignore[attr-defined]
+    EngineCore.sleep = _hpu_sleep
+
+
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
     # --- torch.accelerator.empty_cache ---
@@ -908,6 +938,7 @@ def apply() -> None:
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
         _patch_inc_quantization_config()
+        _patch_engine_core_sleep_host_guard()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
