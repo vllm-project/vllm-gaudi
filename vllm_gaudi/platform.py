@@ -408,6 +408,18 @@ class HpuPlatform(Platform):
             super().update_block_size_for_backend(vllm_config)
         else:
             super().update_block_size_for_backend(vllm_config)
+            # Upstream keeps vLLM's default block size (16) when a model has
+            # more than one attention backend and every backend accepts it.
+            # Llama-4 does: full attention plus a chunked-local subclass.
+            # check_and_update_config already set 128, and the HPU runner
+            # snapshots that value before this method runs. Leaving 16 here
+            # allocates the KV cache at 16 tokens per block while prompt
+            # attention still unflattens with 128.
+            from vllm.config.cache import CacheConfig
+            if (not cache_config.user_specified_block_size
+                    and cache_config.block_size == CacheConfig.DEFAULT_BLOCK_SIZE):
+                logger.info("Restoring HPU block_size to 128 after multi-backend default selection.")
+                cache_config.block_size = 128
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -524,8 +536,11 @@ class HpuPlatform(Platform):
             return False
         if num_gdn <= 0:
             return False
-        # Compact-GDN is auto-disabled for PD-disaggregated serving.
-        return getattr(vllm_config, 'kv_transfer_config', None) is None
+        # Compact-GDN is auto-disabled for PD-disaggregated serving and prefix caching.
+        if getattr(vllm_config, 'kv_transfer_config', None) is not None:
+            return False
+        cache_config = getattr(vllm_config, 'cache_config', None)
+        return not getattr(cache_config, 'enable_prefix_caching', False)
 
     @classmethod
     def _maybe_disable_synapse_input_reuse(cls, vllm_config: VllmConfig) -> None:
