@@ -7658,27 +7658,31 @@ class HPUAttentionMetadataProcessor:
             block_size = getattr(prefill_metadata, "block_size", self.block_size)
             max_context_len = max_context_len * block_size
 
+            # Masks are [batch, 1, query, context]: a cached prefill can be padded to several rows
+            # (data parallel padding, prompt batch size buckets above 1).
             if window_block_list is not None:
                 # Re-anchor ctx_len to the block-aligned gather frame so a
                 # non-block-aligned ctx_len doesn't misalign the sliding-window mask.
                 round_up_ctx = ((context_lens_t + block_size - 1) // block_size) * block_size
                 frame_base = torch.clamp(round_up_ctx - max_context_len, min=0)
                 context_lens_trimmed = context_lens_t - frame_base
-                invalid_lens_t = context_lens_trimmed - window_size + torch.arange(seq_len, device=device) - 1
-                past_indices = torch.arange(max_context_len, device=device)
-                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                             (past_indices.unsqueeze(0) < context_lens_trimmed.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+                invalid_lens_t = (context_lens_trimmed.view(-1, 1) - window_size +
+                                  torch.arange(seq_len, device=device).view(1, -1) - 1)
+                past_indices = torch.arange(max_context_len, device=device).view(1, 1, -1)
+                past_mask = ((past_indices > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices < context_lens_trimmed.view(-1, 1, 1))).unsqueeze(1)
             else:
                 # Full block list: use absolute coordinate frame with window lower bound
-                invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-                past_indices = torch.arange(max_context_len, device=device)
-                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                             (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+                invalid_lens_t = (context_lens_t.view(-1, 1) - window_size +
+                                  torch.arange(seq_len, device=device).view(1, -1) - 1)
+                past_indices = torch.arange(max_context_len, device=device).view(1, 1, -1)
+                past_mask = ((past_indices > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices < context_lens_t.view(-1, 1, 1))).unsqueeze(1)
 
             # Create boolean sliding window mask
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
             causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
-            causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
+            causal_mask = causal_mask.view(1, 1, seq_len, seq_len).expand(batch_size, -1, -1, -1)
 
             if image_seg_ids is not None:
                 # The bidirectional term only ever opens forward pairs (j > i),
