@@ -5053,6 +5053,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Loading drafter model weights took %.4f GB", self.model_memory_usage / float(2**30))
             if hasattr(self.drafter, "model"):
                 self.drafter.model = self.drafter.model.to("hpu")
+                # As for the target: WNA16 per-expert views must follow the
+                # moved Parameters (e.g. the MoE of a w4a16 MTP head).
+                _rebind_wna16_moe_expert_weights(self.drafter.model)
                 torch.hpu.synchronize()
                 with HabanaMemoryProfiler() as m:  # noqa: SIM117
                     self.drafter.model = _maybe_wrap_in_hpu_graph(self.drafter.model, vllm_config=self.vllm_config)
