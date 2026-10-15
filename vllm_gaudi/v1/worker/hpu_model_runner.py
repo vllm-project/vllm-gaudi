@@ -7521,7 +7521,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if decode_data is not None:
                 assert num_decodes is not None
                 draft_token_ids = self.propose_eagle_decode(
-                    sampled_token_ids,
                     decode_sampled_token_ids_tensor,
                     hidden_states,
                     aux_hidden_states,
@@ -7570,7 +7569,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
     def propose_eagle_decode(
         self,
-        sampled_token_ids: list[list[int]],
+        # [padded_batch_size, max_num_draft_tokens + 1] rejection sampler output
         decode_sampled_token_ids_tensor: torch.Tensor,
         hidden_states: torch.Tensor,
         aux_hidden_states: Optional[torch.Tensor],
@@ -7599,7 +7598,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         common_attn_metadata, hidden_states_indices, last_token_indices = \
             self.drafter.prepare_inputs(common_attn_metadata,
                                         decode_data.spec_decode_metadata,
-                                        sampled_token_ids)
+                                        decode_sampled_token_ids_tensor)
 
         target_token_ids = decode_sampled_token_ids_tensor.reshape(-1, 1)[hidden_states_indices]
         target_positions = decode_data.position_ids[hidden_states_indices]

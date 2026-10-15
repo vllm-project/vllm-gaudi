@@ -5,6 +5,7 @@ import torch
 from vllm_gaudi.utils import async_h2d_copy
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
@@ -138,35 +139,26 @@ class HpuEagleProposer(EagleProposer):
         self,
         common_attn_metadata,
         spec_decode_metadata: SpecDecodeMetadata,
-        sampled_token_ids: list[list[int]],
+        # [batch_size, max_num_draft_tokens + 1] rejection sampler output
+        sampled_token_ids: torch.Tensor,
     ):
-        assert spec_decode_metadata is not None
-        num_draft_tokens = \
-            spec_decode_metadata.num_draft_tokens
-        max_num_draft_tokens = max(num_draft_tokens)
+        """Rows of the verified tokens that the drafter continues from.
 
-        num_picked_token_indices = []
-        last_token_indices = []
-        starting_index = 0
-        # At most n rejections: the first position is always valid, so every
-        # request contributes exactly one last_token_index (static shape). Only
-        # dummy warmup steps can report zero sampled tokens.
-        num_rejected_tokens = [
-            min(n, n + 1 - len(sampled_token_ids[i])) if n > 0 else 0 for i, n in enumerate(num_draft_tokens)
-        ]
-        for i, n in enumerate(num_draft_tokens):
-            r = num_rejected_tokens[i]
-            step = max_num_draft_tokens + 1
-            for j in range(step):
-                if j == n - r:
-                    last_token_indices.append(starting_index + j)
-                if j < n + 1 - r:
-                    num_picked_token_indices.append(starting_index + j)
-                else:
-                    num_picked_token_indices.append(-1)
-            starting_index += step
-        hidden_states_indices = torch.tensor(num_picked_token_indices, dtype=torch.long, device=self.device)
-        last_token_indices = torch.tensor(last_token_indices, dtype=torch.long, device=self.device)
+        Request i owns rows [i * (K + 1), (i + 1) * (K + 1)) of the decode
+        batch. Its valid rows hold the accepted drafts and the token after
+        them, at least one; the others are -1. The drafter samples at the last
+        valid row. Computed on the device from the rejection output, so it
+        needs no host sync.
+        """
+        assert spec_decode_metadata is not None
+        num_seqs, num_rows = sampled_token_ids.shape
+        device = sampled_token_ids.device
+        num_valid = (sampled_token_ids != PLACEHOLDER_TOKEN_ID).sum(dim=1, dtype=torch.int32).clamp(min=1)
+        rows = torch.arange(num_rows, dtype=torch.int32, device=device).view(1, -1)
+        starts = torch.arange(num_seqs, dtype=torch.int32, device=device).view(-1, 1) * num_rows
+        hidden_states_indices = torch.where(rows < num_valid.view(-1, 1), starts + rows,
+                                            torch.full_like(rows, -1)).flatten().to(torch.long)
+        last_token_indices = (starts.view(-1) + num_valid - 1).to(torch.long)
         return common_attn_metadata, hidden_states_indices, last_token_indices
 
     def prepare_attn_metadata(
