@@ -138,6 +138,33 @@ class HPUAsyncScheduler(AsyncScheduler):
             for block_type in ("mamba", "gdn_attention", "linear_attention"))
 
     @cached_property
+    def _align_to_mamba_block(self) -> bool:
+        """Qwen3.5 hybrid on non-compact GDN with prefix caching: in "align" mode an SSM
+        state is only checkpointed when a step ends on a state-block boundary.
+        """
+        from vllm_gaudi.platform import HpuPlatform, is_qwen3_5_hybrid_model
+        if not self.vllm_config.cache_config.enable_prefix_caching:
+            return False
+        if not is_qwen3_5_hybrid_model(self.vllm_config.model_config):
+            return False
+        return not HpuPlatform._compact_gdn_active(self.vllm_config)
+
+    @cached_property
+    def _mamba_state_block_size(self) -> int:
+        """Tokens per mamba state slot, from MambaSpec in the KV cache config.
+
+        Not cache_config.block_size: for these models that is reset to the 128-token HPU
+        kernel block, so it is not the state grid (upstream's splitter uses it and would
+        align to 128 here). 0 if the mamba groups disagree.
+        """
+        from vllm.v1.kv_cache_interface import MambaSpec
+        sizes = {
+            g.kv_cache_spec.block_size
+            for g in self.kv_cache_config.kv_cache_groups if isinstance(g.kv_cache_spec, MambaSpec)
+        }
+        return sizes.pop() if len(sizes) == 1 else 0
+
+    @cached_property
     def _mamba_align_chunk_size(self) -> int:
         """Chunk size to align chunked-prefill splits to, mirroring the runner's
         fallback (see ``mamba_chunk_size`` in hpu_model_runner.py).
@@ -170,6 +197,11 @@ class HPUAsyncScheduler(AsyncScheduler):
         Both the layer count and the chunk size must match the model runner's
         own logic exactly (see the cached properties above); a mismatch makes
         the runner assert on an unaligned context_lens.
+
+        For Qwen3.5 hybrids on non-compact GDN with prefix caching
+        (``_align_to_mamba_block``), chunk ends are additionally placed on the
+        mamba state grid (``_mamba_state_block_size``), so the state slot a
+        step writes holds exactly the tokens its block hash claims.
         """
         chunk_size = self._mamba_align_chunk_size
         num_mamba_layers = self._num_mamba_like_layers
@@ -180,6 +212,26 @@ class HPUAsyncScheduler(AsyncScheduler):
         num_computed_tokens = (request.num_computed_tokens + num_new_local_computed_tokens +
                                num_external_computed_tokens)
         prompt_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        block_size = self._mamba_state_block_size
+        if self._align_to_mamba_block and block_size > 0 and block_size % chunk_size == 0:
+            # Round the chunk end down to the state grid, so one chunk may cover several
+            # blocks, and stop at the prompt's last full block so its state stays cacheable.
+            end = num_computed_tokens + num_new_tokens
+            if end < prompt_end:
+                aligned = end // block_size * block_size
+                if aligned > num_computed_tokens:
+                    end = aligned
+                else:
+                    end = num_computed_tokens + num_new_tokens // chunk_size * chunk_size
+            # A chunk starting mid-block (after a sub-block chunk) must stop at the next
+            # boundary: running past it leaves that block holding the sub-block state,
+            # which is then hashed as covering the full block.
+            if num_computed_tokens < prompt_end and num_computed_tokens % block_size:
+                end = min(end, (num_computed_tokens // block_size + 1) * block_size)
+            last_cacheable = request.num_tokens - request.num_tokens % block_size
+            if num_computed_tokens < last_cacheable < end:
+                end = last_cacheable
+            return max(end - num_computed_tokens, 0)
         if num_computed_tokens < prompt_end:
             remaining = prompt_end - num_computed_tokens
             if num_new_tokens < remaining:
