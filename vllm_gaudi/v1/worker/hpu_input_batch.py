@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining an input batch
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Optional, cast
 
@@ -60,7 +61,7 @@ class HPUMultiGroupBlockTable(MultiGroupBlockTable):
                          block_sizes=kernel_block_sizes,
                          max_num_blocks=[n * r for n, r in zip(max_num_blocks, self.blocks_per_kv_block)])
 
-    def _to_kernel_blocks(self, block_ids: tuple[list[int], ...]) -> tuple[list[int], ...]:
+    def _to_kernel_blocks(self, block_ids: Sequence[list[int]]) -> tuple[list[int], ...]:
         mapped = []
         for ids, ratio in zip(block_ids, self.blocks_per_kv_block):
             if ratio == 1 or not ids:
@@ -70,10 +71,10 @@ class HPUMultiGroupBlockTable(MultiGroupBlockTable):
                 mapped.append(kernel_ids.reshape(-1).tolist())
         return tuple(mapped)
 
-    def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
+    def append_row(self, block_ids: Sequence[list[int]], row_idx: int) -> None:
         super().append_row(self._to_kernel_blocks(block_ids), row_idx)
 
-    def add_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
+    def add_row(self, block_ids: Sequence[list[int]], row_idx: int) -> None:
         super().add_row(self._to_kernel_blocks(block_ids), row_idx)
 
 
