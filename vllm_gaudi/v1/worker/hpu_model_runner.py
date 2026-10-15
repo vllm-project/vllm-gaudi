@@ -7886,8 +7886,10 @@ class HPUAttentionMetadataProcessor:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
             # Non-interleaved SWA otherwise passes window_size to FusedSDPA, which aligns the causal mask
             # top-left: wrong once the prompt has context (APC hit, chunked prefill), so bias it here.
+            # FusedSDPA only: the helper builds context columns for FusedSDPA alone.
             # Remove once FusedSDPA or upstream supports bottom-right causal alignment with window_size.
-            if self.interleaved_sliding_window or (self.sliding_window and attn_metadata.block_list is not None):
+            if self.interleaved_sliding_window or (self.prefill_use_fusedsdpa and self.sliding_window
+                                                   and attn_metadata.block_list is not None):
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, device, dtype)
             if model_has_chunked_attention:
