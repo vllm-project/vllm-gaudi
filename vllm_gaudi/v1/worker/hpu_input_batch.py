@@ -25,6 +25,58 @@ from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
 _SAMPLING_EPS = 1e-5
 
 
+class HPUMultiGroupBlockTable(MultiGroupBlockTable):
+    """MultiGroupBlockTable that splits KV-manager blocks into kernel blocks.
+
+    vLLM #57169 dropped virtual block splitting (``kernel_block_sizes``) from
+    the block table. HPU hybrid models still address the KV cache in kernel
+    blocks, so each group's table is built at its kernel block size and every
+    manager block id ``b`` is expanded to ``b * r + [0, r)``, with
+    ``r = block_size // kernel_block_size``.
+    """
+
+    def __init__(
+        self,
+        max_num_reqs: int,
+        max_num_batched_tokens: int,
+        pin_memory: bool,
+        device: torch.device,
+        block_sizes: list[int],
+        kernel_block_sizes: list[int],
+        max_num_blocks: list[int],
+    ) -> None:
+        if len(kernel_block_sizes) != len(block_sizes):
+            raise ValueError(f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
+                             f"must match block_sizes length ({len(block_sizes)})")
+        for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes):
+            if block_size % kernel_block_size != 0:
+                raise ValueError(f"kernel_block_size {kernel_block_size} must divide "
+                                 f"block_size {block_size} evenly")
+        self.blocks_per_kv_block = [b // k for b, k in zip(block_sizes, kernel_block_sizes)]
+        super().__init__(max_num_reqs=max_num_reqs,
+                         max_num_batched_tokens=max_num_batched_tokens,
+                         pin_memory=pin_memory,
+                         device=device,
+                         block_sizes=kernel_block_sizes,
+                         max_num_blocks=[n * r for n, r in zip(max_num_blocks, self.blocks_per_kv_block)])
+
+    def _to_kernel_blocks(self, block_ids: tuple[list[int], ...]) -> tuple[list[int], ...]:
+        mapped = []
+        for ids, ratio in zip(block_ids, self.blocks_per_kv_block):
+            if ratio == 1 or not ids:
+                mapped.append(ids)
+            else:
+                kernel_ids = np.asarray(ids).reshape(-1, 1) * ratio + np.arange(ratio)
+                mapped.append(kernel_ids.reshape(-1).tolist())
+        return tuple(mapped)
+
+    def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
+        super().append_row(self._to_kernel_blocks(block_ids), row_idx)
+
+    def add_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
+        super().add_row(self._to_kernel_blocks(block_ids), row_idx)
+
+
 @dataclass
 class CachedRequestState:
 
@@ -120,19 +172,13 @@ class InputBatch:
         # use DCP (cp_world_size == 1), so max_num_blocks reduces to
         # cdiv(max_model_len, block_size) per KV cache group.
         max_num_blocks = [cdiv(max_model_len, block_size) for block_size in block_sizes]
-        # vLLM #57169 removed kernel_block_sizes and the split of a KV block
-        # into smaller kernel blocks from MultiGroupBlockTable. Refuse a split
-        # rather than build a table of KV block ids the kernel would misread.
-        split = [(b, k) for b, k in zip(block_sizes, kernel_block_sizes) if k != b]
-        if split:
-            raise NotImplementedError(f"(block_size, kernel_block_size) pairs {split} need a KV block split "
-                                      "that vLLM #57169 removed from MultiGroupBlockTable")
-        self.block_table = MultiGroupBlockTable(max_num_reqs=max_num_reqs,
-                                                max_num_batched_tokens=max_num_batched_tokens,
-                                                pin_memory=pin_memory,
-                                                device=device,
-                                                block_sizes=block_sizes,
-                                                max_num_blocks=max_num_blocks)
+        self.block_table = HPUMultiGroupBlockTable(max_num_reqs=max_num_reqs,
+                                                   max_num_batched_tokens=max_num_batched_tokens,
+                                                   pin_memory=pin_memory,
+                                                   device=device,
+                                                   block_sizes=block_sizes,
+                                                   kernel_block_sizes=kernel_block_sizes,
+                                                   max_num_blocks=max_num_blocks)
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ), dtype=torch.float32, device=device)
