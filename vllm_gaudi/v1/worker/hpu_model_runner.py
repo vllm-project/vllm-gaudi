@@ -1433,15 +1433,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if not os.environ.get("VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"):
                     os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"] = "0"
                 if not os.environ.get("VLLM_COMPACT_GDN"):
-                    # Auto-disable compact GDN for incompatible modes.
-                    if self.vllm_config.kv_transfer_config is not None:
-                        os.environ["VLLM_COMPACT_GDN"] = "0"
-                        logger.warning("Compact GDN auto-disabled: incompatible with PD disaggregated serving")
-                    else:
-                        os.environ["VLLM_COMPACT_GDN"] = "1"
+                    # Auto-disable compact GDN for incompatible modes:
+                    # prefix caching and PD disaggregated serving.
+                    incompatible = (self.vllm_config.kv_transfer_config is not None
+                                    or self.vllm_config.cache_config.enable_prefix_caching)
+                    os.environ["VLLM_COMPACT_GDN"] = "0" if incompatible else "1"
+                    if incompatible:
+                        logger.warning_once("Compact GDN auto-disabled: incompatible with "
+                                            "prefix caching / PD disaggregated serving")
                 if os.environ.get("VLLM_COMPACT_GDN", "0") in ("1", "true") \
                         and self.vllm_config.cache_config.enable_prefix_caching:
-                    logger.warning("Compact GDN mode does not support prefix caching.")
+                    logger.warning_once("Compact GDN mode does not support prefix caching.")
                 logger.info(
                     "GDN layers detected (%d): "
                     "VLLM_USE_HYBRID_CACHE=%s, "
@@ -4569,10 +4571,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 # Collect prefill hidden states for prompt logprobs.
                 # req_id is a list of request IDs in this prefill batch.
+                # Some models (e.g. DeepSeek-V2) return [batch * seq, hidden];
+                # restore the batch dim so [i] selects one request's tokens.
+                prompt_hidden_states = non_flattened_hidden_states
+                if prompt_hidden_states.dim() == 2:
+                    prompt_hidden_states = prompt_hidden_states.view(*token_ids.shape, -1)
                 for i, rid in enumerate(req_id):
                     if rid in self.input_batch.num_prompt_logprobs:
                         prefill_hidden_states_for_logprobs[rid] = \
-                            non_flattened_hidden_states[i]
+                            prompt_hidden_states[i]
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
