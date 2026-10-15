@@ -444,20 +444,23 @@ def test_compressed_tensors_wna16_moe_method_native_int4(default_vllm_config: No
         experts.moe_op(hidden_states, topk_ids, topk_weights, permuted_weights=False, activation="silu")
 
 
+@pytest.mark.parametrize("runner_path", ["inc", "drafter"])
 @pytest.mark.parametrize("native_int4", [False, True], ids=["dequant", "native_int4"])
 def test_compressed_tensors_wna16_moe_method_cpu_first_migration(default_vllm_config: None, dist_init, monkeypatch,
-                                                                 native_int4):
+                                                                 native_int4, runner_path):
     """A CPU-first (or INC) load keeps a single device copy of the WNA16 expert weights.
 
-    Replays the model runner's sequence: process the weights on the host,
-    model.to("hpu"), _rebind_moe_expert_weights, then the
-    _move_remaining_tensors_to_device sweep. Every per-expert view, zero point
-    and _cached_int4 entry must alias the moved Parameters (one storage each)
-    instead of being copied to the device separately, and the layer must still
-    reproduce the reference output.
+    Processes the weights on the host, then replays one of the model runner's
+    sequences: model.to("hpu"), _rebind_moe_expert_weights and the
+    _move_remaining_tensors_to_device sweep on the INC path, or model.to("hpu")
+    and _rebind_wna16_moe_expert_weights alone, with no sweep, for the drafter
+    (and a target loaded without INC). Every per-expert view, zero point and
+    _cached_int4 entry must alias the moved Parameters (one storage each)
+    instead of being copied to the device separately or left on the host, and
+    the layer must still reproduce the reference output.
     """
     from vllm_gaudi.v1.worker.hpu_model_runner import (_model_has_moe_experts, _move_remaining_tensors_to_device,
-                                                       _rebind_moe_expert_weights)
+                                                       _rebind_moe_expert_weights, _rebind_wna16_moe_expert_weights)
     if native_int4 and not int4_moe_native_available():
         pytest.skip("this Habana PyTorch bridge has no mixture_of_experts.int4_fused_weights")
     monkeypatch.setattr(hpu_ct, "get_config", lambda: SimpleNamespace(wna16_native_int4_moe=native_int4))
@@ -477,8 +480,11 @@ def test_compressed_tensors_wna16_moe_method_cpu_first_migration(default_vllm_co
     assert _model_has_moe_experts(oot_op)
 
     oot_op = oot_op.to("hpu")
-    _rebind_moe_expert_weights(oot_op)
-    _move_remaining_tensors_to_device(oot_op, "hpu")
+    if runner_path == "inc":
+        _rebind_moe_expert_weights(oot_op)
+        _move_remaining_tensors_to_device(oot_op, "hpu")
+    else:
+        _rebind_wna16_moe_expert_weights(oot_op)
 
     op = experts.moe_op
     for weights, packed, scale, zero_point in ((op.w13_list, experts.w13_weight_packed, experts.w13_weight_scale,
