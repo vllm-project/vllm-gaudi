@@ -5,6 +5,10 @@ from functools import cached_property
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.request import Request, RequestStatus
 
+from vllm_gaudi.extension.logger import logger as init_logger
+
+logger = init_logger()
+
 
 class HPUAsyncScheduler(AsyncScheduler):
 
@@ -179,6 +183,82 @@ class HPUAsyncScheduler(AsyncScheduler):
         chunk_size_is_explicit = (getattr(hf_text_config, "mamba_chunk_size", None) is not None
                                   or getattr(hf_text_config, "chunk_size", None) is not None)
         return model_config.get_mamba_chunk_size() if chunk_size_is_explicit else 128
+
+    def _try_schedule_encoder_inputs(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+        encoder_compute_budget: int,
+        shift_computed_tokens: int = 0,
+    ) -> tuple[list[int], int, int, list[int]]:
+        """HPU override: never leave a mamba prefill parked mid-chunk.
+
+        The encoder cap stops a chunk before an mm item it cannot admit, and
+        since vllm-project/vllm#51603 it runs after _mamba_block_aligned_split,
+        so nothing re-aligns the result -- but the runner asserts context_lens
+        is chunk aligned.
+
+        Put the boundary back on the grid rather than dropping the step.
+        Dropping cannot converge on its own: a request whose own images exhaust
+        the per-step budget never advances, never gets its first image cached,
+        and meets an identical budget next step. Advancing is what frees the
+        encoder cache. Give up the step only when no aligned boundary is left
+        below the cap, which means the refused item sits inside the first chunk.
+        """
+        encoder_inputs, capped, budget, external = super()._try_schedule_encoder_inputs(
+            request, num_computed_tokens, num_new_tokens, encoder_compute_budget, shift_computed_tokens)
+
+        # capped == 0 is the sibling branch of the same cap, already deferring.
+        if capped in (num_new_tokens, 0) or not self._mamba_chunk_grid_applies:
+            return encoder_inputs, capped, budget, external
+
+        chunk_size = self._mamba_align_chunk_size
+        if chunk_size <= 0:
+            return encoder_inputs, capped, budget, external
+
+        # Decode has no chunk-grid requirement, so only prefill resumes matter.
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        end = num_computed_tokens + capped
+        if end >= prefill_end or end % chunk_size == 0:
+            return encoder_inputs, capped, budget, external
+
+        aligned_end = end // chunk_size * chunk_size
+        if aligned_end <= num_computed_tokens or self._splits_mm_item(request, aligned_end):
+            logger.warning_once("Deferring %s: encoder cap would resume a mamba prefill off the %d-token grid.",
+                                request.request_id, chunk_size)
+            return [], 0, encoder_compute_budget, []
+
+        kept, refund = self._mm_items_within(request, encoder_inputs, aligned_end)
+        kept_external, _ = self._mm_items_within(request, external, aligned_end)
+        logger.debug("Shrinking %s: encoder cap %d -> %d to stay on the %d-token grid.", request.request_id, end,
+                     aligned_end, chunk_size)
+        return kept, aligned_end - num_computed_tokens, budget + refund, kept_external
+
+    @cached_property
+    def _mamba_chunk_grid_applies(self) -> bool:
+        """Whether the runner's chunk-grid assert is live for this model."""
+        return bool(self.need_mamba_block_aligned_split and self._num_mamba_like_layers
+                    and self.vllm_config.cache_config.enable_prefix_caching)
+
+    def _splits_mm_item(self, request: Request, end: int) -> bool:
+        """Whether a chunk ending at `end` lands inside an mm item's placeholders."""
+        if not self.scheduler_config.disable_chunked_mm_input:
+            return False
+        return any(item.mm_position.offset < end < item.mm_position.offset + item.mm_position.length
+                   for item in request.mm_features)
+
+    @staticmethod
+    def _mm_items_within(request: Request, input_ids: list[int], end: int) -> tuple[list[int], int]:
+        """Items a chunk ending at `end` still covers, plus the budget the dropped ones release."""
+        kept, refund = [], 0
+        for input_id in input_ids:
+            position = request.mm_features[input_id].mm_position
+            if position.offset < end:
+                kept.append(input_id)
+            else:
+                refund += position.get_num_embeds()
+        return kept, refund
 
     def _mamba_block_aligned_split(
         self,
