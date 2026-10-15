@@ -7530,32 +7530,32 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 )
             # handle prefill
             if prefill_data is not None:
-                # Currently, prefill is done one by one
+                assert hidden_states_prefills is not None
+                assert num_decodes is not None
+                # Every prefill batch runs the drafter, also the chunks that do
+                # not finish their prompt: the drafter's own KV must cover every
+                # prompt position, or its later drafts attend over a gap. Each
+                # batch returns one draft row per request, which keeps the rows
+                # aligned with the req_ids of take_draft_token_ids; the
+                # scheduler drops the rows of requests still in prefill.
                 draft_token_ids_prefill = []
                 prefill_batch_start_idx = num_decodes
-                assert prefill_sampled_token_ids_tensor is not None
-                assert hidden_states_prefills is not None
-                assert prefill_batch_start_idx is not None
-
-                for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
-                          logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
-                    if idx >= len(prefill_sampled_token_ids_tensor):
-                        continue
+                for idx, (req_ids, _, token_ids, position_ids, attn_metadata, _,
+                          _) in enumerate(zip(*shallow_tuple(prefill_data))):
                     _draft_token_ids = self.propose_eagle_prefill(
-                        prefill_sampled_token_ids_tensor,
                         hidden_states_prefills,
                         aux_hidden_states_prefills,
                         idx,
+                        req_ids,
+                        [scheduler_output.num_scheduled_tokens[req_id] for req_id in req_ids],
                         token_ids,
                         position_ids,
                         attn_metadata,
-                        logits_indices,
                         prefill_batch_start_idx,
                     )
                     draft_token_ids_prefill.append(_draft_token_ids)
-                    prefill_batch_start_idx += len(req_id)
+                    prefill_batch_start_idx += len(req_ids)
 
-                # A partial prefill chunk samples no token, so it proposes none.
                 if draft_token_ids_prefill:
                     draft_token_ids = torch.cat(
                         ([] if draft_token_ids is None else [draft_token_ids]) + draft_token_ids_prefill, dim=0)
@@ -7618,25 +7618,65 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         draft_token_ids = draft_token_ids[:num_decodes]
         return draft_token_ids
 
+    def _prefill_draft_last_tokens(self, req_ids: list[str], query_lens: list[int],
+                                   seq_len: int) -> tuple[list[int], list[int]]:
+        """Last scheduled token of every request in a prefill batch.
+
+        Returns its index in the flattened [batch, seq_len] batch and the token
+        that follows it: the first token of the request's next chunk, or the
+        token just sampled if the chunk finishes the prompt. Both are in
+        token_ids_cpu by the time the drafter runs (0 for unknown requests).
+        """
+        last_token_indices = []
+        next_token_ids = []
+        offset = 0
+        for req_id, query_len in zip(req_ids, query_lens):
+            last_token_indices.append(offset + query_len - 1)
+            req_idx = self.input_batch.req_id_to_index.get(req_id)
+            next_token_id = 0
+            if req_idx is not None:
+                next_pos = int(self.input_batch.num_computed_tokens_cpu[req_idx]) + query_len
+                if next_pos < self.input_batch.num_tokens_no_spec[req_idx]:
+                    next_token_id = int(self.input_batch.token_ids_cpu[req_idx, next_pos])
+            next_token_ids.append(next_token_id)
+            # Same layout as the prefill logits indices.
+            offset += query_len if self.use_merged_prefill else seq_len
+        return last_token_indices, next_token_ids
+
+    @staticmethod
+    def _shift_prefill_token_ids(token_ids: torch.Tensor, last_token_indices: torch.Tensor,
+                                 next_token_ids: torch.Tensor) -> torch.Tensor:
+        """Drafter input ids of a prefill batch: token i + 1 at position i.
+
+        Follows the GPU runner: the tokens shift one to the left, and each
+        request's last scheduled position (an index into the flattened batch)
+        gets the token that follows it.
+        """
+        target_token_ids = token_ids.clone()
+        target_token_ids[..., :-1] = token_ids[..., 1:]
+        target_token_ids.view(-1).index_copy_(0, last_token_indices, next_token_ids)
+        return target_token_ids
+
     def propose_eagle_prefill(
         self,
-        prefill_sampled_token_ids_tensor: torch.Tensor,
         hidden_states_prefills: list[torch.Tensor],
         aux_hidden_states_prefills: Optional[list[torch.Tensor]],
         idx,
+        req_ids,
+        # Scheduled tokens per request (host ints)
+        query_lens,
         token_ids,
         position_ids,
         attn_metadata,
-        logits_indices,
         # The sequence start index of this prefill batch
         batch_start_idx,
     ):
+        """Run the drafter over one prefill batch; one draft row per request."""
         # The input batch block table include both decodes and prefills
         # Decodes are the first num_decodes requests.
         # Prefill are the next num_reqs - num_decodes requests and divide into batches
         block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
-        batch_size = logits_indices.shape[0]
-        prefill_batch_block_table = block_table_cpu_tensor[batch_start_idx:batch_start_idx + batch_size]
+        prefill_batch_block_table = block_table_cpu_tensor[batch_start_idx:batch_start_idx + len(req_ids)]
 
         hidden_states = hidden_states_prefills[idx]
         if self.use_aux_hidden_state_outputs:
@@ -7645,18 +7685,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             target_hidden_states = torch.cat(aux_hidden_states, dim=-1)
         else:
             target_hidden_states = hidden_states
-        next_token_ids = prefill_sampled_token_ids_tensor[idx]
-        # Follow GPU to shift input_tokens by one to the left
-        # to match hidden_states
-        token_ids = token_ids.squeeze()
-        target_token_ids = token_ids.clone()
-        target_token_ids[:-1].copy_(token_ids[1:])
-        target_token_ids[logits_indices] = next_token_ids
-        target_token_ids = target_token_ids.unsqueeze(0)
+
+        # The drafter sees token i + 1 together with the target's hidden state
+        # of token i.
+        last_token_indices, next_token_ids = self._prefill_draft_last_tokens(req_ids, query_lens, token_ids.shape[-1])
+        last_token_indices = async_h2d_copy(last_token_indices, dtype=torch.long, device=self.device)
+        next_token_ids = async_h2d_copy(next_token_ids, dtype=token_ids.dtype, device=self.device)
+        target_token_ids = self._shift_prefill_token_ids(token_ids, last_token_indices, next_token_ids)
+        if target_token_ids.dim() == 1:
+            target_token_ids = target_token_ids.unsqueeze(0)
         if target_hidden_states.dim() == 2:
             target_hidden_states = target_hidden_states.unsqueeze(0)
-        _draft_token_ids = self.drafter.propose(target_token_ids, position_ids, target_hidden_states, logits_indices,
-                                                attn_metadata, prefill_batch_block_table, self)
+        _draft_token_ids = self.drafter.propose(target_token_ids, position_ids, target_hidden_states,
+                                                last_token_indices, attn_metadata, prefill_batch_block_table, self)
         return _draft_token_ids
 
     def propose_ngram_draft_token_ids(
