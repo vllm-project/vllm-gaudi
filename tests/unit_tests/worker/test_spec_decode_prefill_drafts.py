@@ -32,6 +32,7 @@ def _runner(use_merged_prefill: bool = False):
             "last": 1
         },
         num_computed_tokens_cpu=np.array([0, 4], dtype=np.int32),
+        num_prompt_tokens=np.array([10, 8], dtype=np.int32),
         num_tokens_no_spec=np.array([10, 9], dtype=np.int32),
         token_ids_cpu=token_ids_cpu,
     )
@@ -41,33 +42,36 @@ def _runner(use_merged_prefill: bool = False):
 
 
 def test_partial_chunk_is_followed_by_its_next_prompt_token():
-    last, nxt = _runner()._prefill_draft_last_tokens(["chunked"], [6], SEQ_LEN)
+    last, nxt, finishes = _runner()._prefill_draft_last_tokens(["chunked"], [6], SEQ_LEN)
     assert last == [5]
     assert nxt == [106]
+    assert finishes == [False]
 
 
 def test_final_chunk_is_followed_by_the_sampled_token():
-    last, nxt = _runner()._prefill_draft_last_tokens(["last"], [4], SEQ_LEN)
+    last, nxt, finishes = _runner()._prefill_draft_last_tokens(["last"], [4], SEQ_LEN)
     assert last == [3]
     assert nxt == [500]
+    assert finishes == [True]
 
 
 def test_padded_batch_rows_start_at_multiples_of_the_padded_length():
-    last, nxt = _runner()._prefill_draft_last_tokens(["chunked", "last"], [6, 4], SEQ_LEN)
+    last, nxt, _ = _runner()._prefill_draft_last_tokens(["chunked", "last"], [6, 4], SEQ_LEN)
     assert last == [5, SEQ_LEN + 3]
     assert nxt == [106, 500]
 
 
 def test_merged_prefill_requests_are_packed_back_to_back():
-    last, nxt = _runner(use_merged_prefill=True)._prefill_draft_last_tokens(["chunked", "last"], [6, 4], 16)
+    last, nxt, _ = _runner(use_merged_prefill=True)._prefill_draft_last_tokens(["chunked", "last"], [6, 4], 16)
     assert last == [5, 6 + 3]
     assert nxt == [106, 500]
 
 
 def test_unknown_request_gets_a_placeholder_token():
-    last, nxt = _runner()._prefill_draft_last_tokens(["dummy"], [3], SEQ_LEN)
+    last, nxt, finishes = _runner()._prefill_draft_last_tokens(["dummy"], [3], SEQ_LEN)
     assert last == [2]
     assert nxt == [0]
+    assert finishes == [False]
 
 
 def test_shift_puts_the_next_token_after_each_last_scheduled_position():

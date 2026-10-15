@@ -103,3 +103,21 @@ def test_step_without_drafts_still_resumes_from_last_accepted_slot():
     assert load[1].tolist() == [2, 3]
     assert store[1].tolist() == [[1], [3]]
     assert conv_offsets.tolist() == [1, 0]
+
+
+def test_async_load_slots_follow_the_device_accepted_counts():
+    """Async scheduling knows the last step's accepted tokens only on the device;
+    the load slots and conv offsets must match the synchronous ones."""
+    runner = _make_runner_stub([_make_request("a", [1, 2]), _make_request("b", [3, 4]), _make_request("c", [5, 6])])
+    runner._mamba_num_accepted.update({"a": 2, "b": 1})
+    runner.speculative_config = types.SimpleNamespace(num_speculative_tokens=NUM_SPEC)
+    runner.device = torch.device("hpu")
+    sync_load, _, sync_conv_offsets = HPUModelRunner._prepare_mamba_spec_decode_idxs(runner, [0, 1, 2],
+                                                                                     target_bs=4,
+                                                                                     num_tokens=1 + NUM_SPEC)
+
+    num_valid = torch.tensor([2, 1, 1, 1], dtype=torch.int32, device="hpu")
+    load, conv_offsets = HPUModelRunner._async_mamba_spec_load_idxs(runner, [0, 1, 2], 4, num_valid)
+
+    assert load.cpu().tolist() == sync_load.tolist()
+    assert conv_offsets.cpu().tolist() == sync_conv_offsets.tolist()

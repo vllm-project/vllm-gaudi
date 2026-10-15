@@ -279,10 +279,15 @@ class HpuPlatform(Platform):
         # Disable multi-stream for shared experts as no Stream on CPU
         os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-        # NOTE: vLLM has default enabled async scheduling with speculative decoding is on.
-        # However, for HPU, speculative decoding is not supported with async scheduling.
-        vllm_config.scheduler_config.async_scheduling = \
-            vllm_config.scheduler_config.async_scheduling and vllm_config.speculative_config is None
+        # NOTE: vLLM enables async scheduling by default, also with speculative
+        # decoding. The HPU runner supports the two together only for one draft
+        # token of an EAGLE-style drafter (EAGLE, EAGLE3, MTP) and only with
+        # VLLM_HPU_ASYNC_SPEC_DECODE=1; otherwise speculative decoding runs with
+        # synchronous scheduling.
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and vllm_config.scheduler_config.async_scheduling and not (
+                get_config().async_spec_decode and spec_config.use_eagle() and spec_config.num_speculative_tokens == 1):
+            vllm_config.scheduler_config.async_scheduling = False
 
         cls._maybe_disable_chunked_mm_input(vllm_config)
 
