@@ -64,6 +64,14 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     blocks_caching_range: Optional[torch.Tensor] = None
     mamba_chunks_to_block_mapping: Optional[torch.Tensor] = None
     seqlens_offsets_for_blocks: Optional[torch.Tensor] = None
+    # Mamba2 decode with speculative decoding (see HPUMambaMixer2): per cache
+    # group, the slot holding the state after the previous step's last
+    # accepted token [num_groups, batch], the slots receiving the state after
+    # each query token [num_groups, batch, num_tokens], and the conv window
+    # offset of the live history [batch]. None unless speculative decoding.
+    mamba_spec_load_indices: Optional[torch.Tensor] = None
+    mamba_spec_store_indices: Optional[torch.Tensor] = None
+    mamba_spec_conv_offsets: Optional[torch.Tensor] = None
     window_block_list: Optional[torch.Tensor] = None
     image_seg_ids: Optional[torch.Tensor] = None
     indexer_block_index: Optional[torch.Tensor] = None
@@ -140,7 +148,10 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              store_indices_tensor=None,
                              query_start_loc=None,
                              seq_lens_tensor=None,
-                             indexer_block_index=None):
+                             indexer_block_index=None,
+                             mamba_spec_load_indices=None,
+                             mamba_spec_store_indices=None,
+                             mamba_spec_conv_offsets=None):
         return cls(is_prompt=False,
                    block_mapping=None,
                    alibi_blocks=None,
@@ -164,4 +175,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    store_indices_tensor=store_indices_tensor,
                    query_start_loc=query_start_loc,
                    query_start_loc_p=query_start_loc,
-                   indexer_block_index=indexer_block_index)
+                   indexer_block_index=indexer_block_index,
+                   mamba_spec_load_indices=mamba_spec_load_indices,
+                   mamba_spec_store_indices=mamba_spec_store_indices,
+                   mamba_spec_conv_offsets=mamba_spec_conv_offsets)

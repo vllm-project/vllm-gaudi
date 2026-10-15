@@ -148,8 +148,11 @@ class HpuEagleProposer(EagleProposer):
         num_picked_token_indices = []
         last_token_indices = []
         starting_index = 0
+        # At most n rejections: the first position is always valid, so every
+        # request contributes exactly one last_token_index (static shape). Only
+        # dummy warmup steps can report zero sampled tokens.
         num_rejected_tokens = [
-            n + 1 - len(sampled_token_ids[i]) if n > 0 else 0 for i, n in enumerate(num_draft_tokens)
+            min(n, n + 1 - len(sampled_token_ids[i])) if n > 0 else 0 for i, n in enumerate(num_draft_tokens)
         ]
         for i, n in enumerate(num_draft_tokens):
             r = num_rejected_tokens[i]
@@ -162,8 +165,8 @@ class HpuEagleProposer(EagleProposer):
                 else:
                     num_picked_token_indices.append(-1)
             starting_index += step
-        hidden_states_indices = torch.tensor(num_picked_token_indices, device=self.device)
-        last_token_indices = torch.tensor(last_token_indices, device=self.device)
+        hidden_states_indices = torch.tensor(num_picked_token_indices, dtype=torch.long, device=self.device)
+        last_token_indices = torch.tensor(last_token_indices, dtype=torch.long, device=self.device)
         return common_attn_metadata, hidden_states_indices, last_token_indices
 
     def prepare_attn_metadata(

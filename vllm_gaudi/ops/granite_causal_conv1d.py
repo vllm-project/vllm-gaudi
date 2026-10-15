@@ -12,6 +12,12 @@ cache indices).  It processes one sequence at a time
 
 Used exclusively by hpu_mamba_mixer2.py (Granite 4.0).  Other models
 continue to use causal_conv1d_pytorch.py.
+
+Each conv_states slot holds a window of ``(width - 1) + num_speculative_tokens``
+inputs (upstream ``mamba2_state_shape``).  The live history is always its first
+``width - 1`` rows, so every read and write of it uses ``[:state_len]``; the
+extra rows only exist for speculative decoding, see
+``granite_causal_conv1d_update_spec``.
 """
 
 from __future__ import annotations
@@ -83,7 +89,7 @@ def granite_causal_conv1d_fn(
 
     # Get init_state for all batch
     if has_initial_state is not None:
-        init_state = torch.where(has_initial_state, conv_states[load_cache_indices, -state_len:, :],
+        init_state = torch.where(has_initial_state, conv_states[load_cache_indices, :state_len, :],
                                  torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype))
     else:
         init_state = torch.zeros(padded_batch, state_len, dim, device=x_work.device, dtype=work_dtype)
@@ -104,7 +110,7 @@ def granite_causal_conv1d_fn(
         new_states = seq_input.index_select(dim=1, index=indices.flatten()).view(dim, -1, state_len).permute(1, 0, 2)
 
         # Scatter all updates at once
-        conv_states[blocks_caching_range, -state_len:, :] = new_states.transpose(-1, -2)
+        conv_states[blocks_caching_range, :state_len, :] = new_states.transpose(-1, -2)
     else:
         # int32 on purpose, not the int64 qsl: when the conv and SSM parts of
         # the prefill compile into one HPU graph (Granite 4.0-H sizes), the
@@ -112,7 +118,7 @@ def granite_causal_conv1d_fn(
         end = query_start_loc.to(torch.int32)[-1]
         idx = torch.arange(state_len, device=x_work.device, dtype=torch.int32) + end
         new_state = seq_input.index_select(dim=1, index=idx)
-        conv_states[store_cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
+        conv_states[store_cache_indices, :state_len, :] = new_state.transpose(-1, -2)
 
     # Apply depthwise convolution using element-wise TPC ops.
     seq_input = seq_input.unsqueeze(0)
@@ -203,7 +209,7 @@ def granite_causal_conv1d_fn_update(
                 and has_initial_state.numel() != padded_batch:
             raise ValueError("'has_initial_state' must align with 'query_start_loc'.")
 
-    init_state = conv_states[load_cache_indices, -state_len:, :]
+    init_state = conv_states[load_cache_indices, :state_len, :]
     init_state = init_state.transpose(-1, -2)
 
     seq_input = torch.cat([init_state, x_work], dim=2)
@@ -213,6 +219,66 @@ def granite_causal_conv1d_fn_update(
     seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)
     seq_out = _apply_activation(seq_out, activation)
 
-    conv_states[store_cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
+    conv_states[store_cache_indices, :state_len, :] = new_state.transpose(-1, -2)
 
     return seq_out.to(original_dtype)
+
+
+def granite_causal_conv1d_update_spec(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    activation: bool | str | None,
+    conv_state_indices: torch.Tensor,
+    history_offsets: torch.Tensor,
+    num_tokens: int,
+) -> torch.Tensor:
+    """Decode conv update for speculative decoding (verify ``num_tokens`` per request).
+
+    Follows upstream ``causal_conv1d_update`` with ``num_accepted_tokens``: a
+    request's window (slot ``conv_state_indices``) stores the last
+    ``width - 2`` inputs of its history followed by every input of the
+    previous query, accepted or not.  Its live history therefore starts at
+    ``history_offsets = num_accepted - 1`` of the previous step, and rejected
+    drafts never need to be undone.
+
+    x: [batch * num_tokens, dim], request-major (padded tokens at the end).
+    conv_state: [num_slots, (width - 1) + num_speculative_tokens, dim].
+    conv_state_indices, history_offsets: [batch].
+    Returns [batch * num_tokens, dim].
+    """
+    activation = _normalize_activation(activation)
+    original_dtype = x.dtype
+    work_dtype = conv_state.dtype
+    dim, width = weight.shape
+    state_len = width - 1
+    window_len = conv_state.size(1)
+    max_offset = window_len - state_len
+    batch = conv_state_indices.numel()
+    assert 1 <= num_tokens <= max_offset + 1, (f"{num_tokens=} does not fit a conv window of {window_len} "
+                                               f"(kernel width {width})")
+    conv_state_indices = conv_state_indices.long()  # index_copy_ needs int64 indices
+
+    window = conv_state.index_select(0, conv_state_indices)  # [batch, window_len, dim]
+    # Select history rows [offset, offset + state_len) without data-dependent
+    # indexing. torch.where (not a 0/1 multiply) so uninitialised rows can never
+    # leak NaN/Inf into the selected history.
+    history = window[:, :state_len]
+    for offset in range(1, max_offset + 1):
+        history = torch.where((history_offsets == offset).view(-1, 1, 1), window[:, offset:offset + state_len], history)
+
+    # Same (batch, dim, len) layout as granite_causal_conv1d_fn_update.
+    x_work = x.to(work_dtype).reshape(batch, num_tokens, dim).transpose(1, 2)
+    seq_input = torch.cat([history.transpose(1, 2), x_work], dim=2)  # [batch, dim, state_len + num_tokens]
+    new_window = seq_input[:, :, 1:].transpose(1, 2)
+    if new_window.size(1) < window_len:
+        # Fewer tokens than the window holds: the tail rows are never read.
+        new_window = torch.cat([new_window, window[:, new_window.size(1):]], dim=1)
+    conv_state.index_copy_(0, conv_state_indices, new_window)
+
+    weight_work = weight.to(work_dtype)
+    bias_work = bias.to(work_dtype) if bias is not None else None
+    seq_out = _depthwise_conv1d_tpc(seq_input, weight_work, bias_work)  # [batch, dim, num_tokens]
+    seq_out = _apply_activation(seq_out, activation)
+    return seq_out.transpose(1, 2).reshape(batch * num_tokens, dim).to(original_dtype)

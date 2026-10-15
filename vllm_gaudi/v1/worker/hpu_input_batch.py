@@ -131,6 +131,7 @@ class InputBatch:
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
+        max_num_blocks_per_req: Optional[list[int]] = None,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -171,8 +172,16 @@ class InputBatch:
         # vLLM #40996 dropped max_model_len from MultiGroupBlockTable and now
         # requires the caller to pass the per-group block count. HPU does not
         # use DCP (cp_world_size == 1), so max_num_blocks reduces to
-        # cdiv(max_model_len, block_size) per KV cache group.
-        max_num_blocks = [cdiv(max_model_len, block_size) for block_size in block_sizes]
+        # cdiv(max_model_len, block_size) per KV cache group, unless the
+        # caller passes the KV cache specs' max_num_blocks_per_req (Mamba
+        # groups need 1 + num_speculative_tokens state blocks per request).
+        # Both are in KV-manager blocks; HPUMultiGroupBlockTable converts
+        # them to kernel blocks.
+        if max_num_blocks_per_req is not None:
+            assert len(max_num_blocks_per_req) == len(block_sizes)
+            max_num_blocks = list(max_num_blocks_per_req)
+        else:
+            max_num_blocks = [cdiv(max_model_len, block_size) for block_size in block_sizes]
         self.block_table = HPUMultiGroupBlockTable(max_num_reqs=max_num_reqs,
                                                    max_num_batched_tokens=max_num_batched_tokens,
                                                    pin_memory=pin_memory,
