@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Union, Any
+from typing import Callable, Optional, Union, Any, TYPE_CHECKING
 import habana_frameworks.torch as htorch
 import torch
 
@@ -6,7 +6,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from compressed_tensors.quantization import (QuantizationArgs, QuantizationStrategy)
 
@@ -53,7 +52,7 @@ import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi import envs
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
-                                      VllmMixtureOfExpertsOpWNA16)
+                                      VllmMixtureOfExpertsOpWNA16, int4_moe_supports_non_gated, rebias_uint4b8_to_int4_)
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.ops.hpu_fused_moe import (
     _normalize_moe_activation,
@@ -65,6 +64,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 import vllm.model_executor.model_loader.weight_utils as vllm_weight_utils
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
 SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR, QuantizationStrategy.BLOCK]
 
 
@@ -535,7 +538,7 @@ class HPUCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: "RoutedExperts",
         x: torch.Tensor,
         router_logits: torch.Tensor,
         **kwargs,
@@ -767,8 +770,20 @@ class HPUMPLinearKernel(MPLinearKernel):
         return output.reshape(out_shape)
 
 
+# Expressing a non-gated expert MLP on the gated-only fused-MoE kernel,
+# which always computes act(w1 @ x) * (w3 @ x).
+#
+# Squared-ReLU is expressible exactly, because for every real a
+#     relu(a) * a == relu(a) ** 2 == relu2(a)
+# so mirroring w1 into the unused w3 half and asking for plain "relu" reproduces
+# relu2 bit-for-bit.
+_NONGATED_AS_GATED_ACTIVATION = {"relu2": "relu"}
+
+
 @CustomOp.register_oot(name='CompressedTensorsWNA16MarlinMoEMethod')
 class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
+    _nongated_logged: bool = False
+    _int4_path_logged: bool = False
 
     def __init__(
         self,
@@ -806,16 +821,47 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         # EMULATION sentinel so those inherited paths take the generic branch.
         self.wna16_backend = WNA16MoEBackend.EMULATION
 
+    def _native_int4_refusal(self) -> Optional[str]:
+        """Why this checkpoint cannot take the native int4 path, or None if it can.
+
+        Covers what is known from the quant config alone; the op's
+        supports_native_int4 adds the runtime and g_idx checks once weights exist.
+        """
+        if not get_config().wna16_native_int4_moe:
+            return "VLLM_WNA16_NATIVE_INT4_MOE is not set"
+        if self.num_bits != 4:
+            # int4_fused_weights reads 4-bit nibbles and the load-time rebias is
+            # nibble-wise, so e.g. w8a16 must stay on the dequant path.
+            return f"{self.num_bits}-bit weights; int4_fused_weights is 4-bit only"
+        return None
+
+    def _use_native_non_gated(self, layer: torch.nn.Module) -> bool:
+        """Whether non-gated experts can run on the native int4 kernel with is_gated=False.
+
+        Decided before loading because it sets the w13 width: I rows (the single
+        up-projection) on this path, 2I rows with w1 mirrored into w3 on every
+        other path, which only has gated kernels. Must agree with the eligibility
+        decided in process_weights_after_loading: g_idx only exists for
+        actorder "group", and an is_gated-capable overload is also present.
+        """
+        return (not layer.moe_config.is_act_and_mul and self._native_int4_refusal() is None and self.actorder != "group"
+                and int4_moe_supports_non_gated())
+
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
         extra_weight_attrs["intermediate_size_full"] = intermediate_size_per_partition * layer.moe_config.tp_size
+
+        # Kept on the layer, not on self: one quant-method instance may serve
+        # several layers.
+        layer.hpu_wna16_native_non_gated = self._use_native_non_gated(layer)
+        w13_rows = (1 if layer.hpu_wna16_native_non_gated else 2) * intermediate_size_per_partition
 
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
         extra_weight_attrs.update({"is_transposed": False, "quant_method": self.strategy})
         w13_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                    2 * intermediate_size_per_partition,
+                                                    w13_rows,
                                                     hidden_size // self.packed_factor,
                                                     dtype=torch.int32),
                                         requires_grad=False)
@@ -839,10 +885,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
-        w13_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                  2 * intermediate_size_per_partition,
-                                                  num_groups_w13,
-                                                  dtype=params_dtype),
+        w13_scale = torch.nn.Parameter(torch.ones(num_experts, w13_rows, num_groups_w13, dtype=params_dtype),
                                        requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_scale)
         set_weight_attrs(w13_scale, extra_weight_attrs)
@@ -856,8 +899,8 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         w2_weight_shape = torch.nn.Parameter(torch.empty(num_experts, 2), requires_grad=False)
         layer.register_parameter("w2_weight_shape", w2_weight_shape)
         set_weight_attrs(w2_weight_shape, extra_weight_attrs)
-        w13_weight_shape = torch.nn.Parameter(torch.empty(num_experts, 2), requires_grad=False)
 
+        w13_weight_shape = torch.nn.Parameter(torch.empty(num_experts, 2), requires_grad=False)
         layer.register_parameter("w13_weight_shape", w13_weight_shape)
         set_weight_attrs(w13_weight_shape, extra_weight_attrs)
 
@@ -917,9 +960,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
-        w13_zeros = torch.full((num_groups_w13, 2 * intermediate_size_per_partition),
-                               self.quant_type.bias,
-                               dtype=torch.int32)
+        w13_zeros = torch.full((num_groups_w13, w13_rows), self.quant_type.bias, dtype=torch.int32)
         w13_zeros = pack_quantized_values_into_int32(w13_zeros, self.quant_type, packed_dim=1)
         layer.register_parameter("w13_zero_point", torch.nn.Parameter(w13_zeros, requires_grad=False))
         w2_zeros = torch.full((num_groups_w2, hidden_size), self.quant_type.bias, dtype=torch.int32)
@@ -945,7 +986,58 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
 
         return torch.stack(outputs, dim=0)
 
+    def _mirror_w1_into_w3(self, layer: "RoutedExperts") -> str:
+        """Fill the unused w3 half of w13 with a copy of w1, for non-gated experts.
+
+        For a non-gated checkpoint vLLM maps the expert's up_proj onto the *w1*
+        slot of the fused w13 and leaves the w3 half unloaded, which is harmless
+        for CUDA's non-gated kernel. On HPU it is not: create_weights allocates
+        w13 with ``torch.empty`` and the gated kernel multiplies by that
+        uninitialized memory, turning the output into noise. Copying w1 over the
+        w3 half makes the gated kernel evaluate relu2 exactly (see
+        _NONGATED_AS_GATED_ACTIVATION).
+
+        Returns the activation string the fused kernel must be called with.
+        """
+        act = _normalize_moe_activation(layer.activation)
+        gated_act = _NONGATED_AS_GATED_ACTIVATION.get(act)
+        if gated_act is None:
+            raise NotImplementedError(f"Non-gated MoE activation {act!r} cannot be expressed on a gated-only HPU "
+                                      f"fused-MoE kernel. Only {sorted(_NONGATED_AS_GATED_ACTIVATION)} can be "
+                                      f"emulated there; others need the native int4 path "
+                                      f"(VLLM_WNA16_NATIVE_INT4_MOE=1) on a Habana PyTorch bridge whose "
+                                      f"mixture_of_experts.int4_fused_weights takes is_gated.")
+
+        packed = layer.w13_weight_packed.data
+        scale = layer.w13_weight_scale.data
+        # Both are [num_experts, 2 * intermediate_per_partition, ...] with w1 in
+        # the lower half. Mirror weights *and* scales: create_weights fills the
+        # scale with ones, so the copy would otherwise dequantize wrongly.
+        half = packed.shape[1] // 2
+        assert scale.shape[1] == 2 * half, (f"w13 scale/weight row mismatch: {scale.shape} vs {packed.shape}")
+        packed[:, half:, :] = packed[:, :half, :]
+        scale[:, half:, :] = scale[:, :half, :]
+        if not HPUCompressedTensorsWNA16MoEMethod._nongated_logged:
+            HPUCompressedTensorsWNA16MoEMethod._nongated_logged = True
+            # warning, not info: in worker processes this logger propagates to a
+            # root left at WARNING, so info would be discarded.
+            logger.warning(
+                "Non-gated MoE experts on WNA16: mirrored w1 into w3 and lowered "
+                "activation %r -> %r to emulate non-gated on the gated HPU kernel.", act, gated_act)
+        return gated_act
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Non-gated experts must be fixed up *before* the repack below, while
+        # w13 is still in its [experts, 2 * intermediate, hidden / pack] layout.
+        # Not needed when the native int4 kernel runs them non-gated: w13 was
+        # then allocated I-wide and holds exactly the up-projection.
+        # Kept on the layer, not on self: one quant-method instance may serve
+        # several layers.
+        native_non_gated = getattr(layer, "hpu_wna16_native_non_gated", False)
+        layer.hpu_nongated_activation = None
+        if not layer.moe_config.is_act_and_mul and not native_non_gated:
+            layer.hpu_nongated_activation = self._mirror_w1_into_w3(layer)
+
         # Reconfigure packed weights and scales to match moe_wna16 format
         w13_weight_packed = self.gptq_hpu_moe_repack(layer.w13_weight_packed)
         w2_weight_packed = self.gptq_hpu_moe_repack(layer.w2_weight_packed)
@@ -963,28 +1055,57 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         ep_shift = layer.moe_config.ep_rank * num_experts
 
         experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
+        refusal = self._native_int4_refusal()
+        want_native_int4 = get_config().wna16_native_int4_moe
         layer.moe_op = VllmMixtureOfExpertsOpWNA16(
             num_experts,
             experts_min,
             experts_max,
+            native_int4=want_native_int4,
         )
-        for expert_id in range(layer.local_num_experts):
-            layer.moe_op.w13_list[expert_id].set_weight_packed(layer.w13_weight_packed.data[expert_id])
-            layer.moe_op.w2_list[expert_id].set_weight_packed(layer.w2_weight_packed.data[expert_id])
-            layer.moe_op.w13_list[expert_id].set_weight_scale(layer.w13_weight_scale.data[expert_id])
-            layer.moe_op.w2_list[expert_id].set_weight_scale(layer.w2_weight_scale.data[expert_id])
-            layer.moe_op.w13_list[expert_id].set_zero_point(layer.w13_zero_point.data)
-            layer.moe_op.w2_list[expert_id].set_zero_point(layer.w2_zero_point.data)
+        # Per-expert views into the stacked Parameters. The model runner calls the
+        # same method again after moving the model, so the two cannot drift apart.
+        layer.moe_op.bind_expert_weights(layer, with_g_idx=self.actorder == "group")
 
-            if self.actorder == "group":
-                layer.moe_op.w13_list[expert_id].set_g_idx(layer.w13_weight_g_idx.data[expert_id])
-                layer.moe_op.w2_list[expert_id].set_g_idx(layer.w2_weight_g_idx.data[expert_id])
+        # Decide the execution path only after the weights (and any g_idx) are
+        # attached, since eligibility depends on them. Fall back rather than
+        # fail: the bf16 dequant path is always correct, just slower. Every check
+        # runs before the rebias below, which is the point of no return.
+        ok, why = (False, refusal) if refusal else layer.moe_op.supports_native_int4()
+        if native_non_gated:
+            if not ok:
+                # _use_native_non_gated applies the same rule, so this means the two
+                # drifted apart. The I-wide w13 cannot be mirrored after the fact.
+                raise RuntimeError(f"WNA16 MoE: w13 was allocated I-wide for the native non-gated int4 path, "
+                                   f"but that path was refused ({why}); the gated fallback cannot run it.")
+            layer.moe_op.is_gated = False
+        if ok:
+            # int4_fused_weights reads the codes as signed int4 two's complement,
+            # while compressed-tensors stores uint4b8 (value + 8). Rebias once here.
+            # The bf16 dequant path can no longer decode them afterwards; the op
+            # refuses it from now on (codes_signed).
+            rebias_uint4b8_to_int4_(layer.w13_weight_packed.data)
+            rebias_uint4b8_to_int4_(layer.w2_weight_packed.data)
+            layer.moe_op.codes_signed = True
+            layer.moe_op._cache_weight_lists()
+        else:
+            layer.moe_op.native_int4 = False
+        if not HPUCompressedTensorsWNA16MoEMethod._int4_path_logged:
+            HPUCompressedTensorsWNA16MoEMethod._int4_path_logged = True
+            if ok:
+                logger.warning("WNA16 MoE: using native int4_fused_weights (no per-forward dequantization)%s.",
+                               ", non-gated experts with is_gated=False" if native_non_gated else "")
+            elif want_native_int4:
+                # Only warn when the native path was asked for and refused.
+                logger.warning(
+                    "WNA16 MoE: native int4 path unavailable (%s); falling back to per-forward "
+                    "bf16 dequantization.", why)
 
         htorch.core.mark_step()
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: "RoutedExperts",
         x: torch.Tensor,
         router_logits: torch.Tensor,
         **kwargs,
@@ -1003,12 +1124,17 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
 
+        # For non-gated experts on a gated kernel w3 holds a mirror of w1 and the
+        # activation is lowered ("relu2" -> "relu"), see _mirror_w1_into_w3. On the
+        # native non-gated int4 path it stays "relu2" and the op passes is_gated=False.
+        activation = getattr(layer, "hpu_nongated_activation", None) or _normalize_moe_activation(layer.activation)
+
         output = layer.moe_op(
             x,
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=False,
-            activation=_normalize_moe_activation(layer.activation),
+            activation=activation,
         )
         return output.view(*input_shape)
 
