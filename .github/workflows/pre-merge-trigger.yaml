@@ -28,9 +28,10 @@ jobs:
     environment: pre-merge-approval
     timeout-minutes: 720
     permissions:
-      actions: write       # dispatch workflows, read run status, cancel orphaned runs
-      pull-requests: read  # read PR labels for skip-gaudi-tests check
-      issues: read         # listEventsForTimeline to verify skip-gaudi-tests labeler
+      actions: write        # dispatch workflows, read run status, cancel runs
+      contents: read        # read the base branch's pre-merge.yaml, compare commits
+      pull-requests: write  # read PR labels; post the "CI Blocked" comment
+      issues: read          # listEventsForTimeline to verify skip-gaudi-tests labeler
     steps:
       - name: Dispatch, find run, and wait for result
         id: dispatch
@@ -88,6 +89,44 @@ jobs:
               }
             }
 
+            // "CI Blocked" comment with fixed text only (no PR title, branch or
+            // other PR data), then fail.
+            async function blockCi(reason) {
+              try {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner, repo: context.repo.repo, issue_number: pr.number,
+                  body: '### 🚧 CI Blocked\n\n' +
+                        'The main CI workflow was not started for the following reason:\n' +
+                        `> ${reason}\n`,
+                });
+              } catch (e) {
+                core.warning(`Could not post the CI Blocked comment: ${e.message}`);
+              }
+              core.setFailed(`CI blocked: ${reason}`);
+            }
+
+            // The result is the whole run's conclusion.
+            async function waitForRun(id) {
+              for (let i = 0; i < 4320; i++) {
+                try {
+                  const { data: run } = await github.rest.actions.getWorkflowRun({
+                    owner: context.repo.owner, repo: context.repo.repo, run_id: id,
+                  });
+                  if (run.status === 'completed') {
+                    if (run.conclusion !== 'success')
+                      core.setFailed(`pre-merge ${run.conclusion}: ${run.html_url}`);
+                    return;
+                  }
+                  core.info(`Status: ${run.status} (${i + 1}/4320)`);
+                } catch (e) {
+                  core.warning(`getWorkflowRun transient error: ${e.message}`);
+                }
+                await new Promise(r => setTimeout(r, 10000));
+              }
+              await cancelDispatchedRun(id, 'trigger poll timeout (12 h)');
+              core.setFailed('Timed out (12 h) waiting for pre-merge.yaml');
+            }
+
             const headSha   = pr.head.sha;
             const baseRef   = pr.base.ref;
             const prNumber  = String(pr.number);
@@ -124,6 +163,19 @@ jobs:
               return;
             }
 
+            // The base branch's pre-merge.yaml carries this marker when it takes
+            // the nixl_changed input and leaves the draft and behind-base checks
+            // to this trigger. Without it (older release branches) dispatch
+            // exactly as before.
+            const CONTRACT_MARKER = '# pre-merge-contract: 2';
+            const { data: wfFile } = await github.rest.repos.getContent({
+              owner: context.repo.owner, repo: context.repo.repo,
+              path: '.github/workflows/pre-merge.yaml', ref: baseRef,
+            });
+            const contract2 = Buffer.from(wfFile.content, 'base64').toString('utf8')
+              .split(/\r?\n/).includes(CONTRACT_MARKER);
+            core.info(`${baseRef}: pre-merge.yaml ${contract2 ? 'has' : 'lacks'} '${CONTRACT_MARKER}'`);
+
             // 0. Sweep any previous in-flight pre-merge.yaml runs for this PR.
             //    A prior trigger may have been killed by cancel-in-progress
             //    before it could clean up its own dispatched run.
@@ -143,6 +195,47 @@ jobs:
               core.warning(`Could not list previous runs: ${e.message}`);
             }
 
+            const inputs = {
+              pr_number:            prNumber,
+              head_sha:             headSha,
+              base_ref:             baseRef,
+              pr_title:             prTitle,
+              is_draft:             isDraft,
+              skip_tests:           skipTests,
+              is_merge_group:       'false',  // still a required input of pre-merge.yaml
+              use_hourly_runner:    useHourlyRunner,
+              vllm_ref_override:    vllmRefOverride,
+            };
+
+            // Draft, behind-base and NIXL Dockerfile checks for a contract-2
+            // pre-merge.yaml. API calls only; the PR's code is never checked out.
+            if (contract2) {
+              if (pr.draft) {
+                await blockCi("This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI.");
+                return;
+              }
+              const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
+                owner: context.repo.owner, repo: context.repo.repo,
+                basehead: `${baseRef}...${headSha}`,
+              });
+              if (typeof cmp.behind_by !== 'number') {
+                core.setFailed('Compare API returned no behind_by; cannot check the PR against its base');
+                return;
+              }
+              if (cmp.behind_by > 0) {
+                await blockCi('Your branch is **behind the base branch**. Please merge or rebase to get the latest changes.');
+                return;
+              }
+              // A missing or truncated (300 files) list counts as changed.
+              const NIXL_DOCKERFILE = '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest';
+              const files = cmp.files;
+              inputs.nixl_changed = String(
+                !Array.isArray(files) || files.length >= 300 ||
+                files.some(f => f.filename === NIXL_DOCKERFILE || f.previous_filename === NIXL_DOCKERFILE),
+              );
+              core.info(`nixl_changed=${inputs.nixl_changed}`);
+            }
+
             // 1. Dispatch to base branch. return_run_details makes the API
             //    answer 200 with the new run's id instead of an empty 204.
             const { data: dispatched } = await github.rest.actions.createWorkflowDispatch({
@@ -151,17 +244,7 @@ jobs:
               workflow_id: 'pre-merge.yaml',
               ref:   baseRef,
               return_run_details: true,
-              inputs: {
-                pr_number:            prNumber,
-                head_sha:             headSha,
-                base_ref:             baseRef,
-                pr_title:             prTitle,
-                is_draft:             isDraft,
-                skip_tests:           skipTests,
-                is_merge_group:       'false',  // still a required input of pre-merge.yaml
-                use_hourly_runner:    useHourlyRunner,
-                vllm_ref_override:    vllmRefOverride,
-              },
+              inputs,
             });
 
             // 2. Follow only the run this dispatch created. Without its id the
@@ -195,25 +278,8 @@ jobs:
             core.info(`Dispatched run ${runId}: ${dispatched.html_url}`);
             core.setOutput('run_id', String(runId));
 
-            // 3. Poll until complete (12 h max)
-            for (let i = 0; i < 4320; i++) {
-              try {
-                const { data: run } = await github.rest.actions.getWorkflowRun({
-                  owner: context.repo.owner, repo: context.repo.repo, run_id: runId,
-                });
-                if (run.status === 'completed') {
-                  if (run.conclusion !== 'success')
-                    core.setFailed(`pre-merge ${run.conclusion}: ${run.html_url}`);
-                  return;
-                }
-                core.info(`Status: ${run.status} (${i + 1}/4320)`);
-              } catch (e) {
-                core.warning(`getWorkflowRun transient error: ${e.message}`);
-              }
-              await new Promise(r => setTimeout(r, 10000));
-            }
-            await cancelDispatchedRun(runId, 'trigger poll timeout (12 h)');
-            core.setFailed('Timed out (12 h) waiting for pre-merge.yaml');
+            // 3. Wait for the result (12 h max).
+            await waitForRun(runId);
 
       - name: Cancel dispatched run if trigger was cancelled or failed
         if: always() && steps.dispatch.outputs.run_id != ''

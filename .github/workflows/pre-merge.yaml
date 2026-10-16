@@ -5,6 +5,11 @@ name: Basic HPU test suite
 # test runs by "PR #<pr_number> [<head_sha>]".
 run-name: "PR #${{ inputs.pr_number }} [${{ inputs.head_sha }}]"
 
+# pre-merge-trigger.yaml looks for the next line in the base branch's copy of
+# this file. With it, the trigger sends nixl_changed and does the draft and
+# behind-base checks itself.
+# pre-merge-contract: 2
+
 on:
   workflow_dispatch:
     inputs:
@@ -12,14 +17,17 @@ on:
       head_sha:   { description: 'PR head commit SHA',            required: true, type: string }
       base_ref:   { description: 'PR target branch',              required: true, type: string }
       pr_title:   { description: 'PR title',                      required: false, type: string }
+      # is_draft and is_merge_group are unused but stay declared, so dispatches
+      # from trigger runs that started before an update are still accepted.
       is_draft:   { description: 'Draft PR (true/false)',         required: true, type: string, default: 'false' }
       skip_tests:           { description: 'Skip Gaudi tests (true/false)',                  required: true,  type: string, default: 'false' }
       is_merge_group:       { description: 'Triggered from merge queue (true/false)',        required: true,  type: string, default: 'false' }
       use_hourly_runner:    { description: 'Use hourly-ci pool (maintainers only)',          required: false, type: string, default: 'false' }
       vllm_ref_override:    { description: 'Override upstream vllm checkout ref (branch/tag/SHA; maintainers only)', required: false, type: string, default: '' }
+      nixl_changed:         { description: 'NIXL Dockerfile changed (true/false); build-tests it when true', required: false, type: string, default: 'true' }
 
-# Least-privilege default; the jobs that post PR comments (gatekeeper,
-# post-comment) opt into pull-requests: write at the job level.
+# Least-privilege default; post-comment opts into pull-requests: write at the
+# job level.
 permissions:
   contents: read
 
@@ -39,105 +47,12 @@ jobs:
         run: |
           echo "head_sha=${{ inputs.head_sha }}" >> "$GITHUB_OUTPUT"
 
-  gatekeeper:
-    needs: retrieve_head_sha
-    runs-on: ubuntu-latest
-    timeout-minutes: 720
-    permissions:
-      # Required to read the status of checks and PR details
-      checks: read
-      # Add this line to allow posting comments on PRs
-      pull-requests: write
-    steps:
-      # Add this checkout step
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
-          clean: true # Ensure a clean workspace before checkout
-          fetch-depth: 0
-
-      - name: Check for other blocking conditions
-        id: check_conditions
-        # Provide the GITHUB_TOKEN for the gh CLI to authenticate
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IS_MERGE_GROUP: ${{ inputs.is_merge_group }}
-          BASE_REF: ${{ inputs.base_ref }}
-          IS_DRAFT: ${{ inputs.is_draft }}
-        run: |
-          if [[ "$IS_MERGE_GROUP" == "true" ]]; then
-            echo "Merge group event detected. Skipping gatekeeper checks."
-            echo "run_ci=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          BLOCKING_REASON=""
-
-          # --- New check to see if the PR is behind the base branch ---
-          echo "Checking if the PR is behind the base branch..."
-          # Fetch just the latest commit from the base branch for comparison
-          git fetch origin "$BASE_REF" --depth=1
-          behind_count=$(git rev-list --count "HEAD..origin/$BASE_REF")
-
-          if_pr_is_behind="false"
-          if [[ $behind_count -gt 0 ]]; then
-            echo "PR is behind by ${behind_count} commit(s)."
-            if_pr_is_behind="true"
-          else
-            echo "PR is up-to-date with the base branch."
-          fi
-          # --- End of new check ---
-
-
-          if [[ "$IS_DRAFT" == "true" ]]; then
-            BLOCKING_REASON="This is a **Draft PR**. Please mark it as 'Ready for Review' to trigger the CI."
-
-          # Use the 'gh' CLI to fetch the LIVE mergeable state after the sleep
-          elif [[ "$if_pr_is_behind" == "true" ]]; then
-            BLOCKING_REASON="Your branch is **behind the base branch**. Please merge or rebase to get the latest changes."
-          fi
-
-          if [[ -n "$BLOCKING_REASON" ]]; then
-            {
-              echo "run_ci=false"
-              echo "reason<<EOF"
-              echo "$BLOCKING_REASON"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo "run_ci=true" >> "$GITHUB_OUTPUT"
-          fi
-
-          echo "Reason (if blocked): $BLOCKING_REASON"
-
-      - name: Post comment if CI is blocked
-        # This ensures that even if commenting fails, the next step will run
-        continue-on-error: true
-        # Only run this step for non-merge-group PRs where a PR number is available
-        if: inputs.is_merge_group != 'true' && inputs.pr_number != '' && steps.check_conditions.outputs.run_ci == 'false'
-        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9  # v5.0.0
-        with:
-          issue-number: ${{ inputs.pr_number }}
-          body: |
-            ### 🚧 CI Blocked
-
-            The main CI workflow was not started for the following reason:
-            > ${{ steps.check_conditions.outputs.reason }}
-
-      - name: Fail the job to block downstream CI
-        if: inputs.is_merge_group != 'true' && steps.check_conditions.outputs.run_ci == 'false'
-        run: |
-          echo "Failing this job to prevent the main CI from running."
-          exit 1
-
   # --- NEW JOB ---
   # This job runs first on the self-hosted pool, picks a runner,
   # and outputs its name so all other jobs can target it.
   # hourly-ci is selected by the trigger when a maintainer's PR title contains
   # [FIX_FOR_VLLM_LATEST]; the boolean arrives as inputs.use_hourly_runner.
   discover_runner:
-    needs: gatekeeper
     runs-on: ${{ inputs.use_hourly_runner == 'true' && 'hourly-ci' || 'pr-ci' }}
     timeout-minutes: 720
     outputs:
@@ -211,7 +126,7 @@ jobs:
 
   pre-commit:
     # This job runs in parallel with the build job
-    needs: [gatekeeper, retrieve_head_sha]
+    needs: [retrieve_head_sha]
     runs-on: ubuntu-latest
     timeout-minutes: 720
     steps:
@@ -560,38 +475,11 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
-  # Build-test production Dockerfiles when they are modified
-  check_dockerfile_changes:
-    needs: [retrieve_head_sha]
-    if: inputs.is_merge_group != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 720
-    outputs:
-      nixl_changed: ${{ steps.check.outputs.nixl_changed }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
-          fetch-depth: 0
-      - name: Detect changed Dockerfiles
-        id: check
-        env:
-          BASE_REF: ${{ inputs.base_ref }}
-        run: |
-          # Compare PR head against merge base to find changed files
-          CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD" -- '.cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest')
-          if [ -n "$CHANGED" ]; then
-            echo "nixl_changed=true" >> "$GITHUB_OUTPUT"
-            echo "Nixl Dockerfile was modified"
-          else
-            echo "nixl_changed=false" >> "$GITHUB_OUTPUT"
-            echo "Nixl Dockerfile was NOT modified"
-          fi
-
+  # Build-test the production NIXL Dockerfile when the PR changes it. The
+  # trigger detects the change and passes it as inputs.nixl_changed.
   build_nixl_dockerfile:
-    needs: [check_dockerfile_changes, discover_runner, retrieve_head_sha]
-    if: needs.check_dockerfile_changes.outputs.nixl_changed == 'true'
+    needs: [discover_runner, retrieve_head_sha]
+    if: inputs.nixl_changed == 'true'
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
     timeout-minutes: 720
     steps:
