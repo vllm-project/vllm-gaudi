@@ -131,10 +131,11 @@ class HPUAsyncScheduler(AsyncScheduler):
         Hybrid GDN / linear-attention models (e.g. Qwen3.5, Qwen3-Next) type
         their layers "gdn_attention"/"linear_attention", so a "mamba"-only query
         returns 0. Summing all three keeps this scheduler override in lock-step
-        with the runner; otherwise the override self-disables and the runner
-        asserts ``context_lens[0] % mamba_chunk_size == 0`` on an unaligned
-        value, killing every TP worker. Layer typing is fixed for the model's
-        lifetime, so this is cached (computed once per scheduler instance).
+        with the runner; otherwise the override self-disables and upstream's
+        splitter takes over, aligning to the 128-token kernel block rather than
+        the mamba state block (see ``_mamba_state_block_size``). Layer typing is
+        fixed for the model's lifetime, so this is cached (computed once per
+        scheduler instance).
         """
         model_config = self.vllm_config.model_config
         return sum(
@@ -196,8 +197,9 @@ class HPUAsyncScheduler(AsyncScheduler):
 
         The encoder cap stops a chunk before an mm item it cannot admit, and
         since vllm-project/vllm#51603 it runs after _mamba_block_aligned_split,
-        so nothing re-aligns the result -- but the runner asserts context_lens
-        is chunk aligned.
+        so nothing re-aligns the result -- but a runner with a MambaMixer2 layer
+        needs context_lens chunk aligned. Dormant for GDN, which does not (see
+        ``_mamba_chunk_grid_applies``).
 
         Put the boundary back on the grid rather than dropping the step.
         Dropping cannot converge on its own: a request whose own images exhaust
@@ -236,10 +238,39 @@ class HPUAsyncScheduler(AsyncScheduler):
         return kept, aligned_end - num_computed_tokens, budget + refund, kept_external
 
     @cached_property
+    def _num_gdn_layers(self) -> int:
+        """GDN/linear-attention layer count, mirroring ``num_gdn`` in the runner.
+
+        granitemoehybrid relabels plain mamba layers as "linear_attention"
+        (transformers>=5 ``remap_legacy_layer_types``), so a type query alone
+        reports them as GDN. The runner excludes that model explicitly and this
+        must agree with it, or the gate below flips the wrong way.
+        """
+        model_config = self.vllm_config.model_config
+        if getattr(model_config.hf_config, "model_type", None) == "granitemoehybrid":
+            return 0
+        return sum(
+            model_config.get_num_layers_by_block_type(self.vllm_config.parallel_config, block_type)
+            for block_type in ("gdn_attention", "linear_attention"))
+
+    @cached_property
     def _mamba_chunk_grid_applies(self) -> bool:
-        """Whether the runner's chunk-grid assert is live for this model."""
+        """Whether the runner needs a chunk-aligned resume for this model.
+
+        Mirror of ``mamba_chunk_grid_consumed`` in hpu_model_runner.py, plus the
+        conditions under which the runner reaches that code at all. The runner's
+        requirement comes from ``mamba_chunks_to_block_mapping``, which only
+        MambaMixer2 reads -- so for a GDN model (Qwen3-Next/3.5/3.6) this is
+        False and the shrink below is dormant: the runner tolerates the chunk
+        the encoder cap produced, and the cap then stops exactly on the previous
+        mm item's release point rather than rounding back short of it.
+
+        Keep in lock-step with the runner. If this says False where the runner
+        says True, the runner raises on an unaligned resume.
+        """
         return bool(self.need_mamba_block_aligned_split and self._num_mamba_like_layers
-                    and self.vllm_config.cache_config.enable_prefix_caching)
+                    and self.vllm_config.cache_config.enable_prefix_caching
+                    and self._num_mamba_like_layers > self._num_gdn_layers)
 
     def _splits_mm_item(self, request: Request, end: int) -> bool:
         """Whether a chunk ending at `end` lands inside an mm item's placeholders."""
@@ -270,13 +301,13 @@ class HPUAsyncScheduler(AsyncScheduler):
         """HPU override: align chunked-prefill splits to mamba_chunk_size.
 
         The upstream implementation aligns to block_size (e.g. 768).  On HPU
-        the model runner requires context_lens to be a multiple of
-        mamba_chunk_size.  Since block_size must stay large for memory-layout
-        reasons, we substitute mamba_chunk_size here.
+        a model runner with a MambaMixer2 layer requires context_lens to be a
+        multiple of mamba_chunk_size.  Since block_size must stay large for
+        memory-layout reasons, we substitute mamba_chunk_size here.
 
         Both the layer count and the chunk size must match the model runner's
-        own logic exactly (see the cached properties above); a mismatch makes
-        the runner assert on an unaligned context_lens.
+        own logic exactly (see the cached properties above); a mismatch can make
+        the runner raise on an unaligned context_lens.
 
         For Qwen3.5 hybrids on non-compact GDN with prefix caching
         (``_align_to_mamba_block``), chunk ends are additionally placed on the

@@ -1,22 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the HPUAsyncScheduler encoder-cap overrides.
+"""Chunk-grid precondition and encoder-cap guard tests.
 
 Since vllm-project/vllm#51603 the mamba-aligned split runs *before*
 ``_try_schedule_encoder_inputs``, so the encoder cap can stop a chunk just
-before an mm item it cannot admit and leave the request resuming off the
-mamba chunk grid. The runner then trips
-``assert context_lens[0] % mamba_chunk_size == 0`` and takes down every TP
-worker.
+before an mm item it cannot admit and leave the request resuming off the mamba
+chunk grid. Nothing in the scheduler re-aligns it, and nothing can: the cap is
+one of two upstream-owned sites that shorten ``num_new_tokens`` after the split
+(``_reserve_prefill_lookahead`` is the other).
 
-Covers:
+The requirement is therefore stated in the runner, where it belongs, and only
+for the layers that actually have it:
 
-* ``_try_schedule_encoder_inputs``: the decision table of the guard that keeps
-  the capped chunk on the grid -- pass through, shrink (with mm items dropped
-  and their encoder budget refunded), and defer when no grid boundary is left.
+* ``mamba_chunk_grid_violation``: the real precondition. Only
+  ``mamba_chunks_to_block_mapping`` is addressed by
+  ``context_lens // mamba_chunk_size``, so an unaligned resume is safe unless a
+  mamba state-block boundary falls strictly inside the chunk.
+* ``mamba_chunk_grid_consumed``: that mapping is read only by MambaMixer2. The
+  GDN layer Qwen3-Next/3.5/3.6 run writes one state to ``store_indices_tensor``
+  and never looks at the chunk grid, so the precondition is inert there.
+* ``_try_schedule_encoder_inputs``: the decision table of the shrink-to-grid
+  guard, which is consequently dormant for GDN and live for MambaMixer2 models.
+
 These run on CPU; no Gaudi hardware required.
 """
 from types import SimpleNamespace
 from unittest import mock
+
+import pytest
 
 from vllm_gaudi.v1.core.sched.hpu_async_scheduler import HPUAsyncScheduler
 
@@ -194,3 +204,115 @@ def test_unknown_chunk_size_is_untouched():
     request = _request([(16, 16290)])
     base = ([], 16, BUDGET, [])
     assert _call(scheduler, request, num_computed_tokens=0, num_new_tokens=512, base_result=base) == base
+
+
+# ---------------------------------------------------------------------------
+# mamba_chunk_grid_violation: the precondition the runner actually has.
+# ---------------------------------------------------------------------------
+
+MBLOCK = 1152  # cache_config.mamba_block_size on a Qwen3.5 hybrid
+
+
+@pytest.mark.parametrize(
+    "context_len, query_len, expected, why",
+    [
+        # Aligned resumes are unconditionally fine.
+        (0, 1136, None, "fresh prefill"),
+        (1024, 2048, None, "aligned resume spanning two blocks"),
+        # The production failure: resumes at the chat-template prefix. The only
+        # boundary is at context_len + query_len, which the clamp to the last
+        # physical chunk serves exactly, so this step was always safe.
+        (16, 1136, None, "encoder cap at a 16-token prefix, boundary is the chunk's own end"),
+        (1136, 16, None, "resume just below a boundary, chunk ends on it"),
+        (100, 1052, None, "resume past a 100-token leading image"),
+        # One token further and the boundary is strictly interior: the chunk
+        # that mapping picks ends past it, so its state is never checkpointed.
+        (16, 1137, MBLOCK, "boundary one token inside the chunk"),
+        (16, 2288, MBLOCK, "chunk spans a whole block"),
+        (2016, 1136, 2 * MBLOCK, "resume mid-block, chunk crosses the next boundary"),
+    ],
+)
+def test_precondition_fires_only_on_an_interior_boundary(context_len, query_len, expected, why):
+    from vllm_gaudi.v1.worker.hpu_model_runner import mamba_chunk_grid_violation
+
+    assert mamba_chunk_grid_violation(context_len, query_len, MBLOCK, CHUNK) == expected, why
+
+
+def test_precondition_matches_the_block_index_arithmetic():
+    """Cross-check against the mapping the runner builds, not just the formula.
+
+    For every (context_len, query_len) the precondition calls safe, each block
+    in the caching range must be written at the chunk that ends exactly on its
+    boundary -- or, for the trailing partial block, at the end of the chunk.
+    """
+    import torch
+
+    from vllm_gaudi.v1.worker.hpu_model_runner import (compute_prefix_caching_block_indices, mamba_chunk_grid_violation)
+
+    stride = MBLOCK // CHUNK
+    for context_len in range(0, 2 * MBLOCK, 16):
+        for query_len in (16, 128, 1136, 1152, 2288):
+            if mamba_chunk_grid_violation(context_len, query_len, MBLOCK, CHUNK) is not None:
+                continue
+            target_seq = -(-query_len // CHUNK) * CHUNK
+            nphysical = target_seq // CHUNK
+            _, first_sched, last_sched = compute_prefix_caching_block_indices(1, [context_len], [query_len], MBLOCK)
+            chunk_offset = (first_sched[0].item() + 1) * stride - 1 - context_len // CHUNK
+            n_blocks = last_sched[0].item() - first_sched[0].item() + 1
+            indices = torch.clamp(torch.arange(n_blocks) * stride + chunk_offset, max=nphysical - 1)
+
+            end = context_len + query_len
+            for b_rel, chunk_idx in enumerate(indices.tolist()):
+                boundary = (first_sched[0].item() + b_rel + 1) * MBLOCK
+                written_at = context_len + min((chunk_idx + 1) * CHUNK, query_len)
+                want = boundary if boundary <= end else end
+                assert written_at == want, (f"ctx={context_len} qlen={query_len} block={first_sched[0].item() + b_rel} "
+                                            f"written@{written_at} want@{want}")
+
+
+# ---------------------------------------------------------------------------
+# The consumer predicate, and a guard so it cannot silently rot.
+# ---------------------------------------------------------------------------
+
+_CHUNK_GRID_FIELDS = ("mamba_chunks_to_block_mapping", "seqlens_offsets_for_blocks", "blocks_caching_range")
+
+
+def test_gdn_layer_reads_no_chunk_grid_field():
+    """mamba_chunk_grid_consumed is False for GDN only because of this.
+
+    If the GDN layer ever starts consuming the chunk->block mapping, the
+    predicate in hpu_model_runner.py stops being safe and this must fail.
+    Read the source rather than importing: importing patches
+    QwenGatedDeltaNetAttention into three upstream modules.
+    """
+    import importlib.util
+
+    origin = importlib.util.find_spec("vllm_gaudi.models.qwen3_5").origin
+    with open(origin) as handle:
+        source = handle.read()
+    found = [field for field in _CHUNK_GRID_FIELDS if field in source]
+    assert not found, (f"HPUGatedDeltaNetAttention now references {found}; "
+                       "mamba_chunk_grid_consumed must account for it")
+
+
+def test_mamba_mixer2_does_read_the_chunk_grid():
+    """The other half: the predicate exists because this consumer is real."""
+    import importlib.util
+
+    origin = importlib.util.find_spec("vllm_gaudi.ops.hpu_mamba_mixer2").origin
+    with open(origin) as handle:
+        source = handle.read()
+    assert "ssm_state[mamba_chunks_to_block_mapping]" in source
+
+
+@pytest.mark.parametrize(
+    "num_mamba_like, num_gdn, expected, why",
+    [
+        (0, 0, False, "dense model"),
+        (24, 24, False, "GDN only: Qwen3-Next / Qwen3.5 / Qwen3.6"),
+        (24, 0, True, "MambaMixer2 hybrid, and granitemoehybrid via num_gdn=0"),
+        (24, 12, True, "mixed stack still has MambaMixer2 layers"),
+    ],
+)
+def test_consumer_predicate(num_mamba_like, num_gdn, expected, why):
+    assert (num_mamba_like > num_gdn) is expected, why
