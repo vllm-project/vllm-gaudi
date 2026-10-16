@@ -260,11 +260,27 @@ def hpu_causal_conv1d_fn(
     # causal_conv1d takes the same split via initial_state_idx.  When it is not
     # supplied (prefix caching off) read and write collapse to one slot, as before.
     if initial_state_idx is None:
+        read_idx_prefill = batch_cache_idx
         safe_read_idx_prefill = safe_cache_idx_prefill
     else:
         read_idx = (initial_state_idx.to(x_work.device)
                     if initial_state_idx.device != x_work.device else initial_state_idx)
-        safe_read_idx_prefill = torch.remainder(read_idx.reshape(-1), num_conv_slots_pf)
+        read_idx_prefill = read_idx.reshape(-1)
+        safe_read_idx_prefill = torch.remainder(read_idx_prefill, num_conv_slots_pf)
+
+    keep_initial_state = None
+    if has_initial_state is not None:
+        his = has_initial_state
+        if his.numel() < padded_batch:
+            his = torch.nn.functional.pad(his, (0, padded_batch - his.numel()), value=0)
+        keep_initial_state = (his[:padded_batch].bool().reshape(-1)
+                              & valid_mask_prefill.reshape(-1)
+                              & (read_idx_prefill.reshape(-1) >= 0))
+        if cache_indices is not None or initial_state_idx is not None:
+            # Explicit cache indices are physical block IDs, where block 0 is
+            # reserved as the null block. Implicit indices are batch rows, so
+            # row 0 remains a valid incoming state.
+            keep_initial_state = keep_initial_state & (read_idx_prefill.reshape(-1) != 0)
 
     # Batched path — HPU bucketed prefill pads all sequences to the same
     # length, so we can reshape to (B, dim, L) and process all sequences in
@@ -278,15 +294,9 @@ def hpu_causal_conv1d_fn(
         # Gather init states for all sequences at once: (B, state_len, dim) -> (B, dim, state_len)
         if has_initial_state is not None:
             raw_states = conv_states.index_select(0, safe_read_idx_prefill)[:, -state_len:, :].transpose(-1, -2)
-            # has_initial_state may have fewer elements than padded_batch;
-            # pad with False (0) so the mask broadcasts correctly.
-            his = has_initial_state
-            if his.numel() < padded_batch:
-                his = torch.nn.functional.pad(his, (0, padded_batch - his.numel()), value=0)
-            mask = his[:padded_batch].reshape(-1, 1, 1).to(dtype=raw_states.dtype)
-            # Also mask out padding slots to avoid reading stale state.
-            mask = mask * valid_mask_prefill.reshape(-1, 1, 1).to(dtype=mask.dtype)
-            init_states = raw_states * mask
+            assert keep_initial_state is not None
+            # Select instead of multiply to discard unused NaN/Inf state.
+            init_states = torch.where(keep_initial_state.reshape(-1, 1, 1), raw_states, torch.zeros_like(raw_states))
         else:
             init_states = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
 
@@ -343,8 +353,8 @@ def hpu_causal_conv1d_fn(
 
             if has_initial_state is not None:
                 raw_state_b = conv_states[read_idx_b, -state_len:, :].transpose(-1, -2).squeeze(0)
-                mask_b = has_initial_state[b] if has_initial_state.numel() > 1 else has_initial_state[0]
-                init_state_b = torch.where(mask_b, raw_state_b,
+                assert keep_initial_state is not None
+                init_state_b = torch.where(keep_initial_state[b], raw_state_b,
                                            torch.zeros(dim, state_len, device=x_work.device, dtype=work_dtype))
             else:
                 init_state_b = torch.zeros(dim, state_len, device=x_work.device, dtype=work_dtype)
