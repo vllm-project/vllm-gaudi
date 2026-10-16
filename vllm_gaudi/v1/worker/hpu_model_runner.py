@@ -36,6 +36,7 @@ from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemory
 from vllm_gaudi.extension.runtime import clear_config, finalize_config, get_config
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
+from vllm_gaudi.platform import gdn_mamba_types, mamba_reads_chunk_grid
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
 
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
@@ -158,13 +159,7 @@ try:
 except ImportError:
     LMCacheConnectorMetadata = None
 
-_GDN_MAMBA_TYPES: tuple[object, ...] = ("gdn_attention", "linear_attention")
-try:
-    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    _GDN_MAMBA_TYPES = (MambaAttentionBackendEnum.GDN_ATTN, MambaAttentionBackendEnum.LINEAR, "gdn_attention",
-                        "linear_attention")
-except (ImportError, AttributeError):
-    pass
+_GDN_MAMBA_TYPES = gdn_mamba_types()
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -919,6 +914,21 @@ def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num
     )
 
 
+def mamba_chunk_grid_violation(context_len: int, query_len: int, mamba_block_size: int,
+                               mamba_chunk_size: int) -> int | None:
+    """State-block boundary that ``mamba_chunks_to_block_mapping`` would
+    checkpoint at the wrong position, or None.
+
+    The mapping assumes the chunk starts on the chunk grid. Off the grid, only a
+    block boundary strictly inside the chunk is affected; one at the chunk's
+    end is served by the clamp to the last physical chunk.
+    """
+    if context_len % mamba_chunk_size == 0:
+        return None
+    next_boundary = (context_len // mamba_block_size + 1) * mamba_block_size
+    return next_boundary if context_len + query_len > next_boundary else None
+
+
 class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
 
     def __init__(self):
@@ -1434,6 +1444,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                      if self.mamba_chunk_size_is_explicit else 128)
         else:
             self.mamba_chunk_size = 0
+
+        # Set from the KV cache spec in initialize_kv_cache; strict until then.
+        self.mamba_chunk_grid_consumed = True
 
         self.use_hybrid_cache = os.getenv('VLLM_USE_HYBRID_CACHE', 'false').strip().lower() in ("1", "true")
         self.use_naive_mamba_cache_sharing = os.getenv('VLLM_USE_NAIVE_MAMBA_CACHE_SHARING',
@@ -2961,8 +2974,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self.use_prefix_caching:
                 assert len(contents.req_ids) == 1
                 assert mamba_block_size % self.mamba_chunk_size == 0
-                assert context_lens[0] % self.mamba_chunk_size == 0
+                if context_lens[0] % self.mamba_chunk_size:
+                    if self.mamba_chunk_grid_consumed:
+                        # Raise, not assert, so -O cannot turn this into a wrong checkpoint.
+                        unreachable = mamba_chunk_grid_violation(context_lens[0], query_lens[0], mamba_block_size,
+                                                                 self.mamba_chunk_size)
+                        if unreachable is not None:
+                            raise ValueError(f"Mamba prefill resumes at {context_lens[0]}, off the "
+                                             f"{self.mamba_chunk_size}-token chunk grid, and its {query_lens[0]} "
+                                             f"tokens span the state-block boundary at {unreachable}, "
+                                             "which no chunk end lands on.")
+                    else:
+                        logger.warning_once(
+                            "Mamba prefill resumed off the %d-token chunk grid (first at %d, %d scheduled); "
+                            "safe, no layer reads the chunk-to-state-block mapping.", self.mamba_chunk_size,
+                            context_lens[0], query_lens[0])
 
+            build_chunk_grid = self.use_prefix_caching and self.mamba_chunk_grid_consumed
+            if build_chunk_grid:
                 chunk_stride = mamba_block_size // self.mamba_chunk_size
                 # Max mamba blocks to cache for this bucket (upper bound)
                 max_cached_blocks = cdiv(target_seq, mamba_block_size) + 1
@@ -3053,7 +3082,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             padding_mask_flat = async_h2d_copy(padding_mask_flat_cpu, device=self.device)
             query_start_loc_p = async_h2d_copy(query_start_loc_p_cpu, dtype=torch.int32)
 
-            if self.use_prefix_caching:
+            if build_chunk_grid:
                 blocks_caching_range = async_h2d_copy(all_blocks_caching_ranges_cpu, device=self.device)
                 mamba_chunks_to_block_mapping = async_h2d_copy(all_mamba_chunks_to_block_mappings_cpu,
                                                                device=self.device)
@@ -6645,6 +6674,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        self.mamba_chunk_grid_consumed = mamba_reads_chunk_grid(kv_cache_config)
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         if self.num_mamba_like_layers > 0:
