@@ -169,6 +169,26 @@ jobs:
             //    commit, so fail instead of guessing.
             const runId = Number(dispatched?.workflow_run_id);
             if (!Number.isSafeInteger(runId) || runId <= 0) {
+              // Cancel (never follow) in-flight runs with this PR's exact title,
+              // so the unidentified run does not keep a Gaudi machine busy.
+              const title = `PR #${prNumber} [${headSha}]`;
+              for (let i = 0, done = false; i < 30 && !done; i++) {
+                try {
+                  const { data } = await github.rest.actions.listWorkflowRuns({
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    workflow_id: 'pre-merge.yaml', branch: baseRef,
+                    event: 'workflow_dispatch', per_page: 50,
+                  });
+                  for (const r of data.workflow_runs) {
+                    if (r.display_title !== title || ['completed', 'cancelled'].includes(r.status)) continue;
+                    await cancelDispatchedRun(r.id, 'dispatch returned no run id');
+                    done = true;
+                  }
+                } catch (e) {
+                  core.warning(`listWorkflowRuns transient error: ${e.message}`);
+                }
+                if (!done) await new Promise(r => setTimeout(r, 1000));
+              }
               core.setFailed('Dispatch response has no workflow_run_id; cannot identify the test run');
               return;
             }
