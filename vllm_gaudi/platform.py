@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import os
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm.config import ModelConfig, VllmConfig
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
     ModelConfig = None
     VllmConfig = None
@@ -54,6 +56,30 @@ def is_qwen3_5_hybrid_model(model_config: Optional[ModelConfig]) -> bool:
         architectures.add(architecture)
 
     return any(arch in QWEN3_5_HYBRID_ARCHS for arch in architectures)
+
+
+@functools.cache
+def gdn_mamba_types() -> tuple[object, ...]:
+    """``MambaSpec.mamba_type`` values of GDN and linear-attention layers."""
+    try:
+        from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+        return (MambaAttentionBackendEnum.GDN_ATTN, MambaAttentionBackendEnum.LINEAR, "gdn_attention",
+                "linear_attention")
+    except (ImportError, AttributeError):
+        return ("gdn_attention", "linear_attention")
+
+
+def mamba_reads_chunk_grid(kv_cache_config: "KVCacheConfig") -> bool:
+    """Whether a mamba layer may read the runner's chunk-to-state-block mapping.
+
+    MambaMixer2 does; GDN and linear attention write one state per request, and
+    any other type is treated as a reader. Keyed on ``mamba_type``, which the
+    layer class sets, so HF layer-type relabeling cannot change the answer.
+    """
+    from vllm.v1.kv_cache_interface import MambaSpec
+    return any(
+        isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type not in gdn_mamba_types()
+        for g in kv_cache_config.kv_cache_groups)
 
 
 class HpuPlatform(Platform):

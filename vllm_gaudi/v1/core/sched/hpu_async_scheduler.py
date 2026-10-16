@@ -238,39 +238,14 @@ class HPUAsyncScheduler(AsyncScheduler):
         return kept, aligned_end - num_computed_tokens, budget + refund, kept_external
 
     @cached_property
-    def _num_gdn_layers(self) -> int:
-        """GDN/linear-attention layer count, mirroring ``num_gdn`` in the runner.
-
-        granitemoehybrid relabels plain mamba layers as "linear_attention"
-        (transformers>=5 ``remap_legacy_layer_types``), so a type query alone
-        reports them as GDN. The runner excludes that model explicitly and this
-        must agree with it, or the gate below flips the wrong way.
-        """
-        model_config = self.vllm_config.model_config
-        if getattr(model_config.hf_config, "model_type", None) == "granitemoehybrid":
-            return 0
-        return sum(
-            model_config.get_num_layers_by_block_type(self.vllm_config.parallel_config, block_type)
-            for block_type in ("gdn_attention", "linear_attention"))
-
-    @cached_property
     def _mamba_chunk_grid_applies(self) -> bool:
-        """Whether the runner needs a chunk-aligned resume for this model.
-
-        Mirror of ``mamba_chunk_grid_consumed`` in hpu_model_runner.py, plus the
-        conditions under which the runner reaches that code at all. The runner's
-        requirement comes from ``mamba_chunks_to_block_mapping``, which only
-        MambaMixer2 reads -- so for a GDN model (Qwen3-Next/3.5/3.6) this is
-        False and the shrink below is dormant: the runner tolerates the chunk
-        the encoder cap produced, and the cap then stops exactly on the previous
-        mm item's release point rather than rounding back short of it.
-
-        Keep in lock-step with the runner. If this says False where the runner
-        says True, the runner raises on an unaligned resume.
+        """Whether the runner needs a chunk-aligned resume: a MambaMixer2 layer
+        with prefix caching. False for GDN, so the shrink above is dormant there.
         """
+        from vllm_gaudi.platform import mamba_reads_chunk_grid
         return bool(self.need_mamba_block_aligned_split and self._num_mamba_like_layers
                     and self.vllm_config.cache_config.enable_prefix_caching
-                    and self._num_mamba_like_layers > self._num_gdn_layers)
+                    and mamba_reads_chunk_grid(self.kv_cache_config))
 
     def _splits_mm_item(self, request: Request, end: int) -> bool:
         """Whether a chunk ending at `end` lands inside an mm item's placeholders."""
