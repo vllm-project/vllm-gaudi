@@ -432,19 +432,21 @@ jobs:
           echo "Test script exited with code: $EXITCODE"
 
   # Build-test the production NIXL Dockerfile when the PR changes it. The
-  # trigger detects the change and passes it as inputs.nixl_changed.
+  # trigger detects the change and passes it as inputs.nixl_changed. The steps,
+  # not the job, are conditional: a skipped job would also skip post-comment.
   build_nixl_dockerfile:
     needs: [pre_merge_hpu_test_build]
-    if: inputs.nixl_changed == 'true'
     runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
     timeout-minutes: 90
     steps:
       - name: Checkout repository
+        if: inputs.nixl_changed == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ inputs.head_sha }}
           clean: true
       - name: Build nixl Dockerfile (validation only)
+        if: inputs.nixl_changed == 'true'
         run: |
           echo "Building .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest to verify it builds correctly..."
           docker build \
@@ -454,17 +456,53 @@ jobs:
             .
           echo "Nixl Dockerfile build succeeded."
       - name: Cleanup test image
-        if: always()
+        if: always() && inputs.nixl_changed == 'true'
         run: docker rmi -f nixl-dockerfile-build-test || true
 
+  # Final gate: pre-merge-trigger.yaml reports this job's result. It passes only
+  # when every listed job has an allowed result, never on "nothing failed".
   pre_merge_hpu_test:
-    needs: [hpu_unit_tests, e2e, hpu_perf_tests, calibration_tests, calibration_arg_parsing_tests, pre_merge_hpu_test_build]
-    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
+    if: ${{ !cancelled() }}
+    needs: [pre-commit, pre_merge_hpu_test_build, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e, calibration_tests, calibration_arg_parsing_tests, build_nixl_dockerfile]
+    # Same Gaudi machine as the tests; hosted when no build ran (skip-gaudi-tests).
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name || 'ubuntu-latest' }}
     timeout-minutes: 15
-    # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
     steps:
-      - name: Succeeded if all previous jobs passed
-        run: echo "All previous jobs passed."
+      - name: Check the result of every required job
+        env:
+          SKIP_TESTS: ${{ inputs.skip_tests }}
+          PRE_COMMIT: ${{ needs.pre-commit.result }}
+          BUILD: ${{ needs.pre_merge_hpu_test_build.result }}
+          UNIT: ${{ needs.hpu_unit_tests.result }}
+          PD: ${{ needs.hpu_pd_tests.result }}
+          PERF: ${{ needs.hpu_perf_tests.result }}
+          DP: ${{ needs.hpu_dp_tests.result }}
+          E2E: ${{ needs.e2e.result }}
+          CALIBRATION: ${{ needs.calibration_tests.result }}
+          CALIBRATION_ARG_PARSING: ${{ needs.calibration_arg_parsing_tests.result }}
+          NIXL: ${{ needs.build_nixl_dockerfile.result }}
+        run: |
+          failed=0
+          expect() {  # expect <job> <result> <allowed result>
+            if [ "$2" = "$3" ]; then
+              echo "$1: $2"
+            else
+              echo "::error::$1: $2 (expected $3)"
+              failed=1
+            fi
+          }
+          if [ "$SKIP_TESTS" = "true" ]; then want_gaudi=skipped; else want_gaudi=success; fi
+          expect pre-commit "$PRE_COMMIT" success
+          expect pre_merge_hpu_test_build "$BUILD" "$want_gaudi"
+          expect hpu_unit_tests "$UNIT" "$want_gaudi"
+          expect hpu_pd_tests "$PD" "$want_gaudi"
+          expect hpu_perf_tests "$PERF" "$want_gaudi"
+          expect hpu_dp_tests "$DP" "$want_gaudi"
+          expect e2e "$E2E" "$want_gaudi"
+          expect calibration_tests "$CALIBRATION" "$want_gaudi"
+          expect calibration_arg_parsing_tests "$CALIBRATION_ARG_PARSING" "$want_gaudi"
+          expect build_nixl_dockerfile "$NIXL" "$want_gaudi"
+          exit "$failed"
   # This is a new job, at the same level as hpu-test-suite
   post-comment:
     name: Post PR Comment
@@ -477,7 +515,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Post Comment on Success
-        if: inputs.is_merge_group != 'true' && inputs.pr_number != '' && needs.pre_merge_hpu_test.result == 'success'
+        if: inputs.is_merge_group != 'true' && inputs.pr_number != '' && inputs.skip_tests != 'true' && needs.pre_merge_hpu_test.result == 'success'
         uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9  # v5.0.0
         with:
           issue-number: ${{ inputs.pr_number }}
