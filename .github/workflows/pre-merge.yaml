@@ -35,105 +35,22 @@ concurrency:
   group: ${{ github.workflow }}-${{ inputs.pr_number || inputs.head_sha || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Validated in the first step of pre_merge_hpu_test_build, which every Gaudi
+  # job needs.
+  HEAD_SHA: ${{ inputs.head_sha }}
+  IMAGE: hpu-plugin-v1-test-env-pre-merge-${{ inputs.head_sha }}
+
 jobs:
-  retrieve_head_sha:
-    runs-on: ubuntu-latest
-    timeout-minutes: 720
-    outputs:
-      head_sha: ${{ steps.set_sha.outputs.head_sha }}
-    steps:
-      - name: Set Head SHA Output
-        id: set_sha
-        run: |
-          echo "head_sha=${{ inputs.head_sha }}" >> "$GITHUB_OUTPUT"
-
-  # --- NEW JOB ---
-  # This job runs first on the self-hosted pool, picks a runner,
-  # and outputs its name so all other jobs can target it.
-  # hourly-ci is selected by the trigger when a maintainer's PR title contains
-  # [FIX_FOR_VLLM_LATEST]; the boolean arrives as inputs.use_hourly_runner.
-  discover_runner:
-    runs-on: ${{ inputs.use_hourly_runner == 'true' && 'hourly-ci' || 'pr-ci' }}
-    timeout-minutes: 720
-    outputs:
-      runner_name: ${{ steps.get_name.outputs.name }}
-    steps:
-      - name: Get runner name
-        id: get_name
-        run: |
-          echo "This workflow will run on: ${{ runner.name }}"
-          echo "name=${{ runner.name }}" >> "$GITHUB_OUTPUT"
-
-  discover_tests:
-    # --- UPDATED: Add discover_runner dependency ---
-    needs: [discover_runner, retrieve_head_sha]
-    # --- UPDATED: Run on the specific node ---
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
-    timeout-minutes: 720
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
-          clean: true # Ensure a clean workspace before checkout
-      - name: Discover test functions
-        id: set-matrix
-        run: |
-          # This command robustly discovers all functions in the script that match the 'run_*'
-          # naming convention, excluding the main 'run_all_tests' function itself.
-          # The final list is formatted into a JSON array required for the matrix strategy.
-          TEST_FUNCTIONS=$( grep '^run_' ./tests/full_tests/ci_e2e_discoverable_tests.sh | \
-                      awk '{print $1}' | \
-                      sed 's/()//' | \
-                      jq -R . | jq -s -c . )
-
-          echo "Discovered test matrix: $TEST_FUNCTIONS"
-          # Fail the job if no tests were found.
-          if [ "$TEST_FUNCTIONS" = "[]" ]; then
-            echo "::error::No test functions were discovered. Failing the workflow."
-            exit 1
-          fi
-          echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
-
-  discover_calibration_tests:
-    needs: [discover_runner, retrieve_head_sha]
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
-    timeout-minutes: 720
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
-          clean: true
-      - name: Discover calibration test functions
-        id: set-matrix
-        run: |
-          TEST_FUNCTIONS=$( grep '^run_' ./tests/calibration_tests/ci_calibration_smoke_tests.sh | \
-                      awk '{print $1}' | \
-                      sed 's/()//' | \
-                      jq -R . | jq -s -c . )
-
-          echo "Discovered calibration test matrix: $TEST_FUNCTIONS"
-          if [ "$TEST_FUNCTIONS" = "[]" ]; then
-            echo "::error::No calibration test functions were discovered. Failing the workflow."
-            exit 1
-          fi
-          echo "matrix=$TEST_FUNCTIONS" >> "$GITHUB_OUTPUT"
-
   pre-commit:
     # This job runs in parallel with the build job
-    needs: [retrieve_head_sha]
     runs-on: ubuntu-latest
-    timeout-minutes: 720
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          ref: ${{ inputs.head_sha }}
           clean: true # Ensure a clean workspace before checkout
 
       - name: Setup Python
@@ -151,24 +68,68 @@ jobs:
         with:
           extra_args: --all-files --hook-stage manual
 
+  # Picks the Gaudi machine; every later Gaudi job runs on the same one.
+  # hourly-ci is selected by the trigger when a maintainer's PR title contains
+  # [FIX_FOR_VLLM_LATEST]; the boolean arrives as inputs.use_hourly_runner.
   pre_merge_hpu_test_build:
-    # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre-commit, discover_tests, discover_calibration_tests, discover_runner, retrieve_head_sha]
+    needs: [pre-commit]
     if: inputs.skip_tests != 'true'
-    # --- UPDATED: Run on the specific node ---
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
-    timeout-minutes: 720
+    runs-on: ${{ inputs.use_hourly_runner == 'true' && 'hourly-ci' || 'pr-ci' }}
+    timeout-minutes: 90
     permissions:
       contents: read # Required to checkout code and read history
     outputs:
+      runner_name: ${{ steps.runner.outputs.name }}
       target_commit: ${{ steps.checkout_vllm_upstream.outputs.TEST_VLLM_COMMIT }}
+      e2e_matrix: ${{ steps.discover.outputs.e2e }}
+      calibration_matrix: ${{ steps.discover.outputs.calibration }}
     steps:
+      - name: Validate head SHA
+        run: |
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::head_sha must be a full 40-character lowercase commit SHA."
+            exit 1
+          fi
+      - name: Get runner name
+        id: runner
+        # RUNNER_NAME is set by the runner itself.
+        run: |
+          echo "This workflow will run on: $RUNNER_NAME"
+          echo "name=$RUNNER_NAME" >> "$GITHUB_OUTPUT"
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Fetch full history for accurate commit comparison
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          ref: ${{ inputs.head_sha }}
           clean: true # Ensure a clean workspace before checkout
+      - name: Discover test functions
+        id: discover
+        run: |
+          # Prints the script's run_* functions as a JSON array for the matrix
+          # strategy. Fails when there are none or when a name is not a plain
+          # run_<identifier>, because the names end up in shell commands.
+          discover() {
+            local names bad
+            names=$(grep '^run_' "$1" | awk '{print $1}' | sed 's/()//' || true)
+            if [ -z "$names" ]; then
+              echo "::error::No test functions were discovered in $1." >&2
+              return 1
+            fi
+            if bad=$(grep -n -v -E '^run_[A-Za-z0-9_.]+$' <<< "$names"); then
+              echo "::error::Invalid test function names in $1 (position:name below)." >&2
+              echo "$bad" >&2
+              return 1
+            fi
+            jq -R . <<< "$names" | jq -s -c .
+          }
+          E2E=$(discover ./tests/full_tests/ci_e2e_discoverable_tests.sh)
+          CALIBRATION=$(discover ./tests/calibration_tests/ci_calibration_smoke_tests.sh)
+          echo "Discovered test matrix: $E2E"
+          echo "Discovered calibration test matrix: $CALIBRATION"
+          {
+            echo "e2e=$E2E"
+            echo "calibration=$CALIBRATION"
+          } >> "$GITHUB_OUTPUT"
       - name: Read Stable Commit from Target Branch
         id: read_stable_commit
         run: |
@@ -259,7 +220,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Fetch full history for accurate commit comparison
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          ref: ${{ inputs.head_sha }}
           clean: true # Ensure a clean workspace before checkout
 
       - name: Setup Docker environment and build image
@@ -268,60 +229,56 @@ jobs:
           docker build \
             --no-cache \
             --build-arg "VLLM_COMMIT_ARG=$TEST_VLLM_COMMIT" \
-            -t hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
+            -t "$IMAGE" \
             -f .github/Dockerfile.ci .
           echo "Docker image built successfully."
 
   hpu_unit_tests:
-    # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre_merge_hpu_test_build, discover_runner, retrieve_head_sha]
-    # --- UPDATED: Run on the specific node ---
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    needs: [pre_merge_hpu_test_build]
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
     environment: approved-workflow
-    timeout-minutes: 720
+    timeout-minutes: 45
     steps:
       - name: Run pytest in tests/unit_tests
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-unit-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} || true; }
+          remove_docker_containers() { docker rm -f "hpu-plugin-v1-test-unit-tests-$HEAD_SHA" || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
           echo "Running HPU plugin v1 unit tests"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-unit-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} --network=host \
+          docker run --rm --runtime=habana --name="hpu-plugin-v1-test-unit-tests-$HEAD_SHA" --network=host \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
+            "$IMAGE" \
             /bin/bash -c "pytest -vvv --timeout=300 --durations=10 --durations-min=1.0 /workspace/vllm-gaudi/tests/unit_tests"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   hpu_pd_tests:
-    # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
-    # --- UPDATED: Run on the specific node ---
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests]
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
     environment: approved-workflow
-    timeout-minutes: 720
+    timeout-minutes: 60
     steps:
       - name: Run test scripts
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-pd-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} || true; }
+          remove_docker_containers() { docker rm -f "hpu-plugin-v1-test-pd-tests-$HEAD_SHA" || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
           echo "Running HPU plugin v1 nixl pd tests"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} --network=host \
+          docker run --rm --runtime=habana --name="hpu-plugin-v1-test-pd-tests-$HEAD_SHA" --network=host \
             --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
             -v /mnt/wheels_cache:/tmp/wheels_cache \
-            hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
+            "$IMAGE" \
             /bin/bash -c "
                 pip install lm-eval[api] &&
                 cd /workspace/vllm-gaudi/tests/unit_tests &&
@@ -331,145 +288,144 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   hpu_perf_tests:
-    # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
-    # --- UPDATED: Run on the specific node ---
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests]
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
     environment: approved-workflow
-    timeout-minutes: 720
+    timeout-minutes: 45
     steps:
       - name: Run test scripts
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-perf-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} || true; }
+          remove_docker_containers() { docker rm -f "hpu-plugin-v1-test-perf-tests-$HEAD_SHA" || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
           echo "Running HPU plugin v1 perf tests"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-perf-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} --network=host \
+          docker run --rm --runtime=habana --name="hpu-plugin-v1-test-perf-tests-$HEAD_SHA" --network=host \
             --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -e HF_HOME=/workspace/hf_cache \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
+            "$IMAGE" \
             /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_perf_tests.sh"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   hpu_dp_tests:
-    # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_runner, retrieve_head_sha]
-    # --- UPDATED: Run on the specific node ---
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests]
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
     environment: approved-workflow
-    timeout-minutes: 720
+    timeout-minutes: 30
     steps:
       - name: Run test scripts
         run: |
           EXITCODE=1
-          remove_docker_containers() { docker rm -f hpu-plugin-v1-test-dp-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} || true; }
+          remove_docker_containers() { docker rm -f "hpu-plugin-v1-test-dp-tests-$HEAD_SHA" || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
           echo "Running HPU plugin v1 dp tests"
-          docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-${{ needs.retrieve_head_sha.outputs.head_sha }} --network=host \
+          docker run --rm --runtime=habana --name="hpu-plugin-v1-test-dp-tests-$HEAD_SHA" --network=host \
             --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e VLLM_SKIP_WARMUP=true \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-            hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
+            "$IMAGE" \
             /bin/bash -c "python -u /workspace/vllm-gaudi/examples/data_parallel.py --dp-size 2 --tp-size 2"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
   e2e:
-    # --- UPDATED: Add discover_runner dependency ---
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_tests, discover_runner, retrieve_head_sha]
-    # --- UPDATED: Run on the specific node ---
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests]
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
     environment: approved-workflow
-    timeout-minutes: 720
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # The list of test functions is dynamically populated from the output of the 'discover_tests' job.
-        test_function: ${{ fromJson(needs.discover_tests.outputs.matrix) }}
+        # The list of test functions is discovered by pre_merge_hpu_test_build.
+        test_function: ${{ fromJson(needs.pre_merge_hpu_test_build.outputs.e2e_matrix) }}
 
     steps:
       - name: Run test suite - ${{ matrix.test_function }}
+        env:
+          TEST_FUNCTION: ${{ matrix.test_function }}
+          CONTAINER_NAME: hpu-plugin-test-e2e-${{ inputs.head_sha }}-${{ matrix.test_function }}
         run: |
           EXITCODE=1
-          CONTAINER_NAME="hpu-plugin-test-e2e-${{ needs.retrieve_head_sha.outputs.head_sha }}-${{ matrix.test_function }}"
           # Ensure the container is removed upon exit, regardless of success or failure.
-          remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
+          remove_docker_containers() { docker rm -f "$CONTAINER_NAME" || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
-          echo "Running HPU plugin test: ${{ matrix.test_function }}"
-          docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+          echo "Running HPU plugin test: $TEST_FUNCTION"
+          docker run --rm --runtime=habana --name="$CONTAINER_NAME" --network=host \
             --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -v /mnt/hf_cache:/workspace/hf_cache \
-             hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
-            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_e2e_discoverable_tests.sh" "${{ matrix.test_function }}"
+             "$IMAGE" \
+            /bin/bash "/workspace/vllm-gaudi/tests/full_tests/ci_e2e_discoverable_tests.sh" "$TEST_FUNCTION"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
   calibration_tests:
-    needs: [pre_merge_hpu_test_build, hpu_unit_tests, discover_calibration_tests, discover_runner, retrieve_head_sha]
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests]
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
     environment: approved-workflow
-    timeout-minutes: 720
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        test_function: ${{ fromJson(needs.discover_calibration_tests.outputs.matrix) }}
+        test_function: ${{ fromJson(needs.pre_merge_hpu_test_build.outputs.calibration_matrix) }}
 
     steps:
       - name: Run calibration test - ${{ matrix.test_function }}
+        env:
+          TEST_FUNCTION: ${{ matrix.test_function }}
+          CONTAINER_NAME: hpu-plugin-test-calibration-${{ inputs.head_sha }}-${{ matrix.test_function }}
         run: |
           EXITCODE=1
-          CONTAINER_NAME="hpu-plugin-test-calibration-${{ needs.retrieve_head_sha.outputs.head_sha }}-${{ matrix.test_function }}"
-          remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
+          remove_docker_containers() { docker rm -f "$CONTAINER_NAME" || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
-          echo "Running HPU calibration test: ${{ matrix.test_function }}"
-          docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
+          echo "Running HPU calibration test: $TEST_FUNCTION"
+          docker run --rm --runtime=habana --name="$CONTAINER_NAME" --network=host \
             --privileged \
             -e HABANA_VISIBLE_DEVICES=all \
             -e HF_HOME=/workspace/hf_cache \
             -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
             -e VLLM_GAUDI_PREFIX=/workspace/vllm-gaudi \
             -v /mnt/hf_cache:/workspace/hf_cache \
-             hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
-            /bin/bash "/workspace/vllm-gaudi/tests/calibration_tests/ci_calibration_smoke_tests.sh" "${{ matrix.test_function }}"
+             "$IMAGE" \
+            /bin/bash "/workspace/vllm-gaudi/tests/calibration_tests/ci_calibration_smoke_tests.sh" "$TEST_FUNCTION"
 
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
   calibration_arg_parsing_tests:
-    needs: [pre_merge_hpu_test_build, discover_runner, retrieve_head_sha]
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
-    timeout-minutes: 720
+    needs: [pre_merge_hpu_test_build]
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
+    timeout-minutes: 15
     steps:
       - name: Run calibration arg parsing tests
+        env:
+          CONTAINER_NAME: hpu-plugin-test-calibration-arg-parsing-${{ inputs.head_sha }}
         run: |
           EXITCODE=1
-          CONTAINER_NAME="hpu-plugin-test-calibration-arg-parsing-${{ needs.retrieve_head_sha.outputs.head_sha }}"
-          remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
+          remove_docker_containers() { docker rm -f "$CONTAINER_NAME" || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
 
           echo "Running calibration arg parsing tests"
-          docker run --rm --name=$CONTAINER_NAME \
-             hpu-plugin-v1-test-env-pre-merge-${{ needs.retrieve_head_sha.outputs.head_sha }} \
+          docker run --rm --name="$CONTAINER_NAME" \
+             "$IMAGE" \
             /bin/bash "/workspace/vllm-gaudi/tests/calibration_tests/test_calibrate_model_arg_parsing.sh"
 
           EXITCODE=$?
@@ -478,15 +434,15 @@ jobs:
   # Build-test the production NIXL Dockerfile when the PR changes it. The
   # trigger detects the change and passes it as inputs.nixl_changed.
   build_nixl_dockerfile:
-    needs: [discover_runner, retrieve_head_sha]
+    needs: [pre_merge_hpu_test_build]
     if: inputs.nixl_changed == 'true'
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
-    timeout-minutes: 720
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
+    timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ needs.retrieve_head_sha.outputs.head_sha }}
+          ref: ${{ inputs.head_sha }}
           clean: true
       - name: Build nixl Dockerfile (validation only)
         run: |
@@ -502,11 +458,9 @@ jobs:
         run: docker rmi -f nixl-dockerfile-build-test || true
 
   pre_merge_hpu_test:
-    # --- UPDATED: Add discover_runner dependency ---
-    needs: [hpu_unit_tests, e2e, hpu_perf_tests, calibration_tests, calibration_arg_parsing_tests, discover_runner]
-    # --- UPDATED: Run on the specific node ---
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
-    timeout-minutes: 720
+    needs: [hpu_unit_tests, e2e, hpu_perf_tests, calibration_tests, calibration_arg_parsing_tests, pre_merge_hpu_test_build]
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
+    timeout-minutes: 15
     # This job is required to pass for pre-merge CI. By itself it does nothing, and will only pass if all jobs specified in "needs" list pass.
     steps:
       - name: Succeeded if all previous jobs passed
@@ -517,7 +471,7 @@ jobs:
     # This job runs after hpu-test-suite completes
     needs: [pre_merge_hpu_test, pre_merge_hpu_test_build]
     runs-on: ubuntu-latest
-    timeout-minutes: 720
+    timeout-minutes: 15
     permissions:
       # Permissions are required on a per-job basis
       pull-requests: write
@@ -535,14 +489,15 @@ jobs:
 
   cleanup_docker_image:
     name: Cleanup Docker Image
-    if: always()
-    needs: [discover_runner, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e, calibration_tests, calibration_arg_parsing_tests]
-    runs-on: ${{ needs.discover_runner.outputs.runner_name }}
-    timeout-minutes: 720
+    # Runs whenever the build job got a machine, also after failures.
+    if: ${{ always() && needs.pre_merge_hpu_test_build.outputs.runner_name != '' }}
+    needs: [pre_merge_hpu_test_build, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e, calibration_tests, calibration_arg_parsing_tests]
+    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
+    timeout-minutes: 15
     steps:
       - name: Remove Docker image to free up space
-        env:
-          HEAD_SHA: ${{ inputs.head_sha }}
         run: |
+          echo "Removing containers left by this workflow run..."
+          docker ps -aq --filter "name=-$HEAD_SHA" | xargs -r docker rm -f || true
           echo "Cleaning up Docker images created by this workflow run..."
-          docker rmi -f "hpu-plugin-v1-test-env-pre-merge-$HEAD_SHA" || true
+          docker rmi -f "$IMAGE" || true
