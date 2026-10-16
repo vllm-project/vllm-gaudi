@@ -6,8 +6,8 @@ name: Basic HPU test suite
 run-name: "PR #${{ inputs.pr_number }} [${{ inputs.head_sha }}]"
 
 # pre-merge-trigger.yaml looks for the next line in the base branch's copy of
-# this file. With it, the trigger sends nixl_changed and does the draft and
-# behind-base checks itself.
+# this file. With it, the trigger sends nixl_changed, does the draft and
+# behind-base checks itself, and waits for the pre_merge_hpu_test job.
 # pre-merge-contract: 2
 
 on:
@@ -43,7 +43,8 @@ env:
 
 jobs:
   pre-commit:
-    # This job runs in parallel with the build job
+    # Runs in parallel with the Gaudi jobs. pre_merge_hpu_test requires it, and
+    # pre-merge-trigger.yaml cancels the run when it fails.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -72,7 +73,6 @@ jobs:
   # hourly-ci is selected by the trigger when a maintainer's PR title contains
   # [FIX_FOR_VLLM_LATEST]; the boolean arrives as inputs.use_hourly_runner.
   pre_merge_hpu_test_build:
-    needs: [pre-commit]
     if: inputs.skip_tests != 'true'
     runs-on: ${{ inputs.use_hourly_runner == 'true' && 'hourly-ci' || 'pr-ci' }}
     timeout-minutes: 90
