@@ -7536,7 +7536,7 @@ class HPUAttentionMetadataProcessor:
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
 
-        if self.interleaved_sliding_window:
+        if self.sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
             self.slice_size = int(with_default(get_config().PT_HPU_SDPA_BC_FACTOR, "1024"))
@@ -7658,27 +7658,31 @@ class HPUAttentionMetadataProcessor:
             block_size = getattr(prefill_metadata, "block_size", self.block_size)
             max_context_len = max_context_len * block_size
 
+            # Masks are [batch, 1, query, context]: a cached prefill can be padded to several rows
+            # (data parallel padding, prompt batch size buckets above 1).
             if window_block_list is not None:
                 # Re-anchor ctx_len to the block-aligned gather frame so a
                 # non-block-aligned ctx_len doesn't misalign the sliding-window mask.
                 round_up_ctx = ((context_lens_t + block_size - 1) // block_size) * block_size
                 frame_base = torch.clamp(round_up_ctx - max_context_len, min=0)
                 context_lens_trimmed = context_lens_t - frame_base
-                invalid_lens_t = context_lens_trimmed - window_size + torch.arange(seq_len, device=device) - 1
-                past_indices = torch.arange(max_context_len, device=device)
-                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                             (past_indices.unsqueeze(0) < context_lens_trimmed.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+                invalid_lens_t = (context_lens_trimmed.view(-1, 1) - window_size +
+                                  torch.arange(seq_len, device=device).view(1, -1) - 1)
+                past_indices = torch.arange(max_context_len, device=device).view(1, 1, -1)
+                past_mask = ((past_indices > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices < context_lens_trimmed.view(-1, 1, 1))).unsqueeze(1)
             else:
                 # Full block list: use absolute coordinate frame with window lower bound
-                invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-                past_indices = torch.arange(max_context_len, device=device)
-                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                             (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+                invalid_lens_t = (context_lens_t.view(-1, 1) - window_size +
+                                  torch.arange(seq_len, device=device).view(1, -1) - 1)
+                past_indices = torch.arange(max_context_len, device=device).view(1, 1, -1)
+                past_mask = ((past_indices > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices < context_lens_t.view(-1, 1, 1))).unsqueeze(1)
 
             # Create boolean sliding window mask
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
             causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
-            causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
+            causal_mask = causal_mask.view(1, 1, seq_len, seq_len).expand(batch_size, -1, -1, -1)
 
             if image_seg_ids is not None:
                 # The bidirectional term only ever opens forward pairs (j > i),
@@ -7884,7 +7888,12 @@ class HPUAttentionMetadataProcessor:
         """
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
-            if self.interleaved_sliding_window:
+            # Non-interleaved SWA otherwise passes window_size to FusedSDPA, which aligns the causal mask
+            # top-left: wrong once the prompt has context (APC hit, chunked prefill), so bias it here.
+            # FusedSDPA only: the helper builds context columns for FusedSDPA alone.
+            # Remove once FusedSDPA or upstream supports bottom-right causal alignment with window_size.
+            if self.interleaved_sliding_window or (self.prefill_use_fusedsdpa and self.sliding_window
+                                                   and attn_metadata.block_list is not None):
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, device, dtype)
             if model_has_chunked_attention:
