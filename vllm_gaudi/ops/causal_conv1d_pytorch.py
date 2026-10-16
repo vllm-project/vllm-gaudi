@@ -283,10 +283,12 @@ def hpu_causal_conv1d_fn(
             his = has_initial_state
             if his.numel() < padded_batch:
                 his = torch.nn.functional.pad(his, (0, padded_batch - his.numel()), value=0)
-            mask = his[:padded_batch].reshape(-1, 1, 1).to(dtype=raw_states.dtype)
-            # Also mask out padding slots to avoid reading stale state.
-            mask = mask * valid_mask_prefill.reshape(-1, 1, 1).to(dtype=mask.dtype)
-            init_states = raw_states * mask
+            keep = (his[:padded_batch].bool().reshape(-1)
+                    & valid_mask_prefill.reshape(-1))
+            # Select instead of multiply to discard unused NaN/Inf state.
+            # Slot 0 is valid when this op uses implicit cache indices.
+            init_states = torch.where(keep.reshape(-1, 1, 1), raw_states,
+                                      torch.zeros_like(raw_states))
         else:
             init_states = torch.zeros(padded_batch, dim, state_len, device=x_work.device, dtype=work_dtype)
 
