@@ -28,9 +28,10 @@ Key subsystems:
 | `vllm_gaudi/v1/` | V1 engine worker and model runner for HPU |
 | `vllm_gaudi/distributed/` | HPU communicator and KV transfer connectors (NIXL) |
 | `vllm_gaudi/lora/` | LoRA layer support for HPU-specific layers |
+| `vllm_gaudi/calibration/` | FP8 (INC) calibration tool, the `vllm-gaudi-calibrate` command |
 | `docs/` | MkDocs-based documentation |
 | `tests/` | Unit tests (`unit_tests/`), full model tests (`full_tests/`), upstream compat tests (`upstream_tests/`) |
-| `calibration/` | FP8 calibration pipeline scripts |
+| `calibration/` | Calibration requirements, sample INC configs, and deprecated script stubs |
 | `.cd/` | Docker build files and CI/CD configs |
 
 ## Code Style

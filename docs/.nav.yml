@@ -15,8 +15,11 @@ nav:
     - configuration/long_context.md
     - Calibration: 
       - configuration/calibration/calibration.md
-      - configuration/calibration/calibration_one_node.md
-      - configuration/calibration/calibration_multi_node.md
+      - configuration/calibration/quickstart.md
+      - configuration/calibration/reference.md
+      - configuration/calibration/advanced.md
+      - configuration/calibration/troubleshooting.md
+      - configuration/calibration/migration.md
     - Quantization and Inference: 
       - configuration/quantization/quantization.md
       - configuration/quantization/inc.md
