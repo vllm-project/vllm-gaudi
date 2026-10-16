@@ -28,7 +28,7 @@ jobs:
     environment: pre-merge-approval
     timeout-minutes: 720
     permissions:
-      actions: write        # dispatch workflows, read run status, cancel runs
+      actions: write        # dispatch workflows, read run and job status, cancel runs
       contents: read        # read the base branch's pre-merge.yaml, compare commits
       pull-requests: write  # read PR labels; post the "CI Blocked" comment
       issues: read          # listEventsForTimeline to verify skip-gaudi-tests labeler
@@ -105,7 +105,7 @@ jobs:
               core.setFailed(`CI blocked: ${reason}`);
             }
 
-            // The result is the whole run's conclusion.
+            // Legacy pre-merge.yaml: the result is the whole run's conclusion.
             async function waitForRun(id) {
               for (let i = 0; i < 4320; i++) {
                 try {
@@ -125,6 +125,52 @@ jobs:
               }
               await cancelDispatchedRun(id, 'trigger poll timeout (12 h)');
               core.setFailed('Timed out (12 h) waiting for pre-merge.yaml');
+            }
+
+            // Contract 2: the result is the pre_merge_hpu_test job alone, so the
+            // check turns green as soon as the tests are done. Exactly one such
+            // job in the latest attempt, and only 'success' passes. A failed
+            // pre-commit cancels the run.
+            async function waitForGate(id) {
+              const GATE = 'pre_merge_hpu_test';
+              for (let i = 0; i < 1440; i++) {
+                try {
+                  // Read the run first: if it had already ended, the job list
+                  // below is final.
+                  const { data: run } = await github.rest.actions.getWorkflowRun({
+                    owner: context.repo.owner, repo: context.repo.repo, run_id: id,
+                  });
+                  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                    owner: context.repo.owner, repo: context.repo.repo, run_id: id,
+                    filter: 'latest', per_page: 100,
+                  });
+                  if (jobs.some(j => j.name === 'pre-commit' && j.conclusion === 'failure')) {
+                    await cancelDispatchedRun(id, 'pre-commit failed');
+                    core.setFailed(`pre-commit failed: ${run.html_url}`);
+                    return;
+                  }
+                  const gates = jobs.filter(j => j.name === GATE);
+                  if (gates.length > 1) {
+                    core.setFailed(`Found ${gates.length} ${GATE} jobs, expected one: ${run.html_url}`);
+                    return;
+                  }
+                  if (gates.length === 1 && gates[0].status === 'completed') {
+                    if (gates[0].conclusion !== 'success')
+                      core.setFailed(`${GATE} ${gates[0].conclusion}: ${run.html_url}`);
+                    return;
+                  }
+                  if (run.status === 'completed') {
+                    core.setFailed(`pre-merge ${run.conclusion} without a ${GATE} result: ${run.html_url}`);
+                    return;
+                  }
+                  core.info(`Status: ${run.status}, ${GATE}: ${gates[0]?.status ?? 'not started'} (${i + 1}/1440)`);
+                } catch (e) {
+                  core.warning(`Transient error while polling: ${e.message}`);
+                }
+                await new Promise(r => setTimeout(r, 30000));
+              }
+              await cancelDispatchedRun(id, 'trigger poll timeout (12 h)');
+              core.setFailed(`Timed out (12 h) waiting for ${GATE}`);
             }
 
             const headSha   = pr.head.sha;
@@ -164,9 +210,9 @@ jobs:
             }
 
             // The base branch's pre-merge.yaml carries this marker when it takes
-            // the nixl_changed input and leaves the draft and behind-base checks
-            // to this trigger. Without it (older release branches) dispatch
-            // exactly as before.
+            // the nixl_changed input, leaves the draft and behind-base checks to
+            // this trigger and ends in the pre_merge_hpu_test gate job. Without
+            // it (older release branches) dispatch and wait exactly as before.
             const CONTRACT_MARKER = '# pre-merge-contract: 2';
             const { data: wfFile } = await github.rest.repos.getContent({
               owner: context.repo.owner, repo: context.repo.repo,
@@ -279,7 +325,8 @@ jobs:
             core.setOutput('run_id', String(runId));
 
             // 3. Wait for the result (12 h max).
-            await waitForRun(runId);
+            if (contract2) await waitForGate(runId);
+            else await waitForRun(runId);
 
       - name: Cancel dispatched run if trigger was cancelled or failed
         if: always() && steps.dispatch.outputs.run_id != ''
