@@ -66,6 +66,17 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     seqlens_offsets_for_blocks: Optional[torch.Tensor] = None
     window_block_list: Optional[torch.Tensor] = None
     image_seg_ids: Optional[torch.Tensor] = None
+    # Host-side count of real (non-padded) decode requests, shipped by the
+    # model runner before any H2D copy as a 0-dim CPU int64 tensor so that
+    # consumers can read it with int() without a device sync. It is a
+    # tensor, not a Python int, because the trimmed attention-metadata
+    # tuple is hashed by value for primitives (see trim_attn_metadata in
+    # vllm_gaudi/v1/worker/hpu_model_runner.py), and the real decode count
+    # varies inside a batch bucket -- an int there would multiply graph
+    # captures per batch composition, while tensors hash by metadata.
+    # Optional and None by default: producers that do not ship it keep
+    # counting on their own.
+    num_real_input_reqs: Optional[torch.Tensor] = None
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
@@ -138,7 +149,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              load_indices_tensor=None,
                              store_indices_tensor=None,
                              query_start_loc=None,
-                             seq_lens_tensor=None):
+                             seq_lens_tensor=None,
+                             num_real_input_reqs=None):
         return cls(is_prompt=False,
                    block_mapping=None,
                    alibi_blocks=None,
@@ -161,4 +173,42 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    load_indices_tensor=load_indices_tensor,
                    store_indices_tensor=store_indices_tensor,
                    query_start_loc=query_start_loc,
-                   query_start_loc_p=query_start_loc)
+                   query_start_loc_p=query_start_loc,
+                   num_real_input_reqs=num_real_input_reqs)
+
+
+def real_decode_request_count(state_indices: Optional[torch.Tensor] = None,
+                              query_start_loc: Optional[torch.Tensor] = None,
+                              num_tokens: int = 0,
+                              shipped_count: Optional[torch.Tensor] = None) -> int:
+    """Count real (non-padded) decode requests in a padded decode batch.
+
+    HPU decode bucketing pads decode batches to fixed bucket sizes: real
+    requests come first, and pad rows are zero-length query segments whose
+    state indices carry a sentinel (-1 for compact-GDN state groups, the
+    pad block id for block-table groups). numel()-based counts therefore
+    return the padded batch size instead of the request count whenever
+    the batch is not full.
+
+    Resolution order:
+
+    1. ``shipped_count``: the model runner's exact host count
+       (:attr:`HPUAttentionMetadataV1.num_real_input_reqs`), shipped as a
+       0-dim CPU int64 tensor so ``int()`` over it is a host read with no
+       device sync.
+    2. ``query_start_loc``: count non-empty query segments (pad rows are
+       zero-length segments). Convention-free, but costs a
+       scalar-reduction device sync.
+    3. ``state_indices``: count non-negative entries (the compact-GDN -1
+       sentinel convention). Also a device sync, and only valid where
+       that convention holds.
+    4. ``num_tokens``: last resort for metadata that carries neither
+       segment nor state information.
+    """
+    if shipped_count is not None:
+        return int(shipped_count)
+    if query_start_loc is not None:
+        return int((query_start_loc[1:] > query_start_loc[:-1]).sum())
+    if state_indices is not None:
+        return int((state_indices >= 0).sum())
+    return num_tokens
