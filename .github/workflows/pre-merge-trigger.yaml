@@ -1,13 +1,12 @@
 name: Pre-merge trigger
 
+# Full head SHA, so approvers see exactly which commit they approve. Kept
+# distinct from the dispatched run's "PR #<n> [<sha>]" title.
+run-name: "Pre-merge for #${{ github.event.pull_request.number }} at ${{ github.event.pull_request.head.sha }}: ${{ github.event.pull_request.title }}"
+
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-    branches:
-      - main
-      - releases/**
-  merge_group:
-    types: [checks_requested]
     branches:
       - main
       - releases/**
@@ -18,18 +17,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: pre-merge-trigger-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  group: pre-merge-trigger-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  gate:
-     runs-on: ubuntu-latest
-     environment: pre-merge-approval
-     steps:
-       - run: echo "Approved"
   execute_pre_merge:
     runs-on: ubuntu-latest
-    needs: gate
+    # Approval is required before this job starts; a rejected or expired
+    # approval fails it.
+    environment: pre-merge-approval
     timeout-minutes: 720
     permissions:
       actions: write       # dispatch workflows, read run status, cancel orphaned runs
@@ -41,11 +37,10 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
-            const pr         = context.payload.pull_request;
-            const mergeGroup = context.payload.merge_group;
+            const pr = context.payload.pull_request;
 
-            if (!pr && !mergeGroup) {
-              core.info('Manual trigger - no PR/merge_group context, nothing to do');
+            if (!pr) {
+              core.setFailed('No pull request in the event payload; nothing dispatched');
               return;
             }
 
@@ -93,47 +88,19 @@ jobs:
               }
             }
 
-            let headSha, baseRef, prNumber, prTitle, isDraft, skipTests, isMergeGroup;
-
-            if (pr) {
-              headSha      = pr.head.sha;
-              baseRef      = pr.base.ref;
-              prNumber     = String(pr.number);
-              prTitle      = pr.title;
-              isDraft      = String(pr.draft);
-              skipTests    = await skipTestsFromLabel(
-                context.repo.owner, context.repo.repo, prNumber, pr.labels,
-              );
-              isMergeGroup = 'false';
-            } else {
-              // merge_group: base_ref arrives as refs/heads/main → strip prefix
-              headSha      = mergeGroup.head_sha;
-              baseRef      = mergeGroup.base_ref.replace(/^refs\/heads\//, '');
-              // Extract PR number from head_ref: refs/heads/gh-readonly-queue/main/pr-123-<sha>
-              const match  = mergeGroup.head_ref.match(/\/pr-(\d+)-/);
-              if (!match) {
-                core.setFailed(`Cannot extract PR number from merge_group head_ref: '${mergeGroup.head_ref}'. Expected format: refs/heads/gh-readonly-queue/<branch>/pr-<number>-<sha>`);
-                return;
-              }
-              prNumber     = match[1];
-              isDraft      = 'false';
-              isMergeGroup = 'true';
-              // Fetch PR details via API (title and labels are not in the merge_group payload)
-              const { data: pullRequest } = await github.rest.pulls.get({
-                owner: context.repo.owner,
-                repo:  context.repo.repo,
-                pull_number: parseInt(prNumber, 10),
-              });
-              prTitle   = pullRequest.title;
-              skipTests = await skipTestsFromLabel(
-                context.repo.owner, context.repo.repo, prNumber, pullRequest.labels,
-              );
-            }
+            const headSha   = pr.head.sha;
+            const baseRef   = pr.base.ref;
+            const prNumber  = String(pr.number);
+            const prTitle   = pr.title;
+            const isDraft   = String(pr.draft);
+            const skipTests = await skipTestsFromLabel(
+              context.repo.owner, context.repo.repo, prNumber, pr.labels,
+            );
 
             // Only maintainers may steer runner pool or override upstream vllm ref.
             const TRUSTED = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
-            const assoc   = pr ? pr.author_association : 'NONE';
-            const trusted = TRUSTED.has(assoc) || isMergeGroup === 'true';
+            const assoc   = pr.author_association;
+            const trusted = TRUSTED.has(assoc);
 
             const useHourlyRunner = String(
               trusted && /\[FIX_FOR_VLLM_LATEST\]/.test(prTitle),
@@ -176,12 +143,14 @@ jobs:
               core.warning(`Could not list previous runs: ${e.message}`);
             }
 
-            // 1. Dispatch to base branch
-            await github.rest.actions.createWorkflowDispatch({
+            // 1. Dispatch to base branch. return_run_details makes the API
+            //    answer 200 with the new run's id instead of an empty 204.
+            const { data: dispatched } = await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo:  context.repo.repo,
               workflow_id: 'pre-merge.yaml',
               ref:   baseRef,
+              return_run_details: true,
               inputs: {
                 pr_number:            prNumber,
                 head_sha:             headSha,
@@ -189,59 +158,42 @@ jobs:
                 pr_title:             prTitle,
                 is_draft:             isDraft,
                 skip_tests:           skipTests,
-                is_merge_group:       isMergeGroup,
+                is_merge_group:       'false',  // still a required input of pre-merge.yaml
                 use_hourly_runner:    useHourlyRunner,
                 vllm_ref_override:    vllmRefOverride,
               },
             });
 
-            // 2. Find the dispatched run. Match on PR# + SHA so two PRs sharing
-            //    a head SHA can't be confused. Initial "not yet listed" window
-            //    is capped at 30 × 1 s before falling back to the slower poll.
-            const titleKey = `#${prNumber} [${headSha}]`;
-
-            let runId;
-            for (let i = 0; i < 30; i++) {
-              try {
-                const { data } = await github.rest.actions.listWorkflowRuns({
-                  owner: context.repo.owner, repo: context.repo.repo,
-                  workflow_id: 'pre-merge.yaml', branch: baseRef,
-                  event: 'workflow_dispatch', per_page: 50,
-                });
-                const run = data.workflow_runs.find(r => r.display_title?.includes(titleKey));
-                if (run) {
-                  runId = run.id;
-                  core.info(`Found run ${runId}: ${run.html_url}`);
-                  core.setOutput('run_id', String(runId));
-                  break;
-                }
-                core.info(`Run not yet listed (attempt ${i + 1}/30)`);
-              } catch (e) {
-                core.warning(`listWorkflowRuns transient error: ${e.message}`);
-              }
-              await new Promise(r => setTimeout(r, 1000));
-            }
-
-            if (!runId) {
-              // Best-effort: sweep anything matching our titleKey before giving up.
-              try {
-                const { data } = await github.rest.actions.listWorkflowRuns({
-                  owner: context.repo.owner, repo: context.repo.repo,
-                  workflow_id: 'pre-merge.yaml', branch: baseRef,
-                  event: 'workflow_dispatch', per_page: 50,
-                });
-                for (const r of data.workflow_runs) {
-                  if (['completed', 'cancelled'].includes(r.status)) continue;
-                  if (r.display_title?.includes(titleKey)) {
-                    await cancelDispatchedRun(r.id, 'lookup timeout, late match');
+            // 2. Follow only the run this dispatch created. Without its id the
+            //    run cannot be told apart from other dispatches for the same
+            //    commit, so fail instead of guessing.
+            const runId = Number(dispatched?.workflow_run_id);
+            if (!Number.isSafeInteger(runId) || runId <= 0) {
+              // Cancel (never follow) in-flight runs with this PR's exact title,
+              // so the unidentified run does not keep a Gaudi machine busy.
+              const title = `PR #${prNumber} [${headSha}]`;
+              for (let i = 0, done = false; i < 30 && !done; i++) {
+                try {
+                  const { data } = await github.rest.actions.listWorkflowRuns({
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    workflow_id: 'pre-merge.yaml', branch: baseRef,
+                    event: 'workflow_dispatch', per_page: 50,
+                  });
+                  for (const r of data.workflow_runs) {
+                    if (r.display_title !== title || ['completed', 'cancelled'].includes(r.status)) continue;
+                    await cancelDispatchedRun(r.id, 'dispatch returned no run id');
+                    done = true;
                   }
+                } catch (e) {
+                  core.warning(`listWorkflowRuns transient error: ${e.message}`);
                 }
-              } catch (e) {
-                core.warning(`Fallback cancel lookup failed: ${e.message}`);
+                if (!done) await new Promise(r => setTimeout(r, 1000));
               }
-              core.setFailed('Could not find dispatched run within 30 seconds');
+              core.setFailed('Dispatch response has no workflow_run_id; cannot identify the test run');
               return;
             }
+            core.info(`Dispatched run ${runId}: ${dispatched.html_url}`);
+            core.setOutput('run_id', String(runId));
 
             // 3. Poll until complete (12 h max)
             for (let i = 0; i < 4320; i++) {
