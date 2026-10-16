@@ -140,7 +140,7 @@ def test_pt_hpu_enable_lazy_collectives_default_and_respect():
     assert os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] == "false"
 
 
-def _fake_vllm_config(*, model_type="qwen3_next", gdn_layers=0, kv_transfer=None):
+def _fake_vllm_config(*, model_type="qwen3_next", gdn_layers=0, kv_transfer=None, prefix_caching=False):
     """Minimal vllm_config stub for the compact-GDN detection helpers."""
 
     def get_num_layers_by_block_type(parallel_config, block_type):
@@ -154,6 +154,7 @@ def _fake_vllm_config(*, model_type="qwen3_next", gdn_layers=0, kv_transfer=None
         model_config=model_config,
         parallel_config=SimpleNamespace(),
         kv_transfer_config=kv_transfer,
+        cache_config=SimpleNamespace(enable_prefix_caching=prefix_caching),
     )
 
 
@@ -175,6 +176,22 @@ def test_compact_gdn_excludes_granitemoehybrid():
 def test_compact_gdn_disabled_for_pd_disaggregation():
     cfg = _fake_vllm_config(gdn_layers=4, kv_transfer=SimpleNamespace())
     assert HpuPlatform._compact_gdn_active(cfg) is False
+
+
+def test_compact_gdn_disabled_for_prefix_caching():
+    cfg = _fake_vllm_config(gdn_layers=4, prefix_caching=True)
+    assert HpuPlatform._compact_gdn_active(cfg) is False
+
+
+def test_compact_gdn_active_when_prefix_caching_off():
+    cfg = _fake_vllm_config(gdn_layers=4, prefix_caching=False)
+    assert HpuPlatform._compact_gdn_active(cfg) is True
+
+
+def test_compact_gdn_explicit_env_overrides_prefix_caching():
+    os.environ["VLLM_COMPACT_GDN"] = "1"  # explicit force-on wins over auto-disable
+    cfg = _fake_vllm_config(gdn_layers=4, prefix_caching=True)
+    assert HpuPlatform._compact_gdn_active(cfg) is True
 
 
 def test_compact_gdn_explicit_env_overrides_auto_detection():

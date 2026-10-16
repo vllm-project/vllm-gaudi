@@ -6,6 +6,8 @@ ARG DOCKER_URL=vault.habana.ai/gaudi-docker
 ARG VERSION=1.24.1
 ARG BASE_NAME=ubuntu24.04
 ARG PT_VERSION=2.11.0
+# torchaudio has no release past 2.11.0, so it cannot follow PT_VERSION (move it back once one exists)
+ARG TORCHAUDIO_VERSION=2.11.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
 ARG TORCH_TYPE_SUFFIX
@@ -14,6 +16,7 @@ FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-${TORCH_TYPE_SUF
 
 # Re-declare ARGs needed after FROM (they go out of scope)
 ARG PT_VERSION
+ARG TORCHAUDIO_VERSION
 
 # Parameterize commit/branch for vllm-project & vllm-gaudi checkout
 ARG VLLM_GAUDI_COMMIT=main
@@ -69,7 +72,7 @@ ARG EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN pip install datasets && \
     pip install pandas && \
     pip install --no-cache-dir --no-deps --extra-index-url ${EXTRA_INDEX_URL} \
-    torchaudio==${PT_VERSION}
+    torchaudio==${TORCHAUDIO_VERSION}
 
 # Copy utility scripts and configuration
 RUN mkdir -p /root/scripts/
