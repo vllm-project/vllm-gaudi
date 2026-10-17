@@ -5101,15 +5101,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 with self.profiler.record_event('internal', "sampler"):
                     ##### Sampling Start #####
                     spec_decode_metadata = decode_data.spec_decode_metadata
-                    sampler_output, sampling_metadata = self._run_sampling(
-                        batch_changed, logits_device
-                        if spec_decode_metadata is None else logits_device[spec_decode_metadata.bonus_logits_indices],
-                        pd_info.decode_req_ids, logits_device.shape[0])
-
                     if spec_decode_metadata is None:
+                        sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device,
+                                                                               pd_info.decode_req_ids,
+                                                                               logits_device.shape[0])
                         decode_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
                         logprobs_segments.append((list(pd_info.decode_req_ids), sampler_output.logprobs_tensors))
                     else:
+                        # The rejection sampler samples the bonus tokens itself,
+                        # so its metadata needs one row per request, not per
+                        # token row.
+                        htorch.core.mark_step()
+                        self.input_batch.update_async_output_token_ids()
+                        sampling_metadata = self._prepare_sampling(batch_changed, pd_info.decode_req_ids,
+                                                                   len(spec_decode_metadata.bonus_logits_indices))
                         # Handling spec decode sampling.
                         sampler_output = self.rejection_sampler(
                             spec_decode_metadata,
