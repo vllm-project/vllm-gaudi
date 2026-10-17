@@ -68,6 +68,7 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy, getattr_nested, setattr_nested)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
+from vllm_gaudi.v1.sample import hpu_rejection_sampler
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -5600,6 +5601,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 Sampler.apply_logits_processors = torch.compiler.disable(  # type: ignore[method-assign]
                     Sampler.apply_logits_processors)
                 self.sampler = self._compile(self.sampler, fullgraph=False)
+                if self.speculative_config is not None:
+                    # The rejection sampler was built with the sampler before it
+                    # was compiled: give it the compiled one for the bonus
+                    # tokens, and compile the draft rows' temperature, top-k and
+                    # top-p the same way. warmup_sampler warms both.
+                    self.rejection_sampler.sampler = self.sampler
+                    hpu_rejection_sampler.compile_sampling_constraints(lambda fn: self._compile(fn, fullgraph=False))
             else:
                 self.model = self._compile(self.model)
 
@@ -6027,6 +6035,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                              logits_device=dummy_logits,
                                                                              request_ids=dummy_req_ids,
                                                                              pad_to=dummy_logits.shape[0])
+                    if self.speculative_config is not None:
+                        # The draft rows' sampling constraints: one row per
+                        # request with one draft token, as float32 logits.
+                        hpu_rejection_sampler.warmup_sampling_constraints(dummy_logits.float(), _sampling_metadata)
 
                     # Cleanup after sampling
                     self.input_batch.greedy_reqs = set()

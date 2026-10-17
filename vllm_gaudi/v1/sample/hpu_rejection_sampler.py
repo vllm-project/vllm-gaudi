@@ -2,7 +2,7 @@
 
 from vllm.v1.sample import rejection_sampler
 import torch
-from typing import Optional
+from typing import Callable, Optional
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 
@@ -213,6 +213,27 @@ def apply_sampling_constraints(
     top_k = None if sampling_metadata.top_k is None else sampling_metadata.top_k.repeat_interleave(rows_per_request)
     top_p = None if sampling_metadata.top_p is None else sampling_metadata.top_p.repeat_interleave(rows_per_request)
     return apply_top_k_top_p(logits, top_k, top_p)
+
+
+def compile_sampling_constraints(compile_fn: Callable[[Callable], Callable]) -> None:
+    """Compile the draft rows' sampling constraints, as the runner compiles its sampler.
+
+    RejectionSampler.forward calls the module-level function, so the
+    compiled one replaces it there. Eager, its full-vocabulary top-p sort
+    costs about as much as the sampler's own one, again for every step.
+    """
+    rejection_sampler.apply_sampling_constraints = compile_fn(apply_sampling_constraints)
+
+
+def warmup_sampling_constraints(logits: torch.Tensor, sampling_metadata: SamplingMetadata) -> None:
+    """Run the draft rows' sampling constraints once for this batch and configuration.
+
+    logits is [batch_size * max_num_draft_tokens, vocab_size] float32, as
+    RejectionSampler.forward passes them.
+    """
+    num_seqs = sampling_metadata.temperature.shape[0] if sampling_metadata.temperature is not None else 1
+    rejection_sampler.apply_sampling_constraints(logits, torch.zeros(num_seqs, dtype=torch.int32, device=logits.device),
+                                                 sampling_metadata)
 
 
 rejection_sampler.rejection_sample = rejection_sample
