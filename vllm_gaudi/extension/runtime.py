@@ -20,7 +20,7 @@ HIDDEN_PARAMS = ['flex_impl', 'fsdpa_impl', 'naive_impl']
 
 def eager_deferred_sampling_warning(max_model_len: int, free_device_bytes: float, bytes_per_token: int = 16384):
     """Build the boot-time advisory for issue #1846's deferred-sampling ask,
-    or return None when this configuration cannot hit the class.
+    or return None when the cap-class ask fits the measured free memory.
 
     Under the eager PT bridge with the default 'exp' bucketing tree, the
     first sampling pass after a near-cap prefill triggers one deferred
@@ -30,6 +30,13 @@ def eager_deferred_sampling_warning(max_model_len: int, free_device_bytes: float
     Qwen3.8-class GDN hybrid -- the per-token width is model-geometry
     dependent). The worst case runs at the cap, where prompt + generation
     cannot exceed ``max_model_len``.
+
+    The comparison is one-sided: a warning means the cap-class ask cannot
+    fit even in boot-time free memory -- on the report that is the
+    deterministic death for that request class -- while ``None`` is not a
+    survival claim, because device memory consumed between boot and the
+    first sampling pass is not modeled. The report includes a 1M-class
+    failure whose boot held more free memory than its ask.
     """
     blockpad = max_model_len - 64
     if blockpad <= 0:
