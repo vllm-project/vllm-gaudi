@@ -18,6 +18,40 @@ FEATURE_VALUES = None
 HIDDEN_PARAMS = ['flex_impl', 'fsdpa_impl', 'naive_impl']
 
 
+def eager_deferred_sampling_warning(max_model_len: int, free_device_bytes: float, bytes_per_token: int = 16384):
+    """Build the boot-time advisory for issue #1846's deferred-sampling ask,
+    or return None when this configuration cannot hit the class.
+
+    Under the eager PT bridge with the default 'exp' bucketing tree, the
+    first sampling pass after a near-cap prefill triggers one deferred
+    device allocation whose size tracks the request's block-row length:
+    ``16,384 B x blockpad128(prompt + generation - 64)`` (issue #1846;
+    measured byte-exactly six times on the reporting deployment, a
+    Qwen3.8-class GDN hybrid -- the per-token width is model-geometry
+    dependent). The worst case runs at the cap, where prompt + generation
+    cannot exceed ``max_model_len``.
+    """
+    blockpad = max_model_len - 64
+    if blockpad <= 0:
+        return None
+    blockpad = (blockpad + 127) // 128 * 128
+    ask_bytes = bytes_per_token * blockpad
+    if ask_bytes <= free_device_bytes:
+        return None
+    return (
+        f'Predicted deterministic OOM on this configuration '
+        f'(https://github.com/vllm-project/vllm-gaudi/issues/1846): under the eager PT bridge '
+        f'with the default \'exp\' bucketing tree, a near-cap request (prompt + generation close '
+        f'to max_model_len={max_model_len}) triggers one deferred device allocation of about '
+        f'{ask_bytes / 2**30:.1f} GiB ({ask_bytes} B on the measured model class) at its first '
+        f'sampling pass, and free device memory is {free_device_bytes / 2**30:.1f} GiB -- such a '
+        f'request aborts all workers. The allocation is authored below the Python layer (deferred '
+        f'pipeline materialization) and its per-token width is model-geometry dependent, so verify '
+        f'against your own model. The measured remedy for long-context serving is the padding-aware '
+        f'bucketing tree (VLLM_BUCKETING_STRATEGY=pad with VLLM_HPU_FSDPA_SLICE_ENABLED=0, '
+        f'https://github.com/vllm-project/vllm-gaudi/issues/1854); otherwise cap --max-model-len.')
+
+
 def filter_defined(config, keys):
     return {k: v for k, v in config.get_all(keys).items() if v is not None}
 
