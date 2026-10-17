@@ -5,9 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
+import os
+
 from vllm_gaudi.extension.environment import get_environment
 from vllm_gaudi.extension.features import get_features, get_user_flags, get_experimental_flags
-from vllm_gaudi.extension.config import Config
+from vllm_gaudi.extension.config import Config, boolean
 from vllm_gaudi.extension.logger import logger
 
 RUNTIME_CONFIG = None
@@ -57,9 +59,31 @@ def get_config(**overrides):
     return RUNTIME_CONFIG
 
 
+def _reject_unsupported_env_combinations(config):
+    """Fail fast on environment combinations observed to break serving silently.
+
+    Disabling the Habana eager pipeline with the eager PT bridge backend is
+    the silent-death combination from issue #1855: long streamed requests hang
+    mid-generation with no server-side error while every health signal stays
+    green. The hang lives below the Python layer, so the engine refuses to
+    start instead of serving traffic it cannot complete.
+    """
+    raw = os.environ.get('PT_HPU_EAGER_PIPELINE_ENABLE')
+    if raw not in (None, '') and not boolean(raw) and config.get('bridge_mode') == 'eager':
+        raise RuntimeError(
+            f'PT_HPU_EAGER_PIPELINE_ENABLE={raw} disables the Habana eager pipeline, '
+            'which is not supported on the eager PT bridge backend: long streamed requests '
+            'can hang mid-generation with no server-side error while the engine stays '
+            'healthy (https://github.com/vllm-project/vllm-gaudi/issues/1855). '
+            'Unset PT_HPU_EAGER_PIPELINE_ENABLE (the default, 1, enables the pipeline) '
+            'or set it explicitly to 1 and restart.')
+
+
 def finalize_config():
     detected = get_config()
     detected.finalize()
+
+    _reject_unsupported_env_combinations(detected)
 
     user_flags = filter_defined(detected, USER_FLAGS)
     experimental_flags = filter_defined(detected, EXPERIMENTAL_FLAGS)
