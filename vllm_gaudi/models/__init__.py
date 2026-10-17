@@ -83,3 +83,12 @@ def register_model():
     import vllm_gaudi.models.kimi_k25_vit  # noqa: F401
     import vllm_gaudi.models.kimi_k25  # noqa: F401
     import vllm_gaudi.models.gemma4_mm  # noqa: F401
+
+    # Qwen4Exp (Qwen3.8-Flash-Next): self-contained HPU port. Upstream's
+    # nvidia/ package imports CUDA-only custom ops at module scope, so the
+    # upstream classes cannot load on Gaudi; register the HPU replacements
+    # for both architecture identifiers before vLLM resolves the model.
+    from vllm_gaudi.models.qwen4_exp import HpuQwen4ExpForCausalLM  # noqa: F401
+    ModelRegistry.register_model("Qwen4ExpForCausalLM", "vllm_gaudi.models.qwen4_exp:HpuQwen4ExpForCausalLM")
+    ModelRegistry.register_model("Qwen4ExpForConditionalGeneration",
+                                 "vllm_gaudi.models.qwen4_exp:HpuQwen4ExpForConditionalGeneration")

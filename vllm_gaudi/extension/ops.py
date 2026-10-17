@@ -1112,15 +1112,38 @@ def fp8_block_linear_postprocess_weights(layer, force_channel_fp8=False):
     return layer
 
 
+def _effective_moe_block_size(weight, weight_scale):
+    """Derive the (blockM, blockK) grid a MoE block-quant scale actually uses.
+
+    The checkpoint's fp8 scales are laid out on the quant config's block grid
+    (e.g. 128x128), but upstream vLLM *refines* the grid when TP sharding is
+    not aligned to the config blocks (e.g. 640-wide experts at TP4 shard to
+    160 rows): the loader upsamples the checkpoint scales to a finer grid
+    (repeat_interleave, see RoutedExperts weight loading) so the per-rank
+    slice stays block-aligned.  The stored scale therefore may have more
+    blocks per axis than ceil(dim / config_block); the effective block size
+    is recoverable exactly from the weight/scale shapes.
+    """
+    scale_m, scale_k = weight_scale.shape[-2], weight_scale.shape[-1]
+    out_features, in_features = weight.shape[-2], weight.shape[-1]
+    if out_features % scale_m or in_features % scale_k:
+        raise ValueError(f"fp8 MoE weight shape {tuple(weight.shape)} is not divisible by "
+                         f"its block-scale grid {(scale_m, scale_k)}; cannot derive the "
+                         f"effective block size.")
+    return out_features // scale_m, in_features // scale_k
+
+
 def fp8_block_moe_prepare_weights(layer, force_channel_fp8=False):
     if force_channel_fp8:
         # convert to channel-wise fp8
+        # Derive the effective block grid from the actual tensors: refined
+        # (upsampled) scale grids would be misread with the raw config size.
+        w13_block = _effective_moe_block_size(layer.w13_weight.data, layer.w13_weight_scale_inv.data)
+        w2_block = _effective_moe_block_size(layer.w2_weight.data, layer.w2_weight_scale_inv.data)
         w13_weight, w13_weight_scale_inv = dynamic_quant(
-            dequant_block_fp8_weight_naive(layer.w13_weight.data, layer.w13_weight_scale_inv.data,
-                                           layer.quant_config.weight_block_size))
+            dequant_block_fp8_weight_naive(layer.w13_weight.data, layer.w13_weight_scale_inv.data, w13_block))
         w2_weight, w2_weight_scale_inv = dynamic_quant(
-            dequant_block_fp8_weight_naive(layer.w2_weight.data, layer.w2_weight_scale_inv.data,
-                                           layer.quant_config.weight_block_size))
+            dequant_block_fp8_weight_naive(layer.w2_weight.data, layer.w2_weight_scale_inv.data, w2_block))
         w13_weight_scale_inv, w2_weight_scale_inv \
             = w13_weight_scale_inv.squeeze(-1), w2_weight_scale_inv.squeeze(-1)
         layer.w13_weight.data.copy_(w13_weight)
@@ -1129,14 +1152,16 @@ def fp8_block_moe_prepare_weights(layer, force_channel_fp8=False):
         layer.w2_weight_scale_inv = torch.nn.Parameter(w2_weight_scale_inv, requires_grad=False)
         return fp8_channel_moe_prepare_weights(layer)
 
+    w13_block = _effective_moe_block_size(layer.w13_weight.data, layer.w13_weight_scale_inv.data)
+    w2_block = _effective_moe_block_size(layer.w2_weight.data, layer.w2_weight_scale_inv.data)
     for index in range(layer.moe_op.num_experts):
         layer.moe_op.w13_list[index].set_weight(layer.w13_weight[index])
         layer.moe_op.w13_list[index].set_scale_inv_fp8(layer.w13_weight_scale_inv[index])
-        layer.moe_op.w13_list[index].set_weight_block_size(layer.quant_config.weight_block_size)
+        layer.moe_op.w13_list[index].set_weight_block_size(w13_block)
 
         layer.moe_op.w2_list[index].set_weight(layer.w2_weight[index])
         layer.moe_op.w2_list[index].set_scale_inv_fp8(layer.w2_weight_scale_inv[index])
-        layer.moe_op.w2_list[index].set_weight_block_size(layer.quant_config.weight_block_size)
+        layer.moe_op.w2_list[index].set_weight_block_size(w2_block)
     htorch.core.mark_step()
     return layer
 
