@@ -214,3 +214,14 @@ def test_spec_rows_pad_single_tokens():
     assert HPUModelRunner._as_spec_rows(spec, 2, 2).tolist() == [[1, 2], [3, -1]]
     single = torch.tensor([4, 5, 6])
     assert HPUModelRunner._as_spec_rows(single, 2, 2).tolist() == [[4, -1], [5, -1]]
+
+
+def test_output_recorder_counts_the_valid_tokens_of_live_requests():
+    runner = types.SimpleNamespace(_mamba_num_accepted={"a": 1}, requests={"a": object(), "b": object()})
+    record = HPUModelRunner._async_spec_accepted_recorder(runner, {"a": 0, "b": 1, "done": 2})
+    # a accepted its draft, b rejected it, "done" finished meanwhile; the last row is padding.
+    record([[5, 6], [7], [8, 9], []])
+    assert runner._mamba_num_accepted == {"a": 2, "b": 1}
+    # A row the output dropped (e.g. a partial prefill) still resumes from slot 0.
+    record([[], [7]])
+    assert runner._mamba_num_accepted == {"a": 1, "b": 1}

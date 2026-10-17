@@ -640,9 +640,12 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         sampled_token_ids: torch.Tensor,
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.hpu.Stream,
+        on_output: Optional[Callable[[list[list[int]]], None]] = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
+        # Called by get_output with the valid token ids of every row.
+        self._on_output = on_output
 
         # Keep a reference to the device tensor to avoid it being
         # deallocated until we finish copying it to the host.
@@ -673,6 +676,8 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         for i in self._invalid_req_indices:
             if i < len(valid_sampled_token_ids):
                 valid_sampled_token_ids[i].clear()
+        if self._on_output is not None:
+            self._on_output(valid_sampled_token_ids)
 
         output = self._model_runner_output
         output.sampled_token_ids[:len(valid_sampled_token_ids)] = valid_sampled_token_ids
@@ -1617,12 +1622,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._mamba_num_accepted: dict[str, int] = {}
         # Async scheduling with speculative decoding keeps the previous step's
         # results on the device: the drafts each of its rows verified, and the
-        # valid output tokens per row (see _async_spec_shift). The output
-        # copies of the last steps wait in _async_spec_pending until they reach
-        # _mamba_num_accepted, for requests that skip a step.
+        # valid output tokens per row (see _async_spec_shift). Requests that
+        # skip a step read _mamba_num_accepted instead, which each step's async
+        # output records (see _async_spec_accepted_recorder).
         self._async_spec_prev_num_drafts: Optional[np.ndarray] = None
         self._async_spec_prev_num_valid: Optional[torch.Tensor] = None
-        self._async_spec_pending: collections.deque = collections.deque()
 
         # Keep in int64 to avoid overflow with long context
         self.max_num_reqs = self.scheduler_config.max_num_seqs
@@ -1907,19 +1911,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         padding = torch.full((rows.shape[0], width - 1), PLACEHOLDER_TOKEN_ID, dtype=torch.int32, device=rows.device)
         return torch.cat([rows, padding], dim=1)
 
-    def _apply_async_spec_pending(self) -> None:
-        """Move valid-token counts of finished output copies to _mamba_num_accepted.
+    def _async_spec_accepted_recorder(self, req_id_to_index: dict[str, int]) -> Callable[[list[list[int]]], None]:
+        """Callback for a step's async output: records its valid-token counts in _mamba_num_accepted.
 
-        All steps but the last one: the scheduler has seen their outputs, so
-        their copies are done. Requests of the last step read it on the device.
+        The worker's output thread runs it once the output copy is done, which
+        is before the scheduler sees that output and so before a later step
+        can need the counts (requests that skip a step, see _async_spec_shift).
+        Waiting for the copy on the main thread instead stalls it every step,
+        and with it the overlap of async scheduling.
         """
-        while len(self._async_spec_pending) > 1:
-            req_id_to_index, token_ids_cpu, ready_event = self._async_spec_pending.popleft()
-            ready_event.synchronize()
-            num_valid = (token_ids_cpu != PLACEHOLDER_TOKEN_ID).sum(dim=1).tolist()
+        accepted = self._mamba_num_accepted
+        requests = self.requests
+
+        def record(valid_rows: list[list[int]]) -> None:
             for req_id, row in req_id_to_index.items():
-                if req_id in self.requests:
-                    self._mamba_num_accepted[req_id] = max(int(num_valid[row]), 1)
+                if row < len(valid_rows) and req_id in requests:
+                    accepted[req_id] = max(len(valid_rows[row]), 1)
+
+        return record
 
     def _reset_async_spec_state(self) -> None:
         """Forget the previous step's results (e.g. those of warmup's dummy requests)."""
@@ -1927,7 +1936,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.input_batch.prev_req_id_to_index = None
         self._async_spec_prev_num_valid = None
         self._async_spec_prev_num_drafts = None
-        self._async_spec_pending.clear()
         self._draft_token_ids = None
 
     def _scatter_async_spec_input_ids(self, token_ids: torch.Tensor, req_ids: list[str], num_tokens: int,
@@ -2137,8 +2145,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self._mamba_num_accepted.pop(req_id, None)
-        if self.use_async_spec_decode and self._mamba_spec_decode:
-            self._apply_async_spec_pending()
+        if (self.use_async_spec_decode and self._mamba_spec_decode
+                and len(self._mamba_num_accepted) > 2 * len(self.requests) + 64):
+            # The output thread can record a request that finished meanwhile.
+            for req_id in list(self._mamba_num_accepted):
+                if req_id not in self.requests:
+                    self._mamba_num_accepted.pop(req_id, None)
 
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
@@ -5301,7 +5313,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # Query positions of this step that turned out valid: the
                 # accepted drafts plus the bonus token. Prefill chunks always
                 # leave their state in slot 0. Decodes come first in the batch.
-                # (Async scheduling: see _apply_async_spec_pending.)
+                # (Async scheduling: see _async_spec_accepted_recorder.)
                 self._mamba_num_accepted[req_id] = max(num_tokens, 1) if i < num_decodes else 1
 
         # NOTE(chendi): enable cache based on PR(#20291)
@@ -5372,6 +5384,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 sampled_token_ids=sampled_token_ids,
                 invalid_req_indices=self.invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
+                on_output=self._async_spec_accepted_recorder(self.input_batch.prev_req_id_to_index or {})
+                if self.use_async_spec_decode and self._mamba_spec_decode else None,
             )
             # Hand the async CPU copy + ready event to the input batch for the
             # next step's placeholder splice (see update_async_output_token_ids).
@@ -5379,10 +5393,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 async_output._sampled_token_ids_cpu,
                 async_output._async_copy_ready_event,
             )
-            if self.use_async_spec_decode and self._mamba_spec_decode:
-                self._async_spec_pending.append(
-                    (self.input_batch.prev_req_id_to_index, async_output._sampled_token_ids_cpu,
-                     async_output._async_copy_ready_event))
             return async_output
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
