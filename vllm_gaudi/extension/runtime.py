@@ -20,7 +20,7 @@ HIDDEN_PARAMS = ['flex_impl', 'fsdpa_impl', 'naive_impl']
 
 def eager_deferred_sampling_warning(max_model_len: int, free_device_bytes: float, bytes_per_token: int = 16384):
     """Build the boot-time advisory for issue #1846's deferred-sampling ask,
-    or return None when this configuration cannot hit the class.
+    or return None when the cap-class ask fits the measured free memory.
 
     Under the eager PT bridge with the default 'exp' bucketing tree, the
     first sampling pass after a near-cap prefill triggers one deferred
@@ -30,6 +30,13 @@ def eager_deferred_sampling_warning(max_model_len: int, free_device_bytes: float
     Qwen3.8-class GDN hybrid -- the per-token width is model-geometry
     dependent). The worst case runs at the cap, where prompt + generation
     cannot exceed ``max_model_len``.
+
+    The comparison is one-sided: a warning means the cap-class ask cannot
+    fit even in boot-time free memory -- on the report that is the
+    deterministic death for that request class -- while ``None`` is not a
+    survival claim, because device memory consumed between boot and the
+    first sampling pass is not modeled. The report includes a 1M-class
+    failure whose boot held more free memory than its ask.
     """
     blockpad = max_model_len - 64
     if blockpad <= 0:
@@ -38,18 +45,16 @@ def eager_deferred_sampling_warning(max_model_len: int, free_device_bytes: float
     ask_bytes = bytes_per_token * blockpad
     if ask_bytes <= free_device_bytes:
         return None
-    return (
-        f'Predicted deterministic OOM on this configuration '
-        f'(https://github.com/vllm-project/vllm-gaudi/issues/1846): under the eager PT bridge '
-        f'with the default \'exp\' bucketing tree, a near-cap request (prompt + generation close '
-        f'to max_model_len={max_model_len}) triggers one deferred device allocation of about '
-        f'{ask_bytes / 2**30:.1f} GiB ({ask_bytes} B on the measured model class) at its first '
-        f'sampling pass, and free device memory is {free_device_bytes / 2**30:.1f} GiB -- such a '
-        f'request aborts all workers. The allocation is authored below the Python layer (deferred '
-        f'pipeline materialization) and its per-token width is model-geometry dependent, so verify '
-        f'against your own model. The measured remedy for long-context serving is the padding-aware '
-        f'bucketing tree (VLLM_BUCKETING_STRATEGY=pad with VLLM_HPU_FSDPA_SLICE_ENABLED=0, '
-        f'https://github.com/vllm-project/vllm-gaudi/issues/1854); otherwise cap --max-model-len.')
+    return (f'May hit a deferred device allocation of about '
+            f'{ask_bytes / 2**30:.1f} GiB ({ask_bytes} B on the measured model class) at its first '
+            f'sampling pass (https://github.com/vllm-project/vllm-gaudi/issues/1846): under the eager PT bridge '
+            f'with the default \'exp\' bucketing tree, a near-cap request (prompt + generation close '
+            f'to max_model_len={max_model_len}) triggers this deferred allocation; free device memory is '
+            f'{free_device_bytes / 2**30:.1f} GiB -- on the measured Qwen3.8 GDN hybrid this aborts all workers. '
+            f'The allocation is authored below the Python layer (deferred pipeline materialization) and its '
+            f'per-token width is model-geometry dependent, so verify against your own model. The measured remedy for '
+            f'long-context serving is the padding-aware bucketing tree (VLLM_BUCKETING_STRATEGY=pad with '
+            f'VLLM_HPU_FSDPA_SLICE_ENABLED=0, https://github.com/vllm-project/vllm-gaudi/issues/1854); otherwise cap --max-model-len.')
 
 
 def filter_defined(config, keys):

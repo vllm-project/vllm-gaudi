@@ -8492,8 +8492,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         config = get_config()
         if config.bridge_mode != 'eager' or config.bucketing_strategy != 'exp':
             return
+        # Use mem_margin (the (1 - gpu_memory_utilization) share) when
+        # available: at this hook (post-KV-init, pre-graphs) raw free still
+        # includes graph headroom (VLLM_GRAPH_RESERVED_MEM), which
+        # compile_or_warm_up_model() will consume after this point, so raw
+        # free over-estimates the memory left by the first sampling pass.
+        # Fall back to raw free on the fake-HPU path (returns before setting
+        # mem_margin).
+        free_bytes = getattr(self, 'mem_margin', None)
+        if free_bytes is None:
+            free_bytes = HabanaMemoryProfiler.current_free_device_memory()
         warning = eager_deferred_sampling_warning(self.model_config.max_model_len,
-                                                  HabanaMemoryProfiler.current_free_device_memory())
+                                                  free_bytes)
         if warning:
             logger.warning(warning)
 
