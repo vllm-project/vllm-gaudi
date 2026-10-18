@@ -224,6 +224,31 @@ def test_async_spec_decode_explicit_env_overrides_default():
         assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="nemotron_h")) is False
 
 
+def _sampling_params(**constraint):
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    return SamplingParams(structured_outputs=StructuredOutputsParams(**constraint) if constraint else None)
+
+
+@pytest.mark.parametrize("constraint", [{"json": {"type": "object"}}, {"choice": ["yes", "no"]}, {"regex": "[0-9]+"}])
+def test_structured_output_is_refused_with_speculative_decoding(monkeypatch, constraint):
+    from vllm.exceptions import VLLMValidationError
+    monkeypatch.setattr(HpuPlatform, "_speculative_decoding", True)
+    with pytest.raises(VLLMValidationError, match="speculative decoding"):
+        HpuPlatform.validate_request(None, _sampling_params(**constraint))
+
+
+def test_other_requests_pass_with_speculative_decoding(monkeypatch):
+    from vllm.pooling_params import PoolingParams
+    monkeypatch.setattr(HpuPlatform, "_speculative_decoding", True)
+    HpuPlatform.validate_request(None, _sampling_params())
+    HpuPlatform.validate_request(None, PoolingParams())
+
+
+def test_structured_output_passes_without_speculative_decoding(monkeypatch):
+    monkeypatch.setattr(HpuPlatform, "_speculative_decoding", False)
+    HpuPlatform.validate_request(None, _sampling_params(json={"type": "object"}))
+
+
 def test_disables_synapse_input_reuse_on_auto_detected_compact_gdn():
     """The auto path (no VLLM_COMPACT_GDN exported) must still default the flag off."""
     with _set_lazy(False):

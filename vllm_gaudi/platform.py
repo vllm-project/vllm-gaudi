@@ -68,6 +68,8 @@ class HpuPlatform(Platform):
     ]
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
+    # Set by check_and_update_config, read by validate_request.
+    _speculative_decoding: bool = False
 
     @classmethod
     def get_attn_backend_cls(
@@ -285,12 +287,32 @@ class HpuPlatform(Platform):
         # on Nemotron-H (see _async_spec_decode_enabled); otherwise speculative
         # decoding runs with synchronous scheduling.
         spec_config = vllm_config.speculative_config
+        cls._speculative_decoding = spec_config is not None
         if spec_config is not None and vllm_config.scheduler_config.async_scheduling and not (
                 cls._async_spec_decode_enabled(vllm_config) and spec_config.use_eagle()
                 and spec_config.num_speculative_tokens == 1):
             vllm_config.scheduler_config.async_scheduling = False
 
         cls._maybe_disable_chunked_mm_input(vllm_config)
+
+    @classmethod
+    def validate_request(cls, processed_inputs, params) -> None:
+        """Refuse structured output while speculative decoding is on.
+
+        A step with a grammar to apply takes the runner's plain sampling path,
+        which keeps one logits row per request and skips the verification of
+        the drafts. With drafts in the batch that step fails and takes the
+        engine down, so such requests get a validation error instead.
+        """
+        from vllm.sampling_params import SamplingParams
+        if not cls._speculative_decoding or not isinstance(params, SamplingParams):
+            return
+        # The same test as StructuredOutputRequest.from_sampling_params.
+        constraints = params.structured_outputs
+        if constraints and not constraints.all_constraints_none():
+            from vllm.exceptions import VLLMValidationError
+            raise VLLMValidationError("Structured output (a JSON schema, regex, choice, grammar or required tool call) "
+                                      "is not supported with speculative decoding on HPU.")
 
     @classmethod
     def _async_spec_decode_enabled(cls, vllm_config: VllmConfig) -> bool:
