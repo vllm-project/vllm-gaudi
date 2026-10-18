@@ -281,15 +281,33 @@ class HpuPlatform(Platform):
 
         # NOTE: vLLM enables async scheduling by default, also with speculative
         # decoding. The HPU runner supports the two together only for one draft
-        # token of an EAGLE-style drafter (EAGLE, EAGLE3, MTP) and only with
-        # VLLM_HPU_ASYNC_SPEC_DECODE=1; otherwise speculative decoding runs with
-        # synchronous scheduling.
+        # token of an EAGLE-style drafter (EAGLE, EAGLE3, MTP), by default only
+        # on Nemotron-H (see _async_spec_decode_enabled); otherwise speculative
+        # decoding runs with synchronous scheduling.
         spec_config = vllm_config.speculative_config
         if spec_config is not None and vllm_config.scheduler_config.async_scheduling and not (
-                get_config().async_spec_decode and spec_config.use_eagle() and spec_config.num_speculative_tokens == 1):
+                cls._async_spec_decode_enabled(vllm_config) and spec_config.use_eagle()
+                and spec_config.num_speculative_tokens == 1):
             vllm_config.scheduler_config.async_scheduling = False
 
         cls._maybe_disable_chunked_mm_input(vllm_config)
+
+    @classmethod
+    def _async_spec_decode_enabled(cls, vllm_config: VllmConfig) -> bool:
+        """Whether async scheduling may stay on with speculative decoding.
+
+        Mirrors the async_spec_decode feature value, which the worker resolves
+        once it knows the model type; the runtime config does not know it yet
+        at engine-construction time. On by default for Nemotron-H unless
+        contiguous PA is on. An explicitly set VLLM_HPU_ASYNC_SPEC_DECODE always
+        takes precedence.
+        """
+        explicit = get_config().VLLM_HPU_ASYNC_SPEC_DECODE
+        if explicit is not None:
+            return explicit
+        model_config = getattr(vllm_config, 'model_config', None)
+        return (model_config is not None and getattr(model_config.hf_config, 'model_type', None) == 'nemotron_h'
+                and not get_config().VLLM_CONTIGUOUS_PA)
 
     @classmethod
     def _maybe_disable_chunked_mm_input(cls, vllm_config: "VllmConfig") -> None:

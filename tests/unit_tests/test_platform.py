@@ -201,6 +201,29 @@ def test_compact_gdn_explicit_env_overrides_auto_detection():
     assert HpuPlatform._compact_gdn_active(_fake_vllm_config(gdn_layers=4)) is False
 
 
+def _runtime_flags(*, async_spec_decode=None, contiguous_pa=None):
+    flags = SimpleNamespace(VLLM_HPU_ASYNC_SPEC_DECODE=async_spec_decode, VLLM_CONTIGUOUS_PA=contiguous_pa)
+    return patch("vllm_gaudi.platform.get_config", return_value=flags)
+
+
+def test_async_spec_decode_on_by_default_only_for_nemotron_h():
+    with _runtime_flags():
+        assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="nemotron_h")) is True
+        assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="llama")) is False
+
+
+def test_async_spec_decode_off_by_default_with_contiguous_pa():
+    with _runtime_flags(contiguous_pa=True):
+        assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="nemotron_h")) is False
+
+
+def test_async_spec_decode_explicit_env_overrides_default():
+    with _runtime_flags(async_spec_decode=True):  # force on where the default is off
+        assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="llama")) is True
+    with _runtime_flags(async_spec_decode=False):  # force off where the default is on
+        assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="nemotron_h")) is False
+
+
 def test_disables_synapse_input_reuse_on_auto_detected_compact_gdn():
     """The auto path (no VLLM_COMPACT_GDN exported) must still default the flag off."""
     with _set_lazy(False):

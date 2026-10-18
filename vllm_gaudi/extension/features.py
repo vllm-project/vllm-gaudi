@@ -117,9 +117,14 @@ def get_features():
                 ModelType('glm4_moe'), ModelType('gemma4'), ModelType('nemotron_h'))),
         Value('high_level_profiler_enabled', False, env_var='VLLM_PROFILER_ENABLED', env_var_type=boolean),
         # Async scheduling together with speculative decoding (one draft token,
-        # EAGLE-style drafters, no structured output). Off: speculative decoding
-        # schedules synchronously.
-        Value('async_spec_decode', False, env_var='VLLM_HPU_ASYNC_SPEC_DECODE', env_var_type=boolean),
+        # EAGLE-style drafters, no structured output). On by default for
+        # Nemotron-H, where it is validated, unless contiguous PA is on. Off:
+        # speculative decoding schedules synchronously. HpuPlatform mirrors the
+        # default.
+        Value('async_spec_decode',
+              All(ModelType('nemotron_h'), Disabled('use_contiguous_pa')),
+              env_var='VLLM_HPU_ASYNC_SPEC_DECODE',
+              env_var_type=boolean),
         Value('track_graph_compilation', False, env_var='PT_HPU_METRICS_GC_DETAILS', env_var_type=boolean),
         Value('per_token_kv_scaling_support',
               All(VersionRange(">=1.24.0.350"), MinPackageVersion("neural_compressor_pt", "3.7")),
