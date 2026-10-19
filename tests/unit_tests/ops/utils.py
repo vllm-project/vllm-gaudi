@@ -47,7 +47,7 @@ def create_row_parallel_linear(input_size, output_size, quant_config=None):
                              disable_tp=False)
 
 
-def create_fused_moe(quant_config=None, activation="silu"):
+def create_fused_moe(quant_config=None, activation="silu", ckpt_names=("gate_proj", "down_proj", "up_proj")):
     return FusedMoE(num_experts=128,
                     top_k=8,
                     hidden_size=512,
@@ -71,7 +71,8 @@ def create_fused_moe(quant_config=None, activation="silu"):
                     has_bias=False,
                     is_sequence_parallel=False,
                     zero_expert_type=None,
-                    hash_indices_table=None)
+                    hash_indices_table=None,
+                    ckpt_names=ckpt_names)
 
 
 def get_data_path(filename):
