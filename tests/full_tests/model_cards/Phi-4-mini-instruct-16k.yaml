@@ -1,0 +1,13 @@
+# Owner: @pawel-olejniczak
+# max_model_len above 4096 selects the LongRoPE long factors for the whole server (upstream design),
+# which costs GSM8K accuracy on short prompts; the threshold reflects that regime.
+model_card:
+  model_name: "microsoft/Phi-4-mini-instruct"
+  tasks: gsm8k
+  num_fewshot: 5
+  limit: 256
+  max_model_len: 16384
+
+metrics:
+  name: exact_match,strict-match
+  value: 0.76
