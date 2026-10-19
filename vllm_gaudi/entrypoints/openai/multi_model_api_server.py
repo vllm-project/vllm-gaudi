@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.renderers.chat_utils import load_chat_template
 from vllm.entrypoints.launchers.launcher import serve_http
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.openai.api_server import build_app, setup_server
