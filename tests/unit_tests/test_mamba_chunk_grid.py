@@ -7,6 +7,7 @@ every other mamba-like type keeps the assert. CPU only.
 """
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -74,3 +75,59 @@ def test_only_the_mamba_mixer2_path_reads_the_chunk_grid():
         "v1/attention/backends/hpu_attn.py",  # metadata fields
         "v1/worker/hpu_model_runner.py",  # producer
     }
+
+
+class _PastAlignmentCheck(Exception):
+    """Raised by the stub where the runner starts building the chunk grid."""
+
+
+class _BlockTable:
+
+    @property
+    def block_tables(self):
+        raise _PastAlignmentCheck
+
+
+def _prefill_up_to_the_chunk_grid(context_len, query_len, reads_chunk_grid):
+    """Run the real _form_prefill_batch for one GDN/Mamba prefill on a stub runner,
+    stopping where it starts building the chunk grid."""
+    from vllm_gaudi.v1.worker.hpu_model_runner import BatchContents, HPUModelRunner
+
+    runner = MagicMock(spec=HPUModelRunner)
+    runner.profiler = SimpleNamespace(enabled=False)
+    runner.attn_block_size = runner.block_size = 128
+    runner.interleaved_sliding_window = runner.uses_mrope = runner.use_merged_prefill = False
+    runner.logits_rounding = 1
+    runner.get_dp_padding = lambda n: 0
+    runner._get_prompt_bucketing_fn = lambda: lambda q, c: (1, -(-max(q) // 128) * 128, max(c + [1]))
+    runner.num_mamba_like_layers = 1
+    runner.pin_memory = False
+    runner.mamba_chunk_size = 128
+    runner.cache_config = SimpleNamespace(mamba_block_size=1152)
+    runner.use_prefix_caching = True
+    runner._mamba_reads_chunk_grid = reads_chunk_grid
+    runner.input_batch = SimpleNamespace(req_id_to_index={"req": 0},
+                                         num_computed_tokens_cpu=[context_len],
+                                         block_table=_BlockTable())
+    contents = BatchContents(req_ids=["req"],
+                             token_ids=[[1] * query_len],
+                             context_lens=[context_len],
+                             prompt_lens=[context_len + query_len],
+                             blocks=[list(range(16))],
+                             logits_positions=[[query_len - 1]])
+    HPUModelRunner._form_prefill_batch(runner, contents)
+
+
+@pytest.mark.parametrize(
+    "context_len, query_len, reads_chunk_grid, expected",
+    [
+        (0, 1152, False, _PastAlignmentCheck),
+        (16, 1136, False, _PastAlignmentCheck),  # the original crash: GDN resuming where the encoder cap stopped
+        (0, 1152, True, _PastAlignmentCheck),
+        (16, 1136, True, AssertionError),  # MambaMixer2 keeps the assert
+    ],
+    ids=["gdn-aligned", "gdn-resume-at-16", "mamba2-aligned", "mamba2-resume-at-16"],
+)
+def test_prefill_alignment_check(context_len, query_len, reads_chunk_grid, expected):
+    with pytest.raises(expected):
+        _prefill_up_to_the_chunk_grid(context_len, query_len, reads_chunk_grid)
