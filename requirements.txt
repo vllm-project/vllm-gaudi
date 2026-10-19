@@ -9,7 +9,7 @@ tblib==3.2.2
 # which prometheus-fastapi-instrumentator (<=8.0.0) chokes on while resolving
 # route.path -> 500 on every request. Upstream bug:
 # trallnag/prometheus-fastapi-instrumentator#370. Remove once it ships a fix.
-fastapi<0.137
+fastapi<0.143
 # Cap transformers below 5.17: huggingface/transformers#48105 removed
 # position_ids_in_meshgrid and renamed PixtralRotaryEmbedding to
 # PixtralVisionRotaryEmbedding, both imported at the top of upstream vLLM's

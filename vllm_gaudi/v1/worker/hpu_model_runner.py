@@ -311,16 +311,42 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
 def _model_has_moe_experts(model: torch.nn.Module) -> bool:
     """Return True if the model has any fused-MoE op with per-expert weight views.
 
-    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase``) whose
-    per-expert ``MoeMatmul.weight`` attributes are plain-tensor views that go
-    stale after ``model.to(device)`` and must be rebound. Dense models (e.g.
-    Llama-3.3-70B) have none, so the INC pre-stage ``model.to('hpu')`` + rebind
-    is pure overhead for them -- and worse, it eagerly materializes the full
-    (pre-quantization) weights on a single card, OOMing large dense models
-    before ``convert()`` can shrink them.
+    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase`` or the
+    WNA16 ``VllmMixtureOfExpertsOpWNA16``) whose per-expert weight attributes are
+    plain-tensor views that go stale after ``model.to(device)`` and must be
+    rebound. Dense models (e.g. Llama-3.3-70B) have none, so the INC pre-stage
+    ``model.to('hpu')`` + rebind is pure overhead for them -- and worse, it eagerly
+    materializes the full (pre-quantization) weights on a single card, OOMing
+    large dense models before ``convert()`` can shrink them.
     """
-    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
-    return any(isinstance(getattr(module, "moe_op", None), VllmMixtureOfExpertsOpBase) for module in model.modules())
+    from vllm_gaudi.extension.ops import (  # local to avoid circular import
+        VllmMixtureOfExpertsOpBase, VllmMixtureOfExpertsOpWNA16)
+    return any(
+        isinstance(getattr(module, "moe_op", None), (VllmMixtureOfExpertsOpBase, VllmMixtureOfExpertsOpWNA16))
+        for module in model.modules())
+
+
+def _rebind_wna16_moe_expert_weights(model: torch.nn.Module) -> None:
+    """Re-point WNA16 per-expert views at the parent layer's moved Parameters.
+
+    ``VllmMixtureOfExpertsOpWNA16`` keeps per-expert packed weights, scales,
+    zero points (and g_idx) as plain-attribute views into the layer's stacked
+    ``w13_weight_packed`` / ``w13_weight_scale`` / ... Parameters, plus a
+    ``_cached_int4`` tuple of the same views. After ``model.to(device)`` those
+    views still alias the old storage; ``_move_remaining_tensors_to_device``
+    would then copy every per-expert view (and the cache) separately, leaving
+    two or three copies of the expert weights on the device. Rebinding first
+    keeps one. A no-op when the views already alias the Parameters.
+    """
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpWNA16  # local to avoid circular import
+    rebound = 0
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if isinstance(moe_op, VllmMixtureOfExpertsOpWNA16) and moe_op.expert_weights_stale(module):
+            moe_op.bind_expert_weights(module)
+            rebound += 1
+    if rebound:
+        logger.info("Rebound WNA16 MoE expert weights to the moved Parameters on %d ops", rebound)
 
 
 def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
@@ -337,8 +363,11 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
     Call this AFTER model.to(device) and BEFORE
     _move_remaining_tensors_to_device so that the stray scan finds all
     MoeMatmul.weight tensors already on the correct device and skips them.
+    WNA16 ops keep their own attribute layout; see
+    _rebind_wna16_moe_expert_weights.
     """
     from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
+    _rebind_wna16_moe_expert_weights(model)
     for module in model.modules():
         moe_op = getattr(module, "moe_op", None)
         if not isinstance(moe_op, VllmMixtureOfExpertsOpBase):
@@ -4542,10 +4571,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 # Collect prefill hidden states for prompt logprobs.
                 # req_id is a list of request IDs in this prefill batch.
+                # Some models (e.g. DeepSeek-V2) return [batch * seq, hidden];
+                # restore the batch dim so [i] selects one request's tokens.
+                prompt_hidden_states = non_flattened_hidden_states
+                if prompt_hidden_states.dim() == 2:
+                    prompt_hidden_states = prompt_hidden_states.view(*token_ids.shape, -1)
                 for i, rid in enumerate(req_id):
                     if rid in self.input_batch.num_prompt_logprobs:
                         prefill_hidden_states_for_logprobs[rid] = \
-                            non_flattened_hidden_states[i]
+                            prompt_hidden_states[i]
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
@@ -4967,6 +5001,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Preparing model with INC took %.4f GB", self.model_memory_usage / float(2**30))
         elif not is_fake_hpu():
             self.model = self.model.to("hpu")
+            # A CPU-first load leaves WNA16 per-expert views on the host; without
+            # this they would stay there (no stray-tensor sweep on this path).
+            _rebind_wna16_moe_expert_weights(self.model)
             htcore.mark_step()
 
         apply_model_specific_patches(self)
@@ -7531,7 +7568,7 @@ class HPUAttentionMetadataProcessor:
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
 
-        if self.interleaved_sliding_window:
+        if self.sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
             self.slice_size = int(with_default(get_config().PT_HPU_SDPA_BC_FACTOR, "1024"))
@@ -7653,27 +7690,31 @@ class HPUAttentionMetadataProcessor:
             block_size = getattr(prefill_metadata, "block_size", self.block_size)
             max_context_len = max_context_len * block_size
 
+            # Masks are [batch, 1, query, context]: a cached prefill can be padded to several rows
+            # (data parallel padding, prompt batch size buckets above 1).
             if window_block_list is not None:
                 # Re-anchor ctx_len to the block-aligned gather frame so a
                 # non-block-aligned ctx_len doesn't misalign the sliding-window mask.
                 round_up_ctx = ((context_lens_t + block_size - 1) // block_size) * block_size
                 frame_base = torch.clamp(round_up_ctx - max_context_len, min=0)
                 context_lens_trimmed = context_lens_t - frame_base
-                invalid_lens_t = context_lens_trimmed - window_size + torch.arange(seq_len, device=device) - 1
-                past_indices = torch.arange(max_context_len, device=device)
-                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                             (past_indices.unsqueeze(0) < context_lens_trimmed.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+                invalid_lens_t = (context_lens_trimmed.view(-1, 1) - window_size +
+                                  torch.arange(seq_len, device=device).view(1, -1) - 1)
+                past_indices = torch.arange(max_context_len, device=device).view(1, 1, -1)
+                past_mask = ((past_indices > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices < context_lens_trimmed.view(-1, 1, 1))).unsqueeze(1)
             else:
                 # Full block list: use absolute coordinate frame with window lower bound
-                invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-                past_indices = torch.arange(max_context_len, device=device)
-                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                             (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+                invalid_lens_t = (context_lens_t.view(-1, 1) - window_size +
+                                  torch.arange(seq_len, device=device).view(1, -1) - 1)
+                past_indices = torch.arange(max_context_len, device=device).view(1, 1, -1)
+                past_mask = ((past_indices > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices < context_lens_t.view(-1, 1, 1))).unsqueeze(1)
 
             # Create boolean sliding window mask
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
             causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
-            causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
+            causal_mask = causal_mask.view(1, 1, seq_len, seq_len).expand(batch_size, -1, -1, -1)
 
             if image_seg_ids is not None:
                 # The bidirectional term only ever opens forward pairs (j > i),
@@ -7879,7 +7920,12 @@ class HPUAttentionMetadataProcessor:
         """
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
-            if self.interleaved_sliding_window:
+            # Non-interleaved SWA otherwise passes window_size to FusedSDPA, which aligns the causal mask
+            # top-left: wrong once the prompt has context (APC hit, chunked prefill), so bias it here.
+            # FusedSDPA only: the helper builds context columns for FusedSDPA alone.
+            # Remove once FusedSDPA or upstream supports bottom-right causal alignment with window_size.
+            if self.interleaved_sliding_window or (self.prefill_use_fusedsdpa and self.sliding_window
+                                                   and attn_metadata.block_list is not None):
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, device, dtype)
             if model_has_chunked_attention:
