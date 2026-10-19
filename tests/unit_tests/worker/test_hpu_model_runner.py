@@ -634,7 +634,7 @@ def test_model_torch_regional_compilation(default_vllm_config: None, dist_init, 
     from vllm_gaudi.utils import HPUCompileConfig
     from vllm.model_executor.models.opt import OPTDecoderLayer
     from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding  # noqa
-    from torch.nn.modules.normalization import LayerNorm
+    from vllm.model_executor.layers.layernorm import LayerNorm
     from torch._dynamo.eval_frame import OptimizedModule
 
     def assert_compilation(model, layer_name, module):
