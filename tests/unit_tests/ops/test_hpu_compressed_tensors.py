@@ -610,7 +610,10 @@ def test_compressed_tensors_wna16_moe_method_non_gated(default_vllm_config: None
     monkeypatch.setattr(hpu_ct, "int4_moe_supports_non_gated", lambda: bridge_has_is_gated)
     monkeypatch.setattr(hpu_ct, "get_config", lambda: SimpleNamespace(wna16_native_int4_moe=True))
 
-    oot_op = create_fused_moe(_wna16_moe_quant_config(), activation="relu2_no_mul").to("hpu")
+    # Non-gated experts have no up projection; use the checkpoint names nemotron_h passes.
+    oot_op = create_fused_moe(_wna16_moe_quant_config(),
+                              activation="relu2_no_mul",
+                              ckpt_names=("up_proj", "down_proj", None)).to("hpu")
     experts = oot_op.routed_experts
     assert isinstance(experts.quant_method, HPUCompressedTensorsWNA16MoEMethod)
 
