@@ -558,7 +558,10 @@ def test_compressed_tensors_wna16_moe_method_non_gated_matches_dense_reference(d
     torch.manual_seed(0)
     num_experts, hidden, intermediate, group, top_k = 128, 512, 256, 128, 8  # create_fused_moe sizes
 
-    oot_op = create_fused_moe(_wna16_moe_quant_config(), activation="relu2_no_mul").to("hpu")
+    # Non-gated experts have no up projection; use the checkpoint names nemotron_h passes.
+    oot_op = create_fused_moe(_wna16_moe_quant_config(),
+                              activation="relu2_no_mul",
+                              ckpt_names=("up_proj", "down_proj", None)).to("hpu")
     experts = oot_op.routed_experts
     up_codes = torch.randint(0, 16, (num_experts, intermediate, hidden), dtype=torch.int32)
     down_codes = torch.randint(0, 16, (num_experts, hidden, intermediate), dtype=torch.int32)
