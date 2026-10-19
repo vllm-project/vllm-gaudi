@@ -51,8 +51,9 @@ def register_model():
     from vllm_gaudi.models.dots_ocr import HpuDotsOCRForCausalLM  # noqa: F401
     ModelRegistry.register_model("DotsOCRForCausalLM", "vllm_gaudi.models.dots_ocr:HpuDotsOCRForCausalLM")
 
-    from vllm_gaudi.models.seed_oss import HpuSeedOssForCausalLM  # noqa: F401
-    ModelRegistry.register_model("SeedOssForCausalLM", "vllm_gaudi.models.seed_oss:HpuSeedOssForCausalLM")
+    # SeedOssForCausalLM is intentionally not overridden: upstream vLLM (#59701)
+    # deleted vllm.model_executor.models.seed_oss and now serves it through the
+    # Transformers modeling backend. Our subclass added nothing on top of it.
 
     from vllm_gaudi.models.qwen3_moe import HpuQwen3MoeForCausalLM  # noqa: F401
     ModelRegistry.register_model("Qwen3MoeForCausalLM", "vllm_gaudi.models.qwen3_moe:HpuQwen3MoeForCausalLM")
