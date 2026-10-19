@@ -118,6 +118,13 @@ def get_features():
         Value('per_token_kv_scaling_support',
               All(VersionRange(">=1.24.0.350"), MinPackageVersion("neural_compressor_pt", "3.7")),
               env_var_type=boolean),
+        # Opt-in. For compressed-tensors WNA16 MoE, send the packed int4 expert
+        # weights straight to mixture_of_experts.int4_fused_weights instead of
+        # dequantizing every expert to bf16 on each forward. Falls back to the
+        # dequant path, with a warning, for non-4-bit weights, checkpoints with
+        # g_idx (actorder "group"), or bridges without the overload. See
+        # docs/configuration/env_variables.md.
+        Value('wna16_native_int4_moe', False, env_var='VLLM_WNA16_NATIVE_INT4_MOE', env_var_type=boolean),
         Value('moe_chunk', "", env_var='VLLM_MOE_CHUNK', env_var_type=list_of(int)),
         Value('moe_token_boundary', "", env_var='VLLM_MOE_TOKEN_BOUNDARY', env_var_type=list_of(int)),
         Value('row_parallel_chunks', 1, env_var='VLLM_ROW_PARALLEL_CHUNKS', env_var_type=int),

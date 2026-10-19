@@ -83,7 +83,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists, LogprobsTensors, DraftTokenIds,
                              ModelRunnerOutput, AsyncModelRunnerOutput, KVConnectorOutput)
-from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
+from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cache_groups
 from vllm.v1.utils import CpuGpuBuffer
@@ -311,16 +311,42 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
 def _model_has_moe_experts(model: torch.nn.Module) -> bool:
     """Return True if the model has any fused-MoE op with per-expert weight views.
 
-    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase``) whose
-    per-expert ``MoeMatmul.weight`` attributes are plain-tensor views that go
-    stale after ``model.to(device)`` and must be rebound. Dense models (e.g.
-    Llama-3.3-70B) have none, so the INC pre-stage ``model.to('hpu')`` + rebind
-    is pure overhead for them -- and worse, it eagerly materializes the full
-    (pre-quantization) weights on a single card, OOMing large dense models
-    before ``convert()`` can shrink them.
+    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase`` or the
+    WNA16 ``VllmMixtureOfExpertsOpWNA16``) whose per-expert weight attributes are
+    plain-tensor views that go stale after ``model.to(device)`` and must be
+    rebound. Dense models (e.g. Llama-3.3-70B) have none, so the INC pre-stage
+    ``model.to('hpu')`` + rebind is pure overhead for them -- and worse, it eagerly
+    materializes the full (pre-quantization) weights on a single card, OOMing
+    large dense models before ``convert()`` can shrink them.
     """
-    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
-    return any(isinstance(getattr(module, "moe_op", None), VllmMixtureOfExpertsOpBase) for module in model.modules())
+    from vllm_gaudi.extension.ops import (  # local to avoid circular import
+        VllmMixtureOfExpertsOpBase, VllmMixtureOfExpertsOpWNA16)
+    return any(
+        isinstance(getattr(module, "moe_op", None), (VllmMixtureOfExpertsOpBase, VllmMixtureOfExpertsOpWNA16))
+        for module in model.modules())
+
+
+def _rebind_wna16_moe_expert_weights(model: torch.nn.Module) -> None:
+    """Re-point WNA16 per-expert views at the parent layer's moved Parameters.
+
+    ``VllmMixtureOfExpertsOpWNA16`` keeps per-expert packed weights, scales,
+    zero points (and g_idx) as plain-attribute views into the layer's stacked
+    ``w13_weight_packed`` / ``w13_weight_scale`` / ... Parameters, plus a
+    ``_cached_int4`` tuple of the same views. After ``model.to(device)`` those
+    views still alias the old storage; ``_move_remaining_tensors_to_device``
+    would then copy every per-expert view (and the cache) separately, leaving
+    two or three copies of the expert weights on the device. Rebinding first
+    keeps one. A no-op when the views already alias the Parameters.
+    """
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpWNA16  # local to avoid circular import
+    rebound = 0
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if isinstance(moe_op, VllmMixtureOfExpertsOpWNA16) and moe_op.expert_weights_stale(module):
+            moe_op.bind_expert_weights(module)
+            rebound += 1
+    if rebound:
+        logger.info("Rebound WNA16 MoE expert weights to the moved Parameters on %d ops", rebound)
 
 
 def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
@@ -337,8 +363,11 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
     Call this AFTER model.to(device) and BEFORE
     _move_remaining_tensors_to_device so that the stray scan finds all
     MoeMatmul.weight tensors already on the correct device and skips them.
+    WNA16 ops keep their own attribute layout; see
+    _rebind_wna16_moe_expert_weights.
     """
     from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
+    _rebind_wna16_moe_expert_weights(model)
     for module in model.modules():
         moe_op = getattr(module, "moe_op", None)
         if not isinstance(moe_op, VllmMixtureOfExpertsOpBase):
@@ -1404,15 +1433,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if not os.environ.get("VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"):
                     os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"] = "0"
                 if not os.environ.get("VLLM_COMPACT_GDN"):
-                    # Auto-disable compact GDN for incompatible modes.
-                    if self.vllm_config.kv_transfer_config is not None:
-                        os.environ["VLLM_COMPACT_GDN"] = "0"
-                        logger.warning("Compact GDN auto-disabled: incompatible with PD disaggregated serving")
-                    else:
-                        os.environ["VLLM_COMPACT_GDN"] = "1"
+                    # Auto-disable compact GDN for incompatible modes:
+                    # prefix caching and PD disaggregated serving.
+                    incompatible = (self.vllm_config.kv_transfer_config is not None
+                                    or self.vllm_config.cache_config.enable_prefix_caching)
+                    os.environ["VLLM_COMPACT_GDN"] = "0" if incompatible else "1"
+                    if incompatible:
+                        logger.warning_once("Compact GDN auto-disabled: incompatible with "
+                                            "prefix caching / PD disaggregated serving")
                 if os.environ.get("VLLM_COMPACT_GDN", "0") in ("1", "true") \
                         and self.vllm_config.cache_config.enable_prefix_caching:
-                    logger.warning("Compact GDN mode does not support prefix caching.")
+                    logger.warning_once("Compact GDN mode does not support prefix caching.")
                 logger.info(
                     "GDN layers detected (%d): "
                     "VLLM_USE_HYBRID_CACHE=%s, "
@@ -4540,10 +4571,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 # Collect prefill hidden states for prompt logprobs.
                 # req_id is a list of request IDs in this prefill batch.
+                # Some models (e.g. DeepSeek-V2) return [batch * seq, hidden];
+                # restore the batch dim so [i] selects one request's tokens.
+                prompt_hidden_states = non_flattened_hidden_states
+                if prompt_hidden_states.dim() == 2:
+                    prompt_hidden_states = prompt_hidden_states.view(*token_ids.shape, -1)
                 for i, rid in enumerate(req_id):
                     if rid in self.input_batch.num_prompt_logprobs:
                         prefill_hidden_states_for_logprobs[rid] = \
-                            non_flattened_hidden_states[i]
+                            prompt_hidden_states[i]
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
@@ -4965,6 +5001,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Preparing model with INC took %.4f GB", self.model_memory_usage / float(2**30))
         elif not is_fake_hpu():
             self.model = self.model.to("hpu")
+            # A CPU-first load leaves WNA16 per-expert views on the host; without
+            # this they would stay there (no stray-tensor sweep on this path).
+            _rebind_wna16_moe_expert_weights(self.model)
             htcore.mark_step()
 
         apply_model_specific_patches(self)
@@ -5346,107 +5385,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                f"free_mem:{free_mem}")
         logger.info(msg)
 
-    def warmup_pooler(self):
-        logger.info(
-            "Starting pooler warmup with prompt buckets: %s",
-            self.bucketing_manager.prompt_buckets,
-        )
-
-        model = cast(VllmModelForPooling, self.get_model())
-        device = self.device
-        for (bs, query_len, num_blocks) in self.bucketing_manager.prompt_buckets:
-            if bs == 0 or query_len == 0:
-                continue
-
-            total_tokens = bs * query_len
-            logger.info(
-                "Warmup: bs=%s, query_len=%s, num_blocks=%s, total_tokens=%s",
-                bs,
-                query_len,
-                num_blocks,
-                total_tokens,
-            )
-
-            vocab_size = getattr(self.model.config, "vocab_size", None)
-            if vocab_size is None:
-                raise RuntimeError("Could not determine vocab_size from model config")
-
-            dummy_input_ids = torch.randint(
-                low=0,
-                high=vocab_size,
-                size=(total_tokens, ),
-                device=device,
-                dtype=torch.long,
-            )
-            dummy_positions = torch.arange(total_tokens, device=device, dtype=torch.long)
-            slot_mapping = torch.arange(total_tokens, dtype=torch.long, device=device)
-            seq_lens_tensor = torch.full((bs, ), query_len, device=device, dtype=torch.int32)
-            context_lens_tensor = torch.zeros((bs, ), device=device, dtype=torch.int32)
-
-            attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
-                seq_lens_tensor=seq_lens_tensor,
-                context_lens_tensor=context_lens_tensor,
-                slot_mapping=slot_mapping,
-                block_list=None,
-                attn_bias=None,
-                block_size=self.block_size,
-            )
-
-            with set_forward_context(attn_metadata, self.vllm_config):
-                hidden_states = self.model.forward(
-                    input_ids=dummy_input_ids,
-                    positions=dummy_positions,
-                )
-
-            # flattened = hidden_states.view(-1, hidden_states.shape[-1])
-            num_scheduled_tokens_np = np.full(query_len, bs)
-            prompt_lens_cpu = torch.tensor(num_scheduled_tokens_np, dtype=torch.int32, device="cpu")
-            prompt_token_ids = dummy_input_ids.view(bs, query_len).to(device=device, dtype=torch.int32)
-            supported_tasks = self.get_supported_pooling_tasks()
-            if "embed" in supported_tasks:
-                task = "embed"
-            else:
-                logger.warning(
-                    "Warmup not yet supported for pooling tasks: %s",
-                    supported_tasks,
-                )
-                return
-            dummy_pooling_param = PoolingParams(task=task)
-            to_update = model.pooler.get_pooling_updates(dummy_pooling_param.task)
-            to_update.apply(dummy_pooling_param)
-
-            pooling_params_list = [dummy_pooling_param] * bs
-
-            pooling_metadata = PoolingMetadata(
-                prompt_lens=prompt_lens_cpu,
-                prompt_token_ids=prompt_token_ids,
-                prompt_token_ids_cpu=prompt_token_ids.cpu(),
-                pooling_params=pooling_params_list,
-                pooling_states=[PoolingStates() for _ in range(bs)],
-            )
-            seq_lens_cpu = seq_lens_tensor.cpu()
-            pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np, seq_lens_cpu, device=hidden_states.device)
-
-            try:
-                _pooler_output = model.pooler(hidden_states=hidden_states, pooling_metadata=pooling_metadata)
-                del _pooler_output
-            except RuntimeError as e:
-                err_str = str(e).lower()
-                if "out of memory" in err_str or "oom" in err_str:
-                    raise RuntimeError(f"HPU out of memory occurred when warming up pooler "
-                                       f"with bs={bs}, query_len={query_len}, total_tokens={total_tokens}. "
-                                       "Try lowering max_num_seqs or warmup bucket sizes.") from e
-                else:
-                    raise
-
-            # Cleanup after batch has been warmed up
-            self.input_batch.req_id_to_index = {}
-            self.requests = {}
-
-        # Final synchronization to ensure all operations are completed
-        torch.hpu.synchronize()
-        logger.info("Pooler warmup completed successfully")
-
     def warmup_sampler(self):
         """
         Warmup the sampler with different temperature, top-p, and top-k values.
@@ -5638,11 +5576,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                                                             num_blocks]
         if self.is_pooling_model:
             model = cast(VllmModelForPooling, self.get_model())
-            if hasattr(self.model_config, 'task') and self.model_config.task is not None:
-                task = self.model_config.task
-            else:
-                task = "score" if self.model_config.is_cross_encoder \
-                    else "embed"
+            supported_tasks = self.get_supported_pooling_tasks()
+            # Prefer the embed/classify request tasks; sorting keeps the fallback identical across workers.
+            task = next(t for t in ("embed", "classify", *sorted(supported_tasks)) if t in supported_tasks)
             pooling_param = PoolingParams(task=task)
             to_update = model.pooler.get_pooling_updates(pooling_param.task)
             to_update.apply(pooling_param)
@@ -6359,22 +6295,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self.supports_mm_inputs and use_torch_compile and not mm_warmup_outside:
                 self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
-            if not self.model_config.enforce_eager and not self.is_pooling_model:
-                assert self.mem_margin is not None, \
-                    ("HabanaWorker.determine_num_available_blocks needs "
-                     "to be called before warming up the model.")
-
+            if not self.model_config.enforce_eager:
                 if self.is_pooling_model:
-                    self.warmup_pooler()
+                    # Pooling runs each prompt as its own context-free forward (_prepare_inputs_for_pooling),
+                    # so only the query length of a prompt bucket matters.
+                    query_lens = {query_len for _, query_len, _ in self.bucketing_manager.prompt_buckets}
+                    prompt_buckets = [(1, query_len, 0) for query_len in sorted(query_lens)]
                 else:
+                    assert self.mem_margin is not None, \
+                        ("HabanaWorker.determine_num_available_blocks needs "
+                         "to be called before warming up the model.")
+
                     self.warmup_sampler()
                     self.defragmenter.warmup()
+                    prompt_buckets = self.bucketing_manager.prompt_buckets
 
                 # TODO(kzawora): align_workers
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
-                    self.warmup_graphs(
-                        self.bucketing_manager.prompt_buckets, True, kv_caches)
-                self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
+                    self.warmup_graphs(prompt_buckets, True, kv_caches)
+                self.log_graph_warmup_summary(prompt_buckets, True, mem_post_prompt)
                 if not self.is_pooling_model:
                     mem_post_decode, decode_batch_seq, decode_captured_all = \
                       self.warmup_graphs(
@@ -7543,7 +7482,7 @@ class HPUAttentionMetadataProcessor:
         self.interleaved_sliding_window = (is_interleaved(vllm_config.model_config.hf_text_config)
                                            and self.sliding_window)
 
-        if self.interleaved_sliding_window:
+        if self.sliding_window:
             self.use_window_sdpa = with_default(get_config().PT_HPU_SDPA_QKV_SLICE_MODE_FWD, False)
             #os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD", "false").strip().lower() in ("1", "true")
             self.slice_size = int(with_default(get_config().PT_HPU_SDPA_BC_FACTOR, "1024"))
@@ -7665,27 +7604,31 @@ class HPUAttentionMetadataProcessor:
             block_size = getattr(prefill_metadata, "block_size", self.block_size)
             max_context_len = max_context_len * block_size
 
+            # Masks are [batch, 1, query, context]: a cached prefill can be padded to several rows
+            # (data parallel padding, prompt batch size buckets above 1).
             if window_block_list is not None:
                 # Re-anchor ctx_len to the block-aligned gather frame so a
                 # non-block-aligned ctx_len doesn't misalign the sliding-window mask.
                 round_up_ctx = ((context_lens_t + block_size - 1) // block_size) * block_size
                 frame_base = torch.clamp(round_up_ctx - max_context_len, min=0)
                 context_lens_trimmed = context_lens_t - frame_base
-                invalid_lens_t = context_lens_trimmed - window_size + torch.arange(seq_len, device=device) - 1
-                past_indices = torch.arange(max_context_len, device=device)
-                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                             (past_indices.unsqueeze(0) < context_lens_trimmed.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+                invalid_lens_t = (context_lens_trimmed.view(-1, 1) - window_size +
+                                  torch.arange(seq_len, device=device).view(1, -1) - 1)
+                past_indices = torch.arange(max_context_len, device=device).view(1, 1, -1)
+                past_mask = ((past_indices > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices < context_lens_trimmed.view(-1, 1, 1))).unsqueeze(1)
             else:
                 # Full block list: use absolute coordinate frame with window lower bound
-                invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
-                past_indices = torch.arange(max_context_len, device=device)
-                past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
-                             (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+                invalid_lens_t = (context_lens_t.view(-1, 1) - window_size +
+                                  torch.arange(seq_len, device=device).view(1, -1) - 1)
+                past_indices = torch.arange(max_context_len, device=device).view(1, 1, -1)
+                past_mask = ((past_indices > invalid_lens_t.unsqueeze(-1)) &
+                             (past_indices < context_lens_t.view(-1, 1, 1))).unsqueeze(1)
 
             # Create boolean sliding window mask
             causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
             causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
-            causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
+            causal_mask = causal_mask.view(1, 1, seq_len, seq_len).expand(batch_size, -1, -1, -1)
 
             if image_seg_ids is not None:
                 # The bidirectional term only ever opens forward pairs (j > i),
@@ -7891,7 +7834,12 @@ class HPUAttentionMetadataProcessor:
         """
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
-            if self.interleaved_sliding_window:
+            # Non-interleaved SWA otherwise passes window_size to FusedSDPA, which aligns the causal mask
+            # top-left: wrong once the prompt has context (APC hit, chunked prefill), so bias it here.
+            # FusedSDPA only: the helper builds context columns for FusedSDPA alone.
+            # Remove once FusedSDPA or upstream supports bottom-right causal alignment with window_size.
+            if self.interleaved_sliding_window or (self.prefill_use_fusedsdpa and self.sliding_window
+                                                   and attn_metadata.block_list is not None):
                 attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
                                                                        self.sliding_window, device, dtype)
             if model_has_chunked_attention:
