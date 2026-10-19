@@ -48,10 +48,8 @@ from vllm_gaudi.extension.logger import logger as init_logger
 
 logger = init_logger()
 
-# Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.Mixer2RMSNormGated
 
-
-def _select_cache_group(t: torch.Tensor, group_idx) -> torch.Tensor:
+def _select_cache_group(t: torch.Tensor, group_idx: torch.Tensor) -> torch.Tensor:
     """Row `group_idx` of a per-cache-group tensor shaped [num_groups, ...].
 
     group_idx is a 0-dim long tensor (see maybe_set_mamba_kv_cache_groups_ids)
@@ -60,12 +58,18 @@ def _select_cache_group(t: torch.Tensor, group_idx) -> torch.Tensor:
     index_select: plain t[group_idx] makes dynamo call .item() on the index,
     a graph break (aten._local_scalar_dense). Same approach as
     HPUGatedDeltaNetAttention._resolve_state_indices.
+
+    A Python int is rejected rather than indexed: it would silently bring the
+    per-group specialization back. The isinstance check is resolved while
+    tracing, so it adds no graph break.
     """
-    if isinstance(group_idx, torch.Tensor):
-        return t.index_select(0, group_idx.view(1)).squeeze(0)
-    return t[group_idx]
+    if not isinstance(group_idx, torch.Tensor):
+        raise TypeError(f"cache_group_idx must be a 0-dim tensor set by maybe_set_mamba_kv_cache_groups_ids, "
+                        f"got {type(group_idx).__name__}")
+    return t.index_select(0, group_idx.view(1)).squeeze(0)
 
 
+# Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.Mixer2RMSNormGated
 @Mixer2RMSNormGated.register_oot
 class HPUMixer2RMSNormGated(Mixer2RMSNormGated):
 

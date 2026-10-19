@@ -868,8 +868,12 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                     # layer was compiled N times per shape. Consumers MUST index
                     # with index_select (see _select_cache_group in
                     # hpu_mamba_mixer2): t[idx] with a 0-dim tensor makes dynamo
-                    # call .item(), which breaks the graph.
-                    mamba_mixer.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
+                    # call .item(), which breaks the graph. Placed on the
+                    # mixer's own (model) device, the same device as the
+                    # per-group index tensors it selects from.
+                    mamba_mixer.cache_group_idx = torch.tensor(group_idx,
+                                                               dtype=torch.long,
+                                                               device=next(mamba_mixer.parameters()).device)
             elif 'linear_attn' in layer_name:
                 layer_idx = int(layer_name.split('.')[-2])
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
