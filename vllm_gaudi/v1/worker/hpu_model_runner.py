@@ -83,7 +83,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists, LogprobsTensors, DraftTokenIds,
                              ModelRunnerOutput, AsyncModelRunnerOutput, KVConnectorOutput)
-from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
+from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cache_groups
 from vllm.v1.utils import CpuGpuBuffer
@@ -311,16 +311,42 @@ def _move_remaining_tensors_to_device(model: torch.nn.Module, device: str) -> No
 def _model_has_moe_experts(model: torch.nn.Module) -> bool:
     """Return True if the model has any fused-MoE op with per-expert weight views.
 
-    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase``) whose
-    per-expert ``MoeMatmul.weight`` attributes are plain-tensor views that go
-    stale after ``model.to(device)`` and must be rebound. Dense models (e.g.
-    Llama-3.3-70B) have none, so the INC pre-stage ``model.to('hpu')`` + rebind
-    is pure overhead for them -- and worse, it eagerly materializes the full
-    (pre-quantization) weights on a single card, OOMing large dense models
-    before ``convert()`` can shrink them.
+    Only MoE models carry the ``moe_op`` (``VllmMixtureOfExpertsOpBase`` or the
+    WNA16 ``VllmMixtureOfExpertsOpWNA16``) whose per-expert weight attributes are
+    plain-tensor views that go stale after ``model.to(device)`` and must be
+    rebound. Dense models (e.g. Llama-3.3-70B) have none, so the INC pre-stage
+    ``model.to('hpu')`` + rebind is pure overhead for them -- and worse, it eagerly
+    materializes the full (pre-quantization) weights on a single card, OOMing
+    large dense models before ``convert()`` can shrink them.
     """
-    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
-    return any(isinstance(getattr(module, "moe_op", None), VllmMixtureOfExpertsOpBase) for module in model.modules())
+    from vllm_gaudi.extension.ops import (  # local to avoid circular import
+        VllmMixtureOfExpertsOpBase, VllmMixtureOfExpertsOpWNA16)
+    return any(
+        isinstance(getattr(module, "moe_op", None), (VllmMixtureOfExpertsOpBase, VllmMixtureOfExpertsOpWNA16))
+        for module in model.modules())
+
+
+def _rebind_wna16_moe_expert_weights(model: torch.nn.Module) -> None:
+    """Re-point WNA16 per-expert views at the parent layer's moved Parameters.
+
+    ``VllmMixtureOfExpertsOpWNA16`` keeps per-expert packed weights, scales,
+    zero points (and g_idx) as plain-attribute views into the layer's stacked
+    ``w13_weight_packed`` / ``w13_weight_scale`` / ... Parameters, plus a
+    ``_cached_int4`` tuple of the same views. After ``model.to(device)`` those
+    views still alias the old storage; ``_move_remaining_tensors_to_device``
+    would then copy every per-expert view (and the cache) separately, leaving
+    two or three copies of the expert weights on the device. Rebinding first
+    keeps one. A no-op when the views already alias the Parameters.
+    """
+    from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpWNA16  # local to avoid circular import
+    rebound = 0
+    for module in model.modules():
+        moe_op = getattr(module, "moe_op", None)
+        if isinstance(moe_op, VllmMixtureOfExpertsOpWNA16) and moe_op.expert_weights_stale(module):
+            moe_op.bind_expert_weights(module)
+            rebound += 1
+    if rebound:
+        logger.info("Rebound WNA16 MoE expert weights to the moved Parameters on %d ops", rebound)
 
 
 def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
@@ -337,8 +363,11 @@ def _rebind_moe_expert_weights(model: torch.nn.Module) -> None:
     Call this AFTER model.to(device) and BEFORE
     _move_remaining_tensors_to_device so that the stray scan finds all
     MoeMatmul.weight tensors already on the correct device and skips them.
+    WNA16 ops keep their own attribute layout; see
+    _rebind_wna16_moe_expert_weights.
     """
     from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpBase  # local to avoid circular import
+    _rebind_wna16_moe_expert_weights(model)
     for module in model.modules():
         moe_op = getattr(module, "moe_op", None)
         if not isinstance(moe_op, VllmMixtureOfExpertsOpBase):
@@ -4972,6 +5001,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logger.info("Preparing model with INC took %.4f GB", self.model_memory_usage / float(2**30))
         elif not is_fake_hpu():
             self.model = self.model.to("hpu")
+            # A CPU-first load leaves WNA16 per-expert views on the host; without
+            # this they would stay there (no stray-tensor sweep on this path).
+            _rebind_wna16_moe_expert_weights(self.model)
             htcore.mark_step()
 
         apply_model_specific_patches(self)
@@ -5353,107 +5385,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                f"free_mem:{free_mem}")
         logger.info(msg)
 
-    def warmup_pooler(self):
-        logger.info(
-            "Starting pooler warmup with prompt buckets: %s",
-            self.bucketing_manager.prompt_buckets,
-        )
-
-        model = cast(VllmModelForPooling, self.get_model())
-        device = self.device
-        for (bs, query_len, num_blocks) in self.bucketing_manager.prompt_buckets:
-            if bs == 0 or query_len == 0:
-                continue
-
-            total_tokens = bs * query_len
-            logger.info(
-                "Warmup: bs=%s, query_len=%s, num_blocks=%s, total_tokens=%s",
-                bs,
-                query_len,
-                num_blocks,
-                total_tokens,
-            )
-
-            vocab_size = getattr(self.model.config, "vocab_size", None)
-            if vocab_size is None:
-                raise RuntimeError("Could not determine vocab_size from model config")
-
-            dummy_input_ids = torch.randint(
-                low=0,
-                high=vocab_size,
-                size=(total_tokens, ),
-                device=device,
-                dtype=torch.long,
-            )
-            dummy_positions = torch.arange(total_tokens, device=device, dtype=torch.long)
-            slot_mapping = torch.arange(total_tokens, dtype=torch.long, device=device)
-            seq_lens_tensor = torch.full((bs, ), query_len, device=device, dtype=torch.int32)
-            context_lens_tensor = torch.zeros((bs, ), device=device, dtype=torch.int32)
-
-            attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
-                seq_lens_tensor=seq_lens_tensor,
-                context_lens_tensor=context_lens_tensor,
-                slot_mapping=slot_mapping,
-                block_list=None,
-                attn_bias=None,
-                block_size=self.block_size,
-            )
-
-            with set_forward_context(attn_metadata, self.vllm_config):
-                hidden_states = self.model.forward(
-                    input_ids=dummy_input_ids,
-                    positions=dummy_positions,
-                )
-
-            # flattened = hidden_states.view(-1, hidden_states.shape[-1])
-            num_scheduled_tokens_np = np.full(query_len, bs)
-            prompt_lens_cpu = torch.tensor(num_scheduled_tokens_np, dtype=torch.int32, device="cpu")
-            prompt_token_ids = dummy_input_ids.view(bs, query_len).to(device=device, dtype=torch.int32)
-            supported_tasks = self.get_supported_pooling_tasks()
-            if "embed" in supported_tasks:
-                task = "embed"
-            else:
-                logger.warning(
-                    "Warmup not yet supported for pooling tasks: %s",
-                    supported_tasks,
-                )
-                return
-            dummy_pooling_param = PoolingParams(task=task)
-            to_update = model.pooler.get_pooling_updates(dummy_pooling_param.task)
-            to_update.apply(dummy_pooling_param)
-
-            pooling_params_list = [dummy_pooling_param] * bs
-
-            pooling_metadata = PoolingMetadata(
-                prompt_lens=prompt_lens_cpu,
-                prompt_token_ids=prompt_token_ids,
-                prompt_token_ids_cpu=prompt_token_ids.cpu(),
-                pooling_params=pooling_params_list,
-                pooling_states=[PoolingStates() for _ in range(bs)],
-            )
-            seq_lens_cpu = seq_lens_tensor.cpu()
-            pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np, seq_lens_cpu, device=hidden_states.device)
-
-            try:
-                _pooler_output = model.pooler(hidden_states=hidden_states, pooling_metadata=pooling_metadata)
-                del _pooler_output
-            except RuntimeError as e:
-                err_str = str(e).lower()
-                if "out of memory" in err_str or "oom" in err_str:
-                    raise RuntimeError(f"HPU out of memory occurred when warming up pooler "
-                                       f"with bs={bs}, query_len={query_len}, total_tokens={total_tokens}. "
-                                       "Try lowering max_num_seqs or warmup bucket sizes.") from e
-                else:
-                    raise
-
-            # Cleanup after batch has been warmed up
-            self.input_batch.req_id_to_index = {}
-            self.requests = {}
-
-        # Final synchronization to ensure all operations are completed
-        torch.hpu.synchronize()
-        logger.info("Pooler warmup completed successfully")
-
     def warmup_sampler(self):
         """
         Warmup the sampler with different temperature, top-p, and top-k values.
@@ -5645,11 +5576,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                                                             num_blocks]
         if self.is_pooling_model:
             model = cast(VllmModelForPooling, self.get_model())
-            if hasattr(self.model_config, 'task') and self.model_config.task is not None:
-                task = self.model_config.task
-            else:
-                task = "score" if self.model_config.is_cross_encoder \
-                    else "embed"
+            supported_tasks = self.get_supported_pooling_tasks()
+            # Prefer the embed/classify request tasks; sorting keeps the fallback identical across workers.
+            task = next(t for t in ("embed", "classify", *sorted(supported_tasks)) if t in supported_tasks)
             pooling_param = PoolingParams(task=task)
             to_update = model.pooler.get_pooling_updates(pooling_param.task)
             to_update.apply(pooling_param)
@@ -6366,22 +6295,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self.supports_mm_inputs and use_torch_compile and not mm_warmup_outside:
                 self.warmup_multimodal_graphs(self.get_model().vision_bucket_manager.multimodal_buckets)
 
-            if not self.model_config.enforce_eager and not self.is_pooling_model:
-                assert self.mem_margin is not None, \
-                    ("HabanaWorker.determine_num_available_blocks needs "
-                     "to be called before warming up the model.")
-
+            if not self.model_config.enforce_eager:
                 if self.is_pooling_model:
-                    self.warmup_pooler()
+                    # Pooling runs each prompt as its own context-free forward (_prepare_inputs_for_pooling),
+                    # so only the query length of a prompt bucket matters.
+                    query_lens = {query_len for _, query_len, _ in self.bucketing_manager.prompt_buckets}
+                    prompt_buckets = [(1, query_len, 0) for query_len in sorted(query_lens)]
                 else:
+                    assert self.mem_margin is not None, \
+                        ("HabanaWorker.determine_num_available_blocks needs "
+                         "to be called before warming up the model.")
+
                     self.warmup_sampler()
                     self.defragmenter.warmup()
+                    prompt_buckets = self.bucketing_manager.prompt_buckets
 
                 # TODO(kzawora): align_workers
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
-                    self.warmup_graphs(
-                        self.bucketing_manager.prompt_buckets, True, kv_caches)
-                self.log_graph_warmup_summary(self.bucketing_manager.prompt_buckets, True, mem_post_prompt)
+                    self.warmup_graphs(prompt_buckets, True, kv_caches)
+                self.log_graph_warmup_summary(prompt_buckets, True, mem_post_prompt)
                 if not self.is_pooling_model:
                     mem_post_decode, decode_batch_seq, decode_captured_all = \
                       self.warmup_graphs(

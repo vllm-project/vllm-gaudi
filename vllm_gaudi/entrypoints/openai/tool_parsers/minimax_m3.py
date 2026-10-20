@@ -60,7 +60,7 @@ import math
 import re
 from collections.abc import Sequence
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
