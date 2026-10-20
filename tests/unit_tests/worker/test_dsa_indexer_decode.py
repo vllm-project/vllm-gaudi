@@ -15,33 +15,50 @@ def _runner(use_contiguous_pa=False, max_model_len=131072):
     runner = SimpleNamespace(dsa_index_topk=2048,
                              speculative_config=None,
                              use_contiguous_pa=use_contiguous_pa,
-                             max_model_len=max_model_len)
-    runner._dsa_index_width = lambda *args: HPUModelRunner._dsa_index_width(runner, *args)
+                             max_model_len=max_model_len,
+                             attn_block_size=128,
+                             interleaved_sliding_window=False,
+                             kv_cache_config=SimpleNamespace(num_blocks=1 << 20))
+    # The real methods; they also call each other through self.
+    for name in ('_dsa_index_width', '_dsa_warmup_req_blocks', '_build_dsa_block_index', '_generate_seq_lengths',
+                 '_prepare_dummy_scenario'):
+        setattr(runner, name, getattr(HPUModelRunner, name).__get__(runner))
     return runner
+
+
+def _scenario_blocks(runner, batch_size, num_blocks, longest=None):
+    """Per-request block counts of the decode batch built by the real warmup scenario."""
+    built = []
+    # Context tokens plus the token being decoded.
+    runner._add_dummy_request = lambda requests, scheduled, num_computed_tokens, **_: requests.append(
+        cdiv(num_computed_tokens + 1, runner.attn_block_size))
+    runner._execute_dummy_scenario = lambda requests, scheduled: built.extend(requests)
+    runner._prepare_dummy_scenario(None, (batch_size, 1, num_blocks), decode_longest_blocks=longest)
+    return built
 
 
 def test_dsa_index_width_transitions():
     runner = _runner()
-    assert HPUModelRunner._dsa_index_width(runner, 1, 640, 40, 128) is None
-    assert HPUModelRunner._dsa_index_width(runner, 32, 1280, 10, 128) == 16
-    assert HPUModelRunner._dsa_index_width(runner, 32, 1280, 17, 128) == 64
-    assert HPUModelRunner._dsa_index_width(runner, 32, 1280, 300, 128) == 1024
-    assert HPUModelRunner._dsa_index_width(runner, 32, 1280, 1100, 128) is None
+    assert runner._dsa_index_width(1, 640, 40, 128) is None
+    assert runner._dsa_index_width(32, 1280, 10, 128) == 16
+    assert runner._dsa_index_width(32, 1280, 17, 128) == 64
+    assert runner._dsa_index_width(32, 1280, 300, 128) == 1024
+    assert runner._dsa_index_width(32, 1280, 1100, 128) is None
     runner.dsa_index_topk = None
-    assert HPUModelRunner._dsa_index_width(runner, 32, 1280, 10, 128) is None
-    assert HPUModelRunner._dsa_warmup_req_blocks(runner, 32, 1280, 128) == []
+    assert runner._dsa_index_width(32, 1280, 10, 128) is None
+    assert runner._dsa_warmup_req_blocks(32, 1280, 128) == []
 
 
 def test_dsa_warmup_req_blocks():
     # Natural width 64 (1280 / 32 = 40 blocks); 1025 blocks exercises the batch-wide path.
-    assert HPUModelRunner._dsa_warmup_req_blocks(_runner(max_model_len=204800), 32, 1280, 128) == [16, 256, 1024, 1025]
+    assert _runner(max_model_len=204800)._dsa_warmup_req_blocks(32, 1280, 128) == [16, 256, 1024, 1025]
     # A 1024-block max_model_len cannot reach the batch-wide path in a 1280-block bucket.
-    assert HPUModelRunner._dsa_warmup_req_blocks(_runner(), 32, 1280, 128) == [16, 256, 1024]
+    assert _runner()._dsa_warmup_req_blocks(32, 1280, 128) == [16, 256, 1024]
     # Natural width 16; a 17-block request takes the batch-wide path.
-    assert HPUModelRunner._dsa_warmup_req_blocks(_runner(), 4, 64, 128) == [17]
+    assert _runner()._dsa_warmup_req_blocks(4, 64, 128) == [17]
     # max_model_len bounds a single request to 64 blocks, so only width 16 is left to warm.
-    assert HPUModelRunner._dsa_warmup_req_blocks(_runner(max_model_len=8192), 32, 1280, 128) == [16]
-    assert HPUModelRunner._dsa_warmup_req_blocks(_runner(), 1, 1280, 128) == []
+    assert _runner(max_model_len=8192)._dsa_warmup_req_blocks(32, 1280, 128) == [16]
+    assert _runner()._dsa_warmup_req_blocks(1, 1280, 128) == []
 
 
 @pytest.mark.parametrize('use_contiguous_pa', [False, True])
@@ -53,7 +70,7 @@ def test_dsa_warmup_covers_runtime_widths(use_contiguous_pa, max_model_len):
         for num_blocks in (32, 64, 128, 256, 512, 1024, 1280, 2048, 4096):
             if batch_size > num_blocks:
                 continue
-            req_blocks = HPUModelRunner._dsa_warmup_req_blocks(runner, batch_size, num_blocks, block_size)
+            req_blocks = runner._dsa_warmup_req_blocks(batch_size, num_blocks, block_size)
             default_longest = 1 if use_contiguous_pa else cdiv(num_blocks, batch_size)
             longest_cap = min(cdiv(max_model_len, block_size),
                               num_blocks if use_contiguous_pa else num_blocks - (batch_size - 1))
@@ -73,12 +90,12 @@ def test_dsa_warmup_covers_runtime_widths(use_contiguous_pa, max_model_len):
 def test_build_dsa_block_index():
     runner = _runner()
     tables = [[7, 3], [], [9, 1, 4]]
-    flat = HPUModelRunner._build_dsa_block_index(runner, tables, 4, 6, 16)
+    flat = runner._build_dsa_block_index(tables, 4, 6, 16)
     assert flat.shape == (4, 16) and flat.dtype == torch.int32
     assert flat[0, :2].tolist() == [0, 1] and flat[2, :3].tolist() == [2, 3, 4]
     assert (flat[1] == 6).all() and (flat[3] == 6).all() and (flat[0, 2:] == 6).all()
     runner.use_contiguous_pa = True
-    by_id = HPUModelRunner._build_dsa_block_index(runner, tables, 4, 10, 16)
+    by_id = runner._build_dsa_block_index(tables, 4, 10, 16)
     assert by_id[0, :2].tolist() == [7, 3] and by_id[2, :3].tolist() == [9, 1, 4]
     assert (by_id[1] == 10).all() and (by_id[3] == 10).all()
 
@@ -124,42 +141,26 @@ def test_decode_per_request_index_matches_batch_wide(compiled, monkeypatch):
     torch.testing.assert_close(selections[1], selections[0], rtol=0, atol=0)
 
 
-def test_dsa_warmup_scenario_block_bounds():
-    """Verify non-contiguous PA scenarios don't create unintended width transitions."""
-    block_size = 128
-    runner = _runner(use_contiguous_pa=False, max_model_len=32768)
+def test_dsa_warmup_scenario_block_counts():
+    runner = _runner(max_model_len=32768)
+    assert runner._dsa_warmup_req_blocks(4, 288, 128) == [16, 64]
+    assert _scenario_blocks(runner, 4, 288) == [72, 72, 72, 72]
+    # The other requests must not outgrow the forced longest one, or the scenario runs a different width.
+    assert _scenario_blocks(runner, 4, 288, 16) == [16, 16, 16, 16]
+    assert _scenario_blocks(runner, 4, 288, 64) == [64, 64, 64, 64]
 
-    def compute_scenario_widths(batch_size, num_blocks, block_size, max_model_len, decode_longest_blocks=None):
-        """Simulate _prepare_dummy_scenario and return the block counts it creates."""
-        if decode_longest_blocks:
-            other_blocks = min(num_blocks - decode_longest_blocks, (batch_size - 1) * decode_longest_blocks)
-            seq_lengths = [min(decode_longest_blocks * block_size, max_model_len) - 1]
-            if batch_size > 1:
-                seq_lengths += runner._generate_seq_lengths(batch_size - 1, other_blocks, block_size)
-        else:
-            seq_lengths = runner._generate_seq_lengths(batch_size, num_blocks, block_size)
-        req_blocks = [(sl + block_size - 1) // block_size for sl in seq_lengths]
-        return req_blocks
 
-    test_cases = [
-        (4, 288, None),  # Natural 72-block splits evenly
-        (4, 288, 72),  # Longest 72, others capped
-        (8, 512, None),
-        (8, 512, 64),
-        (32, 1280, None),
-        (32, 1280, 16),
-        (32, 1280, 256),
-    ]
-    for batch_size, num_blocks, decode_longest_blocks in test_cases:
-        longest_cap = min(cdiv(runner.max_model_len, block_size), num_blocks - (batch_size - 1))
-        req_blocks = compute_scenario_widths(batch_size, num_blocks, block_size, runner.max_model_len,
-                                             decode_longest_blocks)
-        assert len(req_blocks) == batch_size
-        assert all(b > 0 for b in req_blocks), f"Case {(batch_size, num_blocks, decode_longest_blocks)}: {req_blocks}"
-        assert sum(req_blocks) <= num_blocks, f"Total blocks exceed bucket: {req_blocks}"
-        if decode_longest_blocks:
-            assert req_blocks[0] == decode_longest_blocks, \
-                f"First request should be {decode_longest_blocks}, got {req_blocks[0]}"
-            assert all(b <= decode_longest_blocks for b in req_blocks[1:]), \
-                f"Other requests should be <= {decode_longest_blocks}: {req_blocks}"
-            assert all(b <= longest_cap for b in req_blocks), f"Blocks exceed cap {longest_cap}: {req_blocks}"
+@pytest.mark.parametrize('use_contiguous_pa', [False, True])
+@pytest.mark.parametrize('max_model_len', [8192, 32768, 131072])
+def test_dsa_warmup_scenarios_run_target_width(use_contiguous_pa, max_model_len):
+    runner = _runner(use_contiguous_pa, max_model_len)
+    for batch_size in (2, 3, 4, 8, 16, 32, 64):
+        for num_blocks in (32, 64, 128, 288, 512, 1280, 2048, 4096):
+            if batch_size > num_blocks:
+                continue
+            for longest in runner._dsa_warmup_req_blocks(batch_size, num_blocks, 128):
+                blocks = _scenario_blocks(runner, batch_size, num_blocks, longest)
+                assert len(blocks) == batch_size and blocks[0] == max(blocks) == longest, \
+                    (batch_size, num_blocks, longest, blocks)
+                if not use_contiguous_pa:
+                    assert sum(blocks) <= num_blocks, (batch_size, num_blocks, longest, blocks)
