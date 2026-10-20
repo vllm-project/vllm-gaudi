@@ -34,7 +34,7 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
         return HPUAttentionMetadataV1
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[Union[int, MultipleOf]]:
         # 16 is supported for testing/smaller models; 128 is the standard HPU
         # kernel block size; 528 is required for Granite 4.0-H
         # (granitemoehybrid) without prefix caching (16-token FA alignment),
