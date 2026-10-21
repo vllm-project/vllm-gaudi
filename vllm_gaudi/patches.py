@@ -984,28 +984,73 @@ def _patch_moe_runner_delegation() -> None:
         try:
             mod = __import__(mod_name, fromlist=[cls_name])
             cls = getattr(mod, cls_name)
+            if getattr(cls, "_patched_delegation", False):
+                continue
             orig_getattr = getattr(cls, "__getattr__", None)
 
-            def _getattr(self, name: str):
-                try:
-                    if orig_getattr:
-                        return orig_getattr(self, name)
-                    return super(cls, self).__getattr__(name)
-                except AttributeError:
-                    routed = getattr(self, "routed_experts", None)
-                    if routed is not None and hasattr(routed, name):
-                        return getattr(routed, name)
-                    raise
+            def _make_getattr(og_get, target_cls):
+                def _getattr(self, name: str):
+                    try:
+                        if og_get:
+                            return og_get(self, name)
+                        return super(target_cls, self).__getattr__(name)
+                    except AttributeError:
+                        routed = getattr(self, "routed_experts", None)
+                        if routed is not None and hasattr(routed, name):
+                            return getattr(routed, name)
+                        raise
+                return _getattr
 
-            cls.__getattr__ = _getattr
+            cls.__getattr__ = _make_getattr(orig_getattr, cls)
+            cls._patched_delegation = True
         except Exception:
             pass
 
 
 def _patch_kimi_linear_weights() -> None:
-    """Ensure KimiLinearDecoderLayer safely accesses w13_weight and w2_weight without evaluating bool(Tensor)."""
+    """Ensure KimiLinearDecoderLayer and KimiMoE safely access w13_weight and w2_weight without evaluating bool(Tensor)."""
     try:
         import vllm.models.kimi_k3.amd.linear as k3_linear
+
+        orig_moe_init = getattr(k3_linear.KimiMoE, "__init__", None)
+        if orig_moe_init is not None and not getattr(k3_linear.KimiMoE, "_patched_weights", False):
+            def _safe_moe_init(self, *args, **kwargs):
+                try:
+                    orig_moe_init(self, *args, **kwargs)
+                except AttributeError as e:
+                    if "w13_weight_packed" in str(e) or "w2_weight_packed" in str(e):
+                        target = getattr(self.experts, "routed_experts", self.experts)
+                        w13_candidates = (
+                            getattr(target, "w13_weight", None),
+                            getattr(target, "w13_weight_packed", None),
+                            getattr(self.experts, "w13_weight", None),
+                            getattr(self.experts, "w13_weight_packed", None),
+                        )
+                        w13_w = next((w for w in w13_candidates if w is not None), None)
+                        w2_candidates = (
+                            getattr(target, "w2_weight", None),
+                            getattr(target, "w2_weight_packed", None),
+                            getattr(self.experts, "w2_weight", None),
+                            getattr(self.experts, "w2_weight_packed", None),
+                        )
+                        w2_w = next((w for w in w2_candidates if w is not None), None)
+                        if w13_w is not None and hasattr(w13_w, "data"):
+                            w13_w.data.zero_()
+                        if w2_w is not None and hasattr(w2_w, "data"):
+                            w2_w.data.zero_()
+                        moe_cfg = getattr(self.experts, "moe_config", None) or getattr(target, "moe_config", None)
+                        if moe_cfg is not None and hasattr(self, "padded_moe_intermediate_size"):
+                            moe_intermediate_size = getattr(moe_cfg, "intermediate_size_per_partition", None)
+                            if moe_intermediate_size:
+                                moe_cfg.intermediate_size_per_partition_unpadded = (
+                                    moe_intermediate_size // self.tp_size
+                                )
+                    else:
+                        raise
+
+            k3_linear.KimiMoE.__init__ = _safe_moe_init
+            k3_linear.KimiMoE._patched_weights = True
+
         orig_forward = getattr(k3_linear.KimiLinearDecoderLayer, "forward", None)
         if orig_forward is None:
             return
@@ -1084,6 +1129,7 @@ def _patch_kimi_k3_arch() -> None:
     try:
         _patch_rocm_platform_for_hpu()
         _patch_kimi_kda()
+        _patch_moe_runner_delegation()
         _patch_kimi_attn_res()
         _patch_kimi_linear_weights()
         import vllm.models.kimi_k3 as k3_pkg
@@ -1318,6 +1364,7 @@ def apply() -> None:
         _patch_sdpa_attention_forward()
         _patch_inc_quantization_config()
         _patch_mla_prefill_selector()
+        _patch_moe_runner_delegation()
         _patch_kimi_k3_hybrid_config()
         _patch_kimi_k3_arch()
         _patch_compressed_tensors_mxfp4()
