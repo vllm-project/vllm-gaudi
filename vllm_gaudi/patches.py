@@ -444,6 +444,35 @@ def _patch_mamba_bind_kv_cache() -> None:
     MambaBase.bind_kv_cache = _hpu_mamba_bind_kv_cache
 
 
+def _hpu_mla_bind_kv_cache(self, kv_cache) -> None:
+    """Store the HPU per-layer KV-cache tuple unchanged.
+
+    Upstream MLAAttention.bind_kv_cache executes `self.kv_cache = kv_cache.squeeze(1)`,
+    assuming a single 4D CUDA tensor [B, 1, N, C]. On HPU, kv_cache is allocated as a
+    tuple (key_cache, value_cache, key_scales, value_scales), which raises
+    `AttributeError: 'tuple' object has no attribute 'squeeze'`.
+    """
+    if isinstance(kv_cache, (tuple, list)):
+        self.kv_cache = tuple(kv_cache)
+    else:
+        self.kv_cache = kv_cache.squeeze(1)
+
+
+def _patch_mla_bind_kv_cache() -> None:
+    """Install the HPU-safe ``MLAAttention.bind_kv_cache`` replacement."""
+    try:
+        from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    except ImportError:
+        return
+
+    upstream = getattr(MLAAttention, "bind_kv_cache", None)
+    if upstream is None or upstream is _hpu_mla_bind_kv_cache:
+        return
+
+    MLAAttention.bind_kv_cache = _hpu_mla_bind_kv_cache
+    MLAAttention._patched_hpu_bind = True
+
+
 def _hpu_get_num_layers_by_block_type(self, parallel_config, block_type="attention"):
     """HPU-safe replacement for ``ModelConfig.get_num_layers_by_block_type``.
 
@@ -1136,10 +1165,16 @@ def _patch_kimi_k3_arch() -> None:
         _patch_moe_runner_delegation()
         _patch_kimi_attn_res()
         _patch_kimi_linear_weights()
+        _patch_mla_bind_kv_cache()
         import vllm.models.kimi_k3 as k3_pkg
         import vllm.models.kimi_k3.amd.linear as _amd_linear
+        import vllm.models.kimi_k3.amd.mla as _amd_mla
         import vllm.models.kimi_k3.amd.model as _amd_model
         import vllm.models.kimi_k3.amd.mtp as _amd_mtp
+        from vllm_gaudi.attention.oot_mla import HPUMultiHeadLatentAttentionWrapper
+
+        _amd_linear.KimiK3MultiHeadLatentAttentionWrapper = HPUMultiHeadLatentAttentionWrapper
+        _amd_mla.KimiK3MultiHeadLatentAttentionWrapper = HPUMultiHeadLatentAttentionWrapper
 
         k3_pkg.KimiLinearForCausalLM = _amd_linear.KimiLinearForCausalLM
         k3_pkg.KimiK3ForConditionalGeneration = _amd_model.KimiK3ForConditionalGeneration
@@ -1364,6 +1399,7 @@ def apply() -> None:
         _patch_use_sequence_parallel_moe()
         _patch_check_shm_free_space()
         _patch_mamba_bind_kv_cache()
+        _patch_mla_bind_kv_cache()
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
         _patch_inc_quantization_config()
