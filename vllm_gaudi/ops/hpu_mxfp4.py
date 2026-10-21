@@ -163,3 +163,5 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
 
 # Monkey-patch: replace CUDA GptOssMxfp4MoEMethod with HPU version
 mxfp4_module.GptOssMxfp4MoEMethod = HPUGptOssMxfp4MoEMethod
+if hasattr(mxfp4_module, "Mxfp4MoEMethod"):
+    mxfp4_module.Mxfp4MoEMethod = HPUGptOssMxfp4MoEMethod

@@ -496,7 +496,23 @@ def _hpu_get_num_layers_by_block_type(self, parallel_config, block_type="attenti
             else:
                 return sum(t == block_type for t in layer_types_value[start:end])
 
-        if layers_block_type_value is None and attn_type_list is None and layer_types_value is None:
+        # Hybrid model Kimi-K3 / Kimi Linear
+        linear_attn_config = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(self.hf_config, "linear_attn_config", None)
+        if linear_attn_config is not None:
+            if isinstance(linear_attn_config, dict):
+                full_attn = set(linear_attn_config.get("full_attn_layers", []))
+                kda = set(linear_attn_config.get("kda_layers", []))
+            else:
+                full_attn = set(getattr(linear_attn_config, "full_attn_layers", []))
+                kda = set(getattr(linear_attn_config, "kda_layers", []))
+            if block_type == "attention":
+                return sum((idx + 1) in full_attn for idx in range(start, end))
+            elif block_type == "linear_attention":
+                return sum((idx + 1) in kda for idx in range(start, end))
+            else:
+                return 0
+
+        if layers_block_type_value is None and attn_type_list is None and layer_types_value is None and linear_attn_config is None:
             raise ValueError("The model is an hybrid without a layers_block_type or an "
                              "attn_type_list, or a layer_types in the hf_config, "
                              f"cannot determine the num of {block_type} layers")
@@ -520,8 +536,8 @@ def _patch_get_num_layers_by_block_type() -> None:
 
     if "get_num_layers_by_block_type" not in source or "layers_block_type" not in source:
         return  # Method shape changed — do not risk an incompatible override.
-    if "_GRANITE_LEGACY_LAYER_ALIASES" in source or "normalized_block_type" in source:
-        return  # Already normalizes (e.g. PR #47634 merged).
+    if "linear_attn_config" in source and ("_GRANITE_LEGACY_LAYER_ALIASES" in source or "normalized_block_type" in source):
+        return  # Already normalizes and supports linear_attn_config.
 
     ModelConfig.get_num_layers_by_block_type = _hpu_get_num_layers_by_block_type
 
@@ -845,6 +861,355 @@ def _patch_sdpa_attention_forward() -> None:
     _ensure_fsdpa_cached()
 
 
+def _patch_triton_for_hpu() -> None:
+    """Disable Triton compiler on HPU to prevent incompatible kernel generation."""
+    try:
+        import vllm.triton_utils.importing as imp
+        imp.HAS_TRITON = False
+    except Exception:
+        pass
+
+
+def _patch_rocm_platform_for_hpu() -> None:
+    """Neutralize vllm.platforms.rocm queries on HPU."""
+    try:
+        import sys
+        if "vllm.platforms.rocm" in sys.modules:
+            rmod = sys.modules["vllm.platforms.rocm"]
+        else:
+            import vllm.platforms.rocm as rmod
+        rmod._GCN_ARCH = ""
+        rmod._get_gcn_arch = lambda: ""
+        rmod._ON_GFX1X = False
+        rmod._ON_MI3XX = False
+        rmod._ON_GFX9 = False
+        rmod._ON_GFX942 = False
+        rmod._ON_GFX950 = False
+        rmod.on_gfx942 = lambda: False
+        rmod.on_gfx950 = lambda: False
+    except Exception:
+        pass
+
+
+def _patch_mla_prefill_selector() -> None:
+    """Return _DummyPrefillBackend for MLA prefill on HPU."""
+    try:
+        import vllm.v1.attention.backends.mla.prefill.selector as sel_mod
+        from vllm_gaudi.attention.oot_mla import _DummyPrefillBackend
+        orig_fn = getattr(sel_mod, "get_mla_prefill_backend", None)
+
+        def hpu_get_prefill(vllm_config):
+            from vllm.platforms import current_platform
+            if getattr(current_platform, "device_type", None) == "hpu" or getattr(current_platform, "device_name", None) == "hpu":
+                return _DummyPrefillBackend
+            if orig_fn:
+                return orig_fn(vllm_config)
+            return _DummyPrefillBackend
+
+        sel_mod.get_mla_prefill_backend = hpu_get_prefill
+        try:
+            import vllm.model_executor.layers.attention.mla_attention as mla_mod
+            mla_mod.get_mla_prefill_backend = hpu_get_prefill
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _patch_kimi_k3_hybrid_config() -> None:
+    """Populate layer_types from linear_attn_config for hybrid models like Kimi-K3."""
+    try:
+        from vllm.config import ModelConfig
+        orig_post_init = getattr(ModelConfig, "__post_init__", None)
+        if orig_post_init is not None:
+            def _hpu_post_init(self, *args, **kwargs):
+                orig_post_init(self, *args, **kwargs)
+                lac = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(self.hf_config, "linear_attn_config", None)
+                if lac is not None and not getattr(self.hf_text_config, "layer_types", None):
+                    full_set = set(lac.get("full_attn_layers", []) if isinstance(lac, dict) else getattr(lac, "full_attn_layers", []))
+                    num_layers = getattr(self.hf_text_config, "num_hidden_layers", 93)
+                    l_types = ["full_attention" if (i + 1) in full_set else "linear_attention" for i in range(num_layers)]
+                    self.hf_text_config.layer_types = l_types
+                    if hasattr(self.hf_config, "text_config"):
+                        self.hf_config.text_config.layer_types = l_types
+
+            ModelConfig.__post_init__ = _hpu_post_init
+    except Exception:
+        pass
+
+
+def _patch_moe_runner_delegation() -> None:
+    """Delegate missing attribute lookups on MoERunner to routed_experts."""
+    for mod_name, cls_name in [
+        ("vllm.model_executor.layers.fused_moe.runner.moe_runner", "MoERunner"),
+        ("vllm.models.kimi_k3.amd.latent_moe_runner", "ROCmLatentMoERunner"),
+    ]:
+        try:
+            mod = __import__(mod_name, fromlist=[cls_name])
+            cls = getattr(mod, cls_name)
+            orig_getattr = getattr(cls, "__getattr__", None)
+
+            def _getattr(self, name: str):
+                try:
+                    if orig_getattr:
+                        return orig_getattr(self, name)
+                    return super(cls, self).__getattr__(name)
+                except AttributeError:
+                    routed = getattr(self, "routed_experts", None)
+                    if routed is not None and hasattr(routed, name):
+                        return getattr(routed, name)
+                    raise
+
+            cls.__getattr__ = _getattr
+        except Exception:
+            pass
+
+
+def _patch_kimi_linear_weights() -> None:
+    """Ensure KimiLinearDecoderLayer safely accesses w13_weight and w2_weight without evaluating bool(Tensor)."""
+    try:
+        import vllm.models.kimi_k3.amd.linear as k3_linear
+        orig_forward = getattr(k3_linear.KimiLinearDecoderLayer, "forward", None)
+        if orig_forward is None:
+            return
+
+        def _safe_forward(self, *args, **kwargs):
+            if hasattr(self, "padded_moe_intermediate_size") and hasattr(self, "experts"):
+                moe_cfg = getattr(self.experts, "moe_config", None)
+                target = getattr(self.experts, "routed_experts", self.experts)
+                if moe_cfg is None:
+                    moe_cfg = getattr(target, "moe_config", None)
+                if moe_cfg is not None:
+                    moe_intermediate_size = getattr(moe_cfg, "intermediate_size_per_partition", None)
+                    if moe_intermediate_size and self.padded_moe_intermediate_size != moe_intermediate_size:
+                        w13_candidates = (
+                            getattr(target, "w13_weight", None),
+                            getattr(target, "w13_weight_packed", None),
+                            getattr(self.experts, "w13_weight", None),
+                            getattr(self.experts, "w13_weight_packed", None),
+                        )
+                        w13_w = next((w for w in w13_candidates if w is not None), None)
+                        w2_candidates = (
+                            getattr(target, "w2_weight", None),
+                            getattr(target, "w2_weight_packed", None),
+                            getattr(self.experts, "w2_weight", None),
+                            getattr(self.experts, "w2_weight_packed", None),
+                        )
+                        w2_w = next((w for w in w2_candidates if w is not None), None)
+                        if w13_w is not None and hasattr(w13_w, "data"):
+                            w13_w.data.zero_()
+                        if w2_w is not None and hasattr(w2_w, "data"):
+                            w2_w.data.zero_()
+                        moe_cfg.intermediate_size_per_partition_unpadded = (
+                            moe_intermediate_size // self.tp_size
+                        )
+            return orig_forward(self, *args, **kwargs)
+
+        k3_linear.KimiLinearDecoderLayer.forward = _safe_forward
+    except Exception:
+        pass
+
+
+def _patch_kimi_attn_res() -> None:
+    """Pure PyTorch fallback for Kimi-K3 attn_res when Triton is disabled on HPU."""
+    try:
+        import vllm.models.kimi_k3.amd.ops.attn_res as _attn_res_mod
+
+        def _torch_attn_res(
+            prefix, delta, blocks, norm_weight, qk_weight,
+            output_norm_weight, num_blocks, block_write_idx, eps, output_norm_eps,
+            quant_dtype=None,
+        ):
+            import torch.nn.functional as F
+            if delta is not None:
+                prefix = prefix + delta
+            if block_write_idx >= 0:
+                blocks[:, block_write_idx] = prefix
+            if num_blocks == 0:
+                output = prefix
+            else:
+                values = torch.cat((blocks[:, :num_blocks], prefix.unsqueeze(1)), dim=1)
+                hidden_size = prefix.shape[-1]
+                keys = F.rms_norm(values, (hidden_size,), norm_weight, eps)
+                probs = (keys @ qk_weight).softmax(dim=-1)
+                output = torch.matmul(probs.unsqueeze(1), values).squeeze(1)
+            if output_norm_weight is not None:
+                output = F.rms_norm(output, (prefix.shape[-1],), output_norm_weight, output_norm_eps)
+            return output
+
+        _attn_res_mod.attn_res = _torch_attn_res
+    except Exception:
+        pass
+
+
+def _patch_kimi_k3_arch() -> None:
+    """Route Kimi-K3 models to the platform-independent AMD implementation on HPU."""
+    try:
+        _patch_kimi_attn_res()
+        _patch_kimi_linear_weights()
+        import vllm.models.kimi_k3 as k3_pkg
+        import vllm.models.kimi_k3.amd.linear as _amd_linear
+        import vllm.models.kimi_k3.amd.model as _amd_model
+        import vllm.models.kimi_k3.amd.mtp as _amd_mtp
+
+        k3_pkg.KimiLinearForCausalLM = _amd_linear.KimiLinearForCausalLM
+        k3_pkg.KimiK3ForConditionalGeneration = _amd_model.KimiK3ForConditionalGeneration
+        k3_pkg.KimiK3MTP = _amd_mtp.KimiK3MTP
+
+        from vllm.model_executor.models.registry import ModelRegistry
+        ModelRegistry.register_model("KimiLinearForCausalLM", _amd_linear.KimiLinearForCausalLM)
+        ModelRegistry.register_model("KimiK3ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
+        ModelRegistry.register_model("KimiK3MTP", _amd_mtp.KimiK3MTP)
+    except Exception:
+        pass
+
+
+def _patch_compressed_tensors_mxfp4() -> None:
+    """Enable Gaudi native TPC kernel (VllmMixtureOfExpertsOpMXFP4) for CompressedTensorsW4A4Mxfp4MoEMethod."""
+    try:
+        import vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 as mod
+        from vllm.platforms import current_platform
+        cls = mod.CompressedTensorsW4A4Mxfp4MoEMethod
+
+        orig_init = cls.__init__
+
+        def hpu_init(self, moe):
+            orig_init(self, moe)
+            if getattr(current_platform, "device_type", None) == "hpu":
+                self.mxfp4_backend = None
+                self.experts_cls = None
+                self.use_cutlass_mxfp4 = False
+                self.moe_quant_config = object()
+
+        orig_process = getattr(cls, "process_weights_after_loading", None)
+
+        def hpu_process_weights(self, layer):
+            if getattr(current_platform, "device_type", None) != "hpu":
+                if orig_process:
+                    return orig_process(self, layer)
+                return
+
+            if hasattr(layer, "w13_weight_packed"):
+                layer.w13_weight = torch.nn.Parameter(
+                    layer.w13_weight_packed.data, requires_grad=False
+                )
+                delattr(layer, "w13_weight_packed")
+            if hasattr(layer, "w2_weight_packed"):
+                layer.w2_weight = torch.nn.Parameter(
+                    layer.w2_weight_packed.data, requires_grad=False
+                )
+                delattr(layer, "w2_weight_packed")
+
+            num_experts = layer.local_num_experts
+            ep_shift = layer.moe_config.ep_rank * num_experts
+            experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
+
+            try:
+                from vllm_gaudi.extension.runtime import get_config
+                use_dispatch_fn = get_config().use_dispatch_fn
+            except Exception:
+                use_dispatch_fn = False
+
+            if layer.moe_config.dp_size > 1 and use_dispatch_fn:
+                from functools import partial
+                from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states
+                dispatch_fn = partial(
+                    dispatch_hidden_states,
+                    is_sequence_parallel=layer.moe_config.is_sequence_parallel,
+                )
+            else:
+                dispatch_fn = None
+
+            has_bias = hasattr(layer, "w13_bias") and hasattr(layer, "w2_bias")
+
+            from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpMXFP4
+            layer.moe_op = VllmMixtureOfExpertsOpMXFP4(
+                layer.global_num_experts,
+                num_experts,
+                experts_min,
+                experts_max,
+                block_size=self.group_size,
+                has_bias=has_bias,
+                dispatch_fn=dispatch_fn,
+            )
+
+            for expert_id in range(num_experts):
+                layer.moe_op.w13_list[expert_id].set_weight(layer.w13_weight.data[expert_id])
+                layer.moe_op.w13_list[expert_id].set_scale(layer.w13_weight_scale.data[expert_id])
+                layer.moe_op.w2_list[expert_id].set_weight(layer.w2_weight.data[expert_id])
+                layer.moe_op.w2_list[expert_id].set_scale(layer.w2_weight_scale.data[expert_id])
+                if has_bias:
+                    layer.moe_op.w13_list[expert_id].set_bias(layer.w13_bias.data[expert_id])
+                    layer.moe_op.w2_list[expert_id].set_bias(layer.w2_bias.data[expert_id])
+
+            layer.moe_op._cache_weight_lists()
+            self.moe_quant_config = object()
+
+        orig_apply = getattr(cls, "apply", None)
+
+        def hpu_apply(self, layer, x, topk_weights, topk_ids, shared_experts=None, shared_experts_input=None):
+            if getattr(current_platform, "device_type", None) != "hpu":
+                if orig_apply:
+                    return orig_apply(self, layer, x, topk_weights, topk_ids, shared_experts, shared_experts_input)
+                raise RuntimeError("Non-HPU platform without orig_apply")
+
+            input_shape = x.shape
+            x = x.view(-1, x.shape[-1])
+
+            if topk_ids.dtype != torch.int32:
+                topk_ids = topk_ids.to(torch.int32)
+            topk_weights = topk_weights.to(x.dtype)
+
+            if layer.moe_config.dp_size > 1:
+                from vllm_gaudi.v1.worker.hpu_dp_utils import get_hpu_dp_metadata, dispatch_tensor
+                dp_metadata = get_hpu_dp_metadata()
+                hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
+                x = dispatch_tensor(x, hidden_states_across_dp, layer.moe_config.is_sequence_parallel)
+
+                topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
+                topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.moe_config.is_sequence_parallel)
+
+                topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
+                topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.moe_config.is_sequence_parallel)
+
+            topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
+            topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
+
+            output = layer.moe_op(
+                x,
+                topk_ids,
+                topk_weights,
+                permuted_weights=True,
+                activation="silu",
+            )
+
+            if layer.moe_config.dp_size > 1:
+                return output.view(*(output.size(0), *input_shape[1:]))
+            else:
+                return output.view(*input_shape)
+
+        cls.__init__ = hpu_init
+        cls.process_weights_after_loading = hpu_process_weights
+        cls.apply = hpu_apply
+
+        try:
+            import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as oracle_mod
+            orig_oracle = getattr(oracle_mod, "select_deepseek_v4_mxfp4_moe_backend", None)
+
+            def hpu_select_backend(*args, **kwargs):
+                if getattr(current_platform, "device_type", None) == "hpu":
+                    return (None, None)
+                if orig_oracle:
+                    return orig_oracle(*args, **kwargs)
+                return (None, None)
+
+            oracle_mod.select_deepseek_v4_mxfp4_moe_backend = hpu_select_backend
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _patch_inc_quantization_config() -> None:
     """Register the HPU ``_FakeINCConfig`` as the resolver for ``inc``.
 
@@ -910,6 +1275,10 @@ def apply() -> None:
         torch._C._host_emptyCache = lambda: None
 
     _patch_hf3fs_mock_client_for_cpu_only()
+    _patch_triton_for_hpu()
+    _patch_rocm_platform_for_hpu()
+    _patch_mla_prefill_selector()
+    _patch_moe_runner_delegation()
 
     # --- Deferred patches (cleanup_dist_env_and_memory + sampler) ---
     # We cannot import ``vllm.distributed.parallel_state`` or the sampler
@@ -939,6 +1308,10 @@ def apply() -> None:
         _patch_sdpa_attention_forward()
         _patch_inc_quantization_config()
         _patch_engine_core_sleep_host_guard()
+        _patch_mla_prefill_selector()
+        _patch_kimi_k3_hybrid_config()
+        _patch_kimi_k3_arch()
+        _patch_compressed_tensors_mxfp4()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
