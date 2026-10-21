@@ -954,13 +954,17 @@ def _patch_mla_prefill_selector() -> None:
 
 
 def _patch_kimi_k3_hybrid_config() -> None:
-    """Populate layer_types from linear_attn_config for hybrid models like Kimi-K3."""
+    """Populate layer_types from linear_attn_config for hybrid models like Kimi-K3 and disable expert intermediate padding on EP."""
     try:
         from vllm.config import ModelConfig
         orig_post_init = getattr(ModelConfig, "__post_init__", None)
         if orig_post_init is not None:
             def _hpu_post_init(self, *args, **kwargs):
                 orig_post_init(self, *args, **kwargs)
+                # Ensure KimiMoE does not pad moe_intermediate_size from 3072 to 4096 under EP (saves ~30 GB memory per card)
+                for cfg_obj in (getattr(self, "hf_text_config", None), getattr(self, "hf_config", None)):
+                    if cfg_obj is not None:
+                        setattr(cfg_obj, "min_moe_intermediate_per_partition", 1)
                 lac = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(self.hf_config, "linear_attn_config", None)
                 if lac is not None and not getattr(self.hf_text_config, "layer_types", None):
                     full_set = set(lac.get("full_attn_layers", []) if isinstance(lac, dict) else getattr(lac, "full_attn_layers", []))
