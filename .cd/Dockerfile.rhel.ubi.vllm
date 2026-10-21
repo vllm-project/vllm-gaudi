@@ -82,7 +82,9 @@ RUN dnf install -y --allowerasing \
     # Python development
     python3-devel python3.12 python3.12-devel python3.12-pip \
     # NUMA support
-    numactl-libs numactl-devel && \
+    numactl-libs numactl-devel \
+    # tcmalloc (EPEL), preloaded below
+    gperftools-libs && \
     dnf clean all
 
 # Configure Python 3.12 as default
@@ -227,6 +229,10 @@ RUN umask 002 && \
 
 # Copy license
 COPY LICENSE /licenses/vllm.md
+
+# Same allocator setup as the Habana base images; glibc malloc costs low-batch decode throughput
+ENV LD_PRELOAD=/usr/lib64/libtcmalloc.so.4 \
+    TCMALLOC_LARGE_ALLOC_REPORT_THRESHOLD=7516192768
 
 USER 2000
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
