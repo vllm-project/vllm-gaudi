@@ -635,15 +635,17 @@ run_embedding_model_test() {
 }
 
 # pd_disaggregate_nixl_libfabric
-run_pd_disaggregate_nixl_libfabric_test() {
-    echo "➡️ Testing PD disaggregate through NIXL libfabric."
-    git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
-    cp -r nixl /tmp/nixl_source
-    cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi python install_nixl.py; cd ..
-    rm -rf nixl
-    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
-    echo "✅ PD disaggregate through NIXL libfabric."
-}
+# Temporarily disabled: vLLM requires NIXL >= 1.5.0, but the Gaudi libfabric (OFI) support lives only
+# in the intel-staging/nixl fork, whose newest OFI branch is v0.6.0_OFI. Re-enable once it has one >= 1.5.0.
+# run_pd_disaggregate_nixl_libfabric_test() {
+#     echo "➡️ Testing PD disaggregate through NIXL libfabric."
+#     git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
+#     cp -r nixl /tmp/nixl_source
+#     cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi python install_nixl.py; cd ..
+#     rm -rf nixl
+#     cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
+#     echo "✅ PD disaggregate through NIXL libfabric."
+# }
 
 run_pd_disaggregate_nixl_ucx_test() {
     echo "➡️ Testing PD disaggregate through NIXL UCX."
@@ -762,7 +764,7 @@ launch_all_tests() {
     run_preemption_test
     run_spec_decode_parallel
     run_embedding_model_test
-    run_pd_disaggregate_nixl_libfabric_test
+    # run_pd_disaggregate_nixl_libfabric_test temporarily disabled: see comment above its definition
     run_pd_disaggregate_nixl_ucx_test
     run_cpu_offloading_test
     run_offloading_connector_test
