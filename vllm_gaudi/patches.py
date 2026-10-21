@@ -873,19 +873,57 @@ def _patch_rocm_platform_for_hpu() -> None:
     """Neutralize vllm.platforms.rocm queries on HPU."""
     try:
         import sys
+        import types
+
         if "vllm.platforms.rocm" in sys.modules:
             rmod = sys.modules["vllm.platforms.rocm"]
         else:
-            import vllm.platforms.rocm as rmod
+            rmod = types.ModuleType("vllm.platforms.rocm")
+            sys.modules["vllm.platforms.rocm"] = rmod
+
         rmod._GCN_ARCH = ""
         rmod._get_gcn_arch = lambda: ""
+        for arch in [
+            "on_gfx1x", "on_gfx11", "on_gfx1100", "on_gfx1151",
+            "on_gfx12x", "on_gfx1250", "on_rdna4", "on_mi3xx",
+            "on_gfx9", "on_gfx90a", "on_gfx942", "on_gfx950",
+            "on_cdna", "on_rdna",
+        ]:
+            setattr(rmod, arch, lambda: False)
         rmod._ON_GFX1X = False
+        rmod._ON_GFX11 = False
+        rmod._ON_GFX1100 = False
+        rmod._ON_GFX1151 = False
+        rmod._ON_GFX12X = False
         rmod._ON_MI3XX = False
         rmod._ON_GFX9 = False
+        rmod._ON_GFX90A = False
         rmod._ON_GFX942 = False
         rmod._ON_GFX950 = False
-        rmod.on_gfx942 = lambda: False
-        rmod.on_gfx950 = lambda: False
+        rmod._ON_GFX1250 = False
+        rmod._ON_CDNA = False
+        rmod._ON_RDNA = False
+        rmod.RocmPlatform = type("RocmPlatform", (), {})
+    except Exception:
+        pass
+
+
+def _patch_kimi_kda() -> None:
+    """Ensure KDA fused decode/chunk are explicitly disabled on HPU."""
+    try:
+        import vllm.models.kimi_k3.amd.ops.kda_decode as _kda_decode
+        _kda_decode.is_fused_kda_decode_supported = lambda *args, **kwargs: False
+    except Exception:
+        pass
+    try:
+        import vllm.models.kimi_k3.amd.ops.kda_chunk as _kda_chunk
+        _kda_chunk.is_fused_kda_chunk_supported = lambda *args, **kwargs: False
+    except Exception:
+        pass
+    try:
+        import vllm.models.kimi_k3.amd.kda as _amd_kda
+        _amd_kda.is_fused_kda_decode_supported = lambda *args, **kwargs: False
+        _amd_kda.is_fused_kda_chunk_supported = lambda *args, **kwargs: False
     except Exception:
         pass
 
@@ -1044,6 +1082,8 @@ def _patch_kimi_attn_res() -> None:
 def _patch_kimi_k3_arch() -> None:
     """Route Kimi-K3 models to the platform-independent AMD implementation on HPU."""
     try:
+        _patch_rocm_platform_for_hpu()
+        _patch_kimi_kda()
         _patch_kimi_attn_res()
         _patch_kimi_linear_weights()
         import vllm.models.kimi_k3 as k3_pkg
