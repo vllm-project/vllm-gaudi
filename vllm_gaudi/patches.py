@@ -1128,14 +1128,24 @@ def _patch_kimi_linear_weights() -> None:
 def _patch_kimi_attn_res() -> None:
     """Pure PyTorch fallback for Kimi-K3 attn_res when Triton is disabled on HPU."""
     try:
-        import vllm.models.kimi_k3.amd.ops.attn_res as _attn_res_mod
-
         def _torch_attn_res(
             prefix, delta, blocks, norm_weight, qk_weight,
             output_norm_weight, num_blocks, block_write_idx, eps, output_norm_eps,
             quant_dtype=None,
         ):
             import torch.nn.functional as F
+            if prefix.dim() == 3:
+                # Shape: [batch_size, seq_len, hidden_size] -> flatten tokens
+                b, s, h = prefix.shape
+                flat_prefix = prefix.reshape(-1, h)
+                flat_delta = delta.reshape(-1, h) if delta is not None else None
+                out = _torch_attn_res(
+                    flat_prefix, flat_delta, blocks, norm_weight, qk_weight,
+                    output_norm_weight, num_blocks, block_write_idx, eps, output_norm_eps,
+                    quant_dtype=quant_dtype,
+                )
+                return out.reshape(b, s, h)
+
             if delta is not None:
                 prefix = prefix + delta
             if block_write_idx >= 0:
@@ -1152,7 +1162,28 @@ def _patch_kimi_attn_res() -> None:
                 output = F.rms_norm(output, (prefix.shape[-1],), output_norm_weight, output_norm_eps)
             return output
 
-        _attn_res_mod.attn_res = _torch_attn_res
+        try:
+            import vllm.models.kimi_k3.amd.ops.attn_res as _attn_res_mod
+            _attn_res_mod.attn_res = _torch_attn_res
+        except Exception:
+            pass
+        try:
+            import vllm.models.kimi_k3.amd.linear as _linear_mod
+            _linear_mod.attn_res = _torch_attn_res
+            _linear_mod._apply_attn_res = lambda prefix_sum, block_residual, proj, norm, num_valid_blocks, delta=None, output_norm=None, block_write_idx=-1: _torch_attn_res(
+                prefix_sum,
+                delta,
+                block_residual,
+                norm.weight,
+                proj.weight.squeeze(0),
+                None if output_norm is None else output_norm.weight,
+                num_valid_blocks,
+                block_write_idx,
+                norm.variance_epsilon,
+                0.0 if output_norm is None else output_norm.variance_epsilon,
+            )
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1184,6 +1215,29 @@ def _patch_kimi_k3_arch() -> None:
         ModelRegistry.register_model("KimiLinearForCausalLM", _amd_linear.KimiLinearForCausalLM)
         ModelRegistry.register_model("KimiK3ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
         ModelRegistry.register_model("KimiK3MTP", _amd_mtp.KimiK3MTP)
+
+        # Monkey-patch forward_attn_residual on KimiLinearDecoderLayer
+        # to ensure hidden_states passed to attn_res is always 2D (num_tokens, hidden_size).
+        orig_forward_attn_res = getattr(_amd_linear.KimiLinearDecoderLayer, "forward_attn_residual", None)
+        if orig_forward_attn_res is not None and not getattr(_amd_linear.KimiLinearDecoderLayer, "_patched_attn_res_2d", False):
+            def _safe_forward_attn_residual(self, positions, hidden_states, block_residual, prefix_delta):
+                orig_shape = None
+                if hidden_states.dim() == 3:
+                    orig_shape = hidden_states.shape
+                    hidden_states = hidden_states.view(-1, orig_shape[-1])
+                    if prefix_delta is not None and prefix_delta.dim() == 3:
+                        prefix_delta = prefix_delta.view(-1, orig_shape[-1])
+                res = orig_forward_attn_res(self, positions, hidden_states, block_residual, prefix_delta)
+                if orig_shape is not None:
+                    h, r, p = res
+                    h = h.view(orig_shape)
+                    r = r.view(orig_shape) if r is not None else None
+                    p = p.view(orig_shape) if p is not None else None
+                    return h, r, p
+                return res
+
+            _amd_linear.KimiLinearDecoderLayer.forward_attn_residual = _safe_forward_attn_residual
+            _amd_linear.KimiLinearDecoderLayer._patched_attn_res_2d = True
     except Exception:
         pass
 
@@ -1372,8 +1426,12 @@ def apply() -> None:
     _patch_hf3fs_mock_client_for_cpu_only()
     _patch_triton_for_hpu()
     _patch_rocm_platform_for_hpu()
+    _patch_kimi_kda()
+    _patch_kimi_attn_res()
     _patch_mla_prefill_selector()
     _patch_moe_runner_delegation()
+    _patch_kimi_k3_hybrid_config()
+    _patch_kimi_k3_arch()
 
     # --- Deferred patches (cleanup_dist_env_and_memory + sampler) ---
     # We cannot import ``vllm.distributed.parallel_state`` or the sampler
