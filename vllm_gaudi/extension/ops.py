@@ -257,15 +257,17 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
             position_bias = position_bias.unflatten(1, (kv_heads, -1))
         if block_bias is not None:
             block_bias = block_bias.unsqueeze(2)
-    key = key.transpose(-2, -1)
-
-    if get_config().fp32_softmax:
-        attn = torch.empty(matmul_shape(query, key), dtype=torch.float32, device=query.device)
-        if position_bias is not None:
-            position_bias = position_bias.float()
-        attn = matmul_qk_op(query, key, out=attn)
+    if getattr(matmul_qk_op, "supports_transpose", False):
+        attn = matmul_qk_op(query, key, trans_b=True)
     else:
-        attn = matmul_qk_op(query, key)
+        key = key.transpose(-2, -1)
+        if get_config().fp32_softmax:
+            attn = torch.empty(matmul_shape(query, key), dtype=torch.float32, device=query.device)
+            if position_bias is not None:
+                position_bias = position_bias.float()
+            attn = matmul_qk_op(query, key, out=attn)
+        else:
+            attn = matmul_qk_op(query, key)
 
     if position_bias is not None:
         if attn.dtype != position_bias.dtype:

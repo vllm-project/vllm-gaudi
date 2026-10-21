@@ -48,6 +48,12 @@ def _set_fetch_by_id(kv_cache, value: bool) -> None:
         orig._fetch_by_id = value
 
 
+def _set_fetch_fp8(kv_cache, value: bool) -> None:
+    """Return the fp8 cache from fetch_from_cache without dequant (decode feeds it to FP8Matmul)."""
+    if kv_cache is not None:
+        kv_cache._fetch_fp8 = value
+
+
 class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
@@ -680,6 +686,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # contiguous-PA fetch must gather by id (cache[:n] would read wrong rows).
             _set_fetch_by_id(self.k_cache, True)
             _set_fetch_by_id(self.v_cache, True)
+            _set_fetch_fp8(self.k_cache, False)
+            _set_fetch_fp8(self.v_cache, False)
 
             if self.sliding_window and hasattr(attn_metadata, 'window_block_list') \
                     and attn_metadata.window_block_list is not None:
@@ -717,6 +725,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # window_block_list contains scattered block IDs (not identity layout).
             _set_fetch_by_id(self.k_cache, False)
             _set_fetch_by_id(self.v_cache, False)
+            _set_fetch_fp8(self.k_cache, self.enable_fp8_attn)
+            _set_fetch_fp8(self.v_cache, self.enable_fp8_attn)
 
             if self.sliding_window and \
                 attn_metadata.window_block_list is not None:
