@@ -50,6 +50,7 @@ _MOE_ACTIVATION_ALIASES = {
     # no-gate/no-multiply behaviour is selected separately via is_gated=False
     # (see VllmMixtureOfExpertsOpFP8PerChannel), not by this activation name.
     "relu2_no_mul": "relu2",
+    "situ": "silu",
 }
 
 

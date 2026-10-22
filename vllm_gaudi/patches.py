@@ -1163,6 +1163,18 @@ def _patch_kimi_linear_weights() -> None:
             k3_linear.KimiMoE.__init__ = _safe_moe_init
             k3_linear.KimiMoE._patched_weights = True
 
+        # Also patch _MOE_ACTIVATION_ALIASES in extension/ops and ops/hpu_fused_moe
+        try:
+            import vllm_gaudi.extension.ops as _ext_ops
+            _ext_ops._MOE_ACTIVATION_ALIASES["situ"] = "silu"
+        except Exception:
+            pass
+        try:
+            import vllm_gaudi.ops.hpu_fused_moe as _fused_moe
+            _fused_moe._MOE_ACTIVATION_ALIASES["situ"] = "silu"
+        except Exception:
+            pass
+
         orig_forward = getattr(k3_linear.KimiLinearDecoderLayer, "forward", None)
         if orig_forward is None:
             return
