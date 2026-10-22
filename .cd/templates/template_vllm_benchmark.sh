@@ -17,6 +17,10 @@ RANDOM_ARGS=""
 if [[ "$DATASET_NAME" == "random" ]]; then
     PREFIX_LEN=${PREFIX_LEN:-0}
     RANDOM_INPUT_LEN=$((INPUT_TOK - PREFIX_LEN))
+    if (( RANDOM_INPUT_LEN < 1 )); then
+        echo "INPUT_TOK ($INPUT_TOK) must be greater than PREFIX_LEN ($PREFIX_LEN)" >&2
+        exit 1
+    fi
     RANDOM_ARGS="--random-prefix-len $PREFIX_LEN --random-input-len $RANDOM_INPUT_LEN --random-output-len $OUTPUT_TOK"
 fi
 
