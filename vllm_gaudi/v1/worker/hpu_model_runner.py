@@ -2340,8 +2340,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
             # to avoid padding issues.
             htorch.core.mark_step()
-            if self.attn_backend_name == 'HPUAttentionBackendV1' and \
-                token_ids.ndim == 2 and token_ids.shape[0] == 1:
+            if token_ids.ndim == 2 and token_ids.shape[0] == 1:
                 token_ids = token_ids.squeeze(0)
             inputs_embeds = self.model.embed_input_ids(
                 token_ids,

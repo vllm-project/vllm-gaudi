@@ -939,7 +939,7 @@ def _patch_rocm_platform_for_hpu() -> None:
 
 
 def _patch_kimi_kda() -> None:
-    """Ensure KDA fused decode/chunk are explicitly disabled on HPU."""
+    """Ensure KDA fused decode/chunk are explicitly disabled on HPU and inputs are safely 2D."""
     try:
         import vllm.models.kimi_k3.amd.ops.kda_decode as _kda_decode
         _kda_decode.is_fused_kda_decode_supported = lambda *args, **kwargs: False
@@ -954,6 +954,18 @@ def _patch_kimi_kda() -> None:
         import vllm.models.kimi_k3.amd.kda as _amd_kda
         _amd_kda.is_fused_kda_decode_supported = lambda *args, **kwargs: False
         _amd_kda.is_fused_kda_chunk_supported = lambda *args, **kwargs: False
+
+        orig_kda_fwd = getattr(_amd_kda.KimiK3DeltaAttention, "forward", None)
+        if orig_kda_fwd is not None and not getattr(_amd_kda.KimiK3DeltaAttention, "_patched_2d", False):
+            def _safe_kda_forward(self, hidden_states, positions):
+                if hidden_states.dim() == 3:
+                    hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+                if positions is not None and positions.dim() == 2:
+                    positions = positions.reshape(-1)
+                return orig_kda_fwd(self, hidden_states, positions)
+
+            _amd_kda.KimiK3DeltaAttention.forward = _safe_kda_forward
+            _amd_kda.KimiK3DeltaAttention._patched_2d = True
     except Exception:
         pass
 
@@ -1136,16 +1148,9 @@ def _patch_kimi_attn_res() -> None:
         ):
             import torch.nn.functional as F
             if prefix.dim() == 3:
-                # Shape: [batch_size, seq_len, hidden_size] -> flatten tokens
-                b, s, h = prefix.shape
-                flat_prefix = prefix.reshape(-1, h)
-                flat_delta = delta.reshape(-1, h) if delta is not None else None
-                out = _torch_attn_res(
-                    flat_prefix, flat_delta, blocks, norm_weight, qk_weight,
-                    output_norm_weight, num_blocks, block_write_idx, eps, output_norm_eps,
-                    quant_dtype=quant_dtype,
-                )
-                return out.reshape(b, s, h)
+                prefix = prefix.reshape(-1, prefix.shape[-1])
+            if delta is not None and delta.dim() == 3:
+                delta = delta.reshape(-1, delta.shape[-1])
 
             if delta is not None:
                 prefix = prefix + delta
@@ -1235,21 +1240,14 @@ def _patch_kimi_k3_arch() -> None:
                 inputs_embeds=None,
                 **kwargs,
             ):
-                orig_3d_shape = None
                 if input_ids is not None and input_ids.dim() == 2:
-                    orig_3d_shape = input_ids.shape
                     input_ids = input_ids.view(-1)
-                    if positions is not None:
-                        positions = positions.view(-1)
-                elif inputs_embeds is not None and inputs_embeds.dim() == 3:
-                    orig_3d_shape = inputs_embeds.shape[:2]
+                if inputs_embeds is not None and inputs_embeds.dim() == 3:
                     inputs_embeds = inputs_embeds.view(-1, inputs_embeds.size(-1))
-                    if positions is not None:
-                        positions = positions.view(-1)
-                elif positions is not None and positions.dim() == 2:
+                if positions is not None and positions.dim() == 2:
                     positions = positions.view(-1)
 
-                out = orig_linear_model_forward(
+                return orig_linear_model_forward(
                     self,
                     input_ids=input_ids,
                     positions=positions,
@@ -1258,40 +1256,37 @@ def _patch_kimi_k3_arch() -> None:
                     **kwargs,
                 )
 
-                if orig_3d_shape is not None:
-                    if isinstance(out, torch.Tensor) and out.dim() == 2:
-                        out = out.view(orig_3d_shape[0], orig_3d_shape[1], -1)
-                    elif isinstance(out, tuple) and len(out) > 0 and isinstance(out[0], torch.Tensor) and out[0].dim() == 2:
-                        out = (out[0].view(orig_3d_shape[0], orig_3d_shape[1], -1),) + out[1:]
-                return out
-
             _amd_linear.KimiLinearModel.forward = _safe_kimi_linear_model_forward
             _amd_linear.KimiLinearModel._patched_hpu_tokens = True
 
         # Monkey-patch forward_attn_residual on KimiLinearDecoderLayer
-        # to ensure hidden_states and block_residual have matching shapes.
+        # to ensure hidden_states and block_residual have matching shapes and remain 2D.
         orig_forward_attn_res = getattr(_amd_linear.KimiLinearDecoderLayer, "forward_attn_residual", None)
         if orig_forward_attn_res is not None and not getattr(_amd_linear.KimiLinearDecoderLayer, "_patched_attn_res_2d", False):
             def _safe_forward_attn_residual(self, positions, hidden_states, block_residual, prefix_delta):
-                orig_shape = None
                 if hidden_states.dim() == 3:
-                    orig_shape = hidden_states.shape
-                    hidden_states = hidden_states.view(-1, orig_shape[-1])
-                    if prefix_delta is not None and prefix_delta.dim() == 3:
-                        prefix_delta = prefix_delta.view(-1, orig_shape[-1])
+                    hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+                if prefix_delta is not None and prefix_delta.dim() == 3:
+                    prefix_delta = prefix_delta.reshape(-1, prefix_delta.shape[-1])
+                if positions is not None and positions.dim() == 2:
+                    positions = positions.reshape(-1)
                 if block_residual.dim() == 3 and (block_residual.shape[0] != hidden_states.shape[0] or block_residual.shape[-1] != hidden_states.shape[-1]):
                     block_residual = hidden_states.new_zeros(hidden_states.shape[0], block_residual.shape[1], hidden_states.shape[-1])
-                res = orig_forward_attn_res(self, positions, hidden_states, block_residual, prefix_delta)
-                if orig_shape is not None:
-                    h, r, p = res
-                    h = h.view(orig_shape)
-                    r = r.view(orig_shape[0], orig_shape[1], r.shape[1], r.shape[2]) if r is not None and r.dim() == 3 else r
-                    p = p.view(orig_shape) if p is not None else None
-                    return h, r, p
-                return res
+                return orig_forward_attn_res(self, positions, hidden_states, block_residual, prefix_delta)
 
             _amd_linear.KimiLinearDecoderLayer.forward_attn_residual = _safe_forward_attn_residual
             _amd_linear.KimiLinearDecoderLayer._patched_attn_res_2d = True
+
+        # Monkey-patch KimiMoE.forward to ensure inputs are safely 2D
+        orig_moe_forward = getattr(_amd_linear.KimiMoE, "forward", None)
+        if orig_moe_forward is not None and not getattr(_amd_linear.KimiMoE, "_patched_moe_2d", False):
+            def _safe_moe_forward(self, hidden_states):
+                if hidden_states.dim() == 3:
+                    hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+                return orig_moe_forward(self, hidden_states)
+
+            _amd_linear.KimiMoE.forward = _safe_moe_forward
+            _amd_linear.KimiMoE._patched_moe_2d = True
     except Exception:
         pass
 
