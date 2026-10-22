@@ -79,6 +79,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
     EncoderOnlyAttentionSpec,
+    iter_layer_specs,
 )
 from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists, LogprobsTensors, DraftTokenIds,
@@ -159,12 +160,24 @@ except ImportError:
     LMCacheConnectorMetadata = None
 
 _GDN_MAMBA_TYPES: tuple[object, ...] = ("gdn_attention", "linear_attention")
+_GDN_ATTN_TYPES: tuple[object, ...] = ("gdn_attention", )
 try:
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     _GDN_MAMBA_TYPES = (MambaAttentionBackendEnum.GDN_ATTN, MambaAttentionBackendEnum.LINEAR, "gdn_attention",
                         "linear_attention")
+    _GDN_ATTN_TYPES = (MambaAttentionBackendEnum.GDN_ATTN, "gdn_attention")
 except (ImportError, AttributeError):
     pass
+
+
+def mamba_reads_chunk_grid(kv_cache_config: KVCacheConfig) -> bool:
+    """Whether a mamba layer other than GDN is present. GDN writes one state per
+    request and never reads mamba_chunks_to_block_mapping, so only it may resume
+    a prefill off the chunk grid."""
+    return any(
+        isinstance(spec, MambaSpec) and spec.mamba_type not in _GDN_ATTN_TYPES
+        for group in kv_cache_config.kv_cache_groups for spec in iter_layer_specs(group.kv_cache_spec))
+
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -862,7 +875,18 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 if mamba_mixer is None:
                     mamba_mixer = getattr(layer, 'mixer', None)
                 if mamba_mixer is not None:
-                    mamba_mixer.cache_group_idx = group_idx
+                    # A 0-dim tensor, not a Python int, as in the linear_attn
+                    # branch below: dynamo specializes on int VALUES, so with N
+                    # mamba cache groups every compiled graph containing a mamba
+                    # layer was compiled N times per shape. Consumers MUST index
+                    # with index_select (see _select_cache_group in
+                    # hpu_mamba_mixer2): t[idx] with a 0-dim tensor makes dynamo
+                    # call .item(), which breaks the graph. Placed on the
+                    # mixer's own (model) device, the same device as the
+                    # per-group index tensors it selects from.
+                    mamba_mixer.cache_group_idx = torch.tensor(group_idx,
+                                                               dtype=torch.long,
+                                                               device=next(mamba_mixer.parameters()).device)
             elif 'linear_attn' in layer_name:
                 layer_idx = int(layer_name.split('.')[-2])
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
@@ -1465,6 +1489,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                      if self.mamba_chunk_size_is_explicit else 128)
         else:
             self.mamba_chunk_size = 0
+        # Set from the KV cache spec in initialize_kv_cache; strict until then.
+        self._mamba_reads_chunk_grid = True
 
         self.use_hybrid_cache = os.getenv('VLLM_USE_HYBRID_CACHE', 'false').strip().lower() in ("1", "true")
         self.use_naive_mamba_cache_sharing = os.getenv('VLLM_USE_NAIVE_MAMBA_CACHE_SHARING',
@@ -2950,7 +2976,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if len(has_initial_states_cpu) < target_bs:
                 pad_his = torch.zeros(target_bs - len(has_initial_states_cpu), dtype=has_initial_states_cpu.dtype)
                 has_initial_states_cpu = torch.cat([has_initial_states_cpu, pad_his])
-            prep_initial_states = torch.any(has_initial_states_cpu)
+            # A Python bool, not a 0-dim tensor: hpu_mamba_mixer2 branches on it
+            # with a plain `if`, and branching on a tensor is a data-dependent
+            # graph break in every mamba layer (fatal under fullgraph). The
+            # value is computed on the host, so bool() needs no device sync.
+            prep_initial_states = bool(torch.any(has_initial_states_cpu))
 
             # The code below carefully constructs the chunks such that:
             # 1. Chunks contain tokens from a *single* sequence only.
@@ -2992,7 +3022,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if self.use_prefix_caching:
                 assert len(contents.req_ids) == 1
                 assert mamba_block_size % self.mamba_chunk_size == 0
-                assert context_lens[0] % self.mamba_chunk_size == 0
+                # GDN never reads the chunk-to-block mapping built below, so it may
+                # resume off the chunk grid, e.g. where the encoder cap stopped.
+                if self._mamba_reads_chunk_grid:
+                    assert context_lens[0] % self.mamba_chunk_size == 0
 
                 chunk_stride = mamba_block_size // self.mamba_chunk_size
                 # Max mamba blocks to cache for this bucket (upper bound)
@@ -6648,6 +6681,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        self._mamba_reads_chunk_grid = mamba_reads_chunk_grid(kv_cache_config)
         self.is_encoder_only_attn = False
         self.may_add_encoder_only_layers_to_kv_cache_config()
         if self.num_mamba_like_layers > 0:
