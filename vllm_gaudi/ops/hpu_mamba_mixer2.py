@@ -49,6 +49,26 @@ from vllm_gaudi.extension.logger import logger as init_logger
 logger = init_logger()
 
 
+def _select_cache_group(t: torch.Tensor, group_idx: torch.Tensor) -> torch.Tensor:
+    """Row `group_idx` of a per-cache-group tensor shaped [num_groups, ...].
+
+    group_idx is a 0-dim long tensor (see maybe_set_mamba_kv_cache_groups_ids)
+    so torch.compile does not specialize on its value, which compiled every
+    graph containing a mamba layer once per cache group. It must go through
+    index_select: plain t[group_idx] makes dynamo call .item() on the index,
+    a graph break (aten._local_scalar_dense). Same approach as
+    HPUGatedDeltaNetAttention._resolve_state_indices.
+
+    A Python int is rejected rather than indexed: it would silently bring the
+    per-group specialization back. The isinstance check is resolved while
+    tracing, so it adds no graph break.
+    """
+    if not isinstance(group_idx, torch.Tensor):
+        raise TypeError(f"cache_group_idx must be a 0-dim tensor set by maybe_set_mamba_kv_cache_groups_ids, "
+                        f"got {type(group_idx).__name__}")
+    return t.index_select(0, group_idx.view(1)).squeeze(0)
+
+
 # Adapted from vllm.model_executor.layers.mamba.mamba_mixer2.Mixer2RMSNormGated
 @Mixer2RMSNormGated.register_oot
 class HPUMixer2RMSNormGated(Mixer2RMSNormGated):
@@ -423,11 +443,12 @@ class HPUMambaMixer2(MambaMixer2):
             conv_state = self_kv_cache[0]
             ssm_state = self_kv_cache[1]
 
-            load_indices_tensor = attn_metadata.load_indices_tensor[self.cache_group_idx]
-            store_indices_tensor = attn_metadata.store_indices_tensor[self.cache_group_idx]
+            load_indices_tensor = _select_cache_group(attn_metadata.load_indices_tensor, self.cache_group_idx)
+            store_indices_tensor = _select_cache_group(attn_metadata.store_indices_tensor, self.cache_group_idx)
             if enable_prefix_caching and attn_metadata.is_prompt:
-                blocks_caching_range = attn_metadata.blocks_caching_range[self.cache_group_idx]
-                mamba_chunks_to_block_mapping = attn_metadata.mamba_chunks_to_block_mapping[self.cache_group_idx]
+                blocks_caching_range = _select_cache_group(attn_metadata.blocks_caching_range, self.cache_group_idx)
+                mamba_chunks_to_block_mapping = _select_cache_group(attn_metadata.mamba_chunks_to_block_mapping,
+                                                                    self.cache_group_idx)
                 seqlens_offsets_for_blocks = attn_metadata.seqlens_offsets_for_blocks
             else:
                 blocks_caching_range = None
