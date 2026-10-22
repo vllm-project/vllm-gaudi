@@ -235,6 +235,14 @@ class HpuPlatform(Platform):
                            "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
+        # Upstream enables device-side multimodal input normalization from a
+        # model capability flag. It has no HPU kernel, so the processor stops
+        # normalizing and the vision input is left wrong. Keep it on the CPU.
+        mm_config = getattr(vllm_config.model_config, "multimodal_config", None)
+        if getattr(mm_config, "mm_device_do_normalize", False):
+            logger.warning("Device-side multimodal input normalization is not supported on HPU; disabling it.")
+            mm_config.mm_device_do_normalize = False
+
         from vllm.config import CompilationMode, CUDAGraphMode
         compilation_config = vllm_config.compilation_config
         # Activate custom ops for v1.
