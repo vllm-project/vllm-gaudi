@@ -11,6 +11,7 @@ from vllm_gaudi.ops.hpu_gdn_pytorch import (
     hpu_fused_gdn_gating,
     hpu_fused_recurrent_gated_delta_rule,
 )
+from vllm_gaudi.v1.attention.backends.hpu_attn import real_decode_request_count
 
 
 def _save_ssm_state(core_attn_out, final_state, ssm_state, state_indices):
@@ -112,8 +113,18 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         padding_mask_flat = getattr(attn_metadata, "padding_mask_flat", None)
 
         if not is_prompt:
-            num_decodes = (state_indices.numel() if state_indices is not None else
-                           (query_start_loc.numel() - 1 if query_start_loc is not None else num_tokens))
+            # Real (non-padded) decode request count. HPU decode bucketing
+            # pads the batch to the bucket size, so state_indices.numel()
+            # (and query_start_loc.numel() - 1) count PADDED rows, not
+            # requests, whenever the batch is not full. Prefer the exact
+            # host count shipped on the attention metadata; the resolution
+            # order and fallback semantics live in real_decode_request_count.
+            num_decodes = real_decode_request_count(
+                state_indices=state_indices,
+                query_start_loc=query_start_loc,
+                num_tokens=num_tokens,
+                shipped_count=getattr(attn_metadata, "num_real_input_reqs", None),
+            )
         else:
             num_decodes = 0
 
@@ -265,6 +276,15 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
         else:
             # === Part 2b: Decode =====================================
+            # NOTE: the conv/GDN decode kernels below are row-aligned: they
+            # expect one cache index per PADDED batch row and route pad rows
+            # to the reserved terminal cache row themselves (remainder
+            # routing in ops/causal_conv1d_pytorch.py and
+            # ops/hpu_gdn_pytorch.py); only pad-row outputs are discarded.
+            # num_decodes is the real request count and deliberately does
+            # not trim these kernel arguments -- slicing them to the real
+            # count would break the kernels' row-alignment contract under
+            # bucket padding.
             g, beta = hpu_fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
             conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
@@ -274,7 +294,7 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 weight=conv_weights,
                 bias=self.conv1d.bias,
                 activation=self.activation,
-                conv_state_indices=(state_indices[:num_decodes] if state_indices is not None else state_indices),
+                conv_state_indices=state_indices,
                 block_idx_last_scheduled_token=None,
                 initial_state_idx=None,
                 query_start_loc=query_start_loc,
@@ -291,9 +311,7 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                     q=query, k=key, v=value, g=g, beta=beta,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=(
-                        query_start_loc[:num_decodes + 1]
-                        if query_start_loc is not None else None),
+                    cu_seqlens=query_start_loc,
                     ssm_state_indices=state_indices,
                     use_qk_l2norm_in_kernel=True,
                     ssm_store_indices=store_indices,
