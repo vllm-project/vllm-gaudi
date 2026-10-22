@@ -1149,8 +1149,14 @@ def _patch_kimi_attn_res() -> None:
 
             if delta is not None:
                 prefix = prefix + delta
+
+            if blocks.dim() == 3:
+                if blocks.shape[0] != prefix.shape[0] or blocks.shape[-1] != prefix.shape[-1]:
+                    blocks = prefix.new_zeros(prefix.shape[0], blocks.shape[1], prefix.shape[-1])
+
             if block_write_idx >= 0:
                 blocks[:, block_write_idx] = prefix
+
             if num_blocks == 0:
                 output = prefix
             else:
@@ -1217,8 +1223,53 @@ def _patch_kimi_k3_arch() -> None:
         ModelRegistry.register_model("KimiK3ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
         ModelRegistry.register_model("KimiK3MTP", _amd_mtp.KimiK3MTP)
 
+        # Monkey-patch KimiLinearModel.forward to ensure tokens/positions are 1D/2D
+        # so block_residual is allocated with shape [num_tokens, attn_res_block_num, hidden_size].
+        orig_linear_model_forward = getattr(_amd_linear.KimiLinearModel, "forward", None)
+        if orig_linear_model_forward is not None and not getattr(_amd_linear.KimiLinearModel, "_patched_hpu_tokens", False):
+            def _safe_kimi_linear_model_forward(
+                self,
+                input_ids=None,
+                positions=None,
+                intermediate_tensors=None,
+                inputs_embeds=None,
+                **kwargs,
+            ):
+                orig_3d_shape = None
+                if input_ids is not None and input_ids.dim() == 2:
+                    orig_3d_shape = input_ids.shape
+                    input_ids = input_ids.view(-1)
+                    if positions is not None:
+                        positions = positions.view(-1)
+                elif inputs_embeds is not None and inputs_embeds.dim() == 3:
+                    orig_3d_shape = inputs_embeds.shape[:2]
+                    inputs_embeds = inputs_embeds.view(-1, inputs_embeds.size(-1))
+                    if positions is not None:
+                        positions = positions.view(-1)
+                elif positions is not None and positions.dim() == 2:
+                    positions = positions.view(-1)
+
+                out = orig_linear_model_forward(
+                    self,
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **kwargs,
+                )
+
+                if orig_3d_shape is not None:
+                    if isinstance(out, torch.Tensor) and out.dim() == 2:
+                        out = out.view(orig_3d_shape[0], orig_3d_shape[1], -1)
+                    elif isinstance(out, tuple) and len(out) > 0 and isinstance(out[0], torch.Tensor) and out[0].dim() == 2:
+                        out = (out[0].view(orig_3d_shape[0], orig_3d_shape[1], -1),) + out[1:]
+                return out
+
+            _amd_linear.KimiLinearModel.forward = _safe_kimi_linear_model_forward
+            _amd_linear.KimiLinearModel._patched_hpu_tokens = True
+
         # Monkey-patch forward_attn_residual on KimiLinearDecoderLayer
-        # to ensure hidden_states passed to attn_res is always 2D (num_tokens, hidden_size).
+        # to ensure hidden_states and block_residual have matching shapes.
         orig_forward_attn_res = getattr(_amd_linear.KimiLinearDecoderLayer, "forward_attn_residual", None)
         if orig_forward_attn_res is not None and not getattr(_amd_linear.KimiLinearDecoderLayer, "_patched_attn_res_2d", False):
             def _safe_forward_attn_residual(self, positions, hidden_states, block_residual, prefix_delta):
@@ -1228,11 +1279,13 @@ def _patch_kimi_k3_arch() -> None:
                     hidden_states = hidden_states.view(-1, orig_shape[-1])
                     if prefix_delta is not None and prefix_delta.dim() == 3:
                         prefix_delta = prefix_delta.view(-1, orig_shape[-1])
+                if block_residual.dim() == 3 and (block_residual.shape[0] != hidden_states.shape[0] or block_residual.shape[-1] != hidden_states.shape[-1]):
+                    block_residual = hidden_states.new_zeros(hidden_states.shape[0], block_residual.shape[1], hidden_states.shape[-1])
                 res = orig_forward_attn_res(self, positions, hidden_states, block_residual, prefix_delta)
                 if orig_shape is not None:
                     h, r, p = res
                     h = h.view(orig_shape)
-                    r = r.view(orig_shape) if r is not None else None
+                    r = r.view(orig_shape[0], orig_shape[1], r.shape[1], r.shape[2]) if r is not None and r.dim() == 3 else r
                     p = p.view(orig_shape) if p is not None else None
                     return h, r, p
                 return res
