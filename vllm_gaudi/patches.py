@@ -995,7 +995,21 @@ def _patch_kimi_kda() -> None:
             k = k.view(1, num_tokens, self.local_num_heads, self.head_dim).transpose(1, 2)
             v = v.view(1, num_tokens, self.local_num_heads, self.head_dim).transpose(1, 2)
 
-            attn_out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+            chunk_size = 2048
+            if num_tokens <= chunk_size:
+                attn_out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+            else:
+                outs = []
+                for start in range(0, num_tokens, chunk_size):
+                    end = min(start + chunk_size, num_tokens)
+                    chunk_out = torch.nn.functional.scaled_dot_product_attention(
+                        q[:, :, start:end, :],
+                        k[:, :, start:end, :],
+                        v[:, :, start:end, :],
+                        is_causal=True,
+                    )
+                    outs.append(chunk_out)
+                attn_out = torch.cat(outs, dim=2)
             attn_out = attn_out.transpose(1, 2)  # [1, num_tokens, local_num_heads, head_dim]
 
             normed = self.o_norm(attn_out, g2)
