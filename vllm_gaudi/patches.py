@@ -939,7 +939,7 @@ def _patch_rocm_platform_for_hpu() -> None:
 
 
 def _patch_kimi_kda() -> None:
-    """Ensure KDA fused decode/chunk are explicitly disabled on HPU and inputs are safely 2D."""
+    """Pure PyTorch fallback for KDA on HPU (disabling GPU Triton kernels and dict metadata assertion)."""
     try:
         import vllm.models.kimi_k3.amd.ops.kda_decode as _kda_decode
         _kda_decode.is_fused_kda_decode_supported = lambda *args, **kwargs: False
@@ -955,17 +955,70 @@ def _patch_kimi_kda() -> None:
         _amd_kda.is_fused_kda_decode_supported = lambda *args, **kwargs: False
         _amd_kda.is_fused_kda_chunk_supported = lambda *args, **kwargs: False
 
-        orig_kda_fwd = getattr(_amd_kda.KimiK3DeltaAttention, "forward", None)
-        if orig_kda_fwd is not None and not getattr(_amd_kda.KimiK3DeltaAttention, "_patched_2d", False):
-            def _safe_kda_forward(self, hidden_states, positions):
-                if hidden_states.dim() == 3:
-                    hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
-                if positions is not None and positions.dim() == 2:
-                    positions = positions.reshape(-1)
-                return orig_kda_fwd(self, hidden_states, positions)
+        def _hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor = None) -> torch.Tensor:
+            orig_3d = False
+            if hidden_states.dim() == 3:
+                orig_3d = True
+                b, s, h = hidden_states.shape
+                hidden_states = hidden_states.reshape(-1, h)
+            if positions is not None and positions.dim() == 2:
+                positions = positions.reshape(-1)
 
-            _amd_kda.KimiK3DeltaAttention.forward = _safe_kda_forward
-            _amd_kda.KimiK3DeltaAttention._patched_2d = True
+            num_tokens = hidden_states.size(0)
+            projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
+
+            if getattr(self, "use_full_rank_gate", False):
+                split_sizes = [
+                    3 * self.local_projection_size,
+                    self.local_projection_size,
+                    self.head_dim,
+                    self.local_num_heads,
+                ]
+                if getattr(self, "in_proj_padding", 0):
+                    split_sizes.append(self.in_proj_padding)
+                projected = projected_qkvgfab.split(split_sizes, dim=-1)
+                mixed_qkv, g_proj_states, f_a, beta = projected[:4]
+                g2 = g_proj_states.view(1, num_tokens, self.local_num_heads, self.head_dim)
+            else:
+                mixed_qkv, beta, f_a = projected_qkvgfab.split(
+                    [
+                        3 * self.local_projection_size,
+                        self.local_num_heads,
+                        self.head_dim,
+                    ],
+                    dim=-1,
+                )
+                g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
+                g2 = g_proj_states.view(1, num_tokens, self.local_num_heads, self.head_dim)
+
+            q, k, v = mixed_qkv.split(self.local_projection_size, dim=-1)
+            q = q.view(1, num_tokens, self.local_num_heads, self.head_dim).transpose(1, 2)
+            k = k.view(1, num_tokens, self.local_num_heads, self.head_dim).transpose(1, 2)
+            v = v.view(1, num_tokens, self.local_num_heads, self.head_dim).transpose(1, 2)
+
+            attn_out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+            attn_out = attn_out.transpose(1, 2)  # [1, num_tokens, local_num_heads, head_dim]
+
+            normed = self.o_norm(attn_out, g2)
+            out = normed.reshape(num_tokens, -1)
+            res = self.o_proj(out)[0]
+            if orig_3d:
+                res = res.view(b, s, -1)
+            return res
+
+        if hasattr(_amd_kda, "KimiK3DeltaAttention"):
+            _amd_kda.KimiK3DeltaAttention.forward = _hpu_kda_forward
+            _amd_kda.KimiK3DeltaAttention._forward = lambda *args, **kwargs: None
+        if hasattr(_amd_kda, "GatedDeltaNetAttention"):
+            _amd_kda.GatedDeltaNetAttention.forward = _hpu_kda_forward
+            _amd_kda.GatedDeltaNetAttention._forward = lambda *args, **kwargs: None
+
+        try:
+            import vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn as _gdn_mod
+            _gdn_mod.KimiGatedDeltaNetAttention.forward = _hpu_kda_forward
+            _gdn_mod.KimiGatedDeltaNetAttention._forward = lambda *args, **kwargs: None
+        except Exception:
+            pass
     except Exception:
         pass
 
