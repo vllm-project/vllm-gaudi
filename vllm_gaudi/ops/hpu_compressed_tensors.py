@@ -52,7 +52,7 @@ import vllm_gaudi.extension.ops as hpu_ops
 from vllm_gaudi import envs
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 from vllm_gaudi.extension.ops import (VllmMixtureOfExpertsOpFP8, VllmMixtureOfExpertsOpFP8PerChannel,
-                                      VllmMixtureOfExpertsOpWNA16, rebias_uint4b8_to_int4_)
+                                      VllmMixtureOfExpertsOpWNA16, int4_moe_supports_non_gated, rebias_uint4b8_to_int4_)
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.ops.hpu_fused_moe import (
     _normalize_moe_activation,
@@ -835,16 +835,33 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             return f"{self.num_bits}-bit weights; int4_fused_weights is 4-bit only"
         return None
 
+    def _use_native_non_gated(self, layer: torch.nn.Module) -> bool:
+        """Whether non-gated experts can run on the native int4 kernel with is_gated=False.
+
+        Decided before loading because it sets the w13 width: I rows (the single
+        up-projection) on this path, 2I rows with w1 mirrored into w3 on every
+        other path, which only has gated kernels. Must agree with the eligibility
+        decided in process_weights_after_loading: g_idx only exists for
+        actorder "group", and an is_gated-capable overload is also present.
+        """
+        return (not layer.moe_config.is_act_and_mul and self._native_int4_refusal() is None and self.actorder != "group"
+                and int4_moe_supports_non_gated())
+
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
         extra_weight_attrs["intermediate_size_full"] = intermediate_size_per_partition * layer.moe_config.tp_size
+
+        # Kept on the layer, not on self: one quant-method instance may serve
+        # several layers.
+        layer.hpu_wna16_native_non_gated = self._use_native_non_gated(layer)
+        w13_rows = (1 if layer.hpu_wna16_native_non_gated else 2) * intermediate_size_per_partition
 
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
         extra_weight_attrs.update({"is_transposed": False, "quant_method": self.strategy})
         w13_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                    2 * intermediate_size_per_partition,
+                                                    w13_rows,
                                                     hidden_size // self.packed_factor,
                                                     dtype=torch.int32),
                                         requires_grad=False)
@@ -868,10 +885,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
-        w13_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                  2 * intermediate_size_per_partition,
-                                                  num_groups_w13,
-                                                  dtype=params_dtype),
+        w13_scale = torch.nn.Parameter(torch.ones(num_experts, w13_rows, num_groups_w13, dtype=params_dtype),
                                        requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_scale)
         set_weight_attrs(w13_scale, extra_weight_attrs)
@@ -946,9 +960,7 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
-        w13_zeros = torch.full((num_groups_w13, 2 * intermediate_size_per_partition),
-                               self.quant_type.bias,
-                               dtype=torch.int32)
+        w13_zeros = torch.full((num_groups_w13, w13_rows), self.quant_type.bias, dtype=torch.int32)
         w13_zeros = pack_quantized_values_into_int32(w13_zeros, self.quant_type, packed_dim=1)
         layer.register_parameter("w13_zero_point", torch.nn.Parameter(w13_zeros, requires_grad=False))
         w2_zeros = torch.full((num_groups_w2, hidden_size), self.quant_type.bias, dtype=torch.int32)
@@ -990,11 +1002,11 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         act = _normalize_moe_activation(layer.activation)
         gated_act = _NONGATED_AS_GATED_ACTIVATION.get(act)
         if gated_act is None:
-            raise NotImplementedError(f"Non-gated MoE activation {act!r} cannot be expressed on the HPU bf16 fused-MoE "
-                                      f"kernel, which is gated-only (no is_gated argument on "
-                                      f"mixture_of_experts.fused_weights). Only "
-                                      f"{sorted(_NONGATED_AS_GATED_ACTIVATION)} are supported non-gated; supporting "
-                                      f"others requires is_gated=True/False plumbing in the Habana PyTorch bridge.")
+            raise NotImplementedError(f"Non-gated MoE activation {act!r} cannot be expressed on a gated-only HPU "
+                                      f"fused-MoE kernel. Only {sorted(_NONGATED_AS_GATED_ACTIVATION)} can be "
+                                      f"emulated there; others need the native int4 path "
+                                      f"(VLLM_WNA16_NATIVE_INT4_MOE=1) on a Habana PyTorch bridge whose "
+                                      f"mixture_of_experts.int4_fused_weights takes is_gated.")
 
         packed = layer.w13_weight_packed.data
         scale = layer.w13_weight_scale.data
@@ -1017,10 +1029,13 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Non-gated experts must be fixed up *before* the repack below, while
         # w13 is still in its [experts, 2 * intermediate, hidden / pack] layout.
+        # Not needed when the native int4 kernel runs them non-gated: w13 was
+        # then allocated I-wide and holds exactly the up-projection.
         # Kept on the layer, not on self: one quant-method instance may serve
         # several layers.
+        native_non_gated = getattr(layer, "hpu_wna16_native_non_gated", False)
         layer.hpu_nongated_activation = None
-        if not layer.moe_config.is_act_and_mul:
+        if not layer.moe_config.is_act_and_mul and not native_non_gated:
             layer.hpu_nongated_activation = self._mirror_w1_into_w3(layer)
 
         # Reconfigure packed weights and scales to match moe_wna16 format
@@ -1057,6 +1072,13 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         # fail: the bf16 dequant path is always correct, just slower. Every check
         # runs before the rebias below, which is the point of no return.
         ok, why = (False, refusal) if refusal else layer.moe_op.supports_native_int4()
+        if native_non_gated:
+            if not ok:
+                # _use_native_non_gated applies the same rule, so this means the two
+                # drifted apart. The I-wide w13 cannot be mirrored after the fact.
+                raise RuntimeError(f"WNA16 MoE: w13 was allocated I-wide for the native non-gated int4 path, "
+                                   f"but that path was refused ({why}); the gated fallback cannot run it.")
+            layer.moe_op.is_gated = False
         if ok:
             # int4_fused_weights reads the codes as signed int4 two's complement,
             # while compressed-tensors stores uint4b8 (value + 8). Rebias once here.
@@ -1071,7 +1093,8 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         if not HPUCompressedTensorsWNA16MoEMethod._int4_path_logged:
             HPUCompressedTensorsWNA16MoEMethod._int4_path_logged = True
             if ok:
-                logger.warning("WNA16 MoE: using native int4_fused_weights (no per-forward dequantization).")
+                logger.warning("WNA16 MoE: using native int4_fused_weights (no per-forward dequantization)%s.",
+                               ", non-gated experts with is_gated=False" if native_non_gated else "")
             elif want_native_int4:
                 # Only warn when the native path was asked for and refused.
                 logger.warning(
@@ -1101,8 +1124,9 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
 
-        # For non-gated experts w3 holds a mirror of w1 and the activation is
-        # lowered ("relu2" -> "relu"). See _mirror_w1_into_w3.
+        # For non-gated experts on a gated kernel w3 holds a mirror of w1 and the
+        # activation is lowered ("relu2" -> "relu"), see _mirror_w1_into_w3. On the
+        # native non-gated int4 path it stays "relu2" and the op passes is_gated=False.
         activation = getattr(layer, "hpu_nongated_activation", None) or _normalize_moe_activation(layer.activation)
 
         output = layer.moe_op(

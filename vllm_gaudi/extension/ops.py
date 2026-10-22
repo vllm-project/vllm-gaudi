@@ -1573,6 +1573,16 @@ def int4_moe_native_available() -> bool:
     return _int4_moe_schema() is not None
 
 
+def int4_moe_supports_non_gated() -> bool:
+    """Whether the bridge's int4_fused_weights overload takes is_gated.
+
+    Without it the int4 kernel is gated-only, and non-gated experts need w1
+    mirrored into w3 (see HPUCompressedTensorsWNA16MoEMethod._mirror_w1_into_w3).
+    """
+    schema = _int4_moe_schema()
+    return schema is not None and any(arg.name == "is_gated" for arg in schema.arguments)
+
+
 # compressed-tensors stores 4-bit codes as uint4b8 (value + 8), while
 # int4_fused_weights reads signed two's-complement nibbles. (c - 8) & 0xF == c ^ 8
 # for 4 bits, so a whole int32-packed word converts with one XOR by 0x88888888.
@@ -1596,6 +1606,7 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
     * native_int4=True: pass the packed int4 straight to
       .int4_fused_weights overload, so nothing is dequantized. Requires the codes
       rebiased to signed nibbles, which the quant method does once at load.
+      Only this path can run non-gated experts natively (is_gated=False).
     """
 
     def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8, native_int4: bool = False):
@@ -1607,6 +1618,10 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         self.experts_min = experts_min
         self.experts_max = experts_max
         self.native_int4 = native_int4
+        # False makes the int4 kernel skip the gate split+multiply, for non-gated
+        # experts whose w13 is the single I-wide up-projection. Set by the quant
+        # method; gated layers keep True and their kernel call is unchanged.
+        self.is_gated = True
         # Set once the packed codes were rebiased to signed nibbles for the int4
         # kernel. convert_from_uint4 would then decode them wrongly, so the bf16
         # dequant path must refuse to run.
@@ -1707,6 +1722,9 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         if self._cached_int4 is None:
             self._cache_weight_lists()
         w13_p, w2_p, w13_s, w2_s = self._cached_int4
+        # Passed only when non-gated, so gated layers keep working on bridges
+        # whose int4_fused_weights has no is_gated argument.
+        extra = {} if self.is_gated else {"is_gated": False}
 
         def call(lo, hi, sl):
             return torch.ops.hpu.mixture_of_experts.int4_fused_weights(
@@ -1729,6 +1747,7 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
                 # Codes are read as signed int4 nibbles, not compressed-tensors'
                 # uint4b8 (value + 8) -- hence the rebias at load.
                 is_signed=True,
+                **extra,
             )
 
         if self.moe_n_slice == 1:
