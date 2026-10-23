@@ -321,9 +321,50 @@ def model_has_quant_config() -> bool:
     return model_config is not None and has_quant_config(model_config)
 
 
+def is_plain_softmax_topk(layer) -> bool:
+    """Whether the layer routes with plain renormalized softmax top-k.
+
+    The monolithic apply paths compute this routing inline. Any other routing
+    (grouped top-k, custom routing, non-softmax scoring, a score correction
+    bias or no renormalization) must go through ``select_experts_from_routed``.
+    """
+    return (not layer.use_grouped_topk and getattr(layer, "custom_routing_function", None) is None
+            and getattr(layer, "scoring_func", "softmax") == "softmax"
+            and getattr(layer, "e_score_correction_bias", None) is None and getattr(layer, "renormalize", True))
+
+
+def _topk_routing(layer, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Non-grouped top-k routing with optional score correction bias.
+
+    Matches upstream ``fused_topk_bias``: the bias only affects which experts
+    are selected, the routing weights are the unbiased scores.
+    """
+    scoring_func = getattr(layer, "scoring_func", "softmax")
+    logits = router_logits.float()
+    if scoring_func == "softmax":
+        scores = torch.softmax(logits, dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = logits.sigmoid()
+    else:
+        raise ValueError(f"Unsupported scoring function for non-grouped top-k routing: {scoring_func}")
+
+    bias = getattr(layer, "e_score_correction_bias", None)
+    if bias is None:
+        topk_weights, topk_ids = torch.topk(scores, layer.top_k, dim=-1)
+    else:
+        topk_ids = torch.topk(scores + bias.float().unsqueeze(0), layer.top_k, dim=-1)[1]
+        topk_weights = scores.gather(1, topk_ids)
+
+    if layer.renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    if layer.routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * layer.routed_scaling_factor
+    return topk_weights, topk_ids.to(torch.int32)
+
+
 def select_experts_from_routed(layer, hidden_states: torch.Tensor,
                                router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Route tokens to experts for the grouped/custom-routing monolithic path.
+    """Route tokens to experts for every routing that is not plain softmax top-k.
 
     After upstream PR #41184 the ``layer`` passed to ``apply_monolithic`` is a
     ``RoutedExperts`` instance, which no longer owns a ``.router`` object (the
@@ -346,8 +387,6 @@ def select_experts_from_routed(layer, hidden_states: torch.Tensor,
     Returns:
         A ``(topk_weights, topk_ids)`` tuple.
     """
-    from vllm.model_executor.layers.fused_moe.router.cpu_router import select_experts
-
     # Models hand the runner a placeholder ``router_logits`` (== hidden_states)
     # and expect the runner to overwrite it with the gate output. If that step
     # is skipped the placeholder reaches expert selection and only fails later,
@@ -356,6 +395,12 @@ def select_experts_from_routed(layer, hidden_states: torch.Tensor,
     if router_logits.size(-1) != num_experts:
         raise RuntimeError(f"Router logits have {router_logits.size(-1)} columns but the layer routes to "
                            f"{num_experts} experts; the MoE gate was not applied to the hidden states.")
+
+    # ``select_experts`` only handles plain softmax for non-grouped top-k.
+    if not layer.use_grouped_topk and getattr(layer, "custom_routing_function", None) is None:
+        return _topk_routing(layer, router_logits)
+
+    from vllm.model_executor.layers.fused_moe.router.cpu_router import select_experts
 
     return select_experts(
         hidden_states=hidden_states,
@@ -456,7 +501,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     ):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
-        if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
+        if not is_plain_softmax_topk(layer):
             topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
@@ -547,7 +592,7 @@ class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     ):
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
-        if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
+        if not is_plain_softmax_topk(layer):
             topk_weights, topk_ids = select_experts_from_routed(layer, x, router_logits)
         else:
             import torch.nn.functional as F
