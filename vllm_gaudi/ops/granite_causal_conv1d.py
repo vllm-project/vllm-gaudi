@@ -98,8 +98,10 @@ def granite_causal_conv1d_fn(
         indices = seqlens_offsets_for_blocks.unsqueeze(1) + offset  # [N, state_len]
 
         # Gather all slices at once: seq_input is [dim, seq_len+state_len],
-        # indices is [N, state_len] -> new_states is [N, dim, state_len]
-        new_states = seq_input[:, indices].permute(1, 0, 2)
+        # indices is [N, state_len] -> new_states is [N, dim, state_len].
+        # Not seq_input[:, indices]: that lowers to aten.index with a None
+        # index, which the HPU compile backend runs as an eager fallback.
+        new_states = seq_input.index_select(dim=1, index=indices.flatten()).view(dim, -1, state_len).permute(1, 0, 2)
 
         # Scatter all updates at once
         conv_states[blocks_caching_range, -state_len:, :] = new_states.transpose(-1, -2)
