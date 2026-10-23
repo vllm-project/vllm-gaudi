@@ -63,6 +63,14 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': False,
         'buckets': []
     },
+    'kimi_k3': {
+        'is_batch_based': False,
+        'buckets': []
+    },
+    'kimi': {
+        'is_batch_based': False,
+        'buckets': []
+    },
     'gemma4': {
         'is_batch_based': False,
         'buckets': []
