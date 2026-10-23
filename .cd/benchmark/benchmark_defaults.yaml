@@ -18,8 +18,7 @@ model_text:
     - ibm-granite/granite-8b-code-instruct-4k
     - ibm-granite/granite-20b-code-instruct-8k
     - speakleash/Bielik-4.5B-v3.0-Instruct
-  DATASET: /workspace/vllm-project/benchmarks/sonnet.txt
-  DATASET_NAME: sonnet
+  DATASET_NAME: random
   ENDPOINT: /v1/completions
   BACKEND: vllm
   INPUT_TOK: 2048
@@ -32,8 +31,7 @@ model_text:
 model_text_tokenizer_mode_hf:
   MODELS:
     - mistralai/Mixtral-8x22B-Instruct-v0.1
-  DATASET: /workspace/vllm-project/benchmarks/sonnet.txt
-  DATASET_NAME: sonnet
+  DATASET_NAME: random
   ENDPOINT: /v1/completions
   BACKEND: vllm
   INPUT_TOK: 2048

@@ -551,6 +551,61 @@ class TestManualModuleConstruction:
 
 
 # ---------------------------------------------------------------------------
+# _merge_chunk tests
+# ---------------------------------------------------------------------------
+
+
+class TestMergeChunk:
+    """Tests for SlicedFusedSDPABase._merge_chunk online-softmax merging."""
+
+    @staticmethod
+    def _chunk(rows=4, dim=8, seed=0):
+        g = torch.Generator().manual_seed(seed)
+        out = torch.randn(1, 1, rows, dim, generator=g)
+        m = torch.randn(1, 1, rows, 1, generator=g)
+        linv = torch.rand(1, 1, rows, 1, generator=g) + 0.5
+        return out, m, linv
+
+    @staticmethod
+    def _masked_chunk(rows=4, dim=8):
+        # What sdpa_recomp_fwd returns for rows whose mask is entirely -inf.
+        return (torch.full((1, 1, rows, dim), float('nan')), torch.full(
+            (1, 1, rows, 1), -math.inf), torch.full((1, 1, rows, 1), float('nan')))
+
+    def test_merge_matches_joint_softmax(self):
+        out_a, m_a, linv_a = self._chunk(seed=0)
+        out_b, m_b, linv_b = self._chunk(seed=1)
+        out, m, linv = SlicedFusedSDPABase._merge_chunk(out_a, m_a, linv_a, out_b, m_b, linv_b)
+        w_a = torch.exp(m_a - m) / linv_a
+        w_b = torch.exp(m_b - m) / linv_b
+        torch.testing.assert_close(out, (w_a * out_a + w_b * out_b) / (w_a + w_b))
+        torch.testing.assert_close(linv, 1.0 / (w_a + w_b))
+
+    def test_fully_masked_chunk_is_ignored(self):
+        out_a, m_a, linv_a = self._chunk()
+        out, m, linv = SlicedFusedSDPABase._merge_chunk(out_a, m_a, linv_a, *self._masked_chunk())
+        torch.testing.assert_close(out, out_a)
+        torch.testing.assert_close(m, m_a)
+        torch.testing.assert_close(linv, linv_a)
+
+    def test_fully_masked_last_is_ignored(self):
+        out_b, m_b, linv_b = self._chunk()
+        out, m, linv = SlicedFusedSDPABase._merge_chunk(*self._masked_chunk(), out_b, m_b, linv_b)
+        torch.testing.assert_close(out, out_b)
+        torch.testing.assert_close(m, m_b)
+        torch.testing.assert_close(linv, linv_b)
+
+    def test_both_fully_masked_stays_finite(self):
+        out, m, linv = SlicedFusedSDPABase._merge_chunk(*self._masked_chunk(), *self._masked_chunk())
+        assert not torch.isnan(out).any()
+        assert not torch.isnan(linv).any()
+        # A later valid chunk must still merge cleanly.
+        out_c, m_c, linv_c = self._chunk()
+        out, m, linv = SlicedFusedSDPABase._merge_chunk(out, m, linv, out_c, m_c, linv_c)
+        torch.testing.assert_close(out, out_c)
+
+
+# ---------------------------------------------------------------------------
 # ModuleFusedSDPA.forward dispatch tests
 # ---------------------------------------------------------------------------
 
@@ -966,7 +1021,7 @@ def _generate_realistic_qkv(bs,
     return q, k, v
 
 
-def _build_causal_mask(valid_shape, pad_shape, device='hpu', dtype=torch.bfloat16):
+def _build_causal_mask(valid_shape, pad_shape, device='hpu', dtype=torch.bfloat16, off_value=-3e38):
     """Build a causal attention mask with prefix context and padding.
 
     Follows ``get_attention_mask`` from ``profile_fsdpa_apc.py``.
@@ -974,15 +1029,16 @@ def _build_causal_mask(valid_shape, pad_shape, device='hpu', dtype=torch.bfloat1
     Args:
         valid_shape: ``(bs, q_len, ctx_len)`` – valid (unpadded) lengths.
         pad_shape: ``(bs_pad, q_len_pad, ctx_len_pad)`` – padded lengths.
+        off_value: fill for masked positions. ``HPUModelRunner._set_attn_bias``
+            uses ``-inf``.
 
     Returns:
         attn_bias of shape ``(bs_pad, 1, q_len_pad, q_len_pad + ctx_len_pad)``
-        where masked positions are filled with ``-3e38`` and valid positions
-        are ``0``.
+        where masked positions are filled with ``off_value`` and valid
+        positions are ``0``.
     """
     _, q_len, ctx_len = valid_shape
     bs_pad, q_len_pad, ctx_len_pad = pad_shape
-    off_value = -3e38  # finite value to avoid nan in exp() during chunk rescaling
 
     context_len_t = torch.tensor([ctx_len], dtype=torch.int32, device=device)
     query_lens_t = torch.tensor([q_len], dtype=torch.int32, device=device)
@@ -1160,6 +1216,39 @@ class TestFsdpaSlicingAccuracyBF16:
 
         assert cos_sim > 0.999, f"BF16 cosine similarity too low: {cos_sim}"
 
+    @pytest.mark.parametrize("mode", ["eager", "compile"])
+    @pytest.mark.parametrize("q_len,ctx_len,ctx_pad", [
+        (8192, 8192, 4096),
+        (8185, 8185, 8199),
+    ])
+    def test_bf16_fully_padded_ctx_chunk(self, q_len, ctx_len, ctx_pad, mode):
+        """Context padding spanning a whole chunk, with the runner's -inf mask, must not produce NaN."""
+        bs, heads, kv_heads, head_dim, chunk_size = 1, 8, 2, 128, 4096
+        q_len_pad = 8192
+        ctx_len_pad = ctx_len + ctx_pad
+        kv_len_pad = q_len_pad + ctx_len_pad
+        q, k, v = _generate_realistic_qkv(bs, heads, kv_heads, head_dim, q_len_pad, kv_len_pad, device='hpu')
+        attn_mask = _build_causal_mask((bs, q_len, ctx_len), (bs, q_len_pad, ctx_len_pad),
+                                       device='hpu',
+                                       off_value=-math.inf)
+
+        ref_out = self._run_reference(q, k, v, attn_mask)
+        sliced_out = self._run_sliced(q,
+                                      k,
+                                      v,
+                                      attn_mask,
+                                      slice_thld=kv_len_pad,
+                                      chunk_size=chunk_size,
+                                      q_pad=q_len_pad - q_len,
+                                      ctx_pad=ctx_pad,
+                                      mode=mode)
+
+        assert not torch.isnan(sliced_out).any()
+        cos_sim = torch.nn.functional.cosine_similarity(ref_out[..., :q_len, :].flatten().float(),
+                                                        sliced_out[..., :q_len, :].flatten().float(),
+                                                        dim=0).item()
+        assert cos_sim > 0.999, f"BF16 cosine similarity too low: {cos_sim}"
+
 
 @requires_hpu
 class TestFsdpaSlicingAccuracyFP8:
@@ -1273,6 +1362,36 @@ class TestFsdpaSlicingAccuracyFP8:
                                                             sliced_out.flatten().float(),
                                                             dim=0).item()
 
+        assert cos_sim > 0.99, f"FP8 cosine similarity too low: {cos_sim}"
+
+    @pytest.mark.parametrize("mode", ["eager", "compile"])
+    def test_fp8_fully_padded_ctx_chunk(self, mode):
+        """Context padding spanning a whole chunk, with the runner's -inf mask, must not produce NaN."""
+        bs, heads, kv_heads, head_dim, chunk_size = 1, 8, 2, 128, 4096
+        q_len, ctx_len, ctx_pad = 8185, 8185, 8199
+        q_len_pad = 8192
+        ctx_len_pad = ctx_len + ctx_pad
+        kv_len_pad = q_len_pad + ctx_len_pad
+        q, k, v = _generate_realistic_qkv(bs, heads, kv_heads, head_dim, q_len_pad, kv_len_pad, device='hpu')
+        attn_mask = _build_causal_mask((bs, q_len, ctx_len), (bs, q_len_pad, ctx_len_pad),
+                                       device='hpu',
+                                       off_value=-math.inf)
+
+        ref_out = self._run_reference(q, k, v, attn_mask)
+        sliced_out = self._run_sliced(q,
+                                      k,
+                                      v,
+                                      attn_mask,
+                                      slice_thld=kv_len_pad,
+                                      chunk_size=chunk_size,
+                                      q_pad=q_len_pad - q_len,
+                                      ctx_pad=ctx_pad,
+                                      mode=mode)
+
+        assert not torch.isnan(sliced_out).any()
+        cos_sim = torch.nn.functional.cosine_similarity(ref_out[..., :q_len, :].flatten().float(),
+                                                        sliced_out[..., :q_len, :].flatten().float(),
+                                                        dim=0).item()
         assert cos_sim > 0.99, f"FP8 cosine similarity too low: {cos_sim}"
 
 

@@ -128,9 +128,14 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
             prefill_seq_len = (num_tokens // prefill_num_seqs if prefill_num_seqs > 0 else 0)
             initial_state = ssm_state[state_indices].contiguous()
             if has_initial_state is not None:
-                # Avoid scatter_nd from boolean indexing
-                mask = has_initial_state.bool().view(-1, 1, 1, 1).to(initial_state.dtype)
-                initial_state = initial_state * mask
+                # Select instead of multiply: 0 * NaN/Inf cannot discard
+                # non-finite cache rows for requests without initial state.
+                # Block 0 is the reserved null block (BlockPool.null_block);
+                # its state is never legitimate, so zero it even when
+                # has_initial_state is True (prefix-cache-hit request whose
+                # load index resolves to a null-filled block-table entry).
+                keep = (has_initial_state.bool().view(-1) & (state_indices.reshape(-1) != 0))
+                initial_state = torch.where(keep.view(-1, 1, 1, 1), initial_state, torch.zeros_like(initial_state))
 
         return (is_prompt, conv_state, ssm_state, state_indices, query_start_loc, has_initial_state, padding_mask_flat,
                 num_decodes, mamba_block_size, prefill_num_seqs, prefill_seq_len, initial_state, store_indices)
