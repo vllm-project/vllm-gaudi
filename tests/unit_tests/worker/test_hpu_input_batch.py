@@ -414,3 +414,73 @@ def test_resumed_request_num_prompt_tokens(device: str, num_computed_tokens: int
 
     expected = len(prompt) + len(output) if expect_folded else len(prompt)
     assert input_batch.num_prompt_tokens[req_index] == expected
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_selective_sampling_metadata_after_swap(device: str):
+    """
+    swap_states on a step where no request joined or left (skip_copy=True)
+    must not leave a moved row with the previous owner's sampling params on
+    the device, or with the previous owner's prompt token ids.
+    """
+    params = [
+        SamplingParams(temperature=0.0, top_p=1.0, top_k=0, presence_penalty=0.0),
+        SamplingParams(temperature=0.9, top_p=0.5, top_k=5, presence_penalty=1.5, repetition_penalty=1.2),
+        SamplingParams(temperature=0.3, top_p=0.8, top_k=2, frequency_penalty=0.7),
+    ]
+    prompts = [[1, 2, 3], [10, 20, 30, 40, 50], [7, 8]]
+    outputs = [[4], [60, 61], [9, 9, 9]]
+
+    def make_batch() -> InputBatch:
+        return InputBatch(
+            max_num_reqs=len(params),
+            max_model_len=1024,
+            max_num_batched_tokens=1024,
+            device=torch.device(device),
+            pin_memory=is_pin_memory_available(),
+            vocab_size=VOCAB_SIZE,
+            block_sizes=[1],
+            kernel_block_sizes=[1],
+        )
+
+    def make_req(i: int) -> CachedRequestState:
+        return CachedRequestState(
+            req_id=f"req_{i}",
+            prompt_token_ids=prompts[i],
+            sampling_params=params[i],
+            pooling_params=None,
+            mm_features=[],
+            block_ids=([], ),
+            generator=None,
+            num_computed_tokens=len(prompts[i]) + len(outputs[i]) - 1,
+            output_token_ids=list(outputs[i]),
+        )
+
+    def selective(batch: InputBatch, order: list[int], skip_copy: bool) -> SamplingMetadata:
+        return batch.make_selective_sampling_metadata([(f"req_{i}", outputs[i]) for i in order], skip_copy=skip_copy)
+
+    # Step 1: all requests join, the device rows are copied.
+    batch = make_batch()
+    for i in range(len(params)):
+        batch.add_request(make_req(i))
+    batch.refresh_sampling_metadata()
+    selective(batch, [0, 1, 2], skip_copy=False)
+
+    # Step 2: nobody joins or leaves, but the batch reorders its rows.
+    batch.swap_states(0, 1)
+    order = [1, 0, 2]
+    got = selective(batch, order, skip_copy=True)
+
+    # Reference: the same requests added directly in the swapped order.
+    ref_batch = make_batch()
+    for i in order:
+        ref_batch.add_request(make_req(i))
+    ref_batch.refresh_sampling_metadata()
+    want = selective(ref_batch, order, skip_copy=False)
+
+    for name in ("temperature", "top_p", "top_k", "frequency_penalties", "presence_penalties", "repetition_penalties",
+                 "prompt_token_ids"):
+        a, b = getattr(got, name), getattr(want, name)
+        assert (a is None) == (b is None), name
+        if a is not None:
+            assert torch.equal(a.cpu(), b.cpu()), f"{name}: {a.cpu().tolist()} != {b.cpu().tolist()}"
