@@ -258,6 +258,11 @@ class InputBatch:
         # updates. Should reset each step.
         self.batch_update_builder = BatchUpdateBuilder()
 
+        # Set by swap_states, which moves only the CPU copies of the per-row
+        # sampling params. The device copies are re-copied before the next
+        # selective sampling metadata is built (see _resync_moved_rows).
+        self._sampling_rows_moved = False
+
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
         self.logitsprocs = logitsprocs or LogitsProcessors()
@@ -505,6 +510,8 @@ class InputBatch:
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
         self.min_p_cpu[i1], self.min_p_cpu[i2] =\
             self.min_p_cpu[i2], self.min_p_cpu[i1]
+        if i1 != i2:
+            self._sampling_rows_moved = True
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -612,6 +619,7 @@ class InputBatch:
         # TODO: follow upstream PR#16728 for enabling batch_update
         self._invalidate_prompt_token_ids_cache()
         self.sampling_metadata = self._make_sampling_metadata()
+        self._sampling_rows_moved = False
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
@@ -684,11 +692,34 @@ class InputBatch:
         if hasattr(self, '_prompt_token_ids_cache'):
             self._prompt_token_ids_cache = None
 
+    def _resync_moved_rows(self) -> None:
+        """Copy every row's sampling params to the device after swap_states.
+
+        swap_states moves only the CPU copies. The device copies are otherwise
+        refreshed only when skip_copy is False (a request joined or left), so a
+        row that changed owner on any other step would be sampled with the
+        previous owner's temperature, top_p, top_k and penalties. Whole tensors
+        are copied so the shapes stay fixed.
+        """
+        async_h2d_copy(self.temperature_cpu_tensor, self.temperature)
+        async_h2d_copy(self.top_p_cpu_tensor, self.top_p)
+        async_h2d_copy(self.top_k_cpu_tensor, self.top_k)
+        async_h2d_copy(self.min_p_cpu_tensor, self.min_p)
+        if not self.no_penalties:
+            async_h2d_copy(self.frequency_penalties_cpu_tensor, self.frequency_penalties)
+            async_h2d_copy(self.presence_penalties_cpu_tensor, self.presence_penalties)
+            async_h2d_copy(self.repetition_penalties_cpu_tensor, self.repetition_penalties)
+        # The cached prompt token ids are in row order too.
+        self._invalidate_prompt_token_ids_cache()
+        self._sampling_rows_moved = False
+
     def make_selective_sampling_metadata(
         self,
         req_id_output_token_ids: list[tuple[str, list[int]]],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
+        if self._sampling_rows_moved:
+            self._resync_moved_rows()
         req_indices: list[int] = [self.req_id_to_index[req_id] for req_id, _ in req_id_output_token_ids]
         prompt_token_ids = None
         if not skip_copy:
