@@ -414,3 +414,47 @@ def test_resumed_request_num_prompt_tokens(device: str, num_computed_tokens: int
 
     expected = len(prompt) + len(output) if expect_folded else len(prompt)
     assert input_batch.num_prompt_tokens[req_index] == expected
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_selective_sampling_metadata_rekeys_bad_words(device: str):
+    """
+    Selective sampling metadata covers only the sampled rows, so the bad
+    words map must be keyed by the row in that selection, not by the
+    persistent batch index.
+    """
+    input_batch: InputBatch = InputBatch(
+        max_num_reqs=3,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        pin_memory=is_pin_memory_available(),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        kernel_block_sizes=[1],
+    )
+    bad_words = {"req_0": None, "req_1": [[7]], "req_2": [[8, 9]]}
+    for req_id, words in bad_words.items():
+        sampling_params = SamplingParams()
+        sampling_params._bad_words_token_ids = words
+        input_batch.add_request(
+            CachedRequestState(
+                req_id=req_id,
+                prompt_token_ids=[1, 2, 3],
+                sampling_params=sampling_params,
+                pooling_params=None,
+                mm_features=[],
+                block_ids=([], ),
+                generator=None,
+                num_computed_tokens=0,
+                output_token_ids=[],
+            ))
+    input_batch.refresh_sampling_metadata()
+
+    # A single request sampled alone, as for a prefill.
+    metadata = input_batch.make_selective_sampling_metadata([("req_2", [])])
+    assert metadata.bad_words_token_ids == {0: [[8, 9]]}
+
+    # Several requests in an order that differs from the batch order.
+    metadata = input_batch.make_selective_sampling_metadata([("req_2", []), ("req_0", []), ("req_1", [])])
+    assert metadata.bad_words_token_ids == {0: [[8, 9]], 2: [[7]]}

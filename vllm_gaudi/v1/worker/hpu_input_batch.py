@@ -753,7 +753,10 @@ class InputBatch:
             output_token_ids=cast(list[list[int]], output_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
-            bad_words_token_ids=self.bad_words_token_ids,
+            bad_words_token_ids={
+                i: self.bad_words_token_ids[req_idx]
+                for i, req_idx in enumerate(req_indices) if req_idx in self.bad_words_token_ids
+            },
             logitsprocs=self.logitsprocs,
         )
 
