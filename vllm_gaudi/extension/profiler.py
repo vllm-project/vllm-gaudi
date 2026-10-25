@@ -162,7 +162,9 @@ class HabanaHighLevelProfiler:
                 else f"vllm-instance-{self.pid}-{str(uuid.uuid4().hex)}"
             msg = f'Profiler enabled for: {self.vllm_instance_id}'
             logger().info(msg)
-            self.filename = f'server_events_{self.vllm_instance_id}.json'
+            events_dir = os.getenv('VLLM_PROFILE_DIR') or '.'
+            os.makedirs(events_dir, exist_ok=True)
+            self.filename = os.path.join(events_dir, f'server_events_{self.vllm_instance_id}.json')
             # initialize the trace file (JSON Array Format)
             with open(self.filename, 'w') as outfile:
                 outfile.write('[')
@@ -400,12 +402,12 @@ class HabanaMemoryProfiler:
             self.final_host_memory - self.initial_host_memory
 
 
-def setup_profiler(warmup, active):
+def setup_profiler(warmup, active, output_dir='.', with_stack=True):
     schedule = torch.profiler.schedule(wait=0, warmup=warmup, active=active, repeat=1)
     activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.HPU]
     profiler = torch.profiler.profile(schedule=schedule,
                                       activities=activities,
-                                      on_trace_ready=torch.profiler.tensorboard_trace_handler('.', use_gzip=True),
+                                      on_trace_ready=torch.profiler.tensorboard_trace_handler(output_dir, use_gzip=True),
                                       record_shapes=False,
-                                      with_stack=True)
+                                      with_stack=with_stack)
     return profiler

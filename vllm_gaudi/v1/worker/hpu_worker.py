@@ -44,12 +44,25 @@ if TYPE_CHECKING:
     from vllm.v1.core.scheduler import GrammarOutput, SchedulerOutput
 
 
-def setup_step_profiler(steps):
+def setup_step_profiler(steps, rank=0):
+    """Create the VLLM_PROFILE_STEPS profiler for this rank (None if it is not selected).
+
+    VLLM_PROFILE_RANKS (comma separated global ranks, default: all), VLLM_PROFILE_DIR (default: '.') and
+    VLLM_PROFILE_WITH_STACK (default: false) tune the capture.
+    """
     if steps is None:
+        return None
+    ranks = get_config().VLLM_PROFILE_RANKS
+    if ranks is not None and rank not in ranks:
         return None
     step_start, step_end = steps
     active = step_end - step_start + 1
-    return setup_profiler(warmup=0, active=active)
+    output_dir = get_config().VLLM_PROFILE_DIR or '.'
+    os.makedirs(output_dir, exist_ok=True)
+    return setup_profiler(warmup=0,
+                          active=active,
+                          output_dir=output_dir,
+                          with_stack=bool(get_config().VLLM_PROFILE_WITH_STACK))
 
 
 class HPUWorker(WorkerBase):
@@ -80,7 +93,7 @@ class HPUWorker(WorkerBase):
         self.gc_track_recompiles = get_config().track_graph_compilation and not get_config().high_level_profiler_enabled
         self.step = 0
         self.profile_steps = get_config().VLLM_PROFILE_STEPS
-        self.step_profiler = setup_step_profiler(self.profile_steps)
+        self.step_profiler = setup_step_profiler(self.profile_steps, self.rank)
         self.step_debug = init_debug_logger('steps')
 
         self.model_sleeping = False
@@ -573,6 +586,7 @@ class HPUWorker(WorkerBase):
         if self.step_debug:
             self.step_debug(f'step={self.step}')
         if self.step_profiler and self.step == self.profile_steps[0]:
+            logger.info("Step profiler started at step %d (rank %d)", self.step, self.rank)
             self.step_profiler.start()
         with track_graph_compile('HPUWorker.execute_model') \
                 if self.gc_track_recompiles \
@@ -583,9 +597,12 @@ class HPUWorker(WorkerBase):
             if self.step >= self.profile_steps[0]:
                 self.step_profiler.step()
             if self.step == self.profile_steps[1]:
+                # The last step() already wrote the trace (schedule active window ended); stop() is a safety net.
                 self.step_profiler.stop()
                 self.step_profiler = None
-                raise RuntimeError('Step profiling finished!')
+                logger.info("Step profiler finished at step %d (rank %d)", self.step, self.rank)
+                if not get_config().VLLM_PROFILE_KEEP_RUNNING:
+                    raise RuntimeError('Step profiling finished!')
         self.step += 1
         # NOTE(Harish): removed "if self.rank == 0 else None" for KV_connector enabling with TP>1
         # referred to Gpu Model Runner, KV connector aggregation expects valid output from all ranks
