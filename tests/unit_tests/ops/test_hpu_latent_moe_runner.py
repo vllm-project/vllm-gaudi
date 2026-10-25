@@ -112,3 +112,38 @@ def test_patched_latent_fused_forward_requires_shared_output():
 
     with pytest.raises(RuntimeError, match="shared-expert output"):
         hpu_fused_moe.patched_latent_moe_fused_forward(runner, torch.zeros(4, 8), torch.zeros(4, 2), None, None)
+
+
+def _make_fake_runner_instance(dp_size: int = 1, pcp_size: int = 1):
+    runner_cls = type("FakeMoERunner", (hpu_fused_moe.MoERunnerBase, ), {})
+    runner = runner_cls.__new__(runner_cls)
+    torch.nn.Module.__init__(runner)
+    runner.moe_config = types.SimpleNamespace(dp_size=dp_size, pcp_size=pcp_size)
+    runner._forward_entry = "opaque"
+    return runner
+
+
+def test_install_inline_forward_entry_replaces_only_single_dp_runners(monkeypatch):
+    monkeypatch.setattr(hpu_fused_moe, "_MOE_COMPILE", True)
+    monkeypatch.setattr(hpu_fused_moe, "_hpu_apply_moe_dp1", lambda runner, *args: ("inline", runner))
+    model = torch.nn.Module()
+    single = _make_fake_runner_instance()
+    multi_dp = _make_fake_runner_instance(dp_size=2)
+    multi_pcp = _make_fake_runner_instance(pcp_size=2)
+    model.single, model.multi_dp, model.multi_pcp = single, multi_dp, multi_pcp
+
+    assert hpu_fused_moe.install_inline_moe_forward_entry(model) == 1
+
+    assert multi_dp._forward_entry == "opaque"
+    assert multi_pcp._forward_entry == "opaque"
+    result = single._forward_entry("h", "logits", "shared_in", "ids", "layer.0", 0)
+    assert result == ("inline", single)
+
+
+def test_install_inline_forward_entry_is_skipped_when_disabled(monkeypatch):
+    monkeypatch.setattr(hpu_fused_moe, "_MOE_COMPILE", False)
+    model = torch.nn.Module()
+    model.runner = _make_fake_runner_instance()
+
+    assert hpu_fused_moe.install_inline_moe_forward_entry(model) == 0
+    assert model.runner._forward_entry == "opaque"

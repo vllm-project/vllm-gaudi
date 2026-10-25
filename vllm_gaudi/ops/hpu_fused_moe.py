@@ -27,11 +27,14 @@ from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import
     RoutingSimulatorRouter, )
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter, )
+from vllm.logger import init_logger
 import vllm_gaudi.envs as gaudi_envs
 from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOp
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
+
+logger = init_logger(__name__)
 
 # Map model activation names to the activation strings the Gaudi fused-MoE op's
 # MoeActivationMode_t enum accepts. The synapse MoE kernel enumerates "gelu" (and
@@ -827,6 +830,46 @@ def patched_latent_moe_fused_forward(
 
     result = self._shard_up_proj_tail(fused_output, shared_output, og_hidden_dim_post_xform)
     return self._maybe_add_zero_expert_output(result)
+
+
+def _make_inline_forward_entry(runner):
+    """Build a ``_forward_entry`` replacement that runs the MoE inline instead of the opaque custom op."""
+
+    def _inline_forward_entry(hidden_states, router_logits, shared_experts_input, input_ids, *_args, **_kwargs):
+        # layer_name and hidden_dim_unpadded (and any future extra arguments) are not needed by the inline path.
+        return _hpu_apply_moe_dp1(runner, hidden_states, router_logits, shared_experts_input, input_ids)
+
+    return _inline_forward_entry
+
+
+def install_inline_moe_forward_entry(model: torch.nn.Module) -> int:
+    """Replace ``_forward_entry`` (``torch.ops.vllm.moe_forward[_shared]``) of every MoE runner of ``model``.
+
+    The HPU compile backend cannot trace these opaque custom ops and runs them eagerly ("Fallback required"),
+    which breaks the graph at every MoE layer. Doing it on the instances covers every call site of the entry
+    (``MoERunner.forward`` as well as runner subclasses such as the Kimi-K3 latent runner) in the process that
+    owns the model. Only dp_size==1 / pcp_size==1 runners are replaced. Returns the number of runners changed.
+    """
+    if not _MOE_COMPILE:
+        return 0
+    replaced = 0
+    class_names: set[str] = set()
+    for module in model.modules():
+        if not isinstance(module, MoERunnerBase):
+            continue
+        moe_config = module.moe_config
+        if moe_config.dp_size != 1 or getattr(moe_config, "pcp_size", 1) > 1:
+            continue
+        module._forward_entry = _make_inline_forward_entry(module)
+        class_names.add(type(module).__name__)
+        replaced += 1
+    if replaced:
+        logger.info("Replaced the opaque moe_forward entry with the inline HPU path in %d MoE runners (%s), pid %d",
+                    replaced, ", ".join(sorted(class_names)), os.getpid())
+    else:
+        logger.warning("No MoE runner was switched to the inline HPU path (HPU_FUSED_MOE=%s), pid %d",
+                       int(_MOE_COMPILE), os.getpid())
+    return replaced
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:

@@ -94,6 +94,7 @@ Currently:
 
 import gc
 import inspect
+import os
 from typing import Callable, Optional
 
 import torch
@@ -1150,6 +1151,8 @@ def _patch_latent_moe_runner_forward() -> None:
 
     ROCmLatentMoERunner._fused_forward = _hpu_fused_forward
     ROCmLatentMoERunner._patched_hpu_fused_forward = True
+    logger.info("Patched %s._fused_forward with the inline HPU MoE path, pid %d", ROCmLatentMoERunner.__name__,
+                os.getpid())
 
 
 def _patch_kimi_linear_weights() -> None:
