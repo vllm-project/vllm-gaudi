@@ -671,6 +671,58 @@ def _launch_shared_experts_overlap(runner: MoERunnerBase, shared_experts_input: 
     return bool(forward_async(shared_experts_input))
 
 
+def _hpu_apply_moe_dp1(
+    self,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    """dp_size==1 fast path shared by the patched MoERunner forwards.
+
+    Applies the gate and the routed/shared experts inline instead of going through the opaque
+    ``torch.ops.vllm.moe_forward_shared`` custom op (``_forward_entry``), so that
+    ``torch.ops.hpu.mixture_of_experts`` is traced into the compiled graph.
+    """
+    # Bypass _forward_impl entirely for dp_size==1 to eliminate
+    # graph breaks from _sequence_parallel_context() (which calls
+    # get_forward_context()), skip the no-op _maybe_dispatch(), and
+    # avoid double gate / stream-sync calls that _forward_impl
+    # would redundantly repeat.
+    if self.moe_config.pcp_size > 1:
+        raise RuntimeError("dp_size==1 fast path does not support pcp_size > 1")
+    # Mirror MoERunner._forward_impl's pre-dispatch setup: the quant config
+    # is initialized on routed_experts (which the runner holds directly), so
+    # unlike the old FusedMoE-layer-based init we do NOT need the layer here.
+    self.routed_experts._ensure_moe_quant_config_init()
+    # Start the shared-expert aux stream before routed dispatch, mirroring
+    # upstream MoERunner._forward_impl. Version-tolerant: see
+    # _launch_shared_experts_overlap.
+    shared_experts_overlapping = _launch_shared_experts_overlap(self, shared_experts_input)
+    # Apply the gate if the runner holds it (mirrors _forward_impl).
+    if self.gate is not None:
+        if self._fse_fuse_gate:
+            self._maybe_fuse_gate_weights()
+            router_logits = torch.nn.functional.linear(hidden_states, self._combined_gate_weight)
+        else:
+            router_logits, _ = self.gate(hidden_states)
+    # Core MoERunner._apply_quant_method takes no layer argument — it reads
+    # everything it needs off the runner (self.routed_experts / self.router).
+    # Call it exactly as upstream _forward_impl does. Only pass
+    # shared_experts_overlapping when an async launch actually happened: that
+    # is the only case in which the kwarg is guaranteed to exist upstream.
+    extra_quant_kwargs = {"shared_experts_overlapping": True} if shared_experts_overlapping else {}
+    shared_output, fused_hidden = self._apply_quant_method(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        shared_experts_input=shared_experts_input,
+        input_ids=input_ids,
+        **extra_quant_kwargs,
+    )
+    result = self._maybe_combine(shared_output, fused_hidden)
+    return result
+
+
 def patched_fused_moe_forward(
     self,
     hidden_states: torch.Tensor,
@@ -705,42 +757,7 @@ def patched_fused_moe_forward(
         shared_experts_input, hidden_states))
 
     if self.moe_config.dp_size == 1:
-        # Bypass _forward_impl entirely for dp_size==1 to eliminate
-        # graph breaks from _sequence_parallel_context() (which calls
-        # get_forward_context()), skip the no-op _maybe_dispatch(), and
-        # avoid double gate / stream-sync calls that _forward_impl
-        # would redundantly repeat.
-        if self.moe_config.pcp_size > 1:
-            raise RuntimeError("dp_size==1 fast path does not support pcp_size > 1")
-        # Mirror MoERunner._forward_impl's pre-dispatch setup: the quant config
-        # is initialized on routed_experts (which the runner holds directly), so
-        # unlike the old FusedMoE-layer-based init we do NOT need the layer here.
-        self.routed_experts._ensure_moe_quant_config_init()
-        # Start the shared-expert aux stream before routed dispatch, mirroring
-        # upstream MoERunner._forward_impl. Version-tolerant: see
-        # _launch_shared_experts_overlap.
-        shared_experts_overlapping = _launch_shared_experts_overlap(self, shared_experts_input)
-        # Apply the gate if the runner holds it (mirrors _forward_impl).
-        if self.gate is not None:
-            if self._fse_fuse_gate:
-                self._maybe_fuse_gate_weights()
-                router_logits = torch.nn.functional.linear(hidden_states, self._combined_gate_weight)
-            else:
-                router_logits, _ = self.gate(hidden_states)
-        # Core MoERunner._apply_quant_method takes no layer argument — it reads
-        # everything it needs off the runner (self.routed_experts / self.router).
-        # Call it exactly as upstream _forward_impl does. Only pass
-        # shared_experts_overlapping when an async launch actually happened: that
-        # is the only case in which the kwarg is guaranteed to exist upstream.
-        extra_quant_kwargs = {"shared_experts_overlapping": True} if shared_experts_overlapping else {}
-        shared_output, fused_hidden = self._apply_quant_method(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            shared_experts_input=shared_experts_input,
-            input_ids=input_ids,
-            **extra_quant_kwargs,
-        )
-        result = self._maybe_combine(shared_output, fused_hidden)
+        result = _hpu_apply_moe_dp1(self, hidden_states, router_logits, shared_experts_input, input_ids)
     else:
         # Upstream PR #41184 dropped MoERunner._trtllm_mxfp4_unpadded_dim(); the
         # TRT-LLM MXFP4 unpadded hidden dim now comes from moe_config and is only
@@ -777,6 +794,39 @@ def patched_fused_moe_forward(
 
     combined = self._maybe_reduce_final_output(combined, og_hidden_dim_post_xform, fused_output_is_reduced)
     return self._maybe_add_zero_expert_output(combined)
+
+
+def patched_latent_moe_fused_forward(
+    self,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    shared_experts_input: torch.Tensor | None,
+) -> torch.Tensor:
+    """HPU ``_fused_forward`` of the Kimi-K3 latent-MoE runner without the opaque custom op.
+
+    Upstream ``ROCmLatentMoERunner._fused_forward`` calls ``self._forward_entry``
+    (``torch.ops.vllm.moe_forward_shared``). The HPU compile backend cannot trace that op, so it falls
+    back to eager for every MoE layer. For dp_size==1 this runs the same sequence as the patched
+    ``MoERunnerBase.forward`` (``_hpu_apply_moe_dp1``) and keeps the runner's sharded up-projection tail.
+    """
+    if shared_experts_input is None:
+        hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
+
+    hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (self._maybe_pad_hidden_states(
+        shared_experts_input, hidden_states))
+
+    result = _hpu_apply_moe_dp1(self, hidden_states, router_logits, shared_experts_input, input_ids)
+    shared_output, fused_output = result if isinstance(result, tuple) else (None, result)
+    if shared_output is None:
+        # The sharded up-projection tail accumulates into the shared-expert output, so it cannot run without it.
+        raise RuntimeError("Kimi-K3 latent MoE tail requires the shared-expert output, but the MoE returned none")
+
+    if og_hidden_dim_pre_xform is not None:
+        fused_output = fused_output[..., :og_hidden_dim_pre_xform]
+
+    result = self._shard_up_proj_tail(fused_output, shared_output, og_hidden_dim_post_xform)
+    return self._maybe_add_zero_expert_output(result)
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:

@@ -1119,6 +1119,39 @@ def _patch_moe_runner_delegation() -> None:
             pass
 
 
+def _patch_latent_moe_runner_forward() -> None:
+    """Run the Kimi-K3 latent-MoE runner through the inline HPU MoE path (no opaque custom op).
+
+    ``ROCmLatentMoERunner._fused_forward`` calls ``torch.ops.vllm.moe_forward_shared`` which the HPU compile
+    backend executes eagerly ("Fallback required"), breaking the graph at every MoE layer. Replace it with the
+    dp_size==1 inline implementation used for the other MoE models. Disable with HPU_FUSED_MOE=0.
+    """
+    from vllm.logger import init_logger
+
+    logger = init_logger(__name__)
+    try:
+        from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
+        from vllm_gaudi.ops.hpu_fused_moe import _MOE_COMPILE, patched_latent_moe_fused_forward
+    except Exception as exc:
+        logger.warning_once("Kimi-K3 latent MoE runner patch skipped, import failed: %r", exc)
+        return
+    if not _MOE_COMPILE:
+        logger.warning_once("Kimi-K3 latent MoE runner patch skipped because HPU_FUSED_MOE=0")
+        return
+    if getattr(ROCmLatentMoERunner, "_patched_hpu_fused_forward", False):
+        return
+
+    upstream_fused_forward = ROCmLatentMoERunner._fused_forward
+
+    def _hpu_fused_forward(self, hidden_states, router_logits, input_ids, shared_experts_input):
+        if self.moe_config.dp_size != 1 or getattr(self.moe_config, "pcp_size", 1) > 1:
+            return upstream_fused_forward(self, hidden_states, router_logits, input_ids, shared_experts_input)
+        return patched_latent_moe_fused_forward(self, hidden_states, router_logits, input_ids, shared_experts_input)
+
+    ROCmLatentMoERunner._fused_forward = _hpu_fused_forward
+    ROCmLatentMoERunner._patched_hpu_fused_forward = True
+
+
 def _patch_kimi_linear_weights() -> None:
     """Ensure KimiLinearDecoderLayer and KimiMoE safely access w13_weight and w2_weight without evaluating bool(Tensor)."""
     try:
@@ -1590,6 +1623,7 @@ def apply() -> None:
         _patch_inc_quantization_config()
         _patch_mla_prefill_selector()
         _patch_moe_runner_delegation()
+        _patch_latent_moe_runner_forward()
         _patch_kimi_k3_hybrid_config()
         _patch_kimi_k3_arch()
         _patch_compressed_tensors_mxfp4()
