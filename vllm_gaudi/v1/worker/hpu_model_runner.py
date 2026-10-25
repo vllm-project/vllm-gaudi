@@ -2042,12 +2042,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
+        # Encode only the items the scheduler placed in this step. Encoding every
+        # item of the request that is missing from the encoder cache would
+        # re-encode items already consumed by earlier prefill chunks (the scheduler
+        # frees their cache entries) and would change the number of items per
+        # encoder call from step to step.
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         for req_id in req_ids:
+            encoder_input_ids = scheduled_encoder_inputs.get(req_id)
+            if not encoder_input_ids:
+                continue
             req_state = self.requests[req_id]
 
-            for mm_feature in req_state.mm_features:
+            for mm_input_id in encoder_input_ids:
+                mm_feature = req_state.mm_features[mm_input_id]
                 mm_hash = mm_feature.identifier
-                if mm_hash in self.encoder_cache:
+                if mm_feature.data is None or mm_hash in self.encoder_cache:
                     continue
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))

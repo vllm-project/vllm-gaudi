@@ -282,3 +282,85 @@ class TestGatherMmEmbeddings2DPadded:
         # padded version should NOT have mm at contiguous position 11
         # (that falls in padding region of req_0)
         assert is_padded[11].item() is False
+
+
+class TestExecuteMmEncoder:
+    """Test that _execute_mm_encoder encodes only the items scheduled in this step."""
+
+    @staticmethod
+    def _make_feature(identifier: str, offset: int, length: int) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=f"payload_{identifier}",
+            modality="image",
+            identifier=identifier,
+            mm_position=PlaceholderRange(offset=offset, length=length),
+        )
+
+    @staticmethod
+    def _make_runner(requests: dict, encoder_cache: dict) -> MagicMock:
+        runner = MagicMock(spec=HPUModelRunner)
+        runner.requests = requests
+        runner.encoder_cache = encoder_cache
+        runner.device = "cpu"
+        runner.pin_memory = False
+        runner.model = MagicMock()
+        encoded_lengths: list[int] = []
+
+        def _embed_multimodal(**kwargs):
+            items = kwargs["items"]
+            encoded_lengths.append(len(items))
+            return [torch.zeros(4, HIDDEN_SIZE) for _ in items]
+
+        runner.model.embed_multimodal.side_effect = _embed_multimodal
+        runner.encoded_lengths = encoded_lengths
+        return runner
+
+    @staticmethod
+    def _fake_group_and_batch(mm_kwargs, device=None, pin_memory=False):
+        yield "image", len(mm_kwargs), {"items": [data for _, data in mm_kwargs]}
+
+    def _run(self, runner, scheduled_encoder_inputs, req_ids):
+        sched_out = _make_scheduler_output({"req_0": 16})
+        sched_out.scheduled_encoder_inputs = scheduled_encoder_inputs
+        import vllm_gaudi.v1.worker.hpu_model_runner as runner_module
+        original = runner_module.group_and_batch_mm_kwargs
+        runner_module.group_and_batch_mm_kwargs = self._fake_group_and_batch
+        try:
+            HPUModelRunner._execute_mm_encoder(runner, sched_out, req_ids)
+        finally:
+            runner_module.group_and_batch_mm_kwargs = original
+
+    def test_only_scheduled_items_are_encoded(self):
+        features = [self._make_feature(f"hash_{i}", offset=4 * i, length=4) for i in range(4)]
+        requests = {"req_0": _make_request_state("req_0", 16, features)}
+        runner = self._make_runner(requests, encoder_cache={})
+
+        self._run(runner, {"req_0": [1, 2]}, ["req_0"])
+
+        assert runner.encoded_lengths == [2]
+        assert set(runner.encoder_cache) == {"hash_1", "hash_2"}
+
+    def test_cached_and_dataless_items_are_skipped(self):
+        features = [self._make_feature(f"hash_{i}", offset=4 * i, length=4) for i in range(3)]
+        features[2] = MultiModalFeatureSpec(data=None,
+                                            modality="image",
+                                            identifier="hash_2",
+                                            mm_position=PlaceholderRange(offset=8, length=4))
+        requests = {"req_0": _make_request_state("req_0", 16, features)}
+        runner = self._make_runner(requests, encoder_cache={"hash_0": torch.zeros(4, HIDDEN_SIZE)})
+
+        self._run(runner, {"req_0": [0, 1, 2]}, ["req_0"])
+
+        assert runner.encoded_lengths == [1]
+        assert "hash_1" in runner.encoder_cache
+        assert "hash_2" not in runner.encoder_cache
+
+    def test_nothing_scheduled_runs_no_encoder(self):
+        features = [self._make_feature("hash_0", offset=0, length=4)]
+        requests = {"req_0": _make_request_state("req_0", 16, features)}
+        runner = self._make_runner(requests, encoder_cache={})
+
+        self._run(runner, {}, ["req_0"])
+
+        assert runner.encoded_lengths == []
+        assert not runner.encoder_cache
