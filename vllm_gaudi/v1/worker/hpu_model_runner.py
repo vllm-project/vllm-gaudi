@@ -882,8 +882,10 @@ def apply_model_specific_patches(model_runner):
     model_type = getattr(model_runner.vllm_config.model_config.hf_config, "model_type", "")
     is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5", "qwen3_5_text", "qwen3_5_moe")
     is_gemma4 = model_type in ("gemma4", )
+    # Kimi-K3 mixes dense/MoE feed-forward layers and MLA/KDA attention layers.
+    is_kimi_k3 = model_type in ("kimi_k3", )
 
-    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe or is_gemma4
+    model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe or is_gemma4 or is_kimi_k3
     if is_llama4:
         apply_hpu_llama4_post_load_patches(model_runner.model)
     if is_qwen_moe:
