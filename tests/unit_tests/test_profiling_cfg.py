@@ -111,3 +111,56 @@ def test_setup_profiler_passes_rank_to_the_trace_handler(tmp_path):
     captured["on_trace_ready"](_OneArgProf())
     (trace, ) = tmp_path.iterdir()
     assert trace.name.startswith("5_")
+
+
+class _TorchProfLikeHabana:
+    """Mimics torch.profiler.profile over the Habana wrapper (build #867).
+
+    The outer ``export_chrome_trace`` forwards ``(path, metadata)`` to ``self.profiler``, whose Habana wrapper only
+    accepts ``(path)`` -> TypeError. Only a direct call on the inner profiler works.
+    """
+
+    class _Inner:
+
+        def export_chrome_trace(self, path):
+            with open(path, "w") as f:
+                f.write('{"traceEvents": [1]}')
+
+    def __init__(self):
+        self.profiler = self._Inner()
+        self._trace_metadata = {}
+
+    def export_chrome_trace(self, path, use_python_export=False):
+        self.profiler.export_chrome_trace(path, self._trace_metadata)
+
+
+def test_trace_handler_calls_inner_profiler_when_outer_forwards_extra_arg(tmp_path):
+    import gzip
+    cfg.make_trace_handler(str(tmp_path), 0)(_TorchProfLikeHabana())
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1 and files[0].name.endswith(".pt.trace.json.gz")
+    assert gzip.open(files[0]).read() == b'{"traceEvents": [1]}'
+
+
+def test_trace_handler_falls_back_to_kineto_results_save(tmp_path):
+
+    class Kineto:
+
+        def save(self, path):
+            with open(path, "w") as f:
+                f.write("{}")
+
+    class Inner:
+        kineto_results = Kineto()
+
+        def export_chrome_trace(self, path, metadata=None):
+            raise TypeError("boom")
+
+    class Prof:
+        profiler = Inner()
+
+        def export_chrome_trace(self, path):
+            raise TypeError("boom")
+
+    cfg.make_trace_handler(str(tmp_path), 0, use_gzip=False)(Prof())
+    assert [f.name.endswith(".pt.trace.json") for f in tmp_path.iterdir()] == [True]

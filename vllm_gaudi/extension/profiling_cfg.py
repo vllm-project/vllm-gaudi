@@ -43,19 +43,48 @@ def bucketing_max_batched_tokens(tokens: int, mamba_chunk_size: int, profiling: 
     return -(-tokens // mamba_chunk_size) * mamba_chunk_size
 
 
+def _export_trace(prof, path: str) -> None:
+    """Write the chrome trace of ``prof`` to ``path`` with a fallback chain.
+
+    ``torch.profiler.profile.export_chrome_trace`` always calls ``self.profiler.export_chrome_trace(path,
+    self._trace_metadata)`` (torch/profiler/profiler.py), but the Habana ``habana_autograd_profile_wrapper``
+    (habana_frameworks/torch/activity_profiler/activity_profiler.py) only takes ``(self, path)``, hence
+    ``TypeError: ... takes 2 positional arguments but 3 were given`` for any outer call. So call the inner
+    profiler directly with the path only; fall back to the outer method and to the raw kineto results.
+    """
+    errors = []
+    inner = getattr(prof, "profiler", None)
+    attempts = []
+    if inner is not None and hasattr(inner, "export_chrome_trace"):
+        attempts.append(("profiler.export_chrome_trace", lambda: inner.export_chrome_trace(path)))
+    attempts.append(("export_chrome_trace", lambda: prof.export_chrome_trace(path)))
+    kineto = getattr(inner, "kineto_results", None)
+    if kineto is not None and hasattr(kineto, "save"):
+        attempts.append(("kineto_results.save", lambda: kineto.save(path)))
+    for name, attempt in attempts:
+        try:
+            attempt()
+            if os.path.exists(path):
+                return
+            errors.append(f"{name}: no file written")
+        except Exception as exc:
+            errors.append(f"{name}: {exc!r}")
+    raise RuntimeError("; ".join(errors))
+
+
 def make_trace_handler(output_dir: str, rank: int, use_gzip: bool = True) -> Callable:
     """``on_trace_ready`` callback writing ``<output_dir>/<rank>_<pid>_<ms>.pt.trace.json[.gz]``.
 
-    ``torch.profiler.tensorboard_trace_handler(..., use_gzip=True)`` calls ``prof.export_chrome_trace(path, True)``
-    which the Habana profiler wrapper does not accept (TypeError, no trace written). This handler calls
-    ``export_chrome_trace`` with the path only and gzips in Python. Failures are logged, never raised.
+    ``torch.profiler.tensorboard_trace_handler`` goes through ``prof.export_chrome_trace``, which passes extra
+    arguments the Habana profiler wrapper does not accept (see ``_export_trace``). This handler writes the plain
+    trace through ``_export_trace`` and gzips in Python. Failures are logged, never raised.
     """
 
     def handler(prof) -> None:
         path = os.path.join(output_dir, f"{rank}_{os.getpid()}_{int(time.time() * 1000)}.pt.trace.json")
         try:
             os.makedirs(output_dir, exist_ok=True)
-            prof.export_chrome_trace(path)
+            _export_trace(prof, path)
             if use_gzip:
                 with open(path, "rb") as src, gzip.open(path + ".gz", "wb") as dst:
                     shutil.copyfileobj(src, dst)
