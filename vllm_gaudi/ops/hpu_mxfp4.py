@@ -11,6 +11,7 @@ from functools import partial
 
 import torch
 import torch.nn.functional as F
+import vllm_gaudi.envs as gaudi_envs
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization import mxfp4 as mxfp4_module
@@ -18,6 +19,7 @@ from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
 
 from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpMXFP4
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.ops.hpu_situ_moe import MXFP4_BLOCK, maybe_situ_moe, situ_impl_or_exact
 from vllm_gaudi.ops.hpu_fused_moe import (
     _normalize_moe_activation,
     select_experts_from_routed,
@@ -148,13 +150,17 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
-        output = layer.moe_op(
-            x,
-            topk_ids,
-            topk_weights,
-            permuted_weights=True,
-            activation=_normalize_moe_activation(layer.activation),
-        )
+        # The fused kernel has no SiTU: exact unfused routed experts (see ops/hpu_situ_moe.py).
+        output = maybe_situ_moe(layer, x, topk_ids, topk_weights, situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL),
+                                MXFP4_BLOCK, gaudi_envs.VLLM_MINIMAX_M3_MOE_TOKEN_TILE)
+        if output is None:
+            output = layer.moe_op(
+                x,
+                topk_ids,
+                topk_weights,
+                permuted_weights=True,
+                activation=_normalize_moe_activation(layer.activation),
+            )
         if layer.moe_config.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:

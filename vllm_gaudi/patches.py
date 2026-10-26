@@ -1176,8 +1176,41 @@ def _patch_latent_moe_runner_forward() -> None:
                 os.getpid())
 
 
+def _configure_situ_aliases() -> str:
+    """Apply HPU_KIMI_SITU_IMPL to the fused-MoE activation aliases and return the effective implementation.
+
+    SiTU (Kimi-K3 routed experts): the fused Habana op only knows silu/gelu. "exact" (default) computes the
+    experts unfused (ops/hpu_situ_moe.py) and installs no alias, so any path that still reaches the fused op
+    with "situ" fails loudly instead of silently using silu; "silu" installs the old approximate alias. An
+    invalid value is logged as an error and treated as "exact"; this runs outside of the broad try/except of
+    the other Kimi patches so that it can neither be skipped by nor skip them.
+    """
+    import importlib
+
+    import vllm_gaudi.envs as gaudi_envs
+    from vllm_gaudi.extension.logger import logger as _ext_logger
+    from vllm_gaudi.ops.hpu_situ_moe import situ_impl_or_exact
+
+    situ_impl = situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL, _ext_logger().error)
+    if situ_impl == "silu":
+        _ext_logger().warning("HPU_KIMI_SITU_IMPL=silu: the Kimi-K3 routed experts use silu instead of SiTU "
+                              "(beta*tanh(gate/beta)*sigmoid(gate)*up); model outputs are APPROXIMATE")
+    for module_name in ("vllm_gaudi.extension.ops", "vllm_gaudi.ops.hpu_fused_moe"):
+        try:
+            aliases = importlib.import_module(module_name)._MOE_ACTIVATION_ALIASES
+        except Exception as exc:  # the module may be unavailable in minimal environments
+            _ext_logger().warning("Cannot configure the SiTU alias in %s: %r", module_name, exc)
+            continue
+        if situ_impl == "silu":
+            aliases["situ"] = "silu"
+        else:
+            aliases.pop("situ", None)
+    return situ_impl
+
+
 def _patch_kimi_linear_weights() -> None:
     """Ensure KimiLinearDecoderLayer and KimiMoE safely access w13_weight and w2_weight without evaluating bool(Tensor)."""
+    _configure_situ_aliases()
     try:
         import vllm.models.kimi_k3.amd.linear as k3_linear
 
@@ -1219,18 +1252,6 @@ def _patch_kimi_linear_weights() -> None:
 
             k3_linear.KimiMoE.__init__ = _safe_moe_init
             k3_linear.KimiMoE._patched_weights = True
-
-        # Also patch _MOE_ACTIVATION_ALIASES in extension/ops and ops/hpu_fused_moe
-        try:
-            import vllm_gaudi.extension.ops as _ext_ops
-            _ext_ops._MOE_ACTIVATION_ALIASES["situ"] = "silu"
-        except Exception:
-            pass
-        try:
-            import vllm_gaudi.ops.hpu_fused_moe as _fused_moe
-            _fused_moe._MOE_ACTIVATION_ALIASES["situ"] = "silu"
-        except Exception:
-            pass
 
         orig_forward = getattr(k3_linear.KimiLinearDecoderLayer, "forward", None)
         if orig_forward is None:
@@ -1488,6 +1509,11 @@ def _patch_compressed_tensors_mxfp4() -> None:
                     return orig_apply(self, layer, x, topk_weights, topk_ids, shared_experts, shared_experts_input)
                 raise RuntimeError("Non-HPU platform without orig_apply")
 
+            # imported at call time: these modules are not importable yet while the patches are applied
+            import vllm_gaudi.envs as gaudi_envs
+            from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
+            from vllm_gaudi.ops.hpu_situ_moe import maybe_situ_moe, situ_impl_or_exact
+
             input_shape = x.shape
             x = x.view(-1, x.shape[-1])
 
@@ -1510,13 +1536,20 @@ def _patch_compressed_tensors_mxfp4() -> None:
             topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
             topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
-            output = layer.moe_op(
-                x,
-                topk_ids,
-                topk_weights,
-                permuted_weights=True,
-                activation="silu",
-            )
+            # no SiTU in the fused kernel: exact unfused experts over the same packed MXFP4 tensors
+            output = maybe_situ_moe(layer, x, topk_ids, topk_weights,
+                                    situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL), self.group_size,
+                                    gaudi_envs.VLLM_MINIMAX_M3_MOE_TOKEN_TILE)
+            if output is None:
+                # the layer's own activation (was hard-coded "silu"); a name the fused op does not know fails
+                # loudly. "situ" only gets here with HPU_KIMI_SITU_IMPL=silu, where the alias maps it to silu.
+                output = layer.moe_op(
+                    x,
+                    topk_ids,
+                    topk_weights,
+                    permuted_weights=True,
+                    activation=_normalize_moe_activation(layer.activation),
+                )
 
             if layer.moe_config.dp_size > 1:
                 return output.view(*(output.size(0), *input_shape[1:]))

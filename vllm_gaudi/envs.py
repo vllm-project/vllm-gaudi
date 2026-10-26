@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     HPU_KIMI_KDA_IMPL: str = "real"
     HPU_KIMI_KDA_PREFILL: str = "chunked"
     HPU_KIMI_KDA_CHUNK_SIZE: int = 64
+    HPU_KIMI_SITU_IMPL: str = "exact"
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -139,6 +140,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("HPU_KIMI_KDA_PREFILL", "chunked").strip().lower(),
     "HPU_KIMI_KDA_CHUNK_SIZE":
     lambda: int(os.environ.get("HPU_KIMI_KDA_CHUNK_SIZE", "64")),
+
+    # Kimi-K3 routed experts use the SiTU activation (beta*tanh(gate/beta)*sigmoid(gate)*up, soft-clipped up), which
+    # the Habana fused MoE op does not have. "exact" computes the experts unfused with the real activation (MXFP4
+    # weights dequantized per expert chunk); "silu" maps SiTU to silu in the fused kernel (fast, APPROXIMATE).
+    "HPU_KIMI_SITU_IMPL":
+    lambda: os.environ.get("HPU_KIMI_SITU_IMPL", "exact").strip().lower(),
 }
 
 # end-env-vars-definition

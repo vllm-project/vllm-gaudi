@@ -54,7 +54,6 @@ _MOE_ACTIVATION_ALIASES = {
     "gelu_tanh": "gelu",
     "gelu_new": "gelu",
     "quick_gelu": "gelu",
-    "situ": "silu",
 }
 
 
