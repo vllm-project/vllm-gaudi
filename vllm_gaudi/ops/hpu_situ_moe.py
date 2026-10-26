@@ -16,6 +16,7 @@ matmuls with static shapes, like ``_unfused_swigluoai_moe`` (ops/hpu_fused_moe.p
 
 from __future__ import annotations
 
+import os
 from typing import Callable
 
 import torch
@@ -125,7 +126,9 @@ def situ_moe_experts(x: torch.Tensor,
                      linear_beta: float | None,
                      expert_chunk: int = 8,
                      token_tile: int = 512,
-                     gather_max_tokens: int | None = None) -> torch.Tensor:
+                     gather_max_tokens: int | None = None,
+                     step_hook: Callable[[], None] | None = None,
+                     step_min_tokens: int = 256) -> torch.Tensor:
     """Per-rank partial routed-expert output (before the cross-rank reduction), same contract as the fused op.
 
     x [T, H]; topk_ids / topk_weights [T, K] with GLOBAL expert ids; this rank owns the experts
@@ -134,7 +137,9 @@ def situ_moe_experts(x: torch.Tensor,
     ``ids`` (a LongTensor). Shapes are static (HPU graphs): few tokens (decode) compute only the
     ``G = T * K`` experts that can be hit whenever that is fewer than the local experts (optionally only up to
     ``gather_max_tokens`` tokens), otherwise all local experts are computed densely and masked by the routing
-    weight. Everything is accumulated in fp32.
+    weight. Everything is accumulated in fp32. ``step_hook`` (``htorch.core.mark_step`` in lazy mode) runs after
+    every expert chunk when more than ``step_min_tokens`` tokens are processed: it must stay off for the small
+    (decode) batches that are captured into HPU graphs, where a mark_step would break the capture.
     """
     tokens, hidden = x.shape
     k = topk_ids.shape[-1]
@@ -154,20 +159,25 @@ def situ_moe_experts(x: torch.Tensor,
     total = ids.shape[0]
 
     tile = tokens if token_tile <= 0 or token_tile >= tokens else token_tile
-    outputs = []
-    for t0 in range(0, tokens, tile):
-        xt = x[t0:t0 + tile]
-        acc = torch.zeros(xt.shape[0], hidden, dtype=torch.float32, device=x.device)
-        for c0 in range(0, total, expert_chunk):
-            chunk_ids = ids[c0:c0 + expert_chunk]
-            w13 = get_w13(chunk_ids)  # [c, 2I, H]
-            w2 = get_w2(chunk_ids)  # [c, H, I]
+    starts = list(range(0, tokens, tile))
+    accs = [torch.zeros(min(tile, tokens - t0), hidden, dtype=torch.float32, device=x.device) for t0 in starts]
+    # Expert chunks are the OUTER loop: the weights of a chunk are dequantized once and reused by every token tile
+    # (tile-outer order repeated the whole dequant per tile: 16x the ops for an 8k prefill).
+    step = step_hook if step_hook is not None and tokens > step_min_tokens else None
+    for c0 in range(0, total, expert_chunk):
+        chunk_ids = ids[c0:c0 + expert_chunk]
+        w13 = get_w13(chunk_ids)  # [c, 2I, H]
+        w2 = get_w2(chunk_ids)  # [c, H, I]
+        for i, t0 in enumerate(starts):
+            xt = x[t0:t0 + tile]
             xe = xt.unsqueeze(0).expand(chunk_ids.shape[0], -1, -1)
             hidden_act = situ_activation(torch.bmm(xe, w13.transpose(1, 2)), beta, linear_beta)  # [c, t, I]
             y = torch.bmm(hidden_act, w2.transpose(1, 2))  # [c, t, H]
             weights = gate_w[t0:t0 + tile].index_select(1, chunk_ids).t().unsqueeze(-1)  # [c, t, 1]
-            acc = acc + (y.float() * weights).sum(0)
-        outputs.append(acc)
+            accs[i] = accs[i] + (y.float() * weights).sum(0)
+        if step is not None:
+            step()  # bound the lazy graph: one identical, cacheable graph per chunk
+    outputs = accs
     out = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
     return out.to(x.dtype)
 
@@ -185,6 +195,20 @@ def situ_moe_mxfp4(x: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.
 
     return situ_moe_experts(x, topk_ids, topk_weights, get_w13, get_w2, w13.shape[0], experts_min, beta, linear_beta,
                             **kwargs)
+
+
+def lazy_step_hook() -> Callable[[], None] | None:
+    """``htorch.core.mark_step`` in lazy mode (None in eager / torch.compile mode or without Habana frameworks).
+
+    HPU_KIMI_SITU_MARK_STEP=0 disables it. Imported on first use at runtime, never at plugin load.
+    """
+    if os.environ.get("HPU_KIMI_SITU_MARK_STEP", "1").strip().lower() in ("0", "false", "off"):
+        return None
+    try:
+        import habana_frameworks.torch as htorch
+        return htorch.core.mark_step if htorch.utils.internal.is_lazy() else None
+    except ImportError:
+        return None
 
 
 def maybe_situ_moe(layer, x: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor, impl: str,
@@ -213,4 +237,5 @@ def maybe_situ_moe(layer, x: torch.Tensor, topk_ids: torch.Tensor, topk_weights:
                           int(layer.moe_config.ep_rank * layer.local_num_experts),
                           float(beta),
                           layer.moe_config.activation_situ_linear_beta,
-                          token_tile=token_tile)
+                          token_tile=token_tile,
+                          step_hook=lazy_step_hook())

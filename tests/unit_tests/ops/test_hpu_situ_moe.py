@@ -289,3 +289,41 @@ def test_normalizer_source_uses_the_lazy_alias():
         assert "situ_fused_alias" in text and '"situ": "silu"' not in text
     patches = (root / "patches.py").read_text()
     assert "importlib.import_module(module_name)._MOE_ACTIVATION_ALIASES" not in patches
+
+
+def _dense_case(tokens):
+    experts, hidden, inter, k = 12, 16, 8, 2
+    w13, w2 = _toy_experts(11, experts, hidden, inter)
+    ids, weights = _route(tokens, experts, k, 13)
+    x = torch.randn(tokens, hidden, generator=torch.Generator().manual_seed(14))
+    return x, ids, weights, w13, w2, experts
+
+
+def test_dequant_runs_once_per_expert_chunk_not_once_per_token_tile():
+    x, ids, weights, w13, w2, experts = _dense_case(40)
+    calls = []
+
+    def get(w):
+        return lambda e: calls.append(1) or w.index_select(0, e)
+
+    out = situ.situ_moe_experts(x, ids, weights, get(w13), get(w2), experts, 0, BETA, LINEAR_BETA, expert_chunk=4,
+                                token_tile=8, gather_max_tokens=0)
+    assert len(calls) == 2 * (experts // 4)  # 5 token tiles, 3 chunks: 6 dequants, not 30
+    ref = naive_reference(x, ids, weights, w13, w2, 0, BETA, LINEAR_BETA)
+    torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("tokens,expected_steps", [(40, 3), (8, 0)])
+def test_step_hook_runs_per_chunk_only_for_large_batches(tokens, expected_steps):
+    x, ids, weights, w13, w2, experts = _dense_case(tokens)
+    steps = []
+    situ.situ_moe_experts(x, ids, weights, lambda e: w13.index_select(0, e), lambda e: w2.index_select(0, e),
+                          experts, 0, BETA, LINEAR_BETA, expert_chunk=4, token_tile=16, gather_max_tokens=0,
+                          step_hook=lambda: steps.append(1), step_min_tokens=16)
+    assert len(steps) == expected_steps
+
+
+def test_lazy_step_hook_is_none_without_habana(monkeypatch):
+    assert situ.lazy_step_hook() is None
+    monkeypatch.setenv("HPU_KIMI_SITU_MARK_STEP", "0")
+    assert situ.lazy_step_hook() is None
