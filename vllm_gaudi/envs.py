@@ -35,6 +35,21 @@ if TYPE_CHECKING:
 # to extract the used env vars.
 
 # begin-env-vars-definition
+def _situ_timing_budget() -> int:
+    """HPU_KIMI_SITU_TIMING: a non-negative integer; an invalid value is reported and means 0 (off)."""
+    value = os.environ.get("HPU_KIMI_SITU_TIMING", "0")
+    try:
+        budget = int(value)
+    except ValueError:
+        budget = -1
+    if budget < 0:
+        import logging
+        logging.getLogger("vllm.gaudi.situ").warning(
+            "HPU_KIMI_SITU_TIMING must be a non-negative integer, got %r: timing is off", value)
+        return 0
+    return budget
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
     # Contiguous cache fetching to avoid using costly gather operation on
     # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
@@ -166,7 +181,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # outside the compiled region) and log the per-phase wall times (logger vllm.gaudi.situ); later calls use the
     # normal path again. 0 = off.
     "HPU_KIMI_SITU_TIMING":
-    lambda: int(os.environ.get("HPU_KIMI_SITU_TIMING", "0")),
+    lambda: _situ_timing_budget(),
 }
 
 # end-env-vars-definition

@@ -317,6 +317,19 @@ def test_invalid_env_warns_and_falls_back_instead_of_raising(monkeypatch, caplog
     assert "HPU_KIMI_SITU_DEQUANT" in text and text.count("HPU_KIMI_SITU_TIMING") == 2
 
 
+def test_env_registry_timing_warns_and_defaults_to_zero(monkeypatch, caplog):
+    import logging
+    spec = importlib.util.spec_from_file_location("vllm_gaudi_envs_timing_test", _PATH.parents[1] / "envs.py")
+    envs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(envs)
+    monkeypatch.setenv("HPU_KIMI_SITU_TIMING", "4")
+    assert envs.HPU_KIMI_SITU_TIMING == 4
+    monkeypatch.setenv("HPU_KIMI_SITU_TIMING", "abc")
+    with caplog.at_level(logging.WARNING, logger="vllm.gaudi.situ"):
+        assert envs.HPU_KIMI_SITU_TIMING == 0
+    assert "HPU_KIMI_SITU_TIMING" in caplog.text
+
+
 def test_importing_with_invalid_env_does_not_raise(monkeypatch):
     monkeypatch.setenv("HPU_KIMI_SITU_DEQUANT", "gather")
     monkeypatch.setenv("HPU_KIMI_SITU_TIMING", "many")

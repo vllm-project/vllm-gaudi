@@ -918,6 +918,10 @@ def _kimi_patch_installed(name: str) -> None:
         _KIMI_PATCHES_INSTALLED.append(name)
 
 
+def _kimi_patches_log_installed() -> None:
+    _kimi_patch_logger().info("Kimi-K3 patches installed: %s", ", ".join(_KIMI_PATCHES_INSTALLED))
+
+
 def _patch_rocm_platform_for_hpu() -> None:
     """Neutralize vllm.platforms.rocm queries on HPU."""
     try:
@@ -1094,9 +1098,10 @@ def _patch_mla_prefill_selector() -> None:
             import vllm.model_executor.layers.attention.mla_attention as mla_mod
             mla_mod.get_mla_prefill_backend = hpu_get_prefill
         except Exception:
-            pass
+            _kimi_patch_failed("mla_prefill_selector_attention_module")
+        _kimi_patch_installed("mla_prefill_selector")
     except Exception:
-        pass
+        _kimi_patch_failed("mla_prefill_selector")
 
 
 def _patch_kimi_k3_hybrid_config() -> None:
@@ -1153,8 +1158,9 @@ def _patch_moe_runner_delegation() -> None:
 
             cls.__getattr__ = _make_getattr(orig_getattr, cls)
             cls._patched_delegation = True
+            _kimi_patch_installed(f"moe_runner_delegation[{cls_name}]")
         except Exception:
-            pass
+            _kimi_patch_failed(f"moe_runner_delegation[{cls_name}]")
 
 
 def _patch_latent_moe_runner_forward() -> None:
@@ -1218,7 +1224,7 @@ def _configure_situ_aliases() -> str:
 
 
 def _patch_kimi_linear_weights() -> None:
-    """Ensure KimiLinearDecoderLayer and KimiMoE safely access w13_weight and w2_weight without evaluating bool(Tensor)."""
+    """Ensure KimiMoE safely accesses w13_weight and w2_weight without evaluating bool(Tensor)."""
     _configure_situ_aliases()
     try:
         import vllm.models.kimi_k3.amd.linear as k3_linear
@@ -1262,51 +1268,6 @@ def _patch_kimi_linear_weights() -> None:
             k3_linear.KimiMoE.__init__ = _safe_moe_init
             k3_linear.KimiMoE._patched_weights = True
 
-        from vllm_gaudi.ops.hpu_kda_pytorch import KIMI_DECODER_LAYER_CLASSES, find_kimi_decoder_layer_class
-        layer_cls = find_kimi_decoder_layer_class(k3_linear)
-        if layer_cls is None:
-            _kimi_patch_logger().warning("Kimi-K3: none of %s in %s, the decoder layer forward wrapper of "
-                                         "linear_weights is not installed", KIMI_DECODER_LAYER_CLASSES,
-                                         k3_linear.__name__)
-            return
-        orig_forward = getattr(layer_cls, "forward", None)
-        if orig_forward is None or getattr(orig_forward, "_hpu_safe_forward", False):
-            return
-
-        def _safe_forward(self, *args, **kwargs):
-            if hasattr(self, "padded_moe_intermediate_size") and hasattr(self, "experts"):
-                moe_cfg = getattr(self.experts, "moe_config", None)
-                target = getattr(self.experts, "routed_experts", self.experts)
-                if moe_cfg is None:
-                    moe_cfg = getattr(target, "moe_config", None)
-                if moe_cfg is not None:
-                    moe_intermediate_size = getattr(moe_cfg, "intermediate_size_per_partition", None)
-                    if moe_intermediate_size and self.padded_moe_intermediate_size != moe_intermediate_size:
-                        w13_candidates = (
-                            getattr(target, "w13_weight", None),
-                            getattr(target, "w13_weight_packed", None),
-                            getattr(self.experts, "w13_weight", None),
-                            getattr(self.experts, "w13_weight_packed", None),
-                        )
-                        w13_w = next((w for w in w13_candidates if w is not None), None)
-                        w2_candidates = (
-                            getattr(target, "w2_weight", None),
-                            getattr(target, "w2_weight_packed", None),
-                            getattr(self.experts, "w2_weight", None),
-                            getattr(self.experts, "w2_weight_packed", None),
-                        )
-                        w2_w = next((w for w in w2_candidates if w is not None), None)
-                        if w13_w is not None and hasattr(w13_w, "data"):
-                            w13_w.data.zero_()
-                        if w2_w is not None and hasattr(w2_w, "data"):
-                            w2_w.data.zero_()
-                        moe_cfg.intermediate_size_per_partition_unpadded = (
-                            moe_intermediate_size // self.tp_size
-                        )
-            return orig_forward(self, *args, **kwargs)
-
-        _safe_forward._hpu_safe_forward = True
-        layer_cls.forward = _safe_forward
         _kimi_patch_installed("linear_weights")
     except Exception:
         _kimi_patch_failed("linear_weights")
@@ -1427,7 +1388,7 @@ def _patch_kimi_k3_arch() -> None:
             _amd_linear.KimiMoE.forward = _safe_moe_forward
             _amd_linear.KimiMoE._patched_moe_2d = True
         _kimi_patch_installed("kimi_moe_2d")
-        _kimi_patch_logger().info("Kimi-K3 patches installed: %s", ", ".join(_KIMI_PATCHES_INSTALLED))
+        _kimi_patches_log_installed()
     except Exception:
         _kimi_patch_failed("k3_arch")
 
@@ -1585,9 +1546,10 @@ def _patch_compressed_tensors_mxfp4() -> None:
 
             oracle_mod.select_deepseek_v4_mxfp4_moe_backend = hpu_select_backend
         except Exception:
-            pass
+            _kimi_patch_failed("compressed_tensors_mxfp4_oracle")
+        _kimi_patch_installed("compressed_tensors_mxfp4")
     except Exception:
-        pass
+        _kimi_patch_failed("compressed_tensors_mxfp4")
 
 
 def _patch_inc_quantization_config() -> None:
@@ -1669,6 +1631,7 @@ def apply() -> None:
         _patch_kimi_k3_hybrid_config()
         _patch_kimi_k3_arch()
         _patch_compressed_tensors_mxfp4()
+        _kimi_patches_log_installed()
 
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
