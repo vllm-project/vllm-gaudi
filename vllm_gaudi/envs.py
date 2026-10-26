@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     VLLM_COMPACT_GDN: bool = False
     HPU_INLINE_MOE_ENTRY: bool = True
     HPU_KIMI_KDA_IMPL: str = "real"
+    HPU_KIMI_KDA_PREFILL: str = "chunked"
+    HPU_KIMI_KDA_CHUNK_SIZE: int = 64
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -130,6 +132,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # stateless causal-SDPA stand-in (wrong outputs, for A/B performance runs only).
     "HPU_KIMI_KDA_IMPL":
     lambda: os.environ.get("HPU_KIMI_KDA_IMPL", "real").strip().lower(),
+
+    # Real Kimi-K3 KDA prefill: "chunked" (chunk-parallel WY form, default) or "loop" (token loop, validation only),
+    # and the chunk length of the chunked form.
+    "HPU_KIMI_KDA_PREFILL":
+    lambda: os.environ.get("HPU_KIMI_KDA_PREFILL", "chunked").strip().lower(),
+    "HPU_KIMI_KDA_CHUNK_SIZE":
+    lambda: int(os.environ.get("HPU_KIMI_KDA_CHUNK_SIZE", "64")),
 }
 
 # end-env-vars-definition

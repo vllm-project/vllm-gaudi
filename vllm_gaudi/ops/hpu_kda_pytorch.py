@@ -18,8 +18,10 @@ q, k, v come from a depthwise causal conv (kernel ``W``, silu) over the packed `
 state is the last ``W - 1`` conv inputs per request.
 
 Shapes are static per bucket: prefill takes a uniform ``[B, L]`` padded batch (padding at the end of every
-sequence) and loops over ``L``; padded tokens are exact no-ops (``g = 0``, ``beta = 0``). There is no host sync
-and no data dependent Python control flow, so the functions work in lazy HPU graph capture and eagerly.
+sequence); the default delta rule is chunk-parallel (``kda_chunked_steps``, a loop over L / chunk chunks), the
+token loop over ``L`` (``kda_recurrent_steps``) is kept for validation; padded tokens are exact no-ops
+(``g = 0``, ``beta = 0``). There is no host sync and no data dependent Python control flow, so the functions work
+in lazy HPU graph capture and eagerly.
 """
 
 from __future__ import annotations
@@ -132,10 +134,123 @@ def kda_recurrent_steps(state: torch.Tensor,
     return torch.stack(outs, dim=1), state
 
 
+def _unit_lower_inverse_rows(a: torch.Tensor) -> torch.Tensor:
+    """(I + A)^-1 by row-wise forward substitution; A [..., n, n] strictly lower. Exact and stable (n steps)."""
+    n = a.shape[-1]
+    eye = torch.eye(n, dtype=a.dtype, device=a.device)
+    result = eye.expand(a.shape).clone()
+    for j in range(1, n):
+        correction = torch.matmul(a[..., j:j + 1, :j], result[..., :j, :])
+        result[..., j:j + 1, :] = eye[j] - correction
+    return result
+
+
+def _unit_lower_inverse(a: torch.Tensor, block: int = 16) -> torch.Tensor:
+    """(I + A)^-1 for a strictly lower triangular A [..., C, C], blockwise forward substitution.
+
+    The diagonal ``block`` x ``block`` blocks are inverted by exact forward substitution (all blocks at once, so
+    ``block`` steps instead of C), the block rows are then combined with
+    inv[b, :b] = -inv_bb @ (A[b, :b] @ inv[:b, :b]). A Neumann / repeated-squaring expansion would be cheaper but
+    loses all precision when neighbouring keys are nearly parallel and beta is close to 1.
+    """
+    size = a.shape[-1]
+    if size <= block:
+        return _unit_lower_inverse_rows(a)
+    blocks = size // block
+    diag = torch.stack([a[..., b * block:(b + 1) * block, b * block:(b + 1) * block] for b in range(blocks)], dim=-3)
+    diag_inv = _unit_lower_inverse_rows(diag)  # [..., blocks, block, block]
+    result = torch.zeros_like(a)
+    for b in range(blocks):
+        rows = slice(b * block, (b + 1) * block)
+        result[..., rows, rows] = diag_inv[..., b, :, :]
+        if b:
+            cols = slice(0, b * block)
+            coupling = torch.matmul(a[..., rows, cols], result[..., cols, cols])
+            result[..., rows, cols] = -torch.matmul(diag_inv[..., b, :, :], coupling)
+    return result
+
+
+def kda_chunked_steps(state: torch.Tensor,
+                      q: torch.Tensor,
+                      k: torch.Tensor,
+                      v: torch.Tensor,
+                      g: torch.Tensor,
+                      beta: torch.Tensor,
+                      chunk_size: int = 64,
+                      block_chunks: int = 8,
+                      step_hook: Callable[[], None] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Chunk-parallel (WY / UT form) delta rule, identical to ``kda_recurrent_steps``.
+
+    q,k [B,L,H,K] (normalized, q scaled); v [B,L,H,V]; g [B,L,H,K] LOG forget gate (<= 0); beta [B,L,H];
+    state [B,H,V,K]. Chunks are processed one after another (state carried), tokens of a chunk in parallel.
+    With G_i the cumulative log gate inside the chunk, u_i the pseudo values and S_0 the state before the chunk::
+
+        (I + A) U = beta * (V - (K * exp(G)) S_0^T)       A_ij = beta_i sum_k k_i k_j exp(G_i - G_j)   (j < i)
+        O = (Q * exp(G)) S_0^T + Aqk U                    Aqk_ij = sum_k q_i k_j exp(G_i - G_j)        (j <= i)
+        S = S_0 * exp(G_C) + U^T (K * exp(G_C - G))
+
+    Only exp(G_i - G_j) with j <= i (always <= 1) is evaluated, so nothing overflows however negative the gate
+    gets; the pairwise [C, C, K] tensor exists for one chunk at a time. Tokens past the real length must have
+    g = 0 and beta = 0 (exact no-ops); the sequence is zero-padded to a multiple of ``chunk_size`` the same way.
+    """
+    if chunk_size <= 0 or (chunk_size > 16 and chunk_size % 16 != 0):
+        # _unit_lower_inverse works on 16-row blocks and would leave the last chunk_size % 16 rows zero
+        raise ValueError(f"chunk_size must be positive and, above 16, a multiple of 16, got {chunk_size}")
+    bsz, seq_len, heads, kdim = q.shape
+    vdim = v.shape[-1]
+    chunk = chunk_size
+    pad = -seq_len % chunk
+    if pad:
+        zeros = lambda x: x.new_zeros(bsz, pad, *x.shape[2:])  # noqa: E731
+        q, k, v = (torch.cat([x, zeros(x)], dim=1) for x in (q, k, v))
+        g = torch.cat([g, zeros(g)], dim=1)
+        beta = torch.cat([beta, zeros(beta)], dim=1)
+    num_chunks = (seq_len + pad) // chunk
+
+    def to_chunks(x):  # [B, N*C, H, D] -> [B, H, N, C, D]
+        return x.reshape(bsz, num_chunks, chunk, heads, -1).permute(0, 3, 1, 2, 4)
+
+    qc, kc, vc, gc = to_chunks(q), to_chunks(k), to_chunks(v), to_chunks(g)
+    bc = beta.reshape(bsz, num_chunks, chunk, heads).permute(0, 3, 1, 2).unsqueeze(-1)  # [B,H,N,C,1]
+    cum = torch.cumsum(gc, dim=3)  # G, [B,H,N,C,K]
+    last = cum[:, :, :, -1:, :]  # G_C
+    q_gamma = qc * torch.exp(cum)
+    k_gamma = kc * torch.exp(cum)
+    k_tail = kc * torch.exp(last - cum)
+    gamma_last = torch.exp(last.squeeze(3))  # [B,H,N,K]
+
+    strict = torch.tril(torch.ones(chunk, chunk, dtype=q.dtype, device=q.device), -1)
+    lower = torch.tril(torch.ones(chunk, chunk, dtype=q.dtype, device=q.device))
+
+    outs = []
+    for n in range(num_chunks):
+        g_n, k_n, q_n = cum[:, :, n], kc[:, :, n], qc[:, :, n]  # [B,H,C,K]
+        # exp(G_i - G_j) for j <= i; the clamp keeps the masked-out upper triangle finite (0 * inf would be NaN)
+        decay = torch.exp(torch.clamp(g_n.unsqueeze(3) - g_n.unsqueeze(2), max=0.0))  # [B,H,C,C,K]
+        kk = k_n.unsqueeze(3) * k_n.unsqueeze(2)
+        qk = q_n.unsqueeze(3) * k_n.unsqueeze(2)
+        a_mat = (kk * decay).sum(-1) * strict * bc[:, :, n]  # beta_i on the row
+        aqk = (qk * decay).sum(-1) * lower
+        inv = _unit_lower_inverse(a_mat)
+        s_t = state.transpose(-1, -2)  # [B,H,K,V]
+        rhs = bc[:, :, n] * (vc[:, :, n] - torch.matmul(k_gamma[:, :, n], s_t))
+        pseudo = torch.matmul(inv, rhs)  # U, [B,H,C,V]
+        out_n = torch.matmul(q_gamma[:, :, n], s_t) + torch.matmul(aqk, pseudo)
+        state = state * gamma_last[:, :, n].unsqueeze(-2) + torch.matmul(pseudo.transpose(-1, -2), k_tail[:, :, n])
+        outs.append(out_n)
+        if step_hook is not None and (n + 1) % block_chunks == 0 and n + 1 < num_chunks:
+            step_hook()
+    out = torch.stack(outs, dim=2)  # [B,H,N,C,V]
+    out = out.permute(0, 2, 3, 1, 4).reshape(bsz, num_chunks * chunk, heads, vdim)
+    return out[:, :seq_len], state
+
+
 def _prepare_qkv_gates(conv_out: torch.Tensor, raw_g: torch.Tensor, raw_beta: torch.Tensor, A_log: torch.Tensor,
                        dt_bias: torch.Tensor, lower_bound: float | None, num_heads: int, head_dim: int,
                        token_mask: torch.Tensor | None):
-    """conv_out [B,L,3P] (after silu), raw_g [B,L,P], raw_beta [B,L,H] -> q,k,v,decay,beta (fp32, [B,L,H,*])."""
+    """conv_out [B,L,3P] (after silu), raw_g [B,L,P], raw_beta [B,L,H] -> q,k,v,g,beta (fp32, [B,L,H,*]).
+
+    g is the LOG of the forget gate (<= 0)."""
     bsz, seq_len, _ = conv_out.shape
     proj = num_heads * head_dim
     q, k, v = conv_out.split(proj, dim=-1)
@@ -151,7 +266,7 @@ def _prepare_qkv_gates(conv_out: torch.Tensor, raw_g: torch.Tensor, raw_beta: to
         m = token_mask.reshape(bsz, seq_len, 1).float()
         g = g * m.unsqueeze(-1)
         beta = beta * m
-    return q, k, v, torch.exp(g), beta
+    return q, k, v, g, beta
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -173,12 +288,16 @@ def kda_core_prefill(mixed_qkv: torch.Tensor,
                      num_heads: int,
                      head_dim: int,
                      block: int = 64,
-                     step_hook: Callable[[], None] | None = None) -> torch.Tensor:
+                     step_hook: Callable[[], None] | None = None,
+                     prefill_impl: str = "chunked",
+                     chunk_size: int = 64) -> torch.Tensor:
     """Uniform padded prefill batch.
 
     mixed_qkv [B,L,3P] (pre-conv), raw_g [B,L,P], raw_beta [B,L,H], token_mask [B,L] (1 = real token, padding at
     the end of each sequence) or None, state_idx [B] (-1 = padded row), has_initial_state [B] or None.
     Reads the initial conv/ssm state from the caches, writes the final ones back. Returns o [B,L,H,V] (fp32).
+    ``prefill_impl`` selects the delta rule: "chunked" (chunk-parallel WY form, default) or "loop" (token loop,
+    kept for validation); ``block`` is the loop's hook period in tokens, ``chunk_size`` the chunk length.
     """
     bsz, seq_len, channels = mixed_qkv.shape
     width = conv_weight.shape[-1]
@@ -212,10 +331,15 @@ def kda_core_prefill(mixed_qkv: torch.Tensor,
     write_conv_state(conv_cache, slots, new_conv)
 
     # --- delta rule ---
-    q, k, v, decay, beta = _prepare_qkv_gates(conv_out, raw_g, raw_beta, A_log, dt_bias, lower_bound, num_heads,
-                                              head_dim, token_mask)
+    q, k, v, g, beta = _prepare_qkv_gates(conv_out, raw_g, raw_beta, A_log, dt_bias, lower_bound, num_heads, head_dim,
+                                          token_mask)
     state = read_ssm_state(ssm_cache, slots) * use_init.reshape(bsz, 1, 1, 1)
-    out, state = kda_recurrent_steps(state, q, k, v, decay, beta, block=block, step_hook=step_hook)
+    if prefill_impl == "loop":
+        out, state = kda_recurrent_steps(state, q, k, v, torch.exp(g), beta, block=block, step_hook=step_hook)
+    elif prefill_impl == "chunked":
+        out, state = kda_chunked_steps(state, q, k, v, g, beta, chunk_size=chunk_size, step_hook=step_hook)
+    else:
+        raise ValueError(f"prefill_impl must be 'chunked' or 'loop', got {prefill_impl!r}")
     write_ssm_state(ssm_cache, slots, state)
     return out
 
@@ -238,10 +362,10 @@ def kda_core_decode(mixed_qkv: torch.Tensor, raw_g: torch.Tensor, raw_beta: torc
     conv_out = torch.nn.functional.silu(conv_out)
     write_conv_state(conv_cache, slots, seq[:, 1:, :])
 
-    q, k, v, decay, beta = _prepare_qkv_gates(conv_out.unsqueeze(1), raw_g.unsqueeze(1), raw_beta.unsqueeze(1), A_log,
-                                              dt_bias, lower_bound, num_heads, head_dim, None)
+    q, k, v, g, beta = _prepare_qkv_gates(conv_out.unsqueeze(1), raw_g.unsqueeze(1), raw_beta.unsqueeze(1), A_log,
+                                          dt_bias, lower_bound, num_heads, head_dim, None)
     state = read_ssm_state(ssm_cache, slots)
-    out, state = kda_recurrent_step(state, q[:, 0], k[:, 0], v[:, 0], decay[:, 0], beta[:, 0])
+    out, state = kda_recurrent_step(state, q[:, 0], k[:, 0], v[:, 0], torch.exp(g[:, 0]), beta[:, 0])
     write_ssm_state(ssm_cache, slots, state)
     return out
 

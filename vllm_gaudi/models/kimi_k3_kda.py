@@ -10,6 +10,8 @@ Prefix caching (per-block mamba state caching) and speculative decoding are not 
 read from and written to a single slot per request.
 """
 
+import functools
+
 import torch
 
 from vllm_gaudi.ops.hpu_kda_pytorch import (gated_rmsnorm_sigmoid, kda_core_decode, kda_core_prefill)
@@ -21,6 +23,13 @@ _BLOCK = 64  # tokens per traced block of the prefill token loop
 # In lazy mode dynamo is disabled anyway, so this is a no-op there.
 _core_prefill = torch.compiler.disable(kda_core_prefill)
 _core_decode = torch.compiler.disable(kda_core_decode)
+
+
+@functools.lru_cache(maxsize=None)
+def _prefill_settings() -> tuple[str, int]:
+    """HPU_KIMI_KDA_PREFILL (chunked|loop) and HPU_KIMI_KDA_CHUNK_SIZE, read once through vllm_gaudi.envs."""
+    import vllm_gaudi.envs as gaudi_envs
+    return gaudi_envs.HPU_KIMI_KDA_PREFILL, gaudi_envs.HPU_KIMI_KDA_CHUNK_SIZE
 
 
 def _state_indices(self, attn_metadata) -> torch.Tensor:
@@ -91,6 +100,7 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                 if mask is not None:
                     mask = mask.reshape(num_seqs, seq_len)
                 step_hook = htorch.core.mark_step if htorch.utils.internal.is_lazy() else None
+                prefill_impl, chunk_size = _prefill_settings()
                 core = _core_prefill(mixed_qkv.reshape(num_seqs, seq_len, -1),
                                      raw_g.reshape(num_seqs, seq_len, -1),
                                      raw_beta.reshape(num_seqs, seq_len, -1),
@@ -99,6 +109,8 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                                      token_mask=mask,
                                      block=_BLOCK,
                                      step_hook=step_hook,
+                                     prefill_impl=prefill_impl,
+                                     chunk_size=chunk_size,
                                      **common)
                 # Keep post-processing out of the statement that calls the disabled core: ops chained on its last
                 # line end up in the dynamo resume frame without a source line, and the HPU compile backend then
