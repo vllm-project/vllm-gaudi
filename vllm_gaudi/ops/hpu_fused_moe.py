@@ -58,6 +58,9 @@ _MOE_ACTIVATION_ALIASES = {
 
 def _normalize_moe_activation(activation):
     act = activation.value if isinstance(activation, Enum) else activation
+    if act == "situ":
+        from vllm_gaudi.ops.hpu_situ_moe import situ_fused_alias
+        return situ_fused_alias() or act
     return _MOE_ACTIVATION_ALIASES.get(act, act)
 
 

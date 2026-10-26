@@ -43,6 +43,17 @@ def situ_impl_or_exact(value: str | None, log_error: Callable[[str], None] | Non
         return "exact"
 
 
+def situ_fused_alias() -> str | None:
+    """Activation the fused Habana MoE op must use for "situ", read from HPU_KIMI_SITU_IMPL at call time.
+
+    "silu" only with HPU_KIMI_SITU_IMPL=silu (approximate); None otherwise, so that a "situ" reaching the fused
+    op in "exact" mode fails loudly. Evaluated lazily (no import-time work) so that it cannot hit the circular
+    imports of the vLLM plugin load.
+    """
+    import vllm_gaudi.envs as gaudi_envs
+    return "silu" if situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL) == "silu" else None
+
+
 def situ_activation(gate_up: torch.Tensor, beta: float, linear_beta: float | None) -> torch.Tensor:
     """SituAndMul.forward_native on a fused [..., 2 * d] tensor (first half = gate, second half = up)."""
     d = gate_up.shape[-1] // 2

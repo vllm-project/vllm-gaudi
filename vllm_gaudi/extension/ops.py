@@ -61,6 +61,9 @@ def _as_activation_str(activation):
     """Normalize activation to string for HPU custom op."""
     if isinstance(activation, MoEActivation):
         activation = activation.value
+    if activation == "situ":
+        from vllm_gaudi.ops.hpu_situ_moe import situ_fused_alias
+        return situ_fused_alias() or activation
     return _MOE_ACTIVATION_ALIASES.get(activation, activation)
 
 

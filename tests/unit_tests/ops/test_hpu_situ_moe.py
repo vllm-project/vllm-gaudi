@@ -268,3 +268,24 @@ def test_gather_is_used_for_any_token_count_below_the_hit_bound():
     assert sum(requested) == 16
     torch.testing.assert_close(out, naive_reference(x, ids, weights, w13, w2, 0, BETA, LINEAR_BETA), rtol=1e-4,
                                atol=1e-4)
+
+
+def test_fused_alias_follows_the_env_at_call_time(monkeypatch):
+    monkeypatch.delenv("HPU_KIMI_SITU_IMPL", raising=False)
+    assert situ.situ_fused_alias() is None  # exact: a "situ" reaching the fused op must fail loudly
+    monkeypatch.setenv("HPU_KIMI_SITU_IMPL", "silu")
+    assert situ.situ_fused_alias() == "silu"
+    monkeypatch.setenv("HPU_KIMI_SITU_IMPL", "bogus")
+    assert situ.situ_fused_alias() is None
+
+
+def test_normalizer_source_uses_the_lazy_alias():
+    # The activation normalizers must not rely on import-time mutation of the alias dicts (circular plugin load).
+    import inspect
+    import pathlib
+    root = pathlib.Path(inspect.getfile(situ)).parents[1]
+    for rel in ("extension/ops.py", "ops/hpu_fused_moe.py"):
+        text = (root / rel).read_text()
+        assert "situ_fused_alias" in text and '"situ": "silu"' not in text
+    patches = (root / "patches.py").read_text()
+    assert "importlib.import_module(module_name)._MOE_ACTIVATION_ALIASES" not in patches

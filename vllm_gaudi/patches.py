@@ -1177,16 +1177,14 @@ def _patch_latent_moe_runner_forward() -> None:
 
 
 def _configure_situ_aliases() -> str:
-    """Apply HPU_KIMI_SITU_IMPL to the fused-MoE activation aliases and return the effective implementation.
+    """Validate HPU_KIMI_SITU_IMPL, log the approximation warning and return the effective implementation.
 
     SiTU (Kimi-K3 routed experts): the fused Habana op only knows silu/gelu. "exact" (default) computes the
-    experts unfused (ops/hpu_situ_moe.py) and installs no alias, so any path that still reaches the fused op
-    with "situ" fails loudly instead of silently using silu; "silu" installs the old approximate alias. An
+    experts unfused (ops/hpu_situ_moe.py); "silu" maps "situ" to silu in the activation normalizers
+    (situ_fused_alias, evaluated at use time: no module is imported here because the plugin load is circular). An
     invalid value is logged as an error and treated as "exact"; this runs outside of the broad try/except of
     the other Kimi patches so that it can neither be skipped by nor skip them.
     """
-    import importlib
-
     import vllm_gaudi.envs as gaudi_envs
     from vllm_gaudi.extension.logger import logger as _ext_logger
     from vllm_gaudi.ops.hpu_situ_moe import situ_impl_or_exact
@@ -1195,16 +1193,6 @@ def _configure_situ_aliases() -> str:
     if situ_impl == "silu":
         _ext_logger().warning("HPU_KIMI_SITU_IMPL=silu: the Kimi-K3 routed experts use silu instead of SiTU "
                               "(beta*tanh(gate/beta)*sigmoid(gate)*up); model outputs are APPROXIMATE")
-    for module_name in ("vllm_gaudi.extension.ops", "vllm_gaudi.ops.hpu_fused_moe"):
-        try:
-            aliases = importlib.import_module(module_name)._MOE_ACTIVATION_ALIASES
-        except Exception as exc:  # the module may be unavailable in minimal environments
-            _ext_logger().warning("Cannot configure the SiTU alias in %s: %r", module_name, exc)
-            continue
-        if situ_impl == "silu":
-            aliases["situ"] = "silu"
-        else:
-            aliases.pop("situ", None)
     return situ_impl
 
 
