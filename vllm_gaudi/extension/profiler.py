@@ -21,6 +21,7 @@ from habana_frameworks.torch import torch
 from vllm_gaudi.extension.utils import is_fake_hpu
 from .logger import logger
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.extension.profiling_cfg import make_trace_handler
 
 
 class FileWriter(threading.Thread):
@@ -402,12 +403,12 @@ class HabanaMemoryProfiler:
             self.final_host_memory - self.initial_host_memory
 
 
-def setup_profiler(warmup, active, output_dir='.', with_stack=True):
+def setup_profiler(warmup, active, output_dir='.', with_stack=True, rank=0):
     schedule = torch.profiler.schedule(wait=0, warmup=warmup, active=active, repeat=1)
     activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.HPU]
     profiler = torch.profiler.profile(schedule=schedule,
                                       activities=activities,
-                                      on_trace_ready=torch.profiler.tensorboard_trace_handler(output_dir, use_gzip=True),
+                                      on_trace_ready=make_trace_handler(output_dir, rank),
                                       record_shapes=False,
                                       with_stack=with_stack)
     return profiler

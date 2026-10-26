@@ -3,6 +3,15 @@
 
 from __future__ import annotations
 
+import gzip
+import logging
+import os
+import shutil
+import time
+from typing import Callable
+
+_logger = logging.getLogger(__name__)
+
 
 def profiling_max_batched_tokens(prompt_cfg: tuple | None, decode_cfg: tuple | None, current: int) -> int:
     """Token budget (``max_num_batched_tokens``) that fits the dummy batch of VLLM_PROFILE_PROMPT / _DECODE.
@@ -31,3 +40,28 @@ def bucketing_max_batched_tokens(tokens: int, mamba_chunk_size: int, profiling: 
     if not profiling or mamba_chunk_size <= 0:
         return tokens
     return -(-tokens // mamba_chunk_size) * mamba_chunk_size
+
+
+def make_trace_handler(output_dir: str, rank: int, use_gzip: bool = True) -> Callable:
+    """``on_trace_ready`` callback writing ``<output_dir>/<rank>_<ms>.pt.trace.json[.gz]``.
+
+    ``torch.profiler.tensorboard_trace_handler(..., use_gzip=True)`` calls ``prof.export_chrome_trace(path, True)``
+    which the Habana profiler wrapper does not accept (TypeError, no trace written). This handler calls
+    ``export_chrome_trace`` with the path only and gzips in Python. Failures are logged, never raised.
+    """
+
+    def handler(prof) -> None:
+        path = os.path.join(output_dir, f"{rank}_{int(time.time() * 1000)}.pt.trace.json")
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            prof.export_chrome_trace(path)
+            if use_gzip:
+                with open(path, "rb") as src, gzip.open(path + ".gz", "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                os.remove(path)
+                path += ".gz"
+            _logger.info("Profiler trace written on rank %d: %s (%d bytes)", rank, path, os.path.getsize(path))
+        except Exception as exc:
+            _logger.warning("Cannot write the profiler trace on rank %d (%s): %r", rank, path, exc)
+
+    return handler

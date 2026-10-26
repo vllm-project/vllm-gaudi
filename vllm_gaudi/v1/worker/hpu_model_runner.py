@@ -5892,7 +5892,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 profiler = setup_profiler(warmup=steps - 1,
                                           active=1,
                                           output_dir=output_dir,
-                                          with_stack=bool(config.VLLM_PROFILE_WITH_STACK))
+                                          with_stack=bool(config.VLLM_PROFILE_WITH_STACK),
+                                          rank=rank)
                 logger.info("Profiling the dummy batch on rank %d, trace dir %s", rank, os.path.abspath(output_dir))
             except Exception as exc:
                 logger.warning("Cannot set up the profiler on rank %d, running the dummy batch without it: %r", rank,
@@ -5905,9 +5906,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 bisect.insort(buckets, cfg)
         torch.hpu.synchronize()
         profiler = self._profiler_call(profiler, "start", rank)
-        for _ in range(steps):
+        for i in range(steps):
+            step_start = time.perf_counter()
             self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
             torch.hpu.synchronize()
+            logger.info("Profiling dummy step %d/%d took %.1f s on rank %d", i + 1, steps,
+                        time.perf_counter() - step_start, rank)
             profiler = self._profiler_call(profiler, "step", rank)
         self._profiler_call(profiler, "stop", rank)
 

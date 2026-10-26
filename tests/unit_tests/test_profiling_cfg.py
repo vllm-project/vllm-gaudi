@@ -38,3 +38,35 @@ def test_bucketing_budget_is_a_multiple_of_the_mamba_chunk_in_profile_mode():
 def test_bucketing_budget_is_untouched_outside_profile_mode_or_without_mamba_layers():
     assert cfg.bucketing_max_batched_tokens(8193, 128, profiling=False) == 8193  # real misconfig still fails loudly
     assert cfg.bucketing_max_batched_tokens(8193, 0, profiling=True) == 8193
+
+
+class _OneArgProf:
+    """Like the Habana profiler wrapper: export_chrome_trace accepts exactly one positional argument."""
+
+    def export_chrome_trace(self, path):
+        with open(path, "w") as f:
+            f.write('{"traceEvents": []}')
+
+
+def test_trace_handler_writes_gzip_with_single_arg_export(tmp_path):
+    import gzip
+    cfg.make_trace_handler(str(tmp_path / "out"), 8)(_OneArgProf())
+    files = list((tmp_path / "out").iterdir())
+    assert len(files) == 1 and files[0].name.startswith("8_") and files[0].name.endswith(".pt.trace.json.gz")
+    assert gzip.open(files[0]).read() == b'{"traceEvents": []}'
+
+
+def test_trace_handler_plain_json_without_gzip(tmp_path):
+    cfg.make_trace_handler(str(tmp_path), 0, use_gzip=False)(_OneArgProf())
+    assert [f.name.endswith(".pt.trace.json") for f in tmp_path.iterdir()] == [True]
+
+
+def test_trace_handler_swallows_export_errors(tmp_path):
+
+    class Broken:
+
+        def export_chrome_trace(self, path):
+            raise TypeError("takes 2 positional arguments but 3 were given")
+
+    cfg.make_trace_handler(str(tmp_path), 1)(Broken())
+    assert list(tmp_path.iterdir()) == []
