@@ -281,8 +281,8 @@ def test_timing_env_logs_the_phases_of_the_first_calls_only(monkeypatch, caplog)
                       ("vllm_gaudi.extension", types.ModuleType("vllm_gaudi.extension")),
                       ("vllm_gaudi.extension.graph_state", stub)):
         monkeypatch.setitem(sys.modules, name, mod)
-    monkeypatch.setenv("HPU_KIMI_SITU_TIMING", "2")
-    monkeypatch.setenv("HPU_KIMI_SITU_DEQUANT", "bits")
+    monkeypatch.setattr(situ, "TIMING_BUDGET", 2)
+    monkeypatch.setattr(situ, "DEQUANT_MODE_ENV", "bits")
     monkeypatch.setattr(situ, "_timed_calls", 0)
     layer = _FakeLayer("situ")
     ids, weights = _route(3, 4 * 3, 2, 47)
@@ -296,6 +296,32 @@ def test_timing_env_logs_the_phases_of_the_first_calls_only(monkeypatch, caplog)
     # 3 tokens * 2 = 6 >= 4 local experts: dense, one chunk -> start + route + 3 marks per call
     assert len(syncs) == 2 * 5
     assert torch.equal(outs[0], outs[2])
+    # budget spent: the disabled timed path is not entered any more
+    monkeypatch.setattr(situ, "_timed_situ_moe_mxfp4", lambda *a, **k: pytest.fail("timed path after the budget"))
+    situ.maybe_situ_moe(layer, x, ids, weights, "exact")
+
+
+def test_env_is_validated_at_import_time(monkeypatch):
+    monkeypatch.setenv("HPU_KIMI_SITU_DEQUANT", " Bits ")
+    assert situ._read_dequant_env() == "bits"
+    monkeypatch.setenv("HPU_KIMI_SITU_DEQUANT", "gather")
+    with pytest.raises(ValueError, match="HPU_KIMI_SITU_DEQUANT"):
+        situ._read_dequant_env()
+    monkeypatch.setenv("HPU_KIMI_SITU_TIMING", "3")
+    assert situ._read_timing_budget() == 3
+    for bad in ("x", "-1"):
+        monkeypatch.setenv("HPU_KIMI_SITU_TIMING", bad)
+        with pytest.raises(ValueError, match="HPU_KIMI_SITU_TIMING"):
+            situ._read_timing_budget()
+
+
+def test_bit_dequant_clamps_out_of_range_scales():
+    packed = torch.arange(256, dtype=torch.uint8).reshape(1, 1, 256)
+    for bad, good in ((0, 2), (1, 2), (253, 252), (254, 252), (255, 252)):
+        sc = torch.full((1, 1, 16), bad, dtype=torch.uint8)
+        out = situ.dequant_mxfp4_bits(packed, sc)
+        ref = situ.dequant_mxfp4_reference(packed, torch.full((1, 1, 16), good, dtype=torch.uint8), torch.bfloat16)
+        assert torch.isfinite(out.float()).all() and torch.equal(out.view(torch.int16), ref.view(torch.int16))
 
 
 def test_invalid_impl_falls_back_to_exact_and_reports():

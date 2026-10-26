@@ -117,14 +117,18 @@ def dequant_mxfp4_reference(packed: torch.Tensor,
     return values.reshape(*lead, rows, groups * MXFP4_BLOCK).to(dtype)
 
 
+BITS_MIN_SCALE, BITS_MAX_SCALE = 2, 252  # E8M0 bytes for which the bit assembly is exact
+
+
 def dequant_mxfp4_bits(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     """Gather-free bf16 dequant: the bf16 bit pattern of every value is assembled with int16 elementwise ops.
 
     E2M1 nibble ``s e1 e0 m``: for ``e > 0`` the value is ``(1 + m / 2) * 2^(e - 1)``, so with the E8M0 scale byte
     ``S`` the bf16 exponent field is ``e - 1 + S`` and the mantissa ``m << 6``; for ``e == 0`` it is ``0.5 * m``,
     i.e. exponent field ``S - 1`` when ``m == 1`` and a (signed) zero otherwise. No table lookups (TPC gathers) and
-    no int32 temporaries; equal to ``dequant_mxfp4_reference`` bit for bit for scale bytes 2 .. 252 (outside that
-    range the result would leave the normal bf16 range; real checkpoints use scales around 2^-20 .. 2^8).
+    no int32 temporaries; equal to ``dequant_mxfp4_reference`` bit for bit for scale bytes 2 .. 252. Scale bytes
+    outside that range would leave the normal bf16 range (wrong subnormals, NaN, int16 overflow into the sign bit),
+    so they are clamped to [2, 252] (no host sync); real checkpoints use scales around 2^-20 .. 2^8.
     """
     *lead, rows, half = packed.shape
     groups = scales.shape[-1]
@@ -132,7 +136,7 @@ def dequant_mxfp4_bits(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tens
         raise ValueError(f"packed {tuple(packed.shape)} and scales {tuple(scales.shape)} do not match")
     p = packed.to(torch.int16)
     nib = torch.stack((p & 0x0F, p >> 4), dim=-1).reshape(*lead, rows, groups, MXFP4_BLOCK)
-    s = scales.to(torch.int16).unsqueeze(-1)  # [..., rows, groups, 1]
+    s = scales.to(torch.int16).clamp(BITS_MIN_SCALE, BITS_MAX_SCALE).unsqueeze(-1)  # [..., rows, groups, 1]
     e = (nib >> 1) & 3
     m = nib & 1
     normal = e > 0
@@ -220,6 +224,32 @@ def situ_moe_experts(x: torch.Tensor,
 DEQUANT_MODES = ("lut", "bits")
 
 
+def _read_dequant_env() -> str:
+    """HPU_KIMI_SITU_DEQUANT, validated once at import (envs.py documents it; this module stays importable without
+    vLLM, hence os.environ)."""
+    value = os.environ.get("HPU_KIMI_SITU_DEQUANT", "lut")
+    mode = (value or "lut").strip().lower()
+    if mode not in DEQUANT_MODES:
+        raise ValueError(f"HPU_KIMI_SITU_DEQUANT must be one of {DEQUANT_MODES}, got {value!r}")
+    return mode
+
+
+def _read_timing_budget() -> int:
+    """HPU_KIMI_SITU_TIMING=N (0 = off), validated once at import."""
+    value = os.environ.get("HPU_KIMI_SITU_TIMING", "0")
+    try:
+        budget = int(value)
+    except ValueError:
+        budget = -1
+    if budget < 0:
+        raise ValueError(f"HPU_KIMI_SITU_TIMING must be a non-negative integer, got {value!r}")
+    return budget
+
+
+DEQUANT_MODE_ENV = _read_dequant_env()
+TIMING_BUDGET = _read_timing_budget()
+
+
 def resolve_dequant_mode(value: str | None, dtype: torch.dtype) -> str:
     """HPU_KIMI_SITU_DEQUANT: "lut" (default, table lookups) or "bits" (gather-free, bf16 only)."""
     mode = (value or "lut").strip().lower()
@@ -277,15 +307,7 @@ class PhaseTimer:
         return f"{parts} total={total * 1e3:.1f}ms"
 
 
-_timed_calls = 0
-
-
-def _timing_budget() -> int:
-    """HPU_KIMI_SITU_TIMING=N: time the first N exact SiTU expert calls of this process (0 = off, the default).
-
-    Read from os.environ like graph_state.py (envs.py documents it): this module stays importable without vLLM.
-    """
-    return int(os.environ.get("HPU_KIMI_SITU_TIMING", "0"))
+_timed_calls = 0  # plain int: the compiled path checks it before entering the disabled timed path
 
 
 @torch.compiler.disable
@@ -331,10 +353,10 @@ def maybe_situ_moe(layer, x: torch.Tensor, topk_ids: torch.Tensor, topk_weights:
     args = (x, topk_ids, topk_weights, layer.w13_weight.data, layer.w13_weight_scale.data,
             layer.w2_weight.data, layer.w2_weight_scale.data, int(layer.moe_config.ep_rank * layer.local_num_experts),
             float(beta), layer.moe_config.activation_situ_linear_beta)
-    kwargs = dict(dequant=os.environ.get("HPU_KIMI_SITU_DEQUANT", "lut"),
+    kwargs = dict(dequant=DEQUANT_MODE_ENV,
                   token_tile=token_tile,
                   step_hook=_lazy_step_hook())
-    budget = _timing_budget()
-    if budget > 0:
-        return _timed_situ_moe_mxfp4(budget, *args, **kwargs)
+    # once the budget is spent the normal (compilable) path is used again: no graph break per layer
+    if _timed_calls < TIMING_BUDGET:
+        return _timed_situ_moe_mxfp4(TIMING_BUDGET, *args, **kwargs)
     return situ_moe_mxfp4(*args, **kwargs)
