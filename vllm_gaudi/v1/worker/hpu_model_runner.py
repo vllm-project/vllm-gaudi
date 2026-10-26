@@ -30,6 +30,7 @@ import torch.nn as nn
 import vllm_gaudi.envs as gaudi_envs
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
+from vllm_gaudi.ops.hpu_kda_pytorch import tag_kda_cache_groups
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
@@ -793,15 +794,9 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
         "GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration",
         "Qwen3NextForCausalLM", "NemotronHForCausalLM"
     ]
-    # Kimi-K3: the KDA layers are ".self_attn" modules next to MLA ".self_attn" layers; they are told apart by
-    # the MambaSpec of their KV cache group.
-    kimi_arch = ["KimiK3ForConditionalGeneration", "KimiLinearForCausalLM"]
-    architectures = getattr(model.config, 'architectures', [])
-    is_kimi = any(arch in architectures for arch in kimi_arch)
-    if not is_kimi and not any(arch in architectures for arch in mamba_like_arch):
+    if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):
         return
-    mamba_like_layer = ['.mixer', '.linear_attn'] + (['.self_attn'] if is_kimi else [])
-    named_modules = dict(model.named_modules()) if is_kimi else {}
+    mamba_like_layer = ['.mixer', '.linear_attn']
 
     def _get_decoder_layer_by_idx(model_obj, idx: int):
         # Qwen3.5 multimodal path: model.language_model.model.layers
@@ -845,14 +840,28 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
                 if layer is not None and hasattr(layer, "linear_attn"):
                     layer.linear_attn.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
-            elif is_kimi and layer_name.endswith('.self_attn') and isinstance(kv_group.kv_cache_spec, MambaSpec):
-                layer = named_modules.get(layer_name)
-                if layer is None:  # the registered prefix may lack the top-level wrapper name
-                    layer = next((m for n, m in named_modules.items() if n.endswith(layer_name)), None)
-                if layer is not None:
-                    layer.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
-                else:
-                    logger.warning("Kimi KDA layer %s not found in the model, cache_group_idx not set", layer_name)
+
+
+def maybe_tag_kda_cache_groups(model, kv_cache_config: KVCacheConfig):
+    """Tell every Kimi-K3 KDA layer which KV cache group (row of load_indices_tensor) holds its state.
+
+    Resolved from the layer prefix, i.e. the key the layer registered in the static forward context, which is also
+    the name used in ``kv_cache_groups[i].layer_names`` - no module path / name pattern matching.
+    """
+    if isinstance(model, HpuModelAdapter):
+        model = model.model
+    tagged, untagged, unmatched = tag_kda_cache_groups(
+        model.named_modules(), kv_cache_config.kv_cache_groups,
+        lambda group: isinstance(group.kv_cache_spec, MambaSpec),
+        lambda gid: torch.tensor(gid, dtype=torch.long, device="hpu"))
+    if not (tagged or untagged):
+        return
+    logger.info("KDA cache groups: tagged %d layers (per group: %s)", sum(tagged.values()),
+                dict(sorted(tagged.items())))
+    if untagged:
+        logger.warning("KDA modules without a mamba cache group (%d): %s", len(untagged), untagged[:8])
+    if unmatched:
+        logger.warning("Mamba cache group layers without a KDA module (%d): %s", len(unmatched), unmatched[:8])
 
 
 def maybe_set_chunked_attention_layers(model_runner):
@@ -6684,6 +6693,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if self.enable_bucketing:
                     self.bucketing_manager.block_size = self.block_size
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
+            maybe_tag_kda_cache_groups(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
 
         # Reinitialize the input batch with the correct block sizes for all

@@ -244,3 +244,37 @@ def kda_core_decode(mixed_qkv: torch.Tensor, raw_g: torch.Tensor, raw_beta: torc
     out, state = kda_recurrent_step(state, q[:, 0], k[:, 0], v[:, 0], decay[:, 0], beta[:, 0])
     write_ssm_state(ssm_cache, slots, state)
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# KV cache group tagging
+# ---------------------------------------------------------------------------------------------------------------
+def tag_kda_cache_groups(named_modules, kv_cache_groups, is_mamba_group: Callable, make_index: Callable):
+    """Set ``cache_group_idx`` on every KDA module from the KV cache group that lists its layer name.
+
+    KDA modules are recognised by their ``in_proj_qkvgfab`` projection and matched by ``module.prefix`` (the key
+    they registered in the static forward context, which is what ``kv_cache_groups[i].layer_names`` holds);
+    the module path is only a fallback. Returns ``(tagged, untagged, unmatched)``: layers tagged per group id,
+    KDA module names without a mamba group, and mamba group layer names without a KDA module.
+    """
+    layer_to_group: dict[str, int] = {}
+    for group_id, group in enumerate(kv_cache_groups):
+        if is_mamba_group(group):
+            for layer_name in group.layer_names:
+                layer_to_group[layer_name] = group_id
+    tagged: dict[int, int] = {}
+    untagged: list[str] = []
+    seen: set[str] = set()
+    for module_name, module in named_modules:
+        if not hasattr(module, "in_proj_qkvgfab"):
+            continue
+        prefix = getattr(module, "prefix", None) or module_name
+        group_id = layer_to_group.get(prefix, layer_to_group.get(module_name))
+        if group_id is None:
+            untagged.append(prefix)
+            continue
+        module.cache_group_idx = make_index(group_id)
+        tagged[group_id] = tagged.get(group_id, 0) + 1
+        seen.add(prefix if prefix in layer_to_group else module_name)
+    unmatched = [name for name in layer_to_group if name not in seen]
+    return tagged, untagged, unmatched

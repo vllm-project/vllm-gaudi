@@ -1025,12 +1025,12 @@ def _patch_kimi_kda() -> None:
         kda_impl = gaudi_envs.HPU_KIMI_KDA_IMPL
         _kda_forward = _hpu_kda_forward
         if kda_impl == "real":
-            try:
-                from vllm_gaudi.models.kimi_k3_kda import hpu_kda_forward as _kda_forward
-            except Exception as exc:
-                _ext_logger().error("Real Kimi-K3 KDA is unavailable (%r): FALLING BACK to the dummy KDA, "
-                                    "model outputs will be wrong", exc)
-                kda_impl = "dummy"
+
+            def _kda_forward(self, hidden_states, positions=None):
+                # Imported on first use: importing vllm_gaudi.models here (plugin-apply time) hits a circular
+                # import with vllm.distributed in processes where it is still being initialised.
+                from vllm_gaudi.models.kimi_k3_kda import hpu_kda_forward
+                return hpu_kda_forward(self, hidden_states, positions)
         elif kda_impl != "dummy":
             _ext_logger().error("HPU_KIMI_KDA_IMPL must be 'real' or 'dummy', got %r: using the dummy KDA", kda_impl)
             kda_impl = "dummy"

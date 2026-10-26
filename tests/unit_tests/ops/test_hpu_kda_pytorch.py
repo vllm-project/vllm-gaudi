@@ -398,3 +398,56 @@ def test_layer_forward_without_metadata_returns_zero_core(monkeypatch):
     out = module.hpu_kda_forward(layer, torch.randn(5, 16))
     assert out.shape == (5, 16)
     assert float(out.abs().sum()) == 0.0
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# KV cache group tagging
+# ---------------------------------------------------------------------------------------------------------------
+def _fake_group(layer_names, mamba):
+    return types.SimpleNamespace(layer_names=layer_names, kind="mamba" if mamba else "attn")
+
+
+def _fake_kda(prefix):
+    return types.SimpleNamespace(prefix=prefix, in_proj_qkvgfab=object())
+
+
+def test_tag_kda_cache_groups_uses_layer_prefix_not_module_path():
+    groups = [
+        _fake_group(["lm.layers.0.self_attn", "lm.layers.4.self_attn"], mamba=False),  # MLA
+        _fake_group(["lm.layers.1.self_attn", "lm.layers.2.self_attn"], mamba=True),
+        _fake_group(["lm.layers.3.self_attn", "lm.layers.5.self_attn"], mamba=True),
+    ]
+    mla = types.SimpleNamespace(prefix="lm.layers.0.self_attn")
+    k1, k2, k3, k5 = (_fake_kda(f"lm.layers.{i}.self_attn") for i in (1, 2, 3, 5))
+    # module paths deliberately differ from the registered prefixes (wrapper name, different nesting)
+    modules = [("model.language_model.layers.0.self_attn", mla), ("model.language_model.layers.1.self_attn", k1),
+               ("model.language_model.layers.2.self_attn", k2), ("x.3", k3), ("x.5", k5)]
+
+    tagged, untagged, unmatched = kda.tag_kda_cache_groups(modules, groups, lambda g: g.kind == "mamba",
+                                                           lambda gid: torch.tensor(gid))
+
+    assert tagged == {1: 2, 2: 2}
+    assert untagged == [] and unmatched == []
+    assert [int(m.cache_group_idx) for m in (k1, k2, k3, k5)] == [1, 1, 2, 2]
+    assert not hasattr(mla, "cache_group_idx")
+
+
+def test_tag_kda_cache_groups_reports_untagged_and_unmatched():
+    groups = [_fake_group(["a.self_attn", "ghost.self_attn"], mamba=True)]
+    known, stray = _fake_kda("a.self_attn"), _fake_kda("b.self_attn")
+
+    tagged, untagged, unmatched = kda.tag_kda_cache_groups([("m.a", known), ("m.b", stray)], groups,
+                                                           lambda g: g.kind == "mamba", lambda gid: gid)
+
+    assert tagged == {0: 1}
+    assert untagged == ["b.self_attn"]
+    assert unmatched == ["ghost.self_attn"]
+    assert known.cache_group_idx == 0 and not hasattr(stray, "cache_group_idx")
+
+
+def test_tag_kda_cache_groups_falls_back_to_module_name_without_prefix():
+    groups = [_fake_group(["layers.1.self_attn"], mamba=True)]
+    module = types.SimpleNamespace(in_proj_qkvgfab=object())  # no prefix attribute
+    tagged, untagged, _ = kda.tag_kda_cache_groups([("layers.1.self_attn", module)], groups,
+                                                   lambda g: g.kind == "mamba", lambda gid: gid)
+    assert tagged == {0: 1} and untagged == [] and module.cache_group_idx == 0

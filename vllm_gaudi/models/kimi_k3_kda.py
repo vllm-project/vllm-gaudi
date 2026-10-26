@@ -29,8 +29,9 @@ def _state_indices(self, attn_metadata) -> torch.Tensor:
         group = getattr(self, "cache_group_idx", None)
         if group is None:
             if indices.shape[0] != 1:
-                raise RuntimeError("KDA layer has no cache_group_idx but the batch has %d cache groups; "
-                                   "maybe_set_mamba_kv_cache_groups_ids did not tag this layer" % indices.shape[0])
+                raise RuntimeError("KDA layer %s has no cache_group_idx but the batch has %d cache groups; "
+                                   "maybe_tag_kda_cache_groups did not tag this layer" %
+                                   (getattr(self, "prefix", "?"), indices.shape[0]))
             return indices[0]
         return indices.index_select(0, group.view(1)).squeeze(0)
     return indices
