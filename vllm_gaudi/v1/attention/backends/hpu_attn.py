@@ -34,7 +34,7 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
         return HPUAttentionMetadataV1
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[Union[int, MultipleOf]]:
         # 16 is supported for testing/smaller models; 128 is the standard HPU
         # kernel block size; 528 is required for Granite 4.0-H
         # (granitemoehybrid) without prefix caching (16-token FA alignment),
@@ -66,6 +66,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     seqlens_offsets_for_blocks: Optional[torch.Tensor] = None
     window_block_list: Optional[torch.Tensor] = None
     image_seg_ids: Optional[torch.Tensor] = None
+    indexer_block_index: Optional[torch.Tensor] = None
 
     def seq_len(self):
         return self.slot_mapping.size(-1)
@@ -138,7 +139,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                              load_indices_tensor=None,
                              store_indices_tensor=None,
                              query_start_loc=None,
-                             seq_lens_tensor=None):
+                             seq_lens_tensor=None,
+                             indexer_block_index=None):
         return cls(is_prompt=False,
                    block_mapping=None,
                    alibi_blocks=None,
@@ -161,4 +163,5 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    load_indices_tensor=load_indices_tensor,
                    store_indices_tensor=store_indices_tensor,
                    query_start_loc=query_start_loc,
-                   query_start_loc_p=query_start_loc)
+                   query_start_loc_p=query_start_loc,
+                   indexer_block_index=indexer_block_index)

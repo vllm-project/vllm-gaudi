@@ -469,6 +469,22 @@ _run_gsm8k_phi4_tp2_test() {
     echo "✅ Test with phi-4 TP=2 passed."
 }
 
+# GSM8K on Phi-4-mini-instruct
+_run_gsm8k_phi4_mini_test() {
+    echo "➡️ Testing GSM8K on Phi-4-mini-instruct..."
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Phi-4-mini-instruct.yaml"
+    echo "✅ Test with Phi-4-mini-instruct passed."
+}
+
+# GSM8K on Phi-4-mini-instruct with max_model_len 16384 (LongRoPE long factors)
+_run_gsm8k_phi4_mini_16k_test() {
+    echo "➡️ Testing GSM8K on Phi-4-mini-instruct with max_model_len 16384 (LongRoPE long factors)..."
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" \
+        --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Phi-4-mini-instruct-16k.yaml"
+    echo "✅ Test with Phi-4-mini-instruct 16k passed."
+}
+
 # --- Spec decode tests ---
 # Tests below check if speculative decoding is matching accept rate specified as an argument.
 # If the accept rate is below the threshold, the test will fail. The same applies for accuracy rate.
@@ -591,11 +607,13 @@ run_gsm8k_gemma4_parallel() {
         _run_gsm8k_gemma4_31b_test 4
 }
 
-# GSM8K on phi-4 (1 card) and phi-4 TP=2 (2 cards), warmup ON
+# GSM8K on phi-4 (1 card), phi-4 TP=2 (2 cards), Phi-4-mini 4k and 16k (1 card each), warmup ON
 run_gsm8k_phi4_parallel() {
     _run_parallel_on_card_slices phi4 \
         _run_gsm8k_phi4_test 1 \
-        _run_gsm8k_phi4_tp2_test 2
+        _run_gsm8k_phi4_tp2_test 2 \
+        _run_gsm8k_phi4_mini_test 1 \
+        _run_gsm8k_phi4_mini_16k_test 1
 }
 
 # Spec decode: eagle3 num_spec_2 / eagle3 / ngram (1 card each)
@@ -617,15 +635,17 @@ run_embedding_model_test() {
 }
 
 # pd_disaggregate_nixl_libfabric
-run_pd_disaggregate_nixl_libfabric_test() {
-    echo "➡️ Testing PD disaggregate through NIXL libfabric."
-    git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
-    cp -r nixl /tmp/nixl_source
-    cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi python install_nixl.py; cd ..
-    rm -rf nixl
-    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
-    echo "✅ PD disaggregate through NIXL libfabric."
-}
+# Temporarily disabled: vLLM requires NIXL >= 1.5.0, but the Gaudi libfabric (OFI) support lives only
+# in the intel-staging/nixl fork, whose newest OFI branch is v0.6.0_OFI. Re-enable once it has one >= 1.5.0.
+# run_pd_disaggregate_nixl_libfabric_test() {
+#     echo "➡️ Testing PD disaggregate through NIXL libfabric."
+#     git clone https://github.com/intel-staging/nixl.git -b v0.6.0_OFI
+#     cp -r nixl /tmp/nixl_source
+#     cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi python install_nixl.py; cd ..
+#     rm -rf nixl
+#     cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
+#     echo "✅ PD disaggregate through NIXL libfabric."
+# }
 
 run_pd_disaggregate_nixl_ucx_test() {
     echo "➡️ Testing PD disaggregate through NIXL UCX."
@@ -744,7 +764,7 @@ launch_all_tests() {
     run_preemption_test
     run_spec_decode_parallel
     run_embedding_model_test
-    run_pd_disaggregate_nixl_libfabric_test
+    # run_pd_disaggregate_nixl_libfabric_test temporarily disabled: see comment above its definition
     run_pd_disaggregate_nixl_ucx_test
     run_cpu_offloading_test
     run_offloading_connector_test

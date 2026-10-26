@@ -142,11 +142,17 @@ def rejection_sample(
     synthetic_mode: bool = False,
     synthetic_conditional_rates: Optional[torch.Tensor] = None,
     use_fp64_gumbel: bool = False,
+    fly_window_size: Optional[int] = None,
+    fly_entropy_threshold: Optional[float] = None,
+    fly_entropy_top_k: int = 3,
 ) -> torch.Tensor:
     # NOTE: HPU spec decode only supports greedy sampling, so the
     # `use_fp64_gumbel` knob (used by the random/gumbel recovery path upstream)
     # is accepted for signature parity but intentionally unused here.
+    # The FLy deferred-verification knobs are likewise accepted for parity;
+    # FLy itself is not supported on HPU.
     assert sampling_metadata.all_greedy, "Only greedy sampling is supported."
+    assert fly_window_size is None, "FLy speculative decoding is not supported on HPU."
 
     # Rejection sampling for greedy sampling requests.
 
