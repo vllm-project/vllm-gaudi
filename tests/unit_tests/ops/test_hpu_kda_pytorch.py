@@ -804,8 +804,7 @@ def test_attn_res_torch_updates_a_3d_prefix_in_place_and_rejects_mismatched_bank
         kda.attn_res_torch(prefix, None, blocks[:3], norm_w, qk_w, None, 1, -1, 1e-6, 1e-6)
 
 
-def _toy_residual_stream(attn_res_fn, num_layers=14, tokens=5, hidden=16, block_size=12, seed=140):
-    """The Kimi-K3 forward_attn_residual / KimiLinearModel.forward control flow with toy sublayers."""
+def _toy_params(num_layers, hidden, seed):
     g = torch.Generator().manual_seed(seed)
     mk = lambda *shape: torch.rand(*shape, generator=g) + 0.5  # noqa: E731
     layers = []
@@ -819,6 +818,12 @@ def _toy_residual_stream(attn_res_fn, num_layers=14, tokens=5, hidden=16, block_
                  ln2=mk(hidden),
                  w_attn=torch.randn(hidden, hidden, generator=g) * 0.3,
                  w_mlp=torch.randn(hidden, hidden, generator=g) * 0.3))
+    return g, mk, layers
+
+
+def _toy_residual_stream(attn_res_fn, num_layers=14, tokens=5, hidden=16, block_size=12, seed=140):
+    """The Kimi-K3 forward_attn_residual / KimiLinearModel.forward control flow with toy sublayers."""
+    g, mk, layers = _toy_params(num_layers, hidden, seed)
     final_norm, final_qk = mk(hidden), torch.randn(hidden, generator=g)
     embeddings = torch.randn(tokens, hidden, generator=g)
     num_bank = -(-num_layers // block_size)
@@ -890,3 +895,136 @@ def test_inverse_has_no_in_place_writes():
         inv = kda._unit_lower_inverse(a)
     assert not [n for n in names if n.endswith("_") or n in ("copy_", "slice_scatter", "select_scatter")]
     torch.testing.assert_close(inv, torch.linalg.inv(torch.eye(64) + a), rtol=1e-3, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Out-of-place attn_res for torch.compile mode (regional compilation: one graph per decoder layer)
+# ---------------------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("has_delta", [True, False])
+@pytest.mark.parametrize("num_blocks,block_write_idx", [(0, -1), (0, 0), (2, -1), (2, 2), (3, 1)])
+def test_attn_res_functional_matches_in_place_version_and_modifies_nothing(has_delta, num_blocks, block_write_idx):
+    prefix, delta, blocks, norm_w, qk_w, out_w = _attn_res_case(160 + num_blocks, torch.bfloat16)
+    delta = delta if has_delta else None
+    inputs = (prefix.clone(), blocks.clone())
+    new_prefix, new_blocks, out = kda.attn_res_functional(prefix, delta, blocks, norm_w, qk_w, out_w, num_blocks,
+                                                          block_write_idx, 1e-6, 1e-6)
+    assert torch.equal(prefix, inputs[0]) and torch.equal(blocks, inputs[1])
+    in_place_out = kda.attn_res_torch(prefix, delta, blocks, norm_w, qk_w, out_w, num_blocks, block_write_idx, 1e-6,
+                                      1e-6)
+    assert torch.equal(out, in_place_out)
+    assert torch.equal(new_prefix, prefix) and torch.equal(new_blocks, blocks)
+
+
+class _ToyLayer(torch.nn.Module):
+    """A KimiLinearDecoderLayer stand-in around the real ``forward_attn_residual_functional``."""
+
+    def __init__(self, idx, block_size, p):
+        super().__init__()
+        ns = lambda w, qk=None: types.SimpleNamespace(weight=w, variance_epsilon=1e-6)  # noqa: E731
+        self.self_attention_res_proj = types.SimpleNamespace(weight=p["attn_qk"].unsqueeze(0))
+        self.self_attention_res_norm = ns(p["attn_norm"])
+        self.mlp_res_proj = types.SimpleNamespace(weight=p["mlp_qk"].unsqueeze(0))
+        self.mlp_res_norm = ns(p["mlp_norm"])
+        self.input_layernorm = ns(p["ln1"])
+        self.post_attention_layernorm = ns(p["ln2"])
+        self.is_block_write_layer = idx % block_size == 0
+        self.block_write_idx = idx // block_size
+        self.prev_valid_blocks = -(-idx // block_size)
+        self.w_attn, self.w_mlp = p["w_attn"], p["w_mlp"]
+
+    def _run_self_attn(self, positions, h):
+        return _opaque_tanh_matmul(h, self.w_attn)  # a torch.compiler.disable'd call: forces a graph break
+
+    def mlp(self, h):
+        return torch.tanh(h @ self.w_mlp)
+
+    def forward(self, positions, hidden_states, block_residual, prefix_delta):
+        return kda.forward_attn_residual_functional(self, positions, hidden_states, block_residual, prefix_delta)
+
+
+@torch.compiler.disable
+def _opaque_tanh_matmul(h, w):
+    return torch.tanh(h @ w)
+
+
+def _run_toy_layers(wrap, num_layers=14, block_size=4, tokens=5, hidden=16, seed=140):
+    g, mk, params = _toy_params(num_layers, hidden, seed)
+    mk(hidden), torch.randn(hidden, generator=g)  # the final norm / qk of _toy_residual_stream: same generator state
+    hidden_states = torch.randn(tokens, hidden, generator=g)
+    num_bank = -(-num_layers // block_size)
+    blocks = hidden_states.new_empty(tokens, num_bank, hidden)
+    prefix_delta = None
+    layers = [wrap(_ToyLayer(i, block_size, p)) for i, p in enumerate(params)]
+    for layer in layers:
+        hidden_states, blocks, prefix_delta = layer(None, hidden_states, blocks, prefix_delta)
+    return hidden_states, blocks, prefix_delta
+
+
+def test_functional_layers_match_the_in_place_upstream_flow():
+    prefix, bank, delta = _run_toy_layers(lambda layer: layer)
+    ref_final, ref_prefix, ref_bank = _toy_residual_stream(reference_attn_res_kernel, num_layers=14, block_size=4,
+                                                           seed=140)
+    # the toy stream's final attn_res adds the last mlp output into the prefix in place
+    torch.testing.assert_close(prefix + delta, ref_prefix, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(bank, ref_bank, rtol=1e-4, atol=1e-4)
+
+
+def test_per_layer_compiled_functional_attn_res_equals_eager_across_graph_breaks():
+    """Regional compilation: each layer is its own graph, the disabled attention call splits it again."""
+    import torch._dynamo as dynamo
+    dynamo.reset()
+    try:
+        expected = _run_toy_layers(lambda layer: layer)
+        got = _run_toy_layers(lambda layer: torch.compile(layer, backend="aot_eager"))
+    finally:
+        dynamo.reset()
+    for a, b in zip(got, expected):
+        torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-5)
+
+
+def _mutated_placeholders(wrap_layer, inputs):
+    """Names of graph inputs that the forward graphs of ``wrap_layer(inputs)`` write to in place."""
+    from torch._dynamo.backends.common import aot_autograd
+    import torch._dynamo as dynamo
+
+    mutated = []
+
+    def fw_compiler(gm, example_inputs):
+        placeholders = {n for n in gm.graph.nodes if n.op == "placeholder"}
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and getattr(node.target, "_schema", None) is not None \
+                    and node.target._schema.is_mutable and node.args and node.args[0] in placeholders:
+                mutated.append(str(node.target))
+        return gm.forward
+
+    backend = aot_autograd(fw_compiler=fw_compiler, keep_inference_input_mutations=True)
+    dynamo.reset()
+    try:
+        with torch.no_grad():
+            wrap_layer(backend)(*inputs)
+    finally:
+        dynamo.reset()
+    return mutated
+
+
+def test_compiled_functional_layer_has_no_input_mutation():
+    _, _, params = _toy_params(2, 16, 140)
+    g = torch.Generator().manual_seed(1)
+    hidden_states, blocks = torch.randn(5, 16, generator=g), torch.randn(5, 3, 16, generator=g)
+    for idx in (0, 1):  # a block-write layer and a plain one
+        layer = _ToyLayer(idx, 4, params[idx])
+        delta = None if idx == 0 else torch.randn(5, 16, generator=g)
+        mutated = _mutated_placeholders(lambda backend, layer=layer: torch.compile(layer, backend=backend),
+                                        (None, hidden_states, blocks, delta))
+        assert mutated == []
+
+
+def test_mutation_probe_detects_the_in_place_attn_res():
+    """Positive control: the in-place variant's graph writes into its inputs (copy_ on the placeholders)."""
+    prefix, delta, blocks, norm_w, qk_w, out_w = _attn_res_case(170, torch.float32)
+
+    def wrap(backend):
+        return torch.compile(lambda *a: kda.attn_res_torch(*a, 2, 1, 1e-6, 1e-6), backend=backend)
+
+    mutated = _mutated_placeholders(wrap, (prefix, delta, blocks, norm_w, qk_w, out_w))
+    assert mutated

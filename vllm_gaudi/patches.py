@@ -1374,6 +1374,7 @@ def _patch_kimi_k3_arch() -> None:
 
         # Monkey-patch forward_attn_residual on KimiLinearDecoderLayer
         # to ensure hidden_states and block_residual have matching shapes and remain 2D.
+        from vllm_gaudi.ops.hpu_kda_pytorch import forward_attn_residual_functional
         orig_forward_attn_res = getattr(_amd_linear.KimiLinearDecoderLayer, "forward_attn_residual", None)
         if orig_forward_attn_res is not None and not getattr(_amd_linear.KimiLinearDecoderLayer, "_patched_attn_res_2d", False):
             def _safe_forward_attn_residual(self, positions, hidden_states, block_residual, prefix_delta):
@@ -1389,7 +1390,9 @@ def _patch_kimi_k3_arch() -> None:
                     # later attn_res mix, so fail loudly instead.
                     raise RuntimeError(f"Kimi-K3 block residual bank {tuple(block_residual.shape)} does not match "
                                        f"the hidden states {tuple(hidden_states.shape)}")
-                return orig_forward_attn_res(self, positions, hidden_states, block_residual, prefix_delta)
+                # out-of-place attn_res: the in-place updates of the upstream version do not survive the per-layer
+                # graph boundaries of torch.compile mode
+                return forward_attn_residual_functional(self, positions, hidden_states, block_residual, prefix_delta)
 
             _amd_linear.KimiLinearDecoderLayer.forward_attn_residual = _safe_forward_attn_residual
             _amd_linear.KimiLinearDecoderLayer._patched_attn_res_2d = True

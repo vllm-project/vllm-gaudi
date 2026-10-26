@@ -364,3 +364,56 @@ def test_traces_as_one_graph_with_parsable_stack_traces(tokens, cold_luts):
     assert len(graphs) == 1
     assert not unparsable
     torch.testing.assert_close(out, fn(x, ids, weights))
+
+
+def test_maybe_situ_moe_on_a_layer_traces_as_one_graph_in_compile_mode(monkeypatch):
+    """The layer-level entry point (``.data`` reads, config attributes, the lazily imported mark_step policy) must
+    not break the graph with PT_HPU_LAZY_MODE=0, and the runner's no-graphs publication must not matter."""
+    import sys
+    import types
+
+    import torch._dynamo as dynamo
+    gs_spec = importlib.util.spec_from_file_location("graph_state_under_test",
+                                                     _PATH.parents[1] / "extension" / "graph_state.py")
+    graph_state = importlib.util.module_from_spec(gs_spec)
+    gs_spec.loader.exec_module(graph_state)
+    for name, mod in (("vllm_gaudi", types.ModuleType("vllm_gaudi")),
+                      ("vllm_gaudi.extension", types.ModuleType("vllm_gaudi.extension")),
+                      ("vllm_gaudi.extension.graph_state", graph_state)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setenv("PT_HPU_LAZY_MODE", "0")
+
+    experts, inter, hidden = 16, 64, 128
+    gen = torch.Generator().manual_seed(1)
+    param = lambda *shape, lo, hi: torch.nn.Parameter(  # noqa: E731
+        torch.randint(lo, hi, shape, dtype=torch.uint8, generator=gen), requires_grad=False)
+    layer = types.SimpleNamespace(
+        activation="situ",
+        local_num_experts=experts,
+        moe_config=types.SimpleNamespace(ep_rank=0, activation_situ_beta=BETA, activation_situ_linear_beta=LINEAR_BETA),
+        w13_weight=param(experts, 2 * inter, hidden // 2, lo=0, hi=256),
+        w13_weight_scale=param(experts, 2 * inter, hidden // 32, lo=120, hi=130),
+        w2_weight=param(experts, hidden, inter // 2, lo=0, hi=256),
+        w2_weight_scale=param(experts, hidden, inter // 32, lo=120, hi=130))
+    x = torch.randn(20, hidden, generator=gen).to(torch.bfloat16)
+    ids = torch.randint(0, experts, (20, 2), generator=gen)
+    weights = torch.rand(20, 2, generator=gen)
+
+    def fn(x, ids, weights):
+        return situ.maybe_situ_moe(layer, x, ids, weights, "exact", token_tile=8)
+
+    graphs = []
+
+    def backend(gm, example_inputs):
+        graphs.append(gm)
+        return gm.forward
+
+    dynamo.reset()
+    try:
+        with graph_state.forward_graph_mode(use_graphs=False):
+            out = torch.compile(fn, backend=backend)(x, ids, weights)
+            expected = fn(x, ids, weights)
+    finally:
+        dynamo.reset()
+    assert len(graphs) == 1
+    torch.testing.assert_close(out, expected)
