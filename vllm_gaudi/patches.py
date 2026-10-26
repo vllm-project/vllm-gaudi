@@ -899,6 +899,25 @@ def _patch_triton_for_hpu() -> None:
         pass
 
 
+_KIMI_PATCHES_INSTALLED: list[str] = []
+
+
+def _kimi_patch_logger():
+    """Logger under the 'vllm.' namespace (loggers outside it are silent), created lazily."""
+    import logging
+    return logging.getLogger("vllm.gaudi.kimi_patches")
+
+
+def _kimi_patch_failed(name: str) -> None:
+    """Call from an ``except`` block: report the failed Kimi-K3 patch with its traceback instead of hiding it."""
+    _kimi_patch_logger().warning("Kimi-K3 patch '%s' was not installed", name, exc_info=True)
+
+
+def _kimi_patch_installed(name: str) -> None:
+    if name not in _KIMI_PATCHES_INSTALLED:
+        _KIMI_PATCHES_INSTALLED.append(name)
+
+
 def _patch_rocm_platform_for_hpu() -> None:
     """Neutralize vllm.platforms.rocm queries on HPU."""
     try:
@@ -935,7 +954,7 @@ def _patch_rocm_platform_for_hpu() -> None:
         rmod._ON_RDNA = False
         rmod.RocmPlatform = type("RocmPlatform", (), {})
     except Exception:
-        pass
+        _kimi_patch_failed("rocm_platform_stub")
 
 
 def _patch_kimi_kda() -> None:
@@ -944,12 +963,12 @@ def _patch_kimi_kda() -> None:
         import vllm.models.kimi_k3.amd.ops.kda_decode as _kda_decode
         _kda_decode.is_fused_kda_decode_supported = lambda *args, **kwargs: False
     except Exception:
-        pass
+        _kimi_patch_failed("kda_decode_support")
     try:
         import vllm.models.kimi_k3.amd.ops.kda_chunk as _kda_chunk
         _kda_chunk.is_fused_kda_chunk_supported = lambda *args, **kwargs: False
     except Exception:
-        pass
+        _kimi_patch_failed("kda_chunk_support")
     try:
         import vllm.models.kimi_k3.amd.kda as _amd_kda
         _amd_kda.is_fused_kda_decode_supported = lambda *args, **kwargs: False
@@ -1042,15 +1061,17 @@ def _patch_kimi_kda() -> None:
         if hasattr(_amd_kda, "GatedDeltaNetAttention"):
             _amd_kda.GatedDeltaNetAttention.forward = _kda_forward
             _amd_kda.GatedDeltaNetAttention._forward = lambda *args, **kwargs: None
+        _kimi_patch_installed("kda_forward")
 
         try:
             import vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn as _gdn_mod
             _gdn_mod.KimiGatedDeltaNetAttention.forward = _kda_forward
             _gdn_mod.KimiGatedDeltaNetAttention._forward = lambda *args, **kwargs: None
+            _kimi_patch_installed("kimi_gdn_forward")
         except Exception:
-            pass
+            _kimi_patch_failed("kimi_gdn_forward")
     except Exception:
-        pass
+        _kimi_patch_failed("kda_forward")
 
 
 def _patch_mla_prefill_selector() -> None:
@@ -1101,7 +1122,7 @@ def _patch_kimi_k3_hybrid_config() -> None:
 
             ModelConfig.__post_init__ = _hpu_post_init
     except Exception:
-        pass
+        _kimi_patch_failed("hybrid_config")
 
 
 def _patch_moe_runner_delegation() -> None:
@@ -1278,8 +1299,9 @@ def _patch_kimi_linear_weights() -> None:
             return orig_forward(self, *args, **kwargs)
 
         k3_linear.KimiLinearDecoderLayer.forward = _safe_forward
+        _kimi_patch_installed("linear_weights")
     except Exception:
-        pass
+        _kimi_patch_failed("linear_weights")
 
 
 def _patch_kimi_attn_res() -> None:
@@ -1290,8 +1312,9 @@ def _patch_kimi_attn_res() -> None:
         try:
             import vllm.models.kimi_k3.amd.ops.attn_res as _attn_res_mod
             _attn_res_mod.attn_res = _torch_attn_res
+            _kimi_patch_installed("attn_res_op")
         except Exception:
-            pass
+            _kimi_patch_failed("attn_res_op")
         try:
             import vllm.models.kimi_k3.amd.linear as _linear_mod
             _linear_mod.attn_res = _torch_attn_res
@@ -1307,10 +1330,11 @@ def _patch_kimi_attn_res() -> None:
                 norm.variance_epsilon,
                 0.0 if output_norm is None else output_norm.variance_epsilon,
             )
+            _kimi_patch_installed("attn_res_linear")
         except Exception:
-            pass
+            _kimi_patch_failed("attn_res_linear")
     except Exception:
-        pass
+        _kimi_patch_failed("attn_res")
 
 
 def _patch_kimi_k3_arch() -> None:
@@ -1340,6 +1364,7 @@ def _patch_kimi_k3_arch() -> None:
         ModelRegistry.register_model("KimiLinearForCausalLM", _amd_linear.KimiLinearForCausalLM)
         ModelRegistry.register_model("KimiK3ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
         ModelRegistry.register_model("KimiK3MTP", _amd_mtp.KimiK3MTP)
+        _kimi_patch_installed("model_registration")
 
         # Monkey-patch KimiLinearModel.forward to ensure tokens/positions are 1D/2D
         # so block_residual is allocated with shape [num_tokens, attn_res_block_num, hidden_size].
@@ -1371,6 +1396,7 @@ def _patch_kimi_k3_arch() -> None:
 
             _amd_linear.KimiLinearModel.forward = _safe_kimi_linear_model_forward
             _amd_linear.KimiLinearModel._patched_hpu_tokens = True
+        _kimi_patch_installed("linear_model_tokens_1d")
 
         # out-of-place attn_res on the decoder layer (2D inputs, bank shape check): the in-place updates of the
         # upstream version do not survive the per-layer graph boundaries of torch.compile mode
@@ -1379,6 +1405,8 @@ def _patch_kimi_k3_arch() -> None:
         if install_functional_attn_res(_amd_linear) is None:
             _ext_logger().warning("Kimi-K3: none of %s with forward_attn_residual in %s, the in-place upstream "
                                   "attn_res stays active", KIMI_DECODER_LAYER_CLASSES, _amd_linear.__name__)
+        else:
+            _kimi_patch_installed("functional_attn_res")
 
         # Monkey-patch KimiMoE.forward to ensure inputs are safely 2D
         orig_moe_forward = getattr(_amd_linear.KimiMoE, "forward", None)
@@ -1390,8 +1418,10 @@ def _patch_kimi_k3_arch() -> None:
 
             _amd_linear.KimiMoE.forward = _safe_moe_forward
             _amd_linear.KimiMoE._patched_moe_2d = True
+        _kimi_patch_installed("kimi_moe_2d")
+        _kimi_patch_logger().info("Kimi-K3 patches installed: %s", ", ".join(_KIMI_PATCHES_INSTALLED))
     except Exception:
-        pass
+        _kimi_patch_failed("k3_arch")
 
 
 def _patch_compressed_tensors_mxfp4() -> None:
