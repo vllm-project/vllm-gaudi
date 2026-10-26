@@ -94,6 +94,9 @@ class HPUWorker(WorkerBase):
         self.step = 0
         self.profile_steps = get_config().VLLM_PROFILE_STEPS
         self.step_profiler = setup_step_profiler(self.profile_steps, self.rank)
+        # Number of forward passes (sample_tokens calls) recorded by the step profiler so far.
+        self.step_profiler_recorded = 0
+        self.step_profiler_started = False
         self.step_debug = init_debug_logger('steps')
 
         self.model_sleeping = False
@@ -576,7 +579,43 @@ class HPUWorker(WorkerBase):
         )
 
     def sample_tokens(self, grammar_output: "GrammarOutput|None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)  # type: ignore[union-attr]
+        output = self.model_runner.sample_tokens(grammar_output)  # type: ignore[union-attr]
+        self._step_profiler_after_forward(output)
+        return output
+
+    def _step_profiler_after_forward(self, output) -> None:
+        """Advance the VLLM_PROFILE_STEPS profiler after a forward pass.
+
+        HPUModelRunner.execute_model only updates the request state; the model forward runs in sample_tokens, so
+        the profiler is started in execute_model (step == VLLM_PROFILE_STEPS[0]) and advanced/stopped here.
+        Profiling problems are logged and never propagate into the serving path.
+        """
+        if not self.step_profiler or not self.step_profiler_started or output is None:
+            return
+        active = self.profile_steps[1] - self.profile_steps[0] + 1
+        self.step_profiler_recorded += 1
+        try:
+            if self.step_profiler_recorded < active:
+                self.step_profiler.step()
+                return
+            # Device work is asynchronous: wait for it so that the HPU events land inside the window.
+            torch.hpu.synchronize()
+            # The last step() ends the schedule's active window and exports the trace (on_trace_ready).
+            self.step_profiler.step()
+            self.step_profiler.stop()
+            out_dir = get_config().VLLM_PROFILE_DIR or '.'
+            trace_files = sorted(f"{name} ({os.path.getsize(os.path.join(out_dir, name))} B)"
+                                 for name in os.listdir(out_dir)
+                                 if '.pt.trace.json' in name or name.startswith('server_events'))
+            logger.info("Step profiler finished after %d forward passes (rank %d, step counter %d). Traces in %s: %s",
+                        self.step_profiler_recorded, self.rank, self.step, os.path.abspath(out_dir), trace_files)
+        except Exception as exc:
+            logger.warning("Step profiler failed on rank %d, disabling it: %r", self.rank, exc)
+            self.step_profiler = None
+            return
+        self.step_profiler = None
+        if not get_config().VLLM_PROFILE_KEEP_RUNNING:
+            raise RuntimeError('Step profiling finished!')
 
     @torch.inference_mode()
     def execute_model(
@@ -586,23 +625,18 @@ class HPUWorker(WorkerBase):
         if self.step_debug:
             self.step_debug(f'step={self.step}')
         if self.step_profiler and self.step == self.profile_steps[0]:
-            logger.info("Step profiler started at step %d (rank %d)", self.step, self.rank)
-            self.step_profiler.start()
+            try:
+                self.step_profiler.start()
+                self.step_profiler_started = True
+                logger.info("Step profiler started at step %d (rank %d)", self.step, self.rank)
+            except Exception as exc:
+                logger.warning("Step profiler failed to start on rank %d, disabling it: %r", self.rank, exc)
+                self.step_profiler = None
         with track_graph_compile('HPUWorker.execute_model') \
                 if self.gc_track_recompiles \
                 else contextlib.nullcontext():
             output = self.model_runner.execute_model(scheduler_output)  # type: ignore[union-attr]
         # TODO(woosuk): Send the output to the engine process.
-        if self.step_profiler:
-            if self.step >= self.profile_steps[0]:
-                self.step_profiler.step()
-            if self.step == self.profile_steps[1]:
-                # The last step() already wrote the trace (schedule active window ended); stop() is a safety net.
-                self.step_profiler.stop()
-                self.step_profiler = None
-                logger.info("Step profiler finished at step %d (rank %d)", self.step, self.rank)
-                if not get_config().VLLM_PROFILE_KEEP_RUNNING:
-                    raise RuntimeError('Step profiling finished!')
         self.step += 1
         # NOTE(Harish): removed "if self.rank == 0 else None" for KV_connector enabling with TP>1
         # referred to Gpu Model Runner, KV connector aggregation expects valid output from all ranks
