@@ -43,6 +43,13 @@ def bucketing_max_batched_tokens(tokens: int, mamba_chunk_size: int, profiling: 
     return -(-tokens // mamba_chunk_size) * mamba_chunk_size
 
 
+def _remove_if_exists(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
 def _export_trace(prof, path: str) -> None:
     """Write the chrome trace of ``prof`` to ``path`` with a fallback chain.
 
@@ -62,6 +69,7 @@ def _export_trace(prof, path: str) -> None:
     if kineto is not None and hasattr(kineto, "save"):
         attempts.append(("kineto_results.save", lambda: kineto.save(path)))
     for name, attempt in attempts:
+        _remove_if_exists(path)  # a partial file of a failed attempt must never count as a trace
         try:
             attempt()
             if os.path.exists(path):
@@ -69,6 +77,7 @@ def _export_trace(prof, path: str) -> None:
             errors.append(f"{name}: no file written")
         except Exception as exc:
             errors.append(f"{name}: {exc!r}")
+    _remove_if_exists(path)
     raise RuntimeError("; ".join(errors))
 
 

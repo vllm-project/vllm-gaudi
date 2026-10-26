@@ -2,6 +2,7 @@
 """Token budget of the VLLM_PROFILE_PROMPT / VLLM_PROFILE_DECODE dummy batch (pure python module, loaded by path)."""
 
 import importlib.util
+import os
 import pathlib
 
 _PATH = pathlib.Path(__file__).resolve().parents[2] / "vllm_gaudi" / "extension" / "profiling_cfg.py"
@@ -164,3 +165,47 @@ def test_trace_handler_falls_back_to_kineto_results_save(tmp_path):
 
     cfg.make_trace_handler(str(tmp_path), 0, use_gzip=False)(Prof())
     assert [f.name.endswith(".pt.trace.json") for f in tmp_path.iterdir()] == [True]
+
+
+def test_partial_file_of_a_failed_attempt_never_counts_as_a_trace(tmp_path):
+
+    class Inner:
+
+        def export_chrome_trace(self, path, metadata=None):
+            with open(path, "w") as f:
+                f.write("{partial")
+            raise OSError("disk full")
+
+    class Prof:
+        profiler = Inner()
+
+        def export_chrome_trace(self, path):
+            pass  # "succeeds" without writing anything
+
+    path = str(tmp_path / "t.json")
+    try:
+        cfg._export_trace(Prof(), path)
+    except RuntimeError as exc:
+        assert "no file written" in str(exc) and "disk full" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+    assert not os.path.exists(path)
+
+
+def test_all_attempts_failing_leaves_no_file_and_handler_writes_nothing(tmp_path):
+
+    class Inner:
+
+        def export_chrome_trace(self, path, metadata=None):
+            with open(path, "w") as f:
+                f.write("{partial")
+            raise OSError("boom")
+
+    class Prof:
+        profiler = Inner()
+
+        def export_chrome_trace(self, path):
+            raise OSError("boom")
+
+    cfg.make_trace_handler(str(tmp_path), 0, use_gzip=False)(Prof())
+    assert list(tmp_path.iterdir()) == []
