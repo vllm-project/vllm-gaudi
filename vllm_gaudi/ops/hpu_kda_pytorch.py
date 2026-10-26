@@ -570,6 +570,11 @@ def forward_attn_residual_functional(self, positions, hidden_states, block_resid
 KIMI_DECODER_LAYER_CLASSES = ("KimiDecoderLayer", "KimiLinearDecoderLayer")
 
 
+def find_kimi_decoder_layer_class(linear_mod) -> type | None:
+    """The decoder layer class of the Kimi-K3 ``linear`` module under any of its known names, or None."""
+    return next((getattr(linear_mod, n) for n in KIMI_DECODER_LAYER_CLASSES if hasattr(linear_mod, n)), None)
+
+
 def kimi_decoder_layer_class(linear_mod) -> type | None:
     """The decoder layer class of the Kimi-K3 ``linear`` module that has ``forward_attn_residual``, or None."""
     for name in KIMI_DECODER_LAYER_CLASSES:

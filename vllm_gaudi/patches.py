@@ -1262,8 +1262,15 @@ def _patch_kimi_linear_weights() -> None:
             k3_linear.KimiMoE.__init__ = _safe_moe_init
             k3_linear.KimiMoE._patched_weights = True
 
-        orig_forward = getattr(k3_linear.KimiLinearDecoderLayer, "forward", None)
-        if orig_forward is None:
+        from vllm_gaudi.ops.hpu_kda_pytorch import KIMI_DECODER_LAYER_CLASSES, find_kimi_decoder_layer_class
+        layer_cls = find_kimi_decoder_layer_class(k3_linear)
+        if layer_cls is None:
+            _kimi_patch_logger().warning("Kimi-K3: none of %s in %s, the decoder layer forward wrapper of "
+                                         "linear_weights is not installed", KIMI_DECODER_LAYER_CLASSES,
+                                         k3_linear.__name__)
+            return
+        orig_forward = getattr(layer_cls, "forward", None)
+        if orig_forward is None or getattr(orig_forward, "_hpu_safe_forward", False):
             return
 
         def _safe_forward(self, *args, **kwargs):
@@ -1298,7 +1305,8 @@ def _patch_kimi_linear_weights() -> None:
                         )
             return orig_forward(self, *args, **kwargs)
 
-        k3_linear.KimiLinearDecoderLayer.forward = _safe_forward
+        _safe_forward._hpu_safe_forward = True
+        layer_cls.forward = _safe_forward
         _kimi_patch_installed("linear_weights")
     except Exception:
         _kimi_patch_failed("linear_weights")

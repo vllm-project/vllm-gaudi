@@ -1255,6 +1255,13 @@ def test_install_patches_the_decoder_layer_the_model_calls_and_removes_input_mut
         torch.testing.assert_close(a, b)
 
 
+@pytest.mark.parametrize("class_name", kda.KIMI_DECODER_LAYER_CLASSES)
+def test_find_decoder_layer_class_accepts_every_known_name(class_name):
+    mod, cls = _upstream_linear_module(class_name)
+    assert kda.find_kimi_decoder_layer_class(mod) is cls
+    assert kda.find_kimi_decoder_layer_class(types.ModuleType("empty")) is None
+
+
 def test_install_reports_a_missing_decoder_layer():
     assert kda.install_functional_attn_res(types.ModuleType("empty")) is None
     renamed = types.ModuleType("renamed")
