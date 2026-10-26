@@ -352,11 +352,16 @@ def kda_core_prefill(mixed_qkv: torch.Tensor,
     return out
 
 
-def kda_core_decode(mixed_qkv: torch.Tensor, raw_g: torch.Tensor, raw_beta: torch.Tensor, conv_weight: torch.Tensor,
+def kda_decode_step(mixed_qkv: torch.Tensor, raw_g: torch.Tensor, raw_beta: torch.Tensor, conv_weight: torch.Tensor,
                     conv_bias: torch.Tensor | None, A_log: torch.Tensor, dt_bias: torch.Tensor,
                     lower_bound: float | None, conv_cache: torch.Tensor, ssm_cache: torch.Tensor,
-                    state_idx: torch.Tensor, num_heads: int, head_dim: int) -> torch.Tensor:
-    """One token per request. mixed_qkv [B,3P], raw_g [B,P], raw_beta [B,H], state_idx [B]. Returns o [B,H,V] fp32."""
+                    state_idx: torch.Tensor, num_heads: int, head_dim: int):
+    """Out-of-place decode step: only READS the caches, returns ``(o, slots, conv_rows, ssm_rows)``.
+
+    ``o`` [B,H,V] fp32; ``conv_rows`` / ``ssm_rows`` are the new cache rows of ``slots``, already in the layout and
+    dtype of the caches, so ``write_kda_decode_state`` is just two ``index_copy_``. Traceable by torch.compile
+    (no in-place writes to graph inputs, which HPU compile can silently drop).
+    """
     bsz, channels = mixed_qkv.shape
     width = conv_weight.shape[-1]
     slots = _slots(state_idx, conv_cache)
@@ -368,13 +373,37 @@ def kda_core_decode(mixed_qkv: torch.Tensor, raw_g: torch.Tensor, raw_beta: torc
     if conv_bias is not None:
         conv_out = conv_out + conv_bias.float()
     conv_out = torch.nn.functional.silu(conv_out)
-    write_conv_state(conv_cache, slots, seq[:, 1:, :])
+    conv_rows = seq[:, 1:, :]
+    if _conv_is_dim_first(conv_cache, channels, width - 1):
+        conv_rows = conv_rows.transpose(-1, -2)
+    conv_rows = conv_rows.to(dtype=conv_cache.dtype).contiguous()
 
     q, k, v, g, beta = _prepare_qkv_gates(conv_out.unsqueeze(1), raw_g.unsqueeze(1), raw_beta.unsqueeze(1), A_log,
                                           dt_bias, lower_bound, num_heads, head_dim, None)
     state = read_ssm_state(ssm_cache, slots)
     out, state = kda_recurrent_step(state, q[:, 0], k[:, 0], v[:, 0], torch.exp(g[:, 0]), beta[:, 0])
-    write_ssm_state(ssm_cache, slots, state)
+    ssm_rows = state.to(dtype=ssm_cache.dtype).contiguous()
+    return out, slots, conv_rows, ssm_rows
+
+
+def write_kda_decode_state(conv_cache: torch.Tensor, ssm_cache: torch.Tensor, slots: torch.Tensor,
+                           conv_rows: torch.Tensor, ssm_rows: torch.Tensor) -> None:
+    """Stores the rows returned by ``kda_decode_step`` (the only in-place part of a decode step)."""
+    conv_cache.index_copy_(0, slots, conv_rows)
+    ssm_cache.index_copy_(0, slots, ssm_rows)
+
+
+def kda_core_decode(mixed_qkv: torch.Tensor, raw_g: torch.Tensor, raw_beta: torch.Tensor, conv_weight: torch.Tensor,
+                    conv_bias: torch.Tensor | None, A_log: torch.Tensor, dt_bias: torch.Tensor,
+                    lower_bound: float | None, conv_cache: torch.Tensor, ssm_cache: torch.Tensor,
+                    state_idx: torch.Tensor, num_heads: int, head_dim: int) -> torch.Tensor:
+    """One token per request. mixed_qkv [B,3P], raw_g [B,P], raw_beta [B,H], state_idx [B]. Returns o [B,H,V] fp32.
+
+    ``kda_decode_step`` followed by ``write_kda_decode_state`` (updates the caches in place)."""
+    out, slots, conv_rows, ssm_rows = kda_decode_step(mixed_qkv, raw_g, raw_beta, conv_weight, conv_bias, A_log,
+                                                      dt_bias, lower_bound, conv_cache, ssm_cache, state_idx, num_heads,
+                                                      head_dim)
+    write_kda_decode_state(conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
     return out
 
 

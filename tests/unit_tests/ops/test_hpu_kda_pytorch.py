@@ -259,6 +259,87 @@ def test_decode_batch_with_padded_row():
     assert torch.isfinite(out).all()
 
 
+def _in_place_decode_f552b8a5(mixed_qkv, raw_g, raw_beta, conv_weight, conv_bias, A_log, dt_bias, lower_bound,
+                              conv_cache, ssm_cache, state_idx, num_heads, head_dim):
+    """kda_core_decode as it was before the functional split (vllm-gaudi f552b8a5), verbatim."""
+    bsz, channels = mixed_qkv.shape
+    width = conv_weight.shape[-1]
+    slots = kda._slots(state_idx, conv_cache)
+    state_c = kda.read_conv_state(conv_cache, slots, channels, width - 1)
+    seq = torch.cat([state_c, mixed_qkv.float().unsqueeze(1)], dim=1)
+    w = conv_weight.reshape(channels, width).float()
+    conv_out = (seq * w.t().unsqueeze(0)).sum(dim=1)
+    if conv_bias is not None:
+        conv_out = conv_out + conv_bias.float()
+    conv_out = torch.nn.functional.silu(conv_out)
+    kda.write_conv_state(conv_cache, slots, seq[:, 1:, :])
+    q, k, v, g, beta = kda._prepare_qkv_gates(conv_out.unsqueeze(1), raw_g.unsqueeze(1), raw_beta.unsqueeze(1), A_log,
+                                              dt_bias, lower_bound, num_heads, head_dim, None)
+    state = kda.read_ssm_state(ssm_cache, slots)
+    out, state = kda.kda_recurrent_step(state, q[:, 0], k[:, 0], v[:, 0], torch.exp(g[:, 0]), beta[:, 0])
+    kda.write_ssm_state(ssm_cache, slots, state)
+    return out
+
+
+@pytest.mark.parametrize("dim_first", [True, False])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("conv_bias", [False, True])
+def test_functional_decode_step_equals_the_in_place_decode_bit_for_bit(dim_first, dtype, conv_bias):
+    params = _make_params(60)
+    if conv_bias:
+        params["conv_bias"] = torch.randn(C, generator=torch.Generator().manual_seed(61))
+    g = torch.Generator().manual_seed(62)
+    old = _new_caches(6, dim_first, dtype)
+    for cache in old:
+        cache.copy_(torch.randn(cache.shape, generator=g).to(dtype))
+    new = tuple(cache.clone() for cache in old)
+    state_idx = torch.tensor([4, 1, -1, 2])  # -1: padded row -> garbage slot
+    for step in range(5):
+        tok = {k: v.to(dtype) for k, v in _make_inputs(70 + step, 4).items()}
+        args = (tok["mixed_qkv"], tok["raw_g"], tok["raw_beta"], params["conv_weight"], params["conv_bias"],
+                params["A_log"], params["dt_bias"], params["lower_bound"])
+        expected = _in_place_decode_f552b8a5(*args, *old, state_idx, H, D)
+        before = tuple(cache.clone() for cache in new)
+        out, slots, conv_rows, ssm_rows = kda.kda_decode_step(*args, *new, state_idx, H, D)
+        assert all(torch.equal(a, b) for a, b in zip(new, before))  # the step only reads the caches
+        kda.write_kda_decode_state(*new, slots, conv_rows, ssm_rows)
+        assert torch.equal(out, expected)
+        assert all(torch.equal(a, b) for a, b in zip(new, old))
+        composed = tuple(cache.clone() for cache in before)
+        assert torch.equal(kda.kda_core_decode(*args, *composed, state_idx, H, D), expected)
+        assert all(torch.equal(a, b) for a, b in zip(composed, old))
+
+
+def _aten_ops(fn, *args):
+    """aten ops executed by ``fn(*args)`` (each one is a separate eager launch outside of a compiled graph)."""
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    ops = []
+
+    class _Count(TorchDispatchMode):
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            ops.append(str(func.overloadpacket.__name__))
+            return func(*args, **(kwargs or {}))
+
+    with _Count():
+        fn(*args)
+    return ops
+
+
+def test_eager_part_of_a_decode_step_is_two_cache_writes():
+    params = _make_params(63)
+    tok = _make_inputs(64, 2)
+    caches = _new_caches(4, False)
+    args = (tok["mixed_qkv"], tok["raw_g"], tok["raw_beta"], params["conv_weight"], params["conv_bias"],
+            params["A_log"], params["dt_bias"], params["lower_bound"], *caches, torch.tensor([1, 2]), H, D)
+    old_ops = _aten_ops(_in_place_decode_f552b8a5, *args)
+    _, slots, conv_rows, ssm_rows = kda.kda_decode_step(*args)
+    new_ops = _aten_ops(kda.write_kda_decode_state, *caches, slots, conv_rows, ssm_rows)
+    assert new_ops == ["index_copy_", "index_copy_"]
+    assert len(old_ops) > 30, old_ops  # the previously eager (compiler.disable'd) decode core
+
+
 def test_bf16_caches_and_inputs_stay_close_to_fp32_reference():
     params = _make_params(19)
     x = _make_inputs(20, 10)
@@ -324,7 +405,15 @@ def _load_layer_module(monkeypatch, metadata):
     habana_torch.utils = types.SimpleNamespace(internal=types.SimpleNamespace(is_lazy=lambda: False))
     habana.torch = habana_torch
     forward_context = types.ModuleType("vllm.forward_context")
-    forward_context.get_forward_context = lambda: types.SimpleNamespace(attn_metadata=metadata["value"])
+
+    class _ForwardContext:  # an existing object like vLLM's (dynamo cannot trace building a SimpleNamespace)
+
+        @property
+        def attn_metadata(self):
+            return metadata["value"]
+
+    context = _ForwardContext()
+    forward_context.get_forward_context = lambda: context
     for name, mod in (("habana_frameworks", habana), ("habana_frameworks.torch", habana_torch),
                       ("vllm", types.ModuleType("vllm")), ("vllm.forward_context", forward_context),
                       ("vllm_gaudi", types.ModuleType("vllm_gaudi")),
@@ -537,7 +626,75 @@ def test_compiled_layer_forward_has_parsable_fx_stack_traces(mode):
         f"FX nodes without a parsable stack_trace or compile error:\n{result.stdout}\n{result.stderr[-2000:]}")
 
 
+def _decode_graph_check():
+    """Fresh interpreter like ``_compile_check``: compiles the layer decode through aot_autograd with
+    keep_inference_input_mutations=True (input mutations stay visible as copy_ on the placeholders) and returns
+    the forward graphs' sizes, the in-place targets on graph inputs and whether result and caches match eager."""
+    from torch._dynamo.backends.common import aot_autograd
+
+    params = _make_params(43)
+    hidden = 16
+    g = torch.Generator().manual_seed(44)
+    caches = tuple(cache.copy_(torch.randn(cache.shape, generator=g)) for cache in _new_caches(4, False))
+    metadata = {"value": None}
+
+    class _MonkeyPatch:
+
+        def setitem(self, mapping, key, value):
+            mapping[key] = value
+
+    module = _load_layer_module(_MonkeyPatch(), metadata)
+    metadata["value"] = types.SimpleNamespace(is_prompt=False, load_indices_tensor=torch.tensor([[0, 0], [1, 3]]))
+    hidden_states = torch.randn(2, hidden, generator=g)
+    eager_layer = _FakeLayer(params, hidden, 45, tuple(cache.clone() for cache in caches))
+    expected = module.hpu_kda_forward(eager_layer, hidden_states)
+
+    graphs, mutated = [], []
+
+    def fw_compiler(gm, example_inputs):
+        placeholders = {n for n in gm.graph.nodes if n.op == "placeholder"}
+        graphs.append(sum(n.op == "call_function" for n in gm.graph.nodes))
+        for node in gm.graph.nodes:
+            schema = getattr(node.target, "_schema", None)
+            if node.op == "call_function" and schema is not None and schema.is_mutable and node.args \
+                    and node.args[0] in placeholders:
+                mutated.append(str(node.target))
+        return gm.forward
+
+    layer = _FakeLayer(params, hidden, 45, caches)
+    backend = aot_autograd(fw_compiler=fw_compiler, keep_inference_input_mutations=True)
+    with torch.no_grad():
+        out = torch.compile(module.hpu_kda_forward, backend=backend, dynamic=False)(layer, hidden_states)
+    return dict(graph_ops=graphs,
+                mutated=mutated,
+                out_equal=bool(torch.allclose(out, expected, rtol=1e-6, atol=1e-6)),
+                caches_equal=all(bool(torch.equal(a, b)) for a, b in zip(caches, eager_layer.kv_cache)))
+
+
+def test_compiled_layer_decode_traces_the_step_and_mutates_no_graph_input():
+    """The decode step is one compiled graph with the projections, the cache writes are the only eager part (two
+    index_copy_ in ``_write_decode_state``), followed by the resume graph (norm, o_proj). No graph writes into its
+    inputs, so HPU compile cannot drop a state update, and the caches end up as in eager mode."""
+    import json
+
+    pytest.importorskip("torch._dynamo")
+    result = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()), "decode_graphs"],
+                            capture_output=True,
+                            text=True,
+                            timeout=600)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr[-2000:]}"
+    stats = json.loads(result.stdout.strip().splitlines()[-1])
+    assert stats["mutated"] == []
+    assert stats["out_equal"] and stats["caches_equal"]
+    assert len(stats["graph_ops"]) == 2, stats  # step graph | 2 x index_copy_ (eager) | resume graph
+    assert stats["graph_ops"][0] > 30, stats  # the decode math is inside the first graph
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "decode_graphs":
+        import json
+        print(json.dumps(_decode_graph_check()))
+        sys.exit(0)
     unparsable = _compile_check(sys.argv[1])
     for item in unparsable:
         print(item)

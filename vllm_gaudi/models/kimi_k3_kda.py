@@ -15,15 +15,23 @@ import functools
 import torch
 
 from vllm_gaudi.extension.graph_state import lazy_step_hook
-from vllm_gaudi.ops.hpu_kda_pytorch import (gated_rmsnorm_sigmoid, kda_core_decode, kda_core_prefill)
+from vllm_gaudi.ops.hpu_kda_pytorch import (gated_rmsnorm_sigmoid, kda_core_prefill, kda_decode_step,
+                                            write_kda_decode_state)
 
 _BLOCK = 64  # tokens per traced block of the prefill token loop
 
 # The state update mutates the cache tensors in place and the prefill loop is long: run both outside of any
 # torch.compile graph (HPU compile silently drops in-place index_copy_ on aliased tensors, see qwen3_5.py).
+# Decode keeps only the two cache writes outside (the step itself is out of place and traced with the layer).
 # In lazy mode dynamo is disabled anyway, so this is a no-op there.
 _core_prefill = torch.compiler.disable(kda_core_prefill)
-_core_decode = torch.compiler.disable(kda_core_decode)
+
+
+@torch.compiler.disable
+def _write_decode_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows):
+    """Stores the decode state rows and passes ``core`` through, so the write is ordered before its consumers."""
+    write_kda_decode_state(conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
+    return core
 
 
 @functools.lru_cache(maxsize=None)
@@ -119,7 +127,13 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                 # fails on the unparsable FX stack_trace ("'NoneType' object has no attribute 'file'").
                 core = core.reshape(num_tokens, heads, head_dim)
             else:
-                core = _core_decode(mixed_qkv, raw_g, raw_beta, state_idx=state_idx[:num_tokens], **common)
+                core, slots, conv_rows, ssm_rows = kda_decode_step(mixed_qkv,
+                                                                   raw_g,
+                                                                   raw_beta,
+                                                                   state_idx=state_idx[:num_tokens],
+                                                                   **common)
+                # the statement ends with the disabled call (see the prefill comment above)
+                core = _write_decode_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
 
     if core is None:  # profile run without metadata: keep shapes, no state
         core = torch.zeros(num_tokens, heads, head_dim, dtype=torch.float32, device=hidden_states.device)
