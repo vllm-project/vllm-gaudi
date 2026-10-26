@@ -191,6 +191,19 @@ def test_lut_dequant_equals_the_reference_dequant_for_every_byte_and_scale(dtype
     assert torch.equal(situ.dequant_mxfp4(all_bytes, sc, dtype), situ.dequant_mxfp4_reference(all_bytes, sc, dtype))
 
 
+def test_bit_dequant_equals_the_reference_bit_for_bit_for_every_byte_and_valid_scale():
+    all_bytes = torch.arange(256, dtype=torch.uint8).reshape(1, 1, 256).repeat(251, 1, 1)  # every byte, 16 groups
+    scales = torch.arange(2, 253, dtype=torch.uint8).reshape(251, 1, 1).repeat(1, 1, 16)  # every valid scale
+    out = situ.dequant_mxfp4_bits(all_bytes, scales)
+    ref = situ.dequant_mxfp4_reference(all_bytes, scales, torch.bfloat16)
+    assert out.dtype == torch.bfloat16 and out.shape == ref.shape
+    assert torch.equal(out.view(torch.int16), ref.view(torch.int16))  # also the sign of zero
+    g = torch.Generator().manual_seed(37)
+    packed = torch.randint(0, 256, (3, 2, 16, 48), generator=g, dtype=torch.uint8)
+    sc = torch.randint(100, 140, (3, 2, 16, 3), generator=g, dtype=torch.uint8)
+    assert torch.equal(situ.dequant_mxfp4_bits(packed, sc), situ.dequant_mxfp4(packed, sc, torch.bfloat16))
+
+
 class _FakeLayer:
 
     def __init__(self, activation, beta=BETA, linear_beta=LINEAR_BETA, ep_rank=1, experts=4, hidden=64, inter=32):

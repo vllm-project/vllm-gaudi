@@ -114,6 +114,31 @@ def dequant_mxfp4_reference(packed: torch.Tensor,
     return values.reshape(*lead, rows, groups * MXFP4_BLOCK).to(dtype)
 
 
+def dequant_mxfp4_bits(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Gather-free bf16 dequant: the bf16 bit pattern of every value is assembled with int16 elementwise ops.
+
+    E2M1 nibble ``s e1 e0 m``: for ``e > 0`` the value is ``(1 + m / 2) * 2^(e - 1)``, so with the E8M0 scale byte
+    ``S`` the bf16 exponent field is ``e - 1 + S`` and the mantissa ``m << 6``; for ``e == 0`` it is ``0.5 * m``,
+    i.e. exponent field ``S - 1`` when ``m == 1`` and a (signed) zero otherwise. No table lookups (TPC gathers) and
+    no int32 temporaries; equal to ``dequant_mxfp4_reference`` bit for bit for scale bytes 2 .. 252 (outside that
+    range the result would leave the normal bf16 range; real checkpoints use scales around 2^-20 .. 2^8).
+    """
+    *lead, rows, half = packed.shape
+    groups = scales.shape[-1]
+    if half * 2 != groups * MXFP4_BLOCK or scales.shape[:-1] != packed.shape[:-1]:
+        raise ValueError(f"packed {tuple(packed.shape)} and scales {tuple(scales.shape)} do not match")
+    p = packed.to(torch.int16)
+    nib = torch.stack((p & 0x0F, p >> 4), dim=-1).reshape(*lead, rows, groups, MXFP4_BLOCK)
+    s = scales.to(torch.int16).unsqueeze(-1)  # [..., rows, groups, 1]
+    e = (nib >> 1) & 3
+    m = nib & 1
+    normal = e > 0
+    exponent = torch.where(normal, e + s - 1, m * (s - 1))
+    bits = (exponent << 7) | ((m * normal) << 6)
+    bits = torch.where(nib >= 8, bits | -0x8000, bits)  # sign bit (0x8000 as int16)
+    return bits.view(torch.bfloat16).reshape(*lead, rows, groups * MXFP4_BLOCK)
+
+
 def situ_moe_experts(x: torch.Tensor,
                      topk_ids: torch.Tensor,
                      topk_weights: torch.Tensor,
