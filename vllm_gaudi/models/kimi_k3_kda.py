@@ -5,6 +5,9 @@ Replaces the upstream forward, which needs Triton kernels and the ``_forward`` c
 HPU runner's mamba metadata (``HPUAttentionMetadataV1``) the same way models/qwen3_5.py does for GDN:
 ``load_indices_tensor`` (per cache group), ``padding_mask_flat``, ``has_initial_states_p`` and the
 ``(conv_state, ssm_state)`` tuple in ``self.kv_cache``.
+
+Prefix caching (per-block mamba state caching) and speculative decoding are not supported here: the state is
+read from and written to a single slot per request.
 """
 
 import torch
@@ -60,7 +63,13 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
     if attn_metadata is not None and kv_cache is not None and len(kv_cache) >= 2:
         state_idx = _state_indices(self, attn_metadata)
         if state_idx is not None:
+            if getattr(attn_metadata, "blocks_caching_range", None) is not None:
+                raise NotImplementedError("The HPU Kimi-K3 KDA does not support mamba prefix caching "
+                                          "(run with --no-enable-prefix-caching)")
             conv_cache, ssm_cache = kv_cache[0], kv_cache[1]
+            if tuple(ssm_cache.shape[1:]) != (heads, head_dim, head_dim):
+                raise RuntimeError(f"unexpected KDA recurrent state cache shape {tuple(ssm_cache.shape)}, "
+                                   f"expected [slots, {heads}, {head_dim}, {head_dim}]")
             conv_weight = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(-1))
             common = dict(conv_weight=conv_weight,
                           conv_bias=self.conv1d.bias,
