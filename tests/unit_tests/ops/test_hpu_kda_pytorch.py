@@ -1185,3 +1185,89 @@ def test_mutation_probe_detects_the_in_place_attn_res():
 
     mutated = _mutated_placeholders(wrap, (prefix, delta, blocks, norm_w, qk_w, out_w))
     assert mutated
+
+
+def _upstream_linear_module(class_name="KimiDecoderLayer"):
+    """A ``vllm.models.kimi_k3.amd.linear`` stand-in: forward -> self.forward_attn_residual (in place, upstream)."""
+
+    def _apply_attn_res(prefix_sum,
+                        block_residual,
+                        proj,
+                        norm,
+                        num_valid_blocks,
+                        delta=None,
+                        output_norm=None,
+                        block_write_idx=-1):  # what patches.py binds upstream's _apply_attn_res to
+        return kda.attn_res_torch(prefix_sum, delta, block_residual, norm.weight, proj.weight.squeeze(0),
+                                  None if output_norm is None else output_norm.weight, num_valid_blocks,
+                                  block_write_idx, norm.variance_epsilon,
+                                  0.0 if output_norm is None else output_norm.variance_epsilon)
+
+    class Layer(_ToyLayer):
+        use_attn_residuals = True
+
+        def forward(self, positions, hidden_states, residual, prefix_delta=None):
+            return self.forward_attn_residual(positions, hidden_states, residual, prefix_delta)
+
+        def forward_attn_residual(self, positions, hidden_states, block_residual, prefix_delta):
+            prefix_sum = hidden_states
+            hidden_states = _apply_attn_res(prefix_sum, block_residual, self.self_attention_res_proj,
+                                            self.self_attention_res_norm, self.prev_valid_blocks, prefix_delta,
+                                            self.input_layernorm,
+                                            self.block_write_idx if self.is_block_write_layer else -1)
+            if self.is_block_write_layer:
+                prefix_sum = None
+            hidden_states = self._run_self_attn(positions, hidden_states)
+            if prefix_sum is None:
+                prefix_sum, prefix_delta = hidden_states, None
+            else:
+                prefix_delta = hidden_states
+            hidden_states = _apply_attn_res(prefix_sum, block_residual, self.mlp_res_proj, self.mlp_res_norm,
+                                            self.prev_valid_blocks + (1 if self.is_block_write_layer else 0),
+                                            prefix_delta, self.post_attention_layernorm)
+            return prefix_sum, block_residual, self.mlp(hidden_states)
+
+    mod = types.ModuleType("vllm.models.kimi_k3.amd.linear")
+    setattr(mod, class_name, Layer)
+    return mod, Layer
+
+
+@pytest.mark.parametrize("class_name", kda.KIMI_DECODER_LAYER_CLASSES)
+def test_install_patches_the_decoder_layer_the_model_calls_and_removes_input_mutations(class_name):
+    mod, cls = _upstream_linear_module(class_name)
+    _, _, params = _toy_params(2, 16, 140)
+    g = torch.Generator().manual_seed(1)
+    hidden_states, blocks = torch.randn(5, 16, generator=g), torch.randn(5, 3, 16, generator=g)
+    delta = torch.randn(5, 16, generator=g)
+    layer = cls(1, 4, params[1])
+
+    def probe():
+        return _mutated_placeholders(lambda backend: torch.compile(layer, backend=backend),
+                                     (None, hidden_states.clone(), blocks.clone(), delta))
+
+    assert probe()  # upstream in-place attn_res: copy_ into the graph inputs
+    assert kda.install_functional_attn_res(mod) is cls
+    patched = cls.forward_attn_residual
+    assert kda.install_functional_attn_res(mod) is cls and cls.forward_attn_residual is patched  # idempotent
+    assert probe() == []
+    expected = kda.forward_attn_residual_functional(layer, None, hidden_states, blocks, delta)
+    for a, b in zip(layer(None, hidden_states, blocks, delta), expected):
+        torch.testing.assert_close(a, b)
+
+
+def test_install_reports_a_missing_decoder_layer():
+    assert kda.install_functional_attn_res(types.ModuleType("empty")) is None
+    renamed = types.ModuleType("renamed")
+    renamed.SomeDecoderLayer = _upstream_linear_module()[1]
+    assert kda.install_functional_attn_res(renamed) is None
+
+
+def test_attn_res_layer_variants_of_kimi_k3():
+    layers = [
+        types.SimpleNamespace(use_attn_residuals=True,
+                              is_block_write_layer=i % 12 == 0,
+                              block_write_idx=i // 12,
+                              prev_valid_blocks=-(-i // 12)) for i in range(93)
+    ]
+    assert kda.attn_res_layer_variants(layers + [torch.nn.Linear(2, 2)]) == 16
+    assert kda.attn_res_layer_variants([torch.nn.Linear(2, 2)]) == 1

@@ -31,7 +31,7 @@ import torch.nn as nn
 import vllm_gaudi.envs as gaudi_envs
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
-from vllm_gaudi.ops.hpu_kda_pytorch import tag_kda_cache_groups
+from vllm_gaudi.ops.hpu_kda_pytorch import attn_res_layer_variants, tag_kda_cache_groups
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
@@ -6411,15 +6411,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         if not self.is_pooling_model:
             self.defragmenter = OnlineDefragmenter(self.kv_caches, self.block_size)
-        # Profiling
-        prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
-        if prompt_profile_cfg or decode_profile_cfg:
-            self._generate_profiling(prompt_profile_cfg, decode_profile_cfg)
-            raise AssertionError("Finished profiling")
-        kv_caches = self.kv_caches
-
+        # before the profiling run too: past the limit dynamo silently runs the frame eagerly
         if not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager:
             multiplier = 5 if self.compile_config.regional_compilation else 1
+            if self.compile_config.regional_compilation:
+                # all decoder layers share one code object; per-layer python ints (Kimi-K3 attn_res) are guarded
+                multiplier *= attn_res_layer_variants(self.model.modules())
             cache_size_limit = 1 + multiplier * (len(self.bucketing_manager.prompt_buckets) +
                                                  len(self.bucketing_manager.decode_buckets))
             torch._dynamo.config.cache_size_limit = max(cache_size_limit, torch._dynamo.config.cache_size_limit)
@@ -6427,6 +6424,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # the cache_size_limit and accumulated_cache_size_limit
             torch._dynamo.config.accumulated_cache_size_limit = max(cache_size_limit * 8,
                                                                     torch._dynamo.config.accumulated_cache_size_limit)
+
+        # Profiling
+        prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
+        if prompt_profile_cfg or decode_profile_cfg:
+            self._generate_profiling(prompt_profile_cfg, decode_profile_cfg)
+            raise AssertionError("Finished profiling")
+        kv_caches = self.kv_caches
 
         if self.skip_warmup:
             logger.info("Skipping warmup...")

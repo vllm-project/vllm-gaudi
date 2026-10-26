@@ -566,6 +566,60 @@ def forward_attn_residual_functional(self, positions, hidden_states, block_resid
     return prefix_sum, block_residual, hidden_states
 
 
+# upstream vllm/models/kimi_k3/amd/linear.py names it KimiDecoderLayer; KimiLinearDecoderLayer is the older name
+KIMI_DECODER_LAYER_CLASSES = ("KimiDecoderLayer", "KimiLinearDecoderLayer")
+
+
+def kimi_decoder_layer_class(linear_mod) -> type | None:
+    """The decoder layer class of the Kimi-K3 ``linear`` module that has ``forward_attn_residual``, or None."""
+    for name in KIMI_DECODER_LAYER_CLASSES:
+        cls = getattr(linear_mod, name, None)
+        if cls is not None and hasattr(cls, "forward_attn_residual"):
+            return cls
+    return None
+
+
+def install_functional_attn_res(linear_mod) -> type | None:
+    """Replace ``forward_attn_residual`` of the Kimi-K3 decoder layer with the out-of-place version.
+
+    Returns the patched class (idempotent), or None when ``linear_mod`` has no such class; the caller must report
+    that loudly: without the patch the in-place upstream version runs inside the per-layer compiled graphs.
+    """
+    cls = kimi_decoder_layer_class(linear_mod)
+    if cls is None or getattr(cls.forward_attn_residual, "_hpu_functional_attn_res", False):
+        return cls
+
+    def forward_attn_residual(self, positions, hidden_states, block_residual, prefix_delta):
+        if hidden_states.dim() == 3:
+            hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+        if prefix_delta is not None and prefix_delta.dim() == 3:
+            prefix_delta = prefix_delta.reshape(-1, prefix_delta.shape[-1])
+        if positions is not None and positions.dim() == 2:
+            positions = positions.reshape(-1)
+        if block_residual.dim() == 3 and (block_residual.shape[0] != hidden_states.shape[0]
+                                          or block_residual.shape[-1] != hidden_states.shape[-1]):
+            # Silently replacing the block bank with zeros would drop the stored blocks and corrupt every
+            # later attn_res mix, so fail loudly instead.
+            raise RuntimeError(f"Kimi-K3 block residual bank {tuple(block_residual.shape)} does not match "
+                               f"the hidden states {tuple(hidden_states.shape)}")
+        return forward_attn_residual_functional(self, positions, hidden_states, block_residual, prefix_delta)
+
+    forward_attn_residual._hpu_functional_attn_res = True
+    cls.forward_attn_residual = forward_attn_residual
+    return cls
+
+
+def attn_res_layer_variants(modules) -> int:
+    """Distinct (is_block_write_layer, block_write_idx, prev_valid_blocks) of the attn_res decoder layers, >= 1.
+
+    dynamo specializes these python ints, so with regional compilation every variant is its own cache entry of the
+    shared forward code object, per bucket shape (Kimi-K3: 93 layers, block 12 -> 16 variants).
+    """
+    variants = {(m.is_block_write_layer, m.block_write_idx, m.prev_valid_blocks)
+                for m in modules if getattr(m, "use_attn_residuals", False) and hasattr(m, "prev_valid_blocks")}
+    return max(1, len(variants))
+
+
 def _layer_attn_res(prefix_sum, block_residual, proj, norm, num_valid_blocks, delta, output_norm, block_write_idx):
     return attn_res_functional(prefix_sum, delta, block_residual, norm.weight, proj.weight.squeeze(0),
                                None if output_norm is None else output_norm.weight, num_valid_blocks,
