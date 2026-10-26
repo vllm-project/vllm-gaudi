@@ -70,3 +70,44 @@ def test_trace_handler_swallows_export_errors(tmp_path):
 
     cfg.make_trace_handler(str(tmp_path), 1)(Broken())
     assert list(tmp_path.iterdir()) == []
+
+
+def test_trace_names_include_rank_and_pid_and_are_distinct(tmp_path):
+    import time
+    handler = cfg.make_trace_handler(str(tmp_path), 3, use_gzip=False)
+    handler(_OneArgProf())
+    time.sleep(0.01)
+    handler(_OneArgProf())
+    names = sorted(f.name for f in tmp_path.iterdir())
+    assert len(set(names)) == 2
+    assert all(n.startswith(f"3_{__import__('os').getpid()}_") for n in names)
+
+
+def test_trace_handler_logger_is_under_vllm_tree():
+    assert cfg._logger.name.startswith("vllm.")
+
+
+def _load_setup_profiler(captured):
+    """Compile only setup_profiler from extension/profiler.py (the module imports Habana / vLLM at load time)."""
+    import ast
+    import types
+    path = _PATH.with_name("profiler.py")
+    tree = ast.parse(path.read_text())
+    func = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "setup_profiler")
+    fake_profiler = types.SimpleNamespace(
+        schedule=lambda **kw: "schedule",
+        ProfilerActivity=types.SimpleNamespace(CPU="cpu", HPU="hpu"),
+        profile=lambda **kw: captured.update(kw) or "profiler",
+    )
+    ns = {"torch": types.SimpleNamespace(profiler=fake_profiler), "make_trace_handler": cfg.make_trace_handler}
+    exec(compile(ast.Module([func], []), str(path), "exec"), ns)
+    return ns["setup_profiler"]
+
+
+def test_setup_profiler_passes_rank_to_the_trace_handler(tmp_path):
+    captured = {}
+    setup = _load_setup_profiler(captured)
+    assert setup(warmup=0, active=1, output_dir=str(tmp_path), rank=5) == "profiler"
+    captured["on_trace_ready"](_OneArgProf())
+    (trace, ) = tmp_path.iterdir()
+    assert trace.name.startswith("5_")

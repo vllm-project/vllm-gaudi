@@ -62,7 +62,8 @@ def setup_step_profiler(steps, rank=0):
     return setup_profiler(warmup=0,
                           active=active,
                           output_dir=output_dir,
-                          with_stack=bool(get_config().VLLM_PROFILE_WITH_STACK))
+                          with_stack=bool(get_config().VLLM_PROFILE_WITH_STACK),
+                          rank=rank)
 
 
 class HPUWorker(WorkerBase):

@@ -5914,6 +5914,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         time.perf_counter() - step_start, rank)
             profiler = self._profiler_call(profiler, "step", rank)
         self._profiler_call(profiler, "stop", rank)
+        self._barrier_after_profiling(rank)
+
+    @staticmethod
+    def _barrier_after_profiling(rank: int) -> None:
+        """Wait until every rank finished exporting its trace (stop() writes it synchronously).
+
+        All ranks run the same dummy steps, also those not listed in VLLM_PROFILE_RANKS, so every rank reaches
+        this barrier. Without it a rank still compressing a large trace is killed by the Ray teardown that
+        follows the 'Finished profiling' assertion on the first rank to get there. Never raises.
+        """
+        try:
+            if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+                torch.distributed.barrier()
+        except Exception as exc:
+            logger.warning("Barrier after profiling failed on rank %d: %r", rank, exc)
 
     @staticmethod
     def _profiler_call(profiler, method: str, rank: int):

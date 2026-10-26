@@ -10,7 +10,8 @@ import shutil
 import time
 from typing import Callable
 
-_logger = logging.getLogger(__name__)
+# under the 'vllm' logger tree: vLLM attaches its handler there, other names would drop the INFO lines
+_logger = logging.getLogger('vllm.gaudi.profiling')
 
 
 def profiling_max_batched_tokens(prompt_cfg: tuple | None, decode_cfg: tuple | None, current: int) -> int:
@@ -43,7 +44,7 @@ def bucketing_max_batched_tokens(tokens: int, mamba_chunk_size: int, profiling: 
 
 
 def make_trace_handler(output_dir: str, rank: int, use_gzip: bool = True) -> Callable:
-    """``on_trace_ready`` callback writing ``<output_dir>/<rank>_<ms>.pt.trace.json[.gz]``.
+    """``on_trace_ready`` callback writing ``<output_dir>/<rank>_<pid>_<ms>.pt.trace.json[.gz]``.
 
     ``torch.profiler.tensorboard_trace_handler(..., use_gzip=True)`` calls ``prof.export_chrome_trace(path, True)``
     which the Habana profiler wrapper does not accept (TypeError, no trace written). This handler calls
@@ -51,7 +52,7 @@ def make_trace_handler(output_dir: str, rank: int, use_gzip: bool = True) -> Cal
     """
 
     def handler(prof) -> None:
-        path = os.path.join(output_dir, f"{rank}_{int(time.time() * 1000)}.pt.trace.json")
+        path = os.path.join(output_dir, f"{rank}_{os.getpid()}_{int(time.time() * 1000)}.pt.trace.json")
         try:
             os.makedirs(output_dir, exist_ok=True)
             prof.export_chrome_trace(path)
