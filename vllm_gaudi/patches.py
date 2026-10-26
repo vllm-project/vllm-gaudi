@@ -1276,38 +1276,7 @@ def _patch_kimi_linear_weights() -> None:
 def _patch_kimi_attn_res() -> None:
     """Pure PyTorch fallback for Kimi-K3 attn_res when Triton is disabled on HPU."""
     try:
-        def _torch_attn_res(
-            prefix, delta, blocks, norm_weight, qk_weight,
-            output_norm_weight, num_blocks, block_write_idx, eps, output_norm_eps,
-            quant_dtype=None,
-        ):
-            import torch.nn.functional as F
-            if prefix.dim() == 3:
-                prefix = prefix.reshape(-1, prefix.shape[-1])
-            if delta is not None and delta.dim() == 3:
-                delta = delta.reshape(-1, delta.shape[-1])
-
-            if delta is not None:
-                prefix = prefix + delta
-
-            if blocks.dim() == 3:
-                if blocks.shape[0] != prefix.shape[0] or blocks.shape[-1] != prefix.shape[-1]:
-                    blocks = prefix.new_zeros(prefix.shape[0], blocks.shape[1], prefix.shape[-1])
-
-            if block_write_idx >= 0:
-                blocks[:, block_write_idx] = prefix
-
-            if num_blocks == 0:
-                output = prefix
-            else:
-                values = torch.cat((blocks[:, :num_blocks], prefix.unsqueeze(1)), dim=1)
-                hidden_size = prefix.shape[-1]
-                keys = F.rms_norm(values, (hidden_size,), norm_weight, eps)
-                probs = (keys @ qk_weight).softmax(dim=-1)
-                output = torch.matmul(probs.unsqueeze(1), values).squeeze(1)
-            if output_norm_weight is not None:
-                output = F.rms_norm(output, (prefix.shape[-1],), output_norm_weight, output_norm_eps)
-            return output
+        from vllm_gaudi.ops.hpu_kda_pytorch import attn_res_torch as _torch_attn_res
 
         try:
             import vllm.models.kimi_k3.amd.ops.attn_res as _attn_res_mod
@@ -1405,8 +1374,12 @@ def _patch_kimi_k3_arch() -> None:
                     prefix_delta = prefix_delta.reshape(-1, prefix_delta.shape[-1])
                 if positions is not None and positions.dim() == 2:
                     positions = positions.reshape(-1)
-                if block_residual.dim() == 3 and (block_residual.shape[0] != hidden_states.shape[0] or block_residual.shape[-1] != hidden_states.shape[-1]):
-                    block_residual = hidden_states.new_zeros(hidden_states.shape[0], block_residual.shape[1], hidden_states.shape[-1])
+                if block_residual.dim() == 3 and (block_residual.shape[0] != hidden_states.shape[0]
+                                                  or block_residual.shape[-1] != hidden_states.shape[-1]):
+                    # Silently replacing the block bank with zeros would drop the stored blocks and corrupt every
+                    # later attn_res mix, so fail loudly instead.
+                    raise RuntimeError(f"Kimi-K3 block residual bank {tuple(block_residual.shape)} does not match "
+                                       f"the hidden states {tuple(hidden_states.shape)}")
                 return orig_forward_attn_res(self, positions, hidden_states, block_residual, prefix_delta)
 
             _amd_linear.KimiLinearDecoderLayer.forward_attn_residual = _safe_forward_attn_residual

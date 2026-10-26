@@ -402,3 +402,66 @@ def tag_kda_cache_groups(named_modules, kv_cache_groups, is_mamba_group: Callabl
         seen.add(prefix if prefix in layer_to_group else module_name)
     unmatched = [name for name in layer_to_group if name not in seen]
     return tagged, untagged, unmatched
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Kimi-K3 attention residual (attn_res), pure PyTorch twin of vllm/models/kimi_k3/amd/ops/attn_res.py
+# ---------------------------------------------------------------------------------------------------------------
+def attn_res_torch(prefix: torch.Tensor,
+                   delta: torch.Tensor | None,
+                   blocks: torch.Tensor,
+                   norm_weight: torch.Tensor,
+                   qk_weight: torch.Tensor,
+                   output_norm_weight: torch.Tensor | None,
+                   num_blocks: int,
+                   block_write_idx: int,
+                   eps: float,
+                   output_norm_eps: float,
+                   quant_dtype=None) -> torch.Tensor:
+    """Same results AND side effects as the Triton ``attn_res`` kernel.
+
+    Per row, in this order:
+      1. with a delta: ``prefix <- round_to_prefix_dtype(prefix + delta)`` is stored back INTO ``prefix`` (the
+         callers return that tensor as the running prefix sum and rely on it);
+      2. ``block_write_idx >= 0``: the updated prefix is stored into ``blocks[:, block_write_idx]``;
+      3. softmax-weighted mix (fp32) of the ``num_blocks`` stored blocks and the updated prefix, with logits
+         ``sum(v * norm_weight * qk_weight) * rsqrt(mean(v^2) + eps)``; no sources -> the prefix itself;
+      4. optional RMSNorm of the mix with ``output_norm_weight``; the result has the dtype of ``prefix``.
+    ``prefix`` [M, D] and ``blocks`` [M, R, D] are mutated in place; a shape mismatch raises (the old fallback
+    silently replaced the block bank with zeros).
+    """
+    del quant_dtype
+    if prefix.dim() == 3:  # [B, S, D]: flatten with views so that the in-place update reaches the caller's tensor
+        flat_delta = None if delta is None else delta.view(-1, delta.shape[-1])
+        out = attn_res_torch(prefix.view(-1, prefix.shape[-1]), flat_delta, blocks, norm_weight, qk_weight,
+                             output_norm_weight, num_blocks, block_write_idx, eps, output_norm_eps)
+        return out.view(prefix.shape)
+    if prefix.dim() != 2:
+        raise ValueError(f"attn_res expects a 2D or 3D prefix, got {tuple(prefix.shape)}")
+    num_tokens, hidden = prefix.shape
+    if delta is not None and delta.shape != prefix.shape:
+        raise ValueError(f"delta {tuple(delta.shape)} does not match prefix {tuple(prefix.shape)}")
+    if blocks.dim() != 3 or blocks.shape[0] != num_tokens or blocks.shape[-1] != hidden:
+        raise ValueError(f"block bank {tuple(blocks.shape)} does not match prefix {tuple(prefix.shape)}")
+
+    if delta is not None:
+        updated = (prefix.float() + delta.float()).to(prefix.dtype)
+        prefix.copy_(updated)  # the kernel's in-place side effect
+        updated = updated.float()
+    else:
+        updated = prefix.float()
+    if block_write_idx >= 0:
+        blocks[:, block_write_idx] = updated.to(blocks.dtype)
+
+    if num_blocks == 0:
+        mixed = updated
+    else:
+        values = torch.cat((blocks[:, :num_blocks].float(), updated.unsqueeze(1)), dim=1)  # [M, S, D]
+        rstd = torch.rsqrt(values.pow(2).mean(dim=-1) + eps)  # [M, S]
+        logits = (values * (norm_weight.float() * qk_weight.float())).sum(dim=-1) * rstd
+        probs = torch.softmax(logits, dim=-1)
+        mixed = (probs.unsqueeze(-1) * values).sum(dim=1)
+    if output_norm_weight is not None:
+        mixed = mixed * torch.rsqrt(mixed.pow(2).mean(dim=-1, keepdim=True) + output_norm_eps)
+        mixed = mixed * output_norm_weight.float()
+    return mixed.to(prefix.dtype)

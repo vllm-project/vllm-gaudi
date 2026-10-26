@@ -712,3 +712,143 @@ def test_prefill_settings_come_from_envs_once(monkeypatch):
     module._prefill_settings.cache_clear()
     monkeypatch.delenv("HPU_KIMI_KDA_PREFILL")
     assert module._prefill_settings() == ("chunked", 64)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# attn_res: same results AND side effects as the upstream Triton kernel
+# ---------------------------------------------------------------------------------------------------------------
+def reference_attn_res_kernel(prefix, delta, blocks, norm_weight, qk_weight, output_norm_weight, num_blocks,
+                              block_write_idx, eps, output_norm_eps):
+    """Row-by-row transcription of vllm/models/kimi_k3/amd/ops/attn_res.py::_attn_res_kernel (side effects included)."""
+    tokens, hidden = prefix.shape
+    output = prefix.new_empty(prefix.shape)
+    input_qk_weight = norm_weight.float() * qk_weight.float()
+    for row in range(tokens):
+        updated = prefix[row].float()
+        if delta is not None:
+            updated = updated + delta[row].float()
+            updated = updated.to(prefix.dtype).float()  # "match the BF16 prefix-add result"
+            prefix[row] = updated.to(prefix.dtype)  # tl.store(prefix_ptr, ...)
+        if block_write_idx >= 0:
+            blocks[row, block_write_idx] = updated.to(blocks.dtype)  # WRITE_BLOCK
+        if num_blocks == 0:
+            mixed = updated
+        else:
+            sources = [blocks[row, r].float() for r in range(num_blocks)] + [updated]
+            logits = []
+            for value in sources:
+                rstd = torch.rsqrt((value * value).sum() / hidden + eps)
+                logits.append((value * input_qk_weight).sum() * rstd)
+            weights = torch.softmax(torch.stack(logits), dim=0)
+            mixed = sum(w * v for w, v in zip(weights, sources))
+        out = mixed
+        if output_norm_weight is not None:
+            out = mixed * torch.rsqrt((mixed * mixed).sum() / hidden + output_norm_eps) * output_norm_weight.float()
+        output[row] = out.to(prefix.dtype)
+    return output
+
+
+def _attn_res_case(seed, dtype, tokens=5, hidden=16, bank=4):
+    g = torch.Generator().manual_seed(seed)
+    prefix = torch.randn(tokens, hidden, generator=g).to(dtype)
+    delta = torch.randn(tokens, hidden, generator=g).to(dtype)
+    blocks = torch.randn(tokens, bank, hidden, generator=g).to(dtype)
+    norm_weight = torch.rand(hidden, generator=g) + 0.5
+    qk_weight = torch.randn(hidden, generator=g)
+    output_norm_weight = torch.rand(hidden, generator=g) + 0.5
+    return prefix, delta, blocks, norm_weight, qk_weight, output_norm_weight
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("has_delta", [True, False])
+@pytest.mark.parametrize("num_blocks,block_write_idx", [(0, -1), (0, 0), (2, -1), (2, 2), (3, 1)])
+@pytest.mark.parametrize("output_norm", [True, False])
+def test_attn_res_torch_matches_kernel_results_and_side_effects(dtype, has_delta, num_blocks, block_write_idx,
+                                                                output_norm):
+    prefix, delta, blocks, norm_w, qk_w, out_w = _attn_res_case(120 + num_blocks, dtype)
+    delta = delta if has_delta else None
+    out_w = out_w if output_norm else None
+    ref_prefix, ref_blocks = prefix.clone(), blocks.clone()
+    ref_out = reference_attn_res_kernel(ref_prefix, delta, ref_blocks, norm_w, qk_w, out_w, num_blocks,
+                                        block_write_idx, 1e-6, 1e-6)
+
+    out = kda.attn_res_torch(prefix, delta, blocks, norm_w, qk_w, out_w, num_blocks, block_write_idx, 1e-6, 1e-6)
+
+    tol = dict(rtol=1e-5, atol=1e-5) if dtype == torch.float32 else dict(rtol=3e-2, atol=3e-2)
+    assert out.dtype == dtype
+    torch.testing.assert_close(out, ref_out, **tol)
+    # the side effects must be identical, not merely close: they feed every later layer
+    assert torch.equal(prefix, ref_prefix)
+    assert torch.equal(blocks, ref_blocks)
+    if has_delta:
+        assert not torch.equal(prefix, _attn_res_case(120 + num_blocks, dtype)[0])  # really updated in place
+
+
+def test_attn_res_torch_updates_a_3d_prefix_in_place_and_rejects_mismatched_banks():
+    prefix, delta, blocks, norm_w, qk_w, out_w = _attn_res_case(130, torch.float32, tokens=6)
+    expected = (prefix + delta).clone()
+    kda.attn_res_torch(prefix.view(2, 3, -1), delta.view(2, 3, -1), blocks, norm_w, qk_w, out_w, 2, -1, 1e-6, 1e-6)
+    torch.testing.assert_close(prefix, expected, rtol=0, atol=0)
+    with pytest.raises(ValueError, match="block bank"):
+        kda.attn_res_torch(prefix, None, blocks[:3], norm_w, qk_w, None, 1, -1, 1e-6, 1e-6)
+
+
+def _toy_residual_stream(attn_res_fn, num_layers=14, tokens=5, hidden=16, block_size=12, seed=140):
+    """The Kimi-K3 forward_attn_residual / KimiLinearModel.forward control flow with toy sublayers."""
+    g = torch.Generator().manual_seed(seed)
+    mk = lambda *shape: torch.rand(*shape, generator=g) + 0.5  # noqa: E731
+    layers = []
+    for _ in range(num_layers):
+        layers.append(
+            dict(attn_norm=mk(hidden),
+                 attn_qk=torch.randn(hidden, generator=g),
+                 mlp_norm=mk(hidden),
+                 mlp_qk=torch.randn(hidden, generator=g),
+                 ln1=mk(hidden),
+                 ln2=mk(hidden),
+                 w_attn=torch.randn(hidden, hidden, generator=g) * 0.3,
+                 w_mlp=torch.randn(hidden, hidden, generator=g) * 0.3))
+    final_norm, final_qk = mk(hidden), torch.randn(hidden, generator=g)
+    embeddings = torch.randn(tokens, hidden, generator=g)
+    num_bank = -(-num_layers // block_size)
+    blocks = embeddings.new_empty(tokens, num_bank, hidden)
+    hidden_states, prefix_delta = embeddings.clone(), None
+    for idx, p in enumerate(layers):
+        is_write = idx % block_size == 0
+        prev_valid = -(-idx // block_size)
+        prefix_sum = hidden_states
+        h = attn_res_fn(prefix_sum, prefix_delta, blocks, p["attn_norm"], p["attn_qk"], p["ln1"], prev_valid,
+                        idx // block_size if is_write else -1, 1e-6, 1e-6)
+        if is_write:
+            prefix_sum = None
+        h = torch.tanh(h @ p["w_attn"])
+        if prefix_sum is None:
+            prefix_sum, prefix_delta = h, None
+        else:
+            prefix_delta = h
+        h = attn_res_fn(prefix_sum, prefix_delta, blocks, p["mlp_norm"], p["mlp_qk"], p["ln2"],
+                        prev_valid + (1 if is_write else 0), -1, 1e-6, 1e-6)
+        h = torch.tanh(h @ p["w_mlp"])
+        hidden_states, prefix_delta = prefix_sum, h
+    final = attn_res_fn(hidden_states, prefix_delta, blocks, final_norm, final_qk, None, num_bank, -1, 1e-6, 0.0)
+    return final, hidden_states, blocks
+
+
+def test_residual_stream_accumulates_across_layers_like_the_kernel():
+    final, last_prefix, bank = _toy_residual_stream(kda.attn_res_torch)
+    ref_final, ref_prefix, ref_bank = _toy_residual_stream(reference_attn_res_kernel)
+    torch.testing.assert_close(final, ref_final, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(last_prefix, ref_prefix, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(bank, ref_bank, rtol=1e-4, atol=1e-4)
+
+
+def test_residual_stream_test_detects_the_old_out_of_place_behaviour():
+    def out_of_place(prefix, delta, *args):
+        # what the previous fallback did: add the delta to a local copy only
+        if delta is not None:
+            prefix = prefix + delta
+        return kda.attn_res_torch(prefix, None, *args)
+
+    broken_final, _, _ = _toy_residual_stream(out_of_place)
+    ref_final, _, _ = _toy_residual_stream(reference_attn_res_kernel)
+    assert not torch.allclose(broken_final, ref_final, rtol=1e-2, atol=1e-2)
