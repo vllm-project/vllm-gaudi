@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     HPU_KIMI_KDA_CHUNK_SIZE: int = 64
     HPU_KIMI_KDA_MARK_STEP_CHUNKS: int = 1
     HPU_KIMI_SITU_IMPL: str = "exact"
+    HPU_KIMI_SITU_MARK_STEP: bool = True
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -150,6 +151,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # weights dequantized per expert chunk); "silu" maps SiTU to silu in the fused kernel (fast, APPROXIMATE).
     "HPU_KIMI_SITU_IMPL":
     lambda: os.environ.get("HPU_KIMI_SITU_IMPL", "exact").strip().lower(),
+    # Lazy mode only, and only for forwards that run outside HPU graphs: cut the lazy graph with a mark_step after
+    # every expert chunk of the exact SiTU experts (and every KDA prefill chunk block). 0 disables the cuts.
+    "HPU_KIMI_SITU_MARK_STEP":
+    lambda: os.environ.get("HPU_KIMI_SITU_MARK_STEP", "1").strip().lower() not in ("0", "false", "off"),
 }
 
 # end-env-vars-definition

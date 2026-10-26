@@ -14,6 +14,7 @@ import functools
 
 import torch
 
+from vllm_gaudi.extension.graph_state import lazy_step_hook
 from vllm_gaudi.ops.hpu_kda_pytorch import (gated_rmsnorm_sigmoid, kda_core_decode, kda_core_prefill)
 
 _BLOCK = 64  # tokens per traced block of the prefill token loop
@@ -49,7 +50,6 @@ def _state_indices(self, attn_metadata) -> torch.Tensor:
 
 def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor = None) -> torch.Tensor:
     """Real KDA forward (replacement for KimiK3DeltaAttention.forward)."""
-    import habana_frameworks.torch as htorch
     from vllm.forward_context import get_forward_context
 
     orig_3d = False
@@ -100,7 +100,7 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                 mask = getattr(attn_metadata, "padding_mask_flat", None)
                 if mask is not None:
                     mask = mask.reshape(num_seqs, seq_len)
-                step_hook = htorch.core.mark_step if htorch.utils.internal.is_lazy() else None
+                step_hook = lazy_step_hook()  # lazy and outside HPU graphs only (a mark_step breaks a capture)
                 prefill_impl, chunk_size, mark_step_chunks = _prefill_settings()
                 core = _core_prefill(mixed_qkv.reshape(num_seqs, seq_len, -1),
                                      raw_g.reshape(num_seqs, seq_len, -1),

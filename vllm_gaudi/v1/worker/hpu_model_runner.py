@@ -35,6 +35,7 @@ from vllm_gaudi.ops.hpu_kda_pytorch import tag_kda_cache_groups
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
+from vllm_gaudi.extension.graph_state import forward_graph_mode
 from vllm_gaudi.extension.profiling_cfg import profiling_max_batched_tokens
 from vllm_gaudi.extension.runtime import clear_config, finalize_config, get_config
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
@@ -3785,7 +3786,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                 f"graphs{'T' if use_graphs else 'F'}")
         else:
             model_event_name = 'model_executable'
-        with self.profiler.record_event('internal', model_event_name):
+        with self.profiler.record_event('internal', model_event_name), forward_graph_mode(use_graphs):
             hidden_states = self.model.forward(input_ids=token_ids,
                                                positions=position_ids,
                                                attn_metadata=trimmed_attn_metadata,

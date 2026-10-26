@@ -321,9 +321,3 @@ def test_step_hook_runs_per_chunk_only_for_large_batches(tokens, expected_steps)
                           experts, 0, BETA, LINEAR_BETA, expert_chunk=4, token_tile=16, gather_max_tokens=0,
                           step_hook=lambda: steps.append(1), step_min_tokens=16)
     assert len(steps) == expected_steps
-
-
-def test_lazy_step_hook_is_none_without_habana(monkeypatch):
-    assert situ.lazy_step_hook() is None
-    monkeypatch.setenv("HPU_KIMI_SITU_MARK_STEP", "0")
-    assert situ.lazy_step_hook() is None

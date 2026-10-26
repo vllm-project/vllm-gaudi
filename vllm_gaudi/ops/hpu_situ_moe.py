@@ -16,7 +16,6 @@ matmuls with static shapes, like ``_unfused_swigluoai_moe`` (ops/hpu_fused_moe.p
 
 from __future__ import annotations
 
-import os
 from typing import Callable
 
 import torch
@@ -128,7 +127,7 @@ def situ_moe_experts(x: torch.Tensor,
                      token_tile: int = 512,
                      gather_max_tokens: int | None = None,
                      step_hook: Callable[[], None] | None = None,
-                     step_min_tokens: int = 256) -> torch.Tensor:
+                     step_min_tokens: int = 0) -> torch.Tensor:
     """Per-rank partial routed-expert output (before the cross-rank reduction), same contract as the fused op.
 
     x [T, H]; topk_ids / topk_weights [T, K] with GLOBAL expert ids; this rank owns the experts
@@ -138,8 +137,8 @@ def situ_moe_experts(x: torch.Tensor,
     ``G = T * K`` experts that can be hit whenever that is fewer than the local experts (optionally only up to
     ``gather_max_tokens`` tokens), otherwise all local experts are computed densely and masked by the routing
     weight. Everything is accumulated in fp32. ``step_hook`` (``htorch.core.mark_step`` in lazy mode) runs after
-    every expert chunk when more than ``step_min_tokens`` tokens are processed: it must stay off for the small
-    (decode) batches that are captured into HPU graphs, where a mark_step would break the capture.
+    every expert chunk when more than ``step_min_tokens`` tokens are processed. The caller passes None whenever
+    the forward runs under HPU graphs (a mark_step would break the capture), see extension/graph_state.py.
     """
     tokens, hidden = x.shape
     k = topk_ids.shape[-1]
@@ -197,18 +196,10 @@ def situ_moe_mxfp4(x: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.
                             **kwargs)
 
 
-def lazy_step_hook() -> Callable[[], None] | None:
-    """``htorch.core.mark_step`` in lazy mode (None in eager / torch.compile mode or without Habana frameworks).
-
-    HPU_KIMI_SITU_MARK_STEP=0 disables it. Imported on first use at runtime, never at plugin load.
-    """
-    if os.environ.get("HPU_KIMI_SITU_MARK_STEP", "1").strip().lower() in ("0", "false", "off"):
-        return None
-    try:
-        import habana_frameworks.torch as htorch
-        return htorch.core.mark_step if htorch.utils.internal.is_lazy() else None
-    except ImportError:
-        return None
+def _lazy_step_hook() -> Callable[[], None] | None:
+    """Shared mark_step policy (extension/graph_state.py); imported lazily, the vLLM plugin load must stay light."""
+    from vllm_gaudi.extension.graph_state import lazy_step_hook
+    return lazy_step_hook()
 
 
 def maybe_situ_moe(layer, x: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor, impl: str,
@@ -238,4 +229,4 @@ def maybe_situ_moe(layer, x: torch.Tensor, topk_ids: torch.Tensor, topk_weights:
                           float(beta),
                           layer.moe_config.activation_situ_linear_beta,
                           token_tile=token_tile,
-                          step_hook=lazy_step_hook())
+                          step_hook=_lazy_step_hook())
