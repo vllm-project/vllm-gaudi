@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import bisect
 import collections
 from collections.abc import Mapping
 import copy
@@ -5869,19 +5870,53 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.execute_model(cleanup, warmup_mode=True)
 
     def _generate_profiling(self, prompt_cfg, decode_cfg):
+        """Profile one synthetic batch (VLLM_PROFILE_PROMPT / VLLM_PROFILE_DECODE; both = one mixed step).
+
+        Every rank must run the dummy batch (the model has collectives), but only the ranks listed in
+        VLLM_PROFILE_RANKS (default: all) record a trace, into VLLM_PROFILE_DIR (default: the working directory).
+        """
         steps = 3
-        profiler = setup_profiler(warmup=steps - 1, active=1)
-        if prompt_cfg and prompt_cfg not in self.bucketing_manager.prompt_buckets:
-            self.bucketing_manager.prompt_buckets.insert(0, prompt_cfg)
-        elif decode_cfg and decode_cfg not in self.bucketing_manager.decode_buckets:
-            self.bucketing_manager.decode_buckets.insert(0, decode_cfg)
+        config = get_config()
+        ranks = config.VLLM_PROFILE_RANKS
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        profiler = None
+        if ranks is None or rank in ranks:
+            try:
+                output_dir = config.VLLM_PROFILE_DIR or '.'
+                os.makedirs(output_dir, exist_ok=True)
+                profiler = setup_profiler(warmup=steps - 1,
+                                          active=1,
+                                          output_dir=output_dir,
+                                          with_stack=bool(config.VLLM_PROFILE_WITH_STACK))
+                logger.info("Profiling the dummy batch on rank %d, trace dir %s", rank, os.path.abspath(output_dir))
+            except Exception as exc:
+                logger.warning("Cannot set up the profiler on rank %d, running the dummy batch without it: %r", rank,
+                               exc)
+                profiler = None
+        # Every rank has to run all dummy steps (collectives), so profiler problems never propagate.
+        for cfg, buckets in ((prompt_cfg, self.bucketing_manager.prompt_buckets),
+                             (decode_cfg, self.bucketing_manager.decode_buckets)):
+            if cfg and cfg not in buckets:
+                bisect.insort(buckets, cfg)
         torch.hpu.synchronize()
-        profiler.start()
+        profiler = self._profiler_call(profiler, "start", rank)
         for _ in range(steps):
             self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
             torch.hpu.synchronize()
-            profiler.step()
-        profiler.stop()
+            profiler = self._profiler_call(profiler, "step", rank)
+        self._profiler_call(profiler, "stop", rank)
+
+    @staticmethod
+    def _profiler_call(profiler, method: str, rank: int):
+        """Call profiler.<method>(); on any error log a warning and return None (= profiling off)."""
+        if profiler is None:
+            return None
+        try:
+            getattr(profiler, method)()
+        except Exception as exc:
+            logger.warning("Profiler %s failed on rank %d, continuing without it: %r", method, rank, exc)
+            return None
+        return profiler
 
     @staticmethod
     def _parse_profile_cfg(profile_cfg):
