@@ -10,9 +10,18 @@ done
 echo "vLLM server is ready. Starting benchmark..."
 
 
-SONNET_ARGS=""
-if [[ "$DATASET_NAME" == "sonnet" ]]; then
-    SONNET_ARGS="--sonnet-prefix-len $PREFIX_LEN --sonnet-input-len $INPUT_TOK --sonnet-output-len $OUTPUT_TOK"
+# Total prompt length is PREFIX_LEN + random-input-len. INPUT_TOK is the
+# full prompt length from the golden config, so the random context is the
+# remainder. This keeps the previous 2048-token prompt with a 100-token prefix.
+RANDOM_ARGS=""
+if [[ "$DATASET_NAME" == "random" ]]; then
+    PREFIX_LEN=${PREFIX_LEN:-0}
+    RANDOM_INPUT_LEN=$((INPUT_TOK - PREFIX_LEN))
+    if (( RANDOM_INPUT_LEN < 1 )); then
+        echo "INPUT_TOK ($INPUT_TOK) must be greater than PREFIX_LEN ($PREFIX_LEN)" >&2
+        exit 1
+    fi
+    RANDOM_ARGS="--random-prefix-len $PREFIX_LEN --random-input-len $RANDOM_INPUT_LEN --random-output-len $OUTPUT_TOK"
 fi
 
 HF_ARGS=""
@@ -29,8 +38,8 @@ printf "\nvllm bench serve \
                 --endpoint $ENDPOINT \
                 --backend $BACKEND \
                 --dataset-name $DATASET_NAME \
-                --dataset-path $DATASET\
-                $SONNET_ARGS \
+                ${DATASET:+--dataset-path $DATASET} \
+                $RANDOM_ARGS \
                 $HF_ARGS \
                 --num-prompts $NUM_PROMPTS \
                 --max-concurrency $CONCURRENT_REQ \
@@ -51,8 +60,8 @@ vllm bench serve \
                 --endpoint $ENDPOINT \
                 --backend $BACKEND \
                 --dataset-name $DATASET_NAME \
-                --dataset-path $DATASET\
-                $SONNET_ARGS \
+                ${DATASET:+--dataset-path $DATASET} \
+                $RANDOM_ARGS \
                 $HF_ARGS \
                 --num-prompts $NUM_PROMPTS \
                 --max-concurrency $CONCURRENT_REQ \

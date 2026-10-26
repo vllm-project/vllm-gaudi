@@ -262,14 +262,23 @@ class SlicedFusedSDPABase(torch.nn.Module):
 
     @staticmethod
     def _merge_chunk(last_out, last_m, last_linv, chunk_out, chunk_m, chunk_linv):
-        """Online softmax rescaling merge of two attention chunks."""
+        """Online softmax rescaling merge of two attention chunks.
+
+        Rows that are fully masked with -inf in a chunk (e.g. a chunk lying entirely
+        in the context padding) come back from the kernel as m=-inf, out=NaN and
+        linv=NaN. They get zero weight here, otherwise the NaN leaks into the valid rows.
+        """
         if last_out is None or last_m is None or last_linv is None:
             return chunk_out, chunk_m, chunk_linv
         new_m = torch.maximum(last_m, chunk_m)
-        last_linv_rescaled = (1.0 / last_linv) * torch.exp(last_m - new_m)
-        chunk_linv_rescaled = (1.0 / chunk_linv) * torch.exp(chunk_m - new_m)
-        new_linv = 1.0 / (last_linv_rescaled + chunk_linv_rescaled)
-        new_out = (last_linv_rescaled * new_linv) * last_out + (chunk_linv_rescaled * new_linv) * chunk_out
+        last_masked = last_m == -math.inf
+        chunk_masked = chunk_m == -math.inf
+        last_linv_rescaled = torch.where(last_masked, 0.0, (1.0 / last_linv) * torch.exp(last_m - new_m))
+        chunk_linv_rescaled = torch.where(chunk_masked, 0.0, (1.0 / chunk_linv) * torch.exp(chunk_m - new_m))
+        linv_sum = last_linv_rescaled + chunk_linv_rescaled
+        new_linv = 1.0 / torch.where(linv_sum > 0, linv_sum, 1.0)
+        new_out = ((last_linv_rescaled * new_linv) * torch.where(last_masked, 0.0, last_out) +
+                   (chunk_linv_rescaled * new_linv) * torch.where(chunk_masked, 0.0, chunk_out))
         return new_out, new_m, new_linv
 
     def _chunked_attention(self, q, k, v, attn_mask, dropout_p, scale, softmax_mode, chunk_kernel_fn):

@@ -14,6 +14,8 @@ ARG OS_VERSION=${OS_VERSION_MAJOR}.${OS_VERSION_MINOR}
 ARG OS_STRING=rhel${OS_VERSION_MAJOR}${OS_VERSION_MINOR}
 ARG BASE_NAME=rhel${OS_VERSION_MAJOR}.${OS_VERSION_MINOR}
 ARG PT_VERSION=2.11.0
+# torchaudio has no release past 2.11.0, so it cannot follow PT_VERSION (move it back once one exists)
+ARG TORCHAUDIO_VERSION=2.11.0
 ARG PT_MODULES_REPO_NAME=gaudi-pt-modules
 # for internal use - to support a different package name for RHEL 9.4 with Python 3.12
 ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING=
@@ -80,7 +82,9 @@ RUN dnf install -y --allowerasing \
     # Python development
     python3-devel python3.12 python3.12-devel python3.12-pip \
     # NUMA support
-    numactl-libs numactl-devel && \
+    numactl-libs numactl-devel \
+    # tcmalloc (EPEL), preloaded below
+    gperftools-libs && \
     dnf clean all
 
 # Configure Python 3.12 as default
@@ -141,6 +145,7 @@ ARG PT_PACKAGE_NAME_NON_DEFAULT_PYTHON_SUBSTRING
 ARG PYPI_INDEX_URL
 ARG SYNAPSE_VERSION
 ARG SYNAPSE_REVISION
+ARG TORCHAUDIO_VERSION
 
 # Environment variables inherited from base, OS_STRING needed for PyTorch install
 ENV OS_STRING="${OS_STRING}"
@@ -159,10 +164,10 @@ RUN SYNAPSE_REVISION_RUNTIME=$(cat /etc/habanalabs/synapse_revision) && \
     rm -rf "${TMP_PATH}" "${PT_PACKAGE_NAME}" && \
     dnf clean all
 
-# Install torchaudio (CPU-only, matching PT version)
+# Install torchaudio (CPU-only); --no-deps keeps the Habana PyTorch in place
 ARG EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN python3 -m pip install --no-cache-dir --no-deps --extra-index-url ${EXTRA_INDEX_URL} \
-    torchaudio==${PT_VERSION}
+    torchaudio==${TORCHAUDIO_VERSION}
 
 WORKDIR /workspace
 
@@ -224,6 +229,10 @@ RUN umask 002 && \
 
 # Copy license
 COPY LICENSE /licenses/vllm.md
+
+# Same allocator setup as the Habana base images; glibc malloc costs low-batch decode throughput
+ENV LD_PRELOAD=/usr/lib64/libtcmalloc.so.4 \
+    TCMALLOC_LARGE_ALLOC_REPORT_THRESHOLD=7516192768
 
 USER 2000
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]

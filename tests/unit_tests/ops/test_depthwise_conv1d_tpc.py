@@ -13,7 +13,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm_gaudi.ops.causal_conv1d_pytorch import _depthwise_conv1d_tpc
+from vllm_gaudi.ops.causal_conv1d_pytorch import (
+    _depthwise_conv1d_tpc,
+    hpu_causal_conv1d_fn,
+)
 from vllm.platforms import current_platform
 
 DEVICE = current_platform.device_type
@@ -47,6 +50,71 @@ def _make_inputs(
     weight = torch.randn(dim, width, dtype=dtype, device=device)
     bias = torch.randn(dim, dtype=dtype, device=device) if with_bias else None
     return x, weight, bias
+
+
+def _run_initial_state_conv(
+    conv_states: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    cache_indices: torch.Tensor | None = None,
+) -> torch.Tensor:
+    batch_tokens = int(query_start_loc[-1])
+    return hpu_causal_conv1d_fn(
+        x=torch.zeros(1, batch_tokens, device=DEVICE),
+        weight=torch.tensor([[1.0, 0.0]], device=DEVICE),
+        bias=None,
+        conv_states=conv_states,
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        activation=None,
+    ).unsqueeze(0)
+
+
+class TestCausalConv1dInitialStateMasking:
+
+    def test_implicit_row_zero_preserves_initial_state(self):
+        conv_states = torch.tensor([[[3.0]], [[5.0]]], device=DEVICE)
+        result = _run_initial_state_conv(
+            conv_states,
+            torch.tensor([0, 1, 2], device=DEVICE),
+            torch.tensor([True, True], device=DEVICE),
+        )
+
+        torch.testing.assert_close(result, torch.tensor([[3.0, 5.0]], device=DEVICE))
+
+    def test_explicit_null_block_discards_non_finite_state(self):
+        conv_states = torch.tensor([[[torch.nan]], [[torch.inf]]], device=DEVICE)
+        result = _run_initial_state_conv(
+            conv_states,
+            torch.tensor([0, 1, 2], device=DEVICE),
+            torch.tensor([True, False], device=DEVICE),
+            cache_indices=torch.tensor([0, 1], device=DEVICE),
+        )
+
+        torch.testing.assert_close(result, torch.zeros(1, 2, device=DEVICE))
+
+    def test_explicit_non_null_block_preserves_initial_state(self):
+        conv_states = torch.tensor([[[torch.nan]], [[7.0]]], device=DEVICE)
+        result = _run_initial_state_conv(
+            conv_states,
+            torch.tensor([0, 1], device=DEVICE),
+            torch.tensor([True], device=DEVICE),
+            cache_indices=torch.tensor([1], device=DEVICE),
+        )
+
+        torch.testing.assert_close(result, torch.tensor([[7.0]], device=DEVICE))
+
+    def test_variable_length_path_discards_null_block_state(self):
+        conv_states = torch.tensor([[[torch.nan]], [[4.0]]], device=DEVICE)
+        result = _run_initial_state_conv(
+            conv_states,
+            torch.tensor([0, 1, 3], device=DEVICE),
+            torch.tensor([True, True], device=DEVICE),
+            cache_indices=torch.tensor([0, 1], device=DEVICE),
+        )
+
+        torch.testing.assert_close(result, torch.tensor([[0.0, 4.0, 0.0]], device=DEVICE))
 
 
 # ---------------------------------------------------------------------------
