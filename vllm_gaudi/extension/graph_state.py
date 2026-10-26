@@ -45,6 +45,8 @@ def lazy_step_hook() -> Callable[[], None] | None:
     """
     if not mark_step_enabled() or not forward_without_graphs():
         return None
+    if os.environ.get("PT_HPU_LAZY_MODE", "1").strip() == "0":
+        return None  # torch.compile mode: no lazy graph to cut, and nothing Habana-specific to trace under dynamo
     try:
         import habana_frameworks.torch as htorch
         return htorch.core.mark_step if htorch.utils.internal.is_lazy() else None

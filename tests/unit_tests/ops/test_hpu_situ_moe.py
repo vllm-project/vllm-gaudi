@@ -321,3 +321,46 @@ def test_step_hook_runs_per_chunk_only_for_large_batches(tokens, expected_steps)
                           experts, 0, BETA, LINEAR_BETA, expert_chunk=4, token_tile=16, gather_max_tokens=0,
                           step_hook=lambda: steps.append(1), step_min_tokens=16)
     assert len(steps) == expected_steps
+
+
+@pytest.mark.parametrize("tokens", [2, 20])  # gather path (T * K < experts) and dense path with token tiles
+@pytest.mark.parametrize("cold_luts", [True, False])
+def test_traces_as_one_graph_with_parsable_stack_traces(tokens, cold_luts):
+    """torch.compile mode: no graph break (also while the LUT cache is filled inside the trace) and every FX node
+    has a stack_trace the HPU compile backend can parse."""
+    import torch._dynamo as dynamo
+    if not hasattr(torch.fx.graph, "_parse_stack_trace"):
+        pytest.skip("torch.fx.graph._parse_stack_trace is not available in this torch version")
+    experts, inter, hidden, topk = 16, 64, 128, 2
+    gen = torch.Generator().manual_seed(0)
+    w13 = torch.randint(0, 256, (experts, 2 * inter, hidden // 2), dtype=torch.uint8, generator=gen)
+    w13_s = torch.randint(120, 130, (experts, 2 * inter, hidden // 32), dtype=torch.uint8, generator=gen)
+    w2 = torch.randint(0, 256, (experts, hidden, inter // 2), dtype=torch.uint8, generator=gen)
+    w2_s = torch.randint(120, 130, (experts, hidden, inter // 32), dtype=torch.uint8, generator=gen)
+    x = torch.randn(tokens, hidden, generator=gen).to(torch.bfloat16)
+    ids = torch.randint(0, experts, (tokens, topk), generator=gen)
+    weights = torch.rand(tokens, topk, generator=gen)
+
+    def fn(x, ids, weights):
+        return situ.situ_moe_mxfp4(x, ids, weights, w13, w13_s, w2, w2_s, 0, BETA, LINEAR_BETA, token_tile=8)
+
+    graphs, unparsable = [], []
+
+    def backend(gm, example_inputs):
+        graphs.append(gm)
+        for node in gm.graph.nodes:
+            if node.op in ("call_function", "call_method") and (
+                    node.stack_trace is None or torch.fx.graph._parse_stack_trace(node.stack_trace) is None):
+                unparsable.append(node.name)
+        return gm.forward
+
+    if cold_luts:
+        situ._LUT_CACHE.clear()
+    dynamo.reset()
+    try:
+        out = torch.compile(fn, backend=backend)(x, ids, weights)
+    finally:
+        dynamo.reset()
+    assert len(graphs) == 1
+    assert not unparsable
+    torch.testing.assert_close(out, fn(x, ids, weights))

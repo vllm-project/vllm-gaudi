@@ -307,6 +307,14 @@ def _load_envs_module():
     return module
 
 
+def _load_graph_state_module():
+    spec = importlib.util.spec_from_file_location("vllm_gaudi_graph_state_under_test",
+                                                  _MODULE_PATH.parents[1] / "extension" / "graph_state.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_layer_module(monkeypatch, metadata):
     import sys
 
@@ -321,6 +329,8 @@ def _load_layer_module(monkeypatch, metadata):
                       ("vllm", types.ModuleType("vllm")), ("vllm.forward_context", forward_context),
                       ("vllm_gaudi", types.ModuleType("vllm_gaudi")),
                       ("vllm_gaudi.ops", types.ModuleType("vllm_gaudi.ops")), ("vllm_gaudi.ops.hpu_kda_pytorch", kda),
+                      ("vllm_gaudi.extension", types.ModuleType("vllm_gaudi.extension")),
+                      ("vllm_gaudi.extension.graph_state", _load_graph_state_module()),
                       ("vllm_gaudi.envs", _load_envs_module())):
         monkeypatch.setitem(sys.modules, name, mod)
     path = _MODULE_PATH.parents[1] / "models" / "kimi_k3_kda.py"

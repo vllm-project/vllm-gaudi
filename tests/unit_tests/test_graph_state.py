@@ -79,3 +79,10 @@ def test_runner_and_both_hooks_use_the_shared_policy():
     assert "forward_graph_mode(use_graphs)" in (root / "v1/worker/hpu_model_runner.py").read_text()
     assert "lazy_step_hook()" in (root / "models/kimi_k3_kda.py").read_text()
     assert "lazy_step_hook" in (root / "ops/hpu_situ_moe.py").read_text()
+
+
+def test_compile_mode_gives_no_hook_without_touching_habana(monkeypatch, fake_habana):
+    monkeypatch.setenv("PT_HPU_LAZY_MODE", "0")
+    monkeypatch.setitem(sys.modules, "habana_frameworks.torch", None)  # an import would raise
+    with gs.forward_graph_mode(use_graphs=False):
+        assert gs.lazy_step_hook() is None
