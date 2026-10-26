@@ -301,18 +301,29 @@ def test_timing_env_logs_the_phases_of_the_first_calls_only(monkeypatch, caplog)
     situ.maybe_situ_moe(layer, x, ids, weights, "exact")
 
 
-def test_env_is_validated_at_import_time(monkeypatch):
+def test_invalid_env_warns_and_falls_back_instead_of_raising(monkeypatch, caplog):
+    import logging
     monkeypatch.setenv("HPU_KIMI_SITU_DEQUANT", " Bits ")
     assert situ._read_dequant_env() == "bits"
-    monkeypatch.setenv("HPU_KIMI_SITU_DEQUANT", "gather")
-    with pytest.raises(ValueError, match="HPU_KIMI_SITU_DEQUANT"):
-        situ._read_dequant_env()
     monkeypatch.setenv("HPU_KIMI_SITU_TIMING", "3")
     assert situ._read_timing_budget() == 3
-    for bad in ("x", "-1"):
-        monkeypatch.setenv("HPU_KIMI_SITU_TIMING", bad)
-        with pytest.raises(ValueError, match="HPU_KIMI_SITU_TIMING"):
-            situ._read_timing_budget()
+    with caplog.at_level(logging.WARNING, logger="vllm.gaudi.situ"):
+        monkeypatch.setenv("HPU_KIMI_SITU_DEQUANT", "gather")
+        assert situ._read_dequant_env() == "lut"
+        for bad in ("x", "-1"):
+            monkeypatch.setenv("HPU_KIMI_SITU_TIMING", bad)
+            assert situ._read_timing_budget() == 0
+    text = caplog.text
+    assert "HPU_KIMI_SITU_DEQUANT" in text and text.count("HPU_KIMI_SITU_TIMING") == 2
+
+
+def test_importing_with_invalid_env_does_not_raise(monkeypatch):
+    monkeypatch.setenv("HPU_KIMI_SITU_DEQUANT", "gather")
+    monkeypatch.setenv("HPU_KIMI_SITU_TIMING", "many")
+    spec = importlib.util.spec_from_file_location("hpu_situ_moe_bad_env", _PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.DEQUANT_MODE_ENV == "lut" and mod.TIMING_BUDGET == 0
 
 
 def test_bit_dequant_clamps_out_of_range_scales():

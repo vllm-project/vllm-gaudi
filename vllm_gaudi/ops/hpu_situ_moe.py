@@ -226,23 +226,28 @@ DEQUANT_MODES = ("lut", "bits")
 
 def _read_dequant_env() -> str:
     """HPU_KIMI_SITU_DEQUANT, validated once at import (envs.py documents it; this module stays importable without
-    vLLM, hence os.environ)."""
+    vLLM, hence os.environ). An invalid value is reported and replaced by the default: this module is imported
+    inside swallowing paths, raising would silently disable the Kimi patches or break every MXFP4 model."""
     value = os.environ.get("HPU_KIMI_SITU_DEQUANT", "lut")
     mode = (value or "lut").strip().lower()
     if mode not in DEQUANT_MODES:
-        raise ValueError(f"HPU_KIMI_SITU_DEQUANT must be one of {DEQUANT_MODES}, got {value!r}")
+        logging.getLogger("vllm.gaudi.situ").warning("HPU_KIMI_SITU_DEQUANT must be one of %s, got %r: using 'lut'",
+                                                     DEQUANT_MODES, value)
+        return "lut"
     return mode
 
 
 def _read_timing_budget() -> int:
-    """HPU_KIMI_SITU_TIMING=N (0 = off), validated once at import."""
+    """HPU_KIMI_SITU_TIMING=N (0 = off), validated once at import; an invalid value is reported and means off."""
     value = os.environ.get("HPU_KIMI_SITU_TIMING", "0")
     try:
         budget = int(value)
     except ValueError:
         budget = -1
     if budget < 0:
-        raise ValueError(f"HPU_KIMI_SITU_TIMING must be a non-negative integer, got {value!r}")
+        logging.getLogger("vllm.gaudi.situ").warning(
+            "HPU_KIMI_SITU_TIMING must be a non-negative integer, got %r: timing is off", value)
+        return 0
     return budget
 
 
