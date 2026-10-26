@@ -52,3 +52,25 @@ def lazy_step_hook() -> Callable[[], None] | None:
         return htorch.core.mark_step if htorch.utils.internal.is_lazy() else None
     except ImportError:
         return None
+
+
+def device_sync_hook() -> Callable[[], None] | None:
+    """Host-side wait for all queued HPU work (diagnostic timings), or None where waiting is not possible.
+
+    Lazy mode needs a mark_step to launch the pending graph, which is only allowed outside HPU graphs; compile /
+    eager mode only waits (callers must run outside the compiled region, e.g. under ``torch.compiler.disable``).
+    """
+    try:
+        import habana_frameworks.torch as htorch
+    except ImportError:
+        return None
+    if not htorch.utils.internal.is_lazy():
+        return htorch.hpu.synchronize
+    if not forward_without_graphs():
+        return None
+
+    def sync():
+        htorch.core.mark_step()
+        htorch.hpu.synchronize()
+
+    return sync

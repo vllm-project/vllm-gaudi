@@ -256,6 +256,48 @@ def test_maybe_situ_moe_leaves_other_cases_to_the_fused_kernel_and_validates_inp
         situ.maybe_situ_moe(_FakeLayer("situ", beta=None), x, ids, weights, "exact")
 
 
+def test_bits_dequant_mode_gives_the_same_experts_output():
+    layer = _FakeLayer("situ")
+    ids, weights = _route(3, 4 * 3, 2, 45)
+    x = torch.randn(3, 64, generator=torch.Generator().manual_seed(46)).to(torch.bfloat16)
+    args = (x, ids, weights, layer.w13_weight.data, layer.w13_weight_scale.data, layer.w2_weight.data,
+            layer.w2_weight_scale.data, 4, BETA, LINEAR_BETA)
+    assert torch.equal(situ.situ_moe_mxfp4(*args, dequant="bits"), situ.situ_moe_mxfp4(*args, dequant="lut"))
+    assert situ.resolve_dequant_mode(" BITS ", torch.bfloat16) == "bits"
+    assert situ.resolve_dequant_mode("bits", torch.float32) == "lut"  # the bit assembly yields bf16 only
+    with pytest.raises(ValueError, match="HPU_KIMI_SITU_DEQUANT"):
+        situ.resolve_dequant_mode("gather", torch.bfloat16)
+
+
+def test_timing_env_logs_the_phases_of_the_first_calls_only(monkeypatch, caplog):
+    import logging
+    import sys
+    import types
+    syncs = []
+    stub = types.ModuleType("vllm_gaudi.extension.graph_state")
+    stub.lazy_step_hook = lambda: None
+    stub.device_sync_hook = lambda: (lambda: syncs.append(1))
+    for name, mod in (("vllm_gaudi", types.ModuleType("vllm_gaudi")),
+                      ("vllm_gaudi.extension", types.ModuleType("vllm_gaudi.extension")),
+                      ("vllm_gaudi.extension.graph_state", stub)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setenv("HPU_KIMI_SITU_TIMING", "2")
+    monkeypatch.setenv("HPU_KIMI_SITU_DEQUANT", "bits")
+    monkeypatch.setattr(situ, "_timed_calls", 0)
+    layer = _FakeLayer("situ")
+    ids, weights = _route(3, 4 * 3, 2, 47)
+    x = torch.randn(3, 64, generator=torch.Generator().manual_seed(48)).to(torch.bfloat16)
+    with caplog.at_level(logging.INFO, logger="vllm.gaudi.situ"):
+        outs = [situ.maybe_situ_moe(layer, x, ids, weights, "exact") for _ in range(3)]
+    lines = [r.getMessage() for r in caplog.records if r.name == "vllm.gaudi.situ"]
+    assert len(lines) == 2 and lines[0].startswith("SiTU experts call 1/2: tokens=3 topk=2 dequant=bits")
+    for phase in ("route=", "dequant_w13=", "dequant_w2=", "experts=", "total="):
+        assert phase in lines[1]
+    # 3 tokens * 2 = 6 >= 4 local experts: dense, one chunk -> start + route + 3 marks per call
+    assert len(syncs) == 2 * 5
+    assert torch.equal(outs[0], outs[2])
+
+
 def test_invalid_impl_falls_back_to_exact_and_reports():
     errors = []
     assert situ.situ_impl_or_exact("fused", errors.append) == "exact"

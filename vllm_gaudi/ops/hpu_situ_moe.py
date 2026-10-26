@@ -16,6 +16,9 @@ matmuls with static shapes, like ``_unfused_swigluoai_moe`` (ops/hpu_fused_moe.p
 
 from __future__ import annotations
 
+import logging
+import os
+import time
 from typing import Callable
 
 import torch
@@ -152,7 +155,8 @@ def situ_moe_experts(x: torch.Tensor,
                      token_tile: int = 512,
                      gather_max_tokens: int | None = None,
                      step_hook: Callable[[], None] | None = None,
-                     step_min_tokens: int = 0) -> torch.Tensor:
+                     step_min_tokens: int = 0,
+                     phase_hook: Callable[[str], None] | None = None) -> torch.Tensor:
     """Per-rank partial routed-expert output (before the cross-rank reduction), same contract as the fused op.
 
     x [T, H]; topk_ids / topk_weights [T, K] with GLOBAL expert ids; this rank owns the experts
@@ -164,7 +168,10 @@ def situ_moe_experts(x: torch.Tensor,
     weight. Everything is accumulated in fp32. ``step_hook`` (``htorch.core.mark_step`` in lazy mode) runs after
     every expert chunk when more than ``step_min_tokens`` tokens are processed. The caller passes None whenever
     the forward runs under HPU graphs (a mark_step would break the capture), see extension/graph_state.py.
+    ``phase_hook(name)`` (diagnostics, see ``PhaseTimer``) runs at the end of every phase: "route", then per chunk
+    "dequant_w13", "dequant_w2" and "experts".
     """
+    mark = phase_hook if phase_hook is not None else (lambda name: None)
     tokens, hidden = x.shape
     k = topk_ids.shape[-1]
     local = topk_ids.long() - experts_min
@@ -188,10 +195,13 @@ def situ_moe_experts(x: torch.Tensor,
     # Expert chunks are the OUTER loop: the weights of a chunk are dequantized once and reused by every token tile
     # (tile-outer order repeated the whole dequant per tile: 16x the ops for an 8k prefill).
     step = step_hook if step_hook is not None and tokens > step_min_tokens else None
+    mark("route")
     for c0 in range(0, total, expert_chunk):
         chunk_ids = ids[c0:c0 + expert_chunk]
         w13 = get_w13(chunk_ids)  # [c, 2I, H]
+        mark("dequant_w13")
         w2 = get_w2(chunk_ids)  # [c, H, I]
+        mark("dequant_w2")
         for i, t0 in enumerate(starts):
             xt = x[t0:t0 + tile]
             xe = xt.unsqueeze(0).expand(chunk_ids.shape[0], -1, -1)
@@ -199,6 +209,7 @@ def situ_moe_experts(x: torch.Tensor,
             y = torch.bmm(hidden_act, w2.transpose(1, 2))  # [c, t, H]
             weights = gate_w[t0:t0 + tile].index_select(1, chunk_ids).t().unsqueeze(-1)  # [c, t, 1]
             accs[i] = accs[i] + (y.float() * weights).sum(0)
+        mark("experts")
         if step is not None:
             step()  # bound the lazy graph: one identical, cacheable graph per chunk
     outputs = accs
@@ -206,19 +217,93 @@ def situ_moe_experts(x: torch.Tensor,
     return out.to(x.dtype)
 
 
-def situ_moe_mxfp4(x: torch.Tensor, topk_ids: torch.Tensor, topk_weights: torch.Tensor, w13: torch.Tensor,
-                   w13_scale: torch.Tensor, w2: torch.Tensor, w2_scale: torch.Tensor, experts_min: int, beta: float,
-                   linear_beta: float | None, **kwargs) -> torch.Tensor:
+DEQUANT_MODES = ("lut", "bits")
+
+
+def resolve_dequant_mode(value: str | None, dtype: torch.dtype) -> str:
+    """HPU_KIMI_SITU_DEQUANT: "lut" (default, table lookups) or "bits" (gather-free, bf16 only)."""
+    mode = (value or "lut").strip().lower()
+    if mode not in DEQUANT_MODES:
+        raise ValueError(f"HPU_KIMI_SITU_DEQUANT must be one of {DEQUANT_MODES}, got {value!r}")
+    return "lut" if dtype != torch.bfloat16 else mode
+
+
+def situ_moe_mxfp4(x: torch.Tensor,
+                   topk_ids: torch.Tensor,
+                   topk_weights: torch.Tensor,
+                   w13: torch.Tensor,
+                   w13_scale: torch.Tensor,
+                   w2: torch.Tensor,
+                   w2_scale: torch.Tensor,
+                   experts_min: int,
+                   beta: float,
+                   linear_beta: float | None,
+                   dequant: str = "lut",
+                   **kwargs) -> torch.Tensor:
     """``situ_moe_experts`` over the stacked packed MXFP4 expert weights of this rank (dequantized per chunk)."""
+    if resolve_dequant_mode(dequant, x.dtype) == "bits":
+        deq = lambda packed, scales: dequant_mxfp4_bits(packed, scales)  # noqa: E731
+    else:
+        deq = lambda packed, scales: dequant_mxfp4(packed, scales, x.dtype)  # noqa: E731
 
     def get_w13(ids):
-        return dequant_mxfp4(w13.index_select(0, ids), w13_scale.index_select(0, ids), x.dtype)
+        return deq(w13.index_select(0, ids), w13_scale.index_select(0, ids))
 
     def get_w2(ids):
-        return dequant_mxfp4(w2.index_select(0, ids), w2_scale.index_select(0, ids), x.dtype)
+        return deq(w2.index_select(0, ids), w2_scale.index_select(0, ids))
 
     return situ_moe_experts(x, topk_ids, topk_weights, get_w13, get_w2, w13.shape[0], experts_min, beta, linear_beta,
                             **kwargs)
+
+
+class PhaseTimer:
+    """Wall time per phase of ``situ_moe_experts`` (``phase_hook``); ``sync`` waits for the device at every mark."""
+
+    def __init__(self, sync: Callable[[], None]):
+        self.sync = sync
+        self.totals: dict[str, float] = {}
+        self.sync()  # do not charge the work queued before the experts to the first phase
+        self._last = time.perf_counter()
+
+    def __call__(self, name: str) -> None:
+        self.sync()
+        now = time.perf_counter()
+        self.totals[name] = self.totals.get(name, 0.0) + now - self._last
+        self._last = now
+
+    def summary(self) -> str:
+        total = sum(self.totals.values())
+        parts = " ".join(f"{name}={sec * 1e3:.1f}ms" for name, sec in self.totals.items())
+        return f"{parts} total={total * 1e3:.1f}ms"
+
+
+_timed_calls = 0
+
+
+def _timing_budget() -> int:
+    """HPU_KIMI_SITU_TIMING=N: time the first N exact SiTU expert calls of this process (0 = off, the default).
+
+    Read from os.environ like graph_state.py (envs.py documents it): this module stays importable without vLLM.
+    """
+    return int(os.environ.get("HPU_KIMI_SITU_TIMING", "0"))
+
+
+@torch.compiler.disable
+def _timed_situ_moe_mxfp4(budget: int, *args, **kwargs) -> torch.Tensor:
+    """``situ_moe_mxfp4`` with per-phase device timings, run eagerly; logged via the vllm.gaudi.situ logger."""
+    global _timed_calls
+    from vllm_gaudi.extension.graph_state import device_sync_hook
+    sync = device_sync_hook() if _timed_calls < budget else None
+    if sync is None:  # budget used up, or lazy mode under HPU graphs (no mark_step allowed)
+        return situ_moe_mxfp4(*args, **kwargs)
+    _timed_calls += 1
+    timer = PhaseTimer(sync)
+    out = situ_moe_mxfp4(*args, phase_hook=timer, **kwargs)
+    x, topk_ids = args[0], args[1]
+    logging.getLogger("vllm.gaudi.situ").info("SiTU experts call %d/%d: tokens=%d topk=%d dequant=%s %s", _timed_calls,
+                                              budget, x.shape[0], topk_ids.shape[-1],
+                                              resolve_dequant_mode(kwargs.get("dequant"), x.dtype), timer.summary())
+    return out
 
 
 def _lazy_step_hook() -> Callable[[], None] | None:
@@ -243,15 +328,13 @@ def maybe_situ_moe(layer, x: torch.Tensor, topk_ids: torch.Tensor, topk_weights:
     beta = layer.moe_config.activation_situ_beta
     if beta is None:
         raise ValueError("SiTU experts need activation_situ_beta in the MoE config")
-    return situ_moe_mxfp4(x,
-                          topk_ids,
-                          topk_weights,
-                          layer.w13_weight.data,
-                          layer.w13_weight_scale.data,
-                          layer.w2_weight.data,
-                          layer.w2_weight_scale.data,
-                          int(layer.moe_config.ep_rank * layer.local_num_experts),
-                          float(beta),
-                          layer.moe_config.activation_situ_linear_beta,
-                          token_tile=token_tile,
-                          step_hook=_lazy_step_hook())
+    args = (x, topk_ids, topk_weights, layer.w13_weight.data, layer.w13_weight_scale.data,
+            layer.w2_weight.data, layer.w2_weight_scale.data, int(layer.moe_config.ep_rank * layer.local_num_experts),
+            float(beta), layer.moe_config.activation_situ_linear_beta)
+    kwargs = dict(dequant=os.environ.get("HPU_KIMI_SITU_DEQUANT", "lut"),
+                  token_tile=token_tile,
+                  step_hook=_lazy_step_hook())
+    budget = _timing_budget()
+    if budget > 0:
+        return _timed_situ_moe_mxfp4(budget, *args, **kwargs)
+    return situ_moe_mxfp4(*args, **kwargs)

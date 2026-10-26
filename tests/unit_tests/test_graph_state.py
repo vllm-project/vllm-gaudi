@@ -67,6 +67,24 @@ def test_not_lazy_or_without_habana_gives_no_hook(monkeypatch, fake_habana):
         assert gs.lazy_step_hook() is None
 
 
+def test_device_sync_hook_marks_steps_only_where_allowed(monkeypatch, fake_habana):
+    import habana_frameworks.torch as htorch
+    waits = []
+    htorch.hpu = types.SimpleNamespace(synchronize=lambda: waits.append(1))
+    assert gs.device_sync_hook() is None  # lazy, graphs unknown: no mark_step
+    with gs.forward_graph_mode(use_graphs=True):
+        assert gs.device_sync_hook() is None
+    with gs.forward_graph_mode(use_graphs=False):
+        gs.device_sync_hook()()
+    assert fake_habana == [1] and waits == [1]
+    monkeypatch.setattr(htorch.utils.internal, "is_lazy", lambda: False)
+    with gs.forward_graph_mode(use_graphs=True):  # compile mode: wait only, the graph mode does not matter
+        gs.device_sync_hook()()
+    assert fake_habana == [1] and waits == [1, 1]
+    monkeypatch.setitem(sys.modules, "habana_frameworks.torch", None)
+    assert gs.device_sync_hook() is None
+
+
 @pytest.mark.parametrize("value", ["0", "false", "off"])
 def test_env_switch_disables_the_cuts(monkeypatch, fake_habana, value):
     monkeypatch.setenv("HPU_KIMI_SITU_MARK_STEP", value)

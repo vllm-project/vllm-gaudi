@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     HPU_KIMI_KDA_MARK_STEP_CHUNKS: int = 1
     HPU_KIMI_SITU_IMPL: str = "exact"
     HPU_KIMI_SITU_MARK_STEP: bool = True
+    HPU_KIMI_SITU_DEQUANT: str = "lut"
+    HPU_KIMI_SITU_TIMING: int = 0
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -155,6 +157,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # every expert chunk of the exact SiTU experts (and every KDA prefill chunk block). 0 disables the cuts.
     "HPU_KIMI_SITU_MARK_STEP":
     lambda: os.environ.get("HPU_KIMI_SITU_MARK_STEP", "1").strip().lower() not in ("0", "false", "off"),
+    # MXFP4 -> bf16 dequant of the exact SiTU experts: "lut" (two embedding table lookups per byte / scale) or
+    # "bits" (gather-free int16 bit assembly of the bf16 values, bit-exact with "lut").
+    "HPU_KIMI_SITU_DEQUANT":
+    lambda: os.environ.get("HPU_KIMI_SITU_DEQUANT", "lut").strip().lower(),
+    # Diagnostics: synchronize the device after every phase of the first N exact SiTU expert calls (run eagerly,
+    # outside the compiled region) and log the per-phase wall times (logger vllm.gaudi.situ). 0 = off.
+    "HPU_KIMI_SITU_TIMING":
+    lambda: int(os.environ.get("HPU_KIMI_SITU_TIMING", "0")),
 }
 
 # end-env-vars-definition
