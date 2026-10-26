@@ -8,6 +8,7 @@ written straight from the KDA math: per head, per token loops with explicit oute
 import importlib.util
 import math
 import pathlib
+import types
 
 import pytest
 import torch
@@ -291,3 +292,109 @@ def test_step_hook_is_called_between_blocks_only():
                          params["A_log"], params["dt_bias"], params["lower_bound"], conv, ssm, torch.tensor([1]),
                          torch.tensor([0]), mask, H, D, block=4, step_hook=lambda: calls.append(1))
     assert len(calls) == 2  # after tokens 4 and 8 (not after the last token)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Layer-level wiring (models/kimi_k3_kda.py) with stubbed vLLM / Habana modules
+# ---------------------------------------------------------------------------------------------------------------
+def _load_layer_module(monkeypatch, metadata):
+    import sys
+
+    habana = types.ModuleType("habana_frameworks")
+    habana_torch = types.ModuleType("habana_frameworks.torch")
+    habana_torch.core = types.SimpleNamespace(mark_step=lambda: None)
+    habana_torch.utils = types.SimpleNamespace(internal=types.SimpleNamespace(is_lazy=lambda: False))
+    habana.torch = habana_torch
+    forward_context = types.ModuleType("vllm.forward_context")
+    forward_context.get_forward_context = lambda: types.SimpleNamespace(attn_metadata=metadata["value"])
+    for name, mod in (("habana_frameworks", habana), ("habana_frameworks.torch", habana_torch),
+                      ("vllm", types.ModuleType("vllm")), ("vllm.forward_context", forward_context),
+                      ("vllm_gaudi", types.ModuleType("vllm_gaudi")),
+                      ("vllm_gaudi.ops", types.ModuleType("vllm_gaudi.ops")), ("vllm_gaudi.ops.hpu_kda_pytorch", kda)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    path = _MODULE_PATH.parents[1] / "models" / "kimi_k3_kda.py"
+    spec = importlib.util.spec_from_file_location("kimi_k3_kda_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeLayer:
+
+    def __init__(self, params, hidden, seed, caches):
+        g = torch.Generator().manual_seed(seed)
+        self.local_num_heads, self.head_dim, self.local_projection_size = H, D, P
+        self.in_proj_padding = 2
+        self.gate_lower_bound = params["lower_bound"]
+        self.w_in = torch.randn(3 * P + P + D + H + self.in_proj_padding, hidden, generator=g) * 0.3
+        self.w_fb = torch.randn(P, D, generator=g) * 0.3
+        self.w_o = torch.randn(hidden, P, generator=g) * 0.3
+        self.norm_w = torch.randn(D, generator=g)
+        self.conv1d = types.SimpleNamespace(weight=params["conv_weight"].unsqueeze(1), bias=None)
+        self.A_log, self.dt_bias = params["A_log"], params["dt_bias"]
+        self.o_norm = types.SimpleNamespace(weight=self.norm_w, eps=1e-5)
+        self.kv_cache = caches
+        self.cache_group_idx = torch.tensor(1)
+
+    def in_proj_qkvgfab(self, x):
+        return (x @ self.w_in.t(), None)
+
+    def f_b_proj(self, x):
+        return (x @ self.w_fb.t(), None)
+
+    def o_proj(self, x):
+        return (x @ self.w_o.t(), None)
+
+
+
+def _reference_layer(layer, hidden_states, params, conv_state=None, ssm_state=None):
+    proj = hidden_states @ layer.w_in.t()
+    qkv, gate = proj[:, :3 * P], proj[:, 3 * P:4 * P]
+    f_a, beta = proj[:, 4 * P:4 * P + D], proj[:, 4 * P + D:4 * P + D + H]
+    x = dict(mixed_qkv=qkv, raw_g=f_a @ layer.w_fb.t(), raw_beta=beta)
+    out, conv_state, ssm_state = reference_kda(x, params, conv_state, ssm_state)
+    normed = out / torch.sqrt((out**2).mean(-1, keepdim=True) + 1e-5) * layer.norm_w
+    normed = normed * torch.sigmoid(gate.view(-1, H, D))
+    return normed.reshape(-1, P) @ layer.w_o.t(), conv_state, ssm_state
+
+
+def test_layer_forward_prefill_then_decode_matches_reference(monkeypatch):
+    params = _make_params(30)
+    hidden = 16
+    caches = _new_caches(4, False)  # SD layout like the HPU Qwen path
+    metadata = {"value": None}
+    module = _load_layer_module(monkeypatch, metadata)
+    layer = _FakeLayer(params, hidden, 31, caches)
+
+    g = torch.Generator().manual_seed(32)
+    hs = torch.randn(10, hidden, generator=g)
+    # two cache groups -> load_indices is [groups, batch]; the layer picks row 1. Prompt has 7 real tokens in an
+    # 8-token bucket, plus one padded row.
+    prompt = torch.zeros(2, 8, hidden)
+    prompt[0, :7] = hs[:7]
+    mask = torch.zeros(2, 8)
+    mask[0, :7] = 1.0
+    metadata["value"] = types.SimpleNamespace(is_prompt=True,
+                                               load_indices_tensor=torch.tensor([[0, 0], [2, -1]]),
+                                               padding_mask_flat=mask.reshape(-1, 1),
+                                               has_initial_states_p=torch.tensor([0, 0], dtype=torch.int32))
+    out = module.hpu_kda_forward(layer, prompt.reshape(-1, hidden))
+    ref, conv_s, ssm_s = _reference_layer(layer, hs[:7], params)
+    torch.testing.assert_close(out.reshape(2, 8, hidden)[0, :7], ref, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(caches[1][2], ssm_s, rtol=1e-5, atol=1e-5)
+
+    for t in range(7, 10):
+        metadata["value"] = types.SimpleNamespace(is_prompt=False, load_indices_tensor=torch.tensor([[0], [2]]))
+        out = module.hpu_kda_forward(layer, hs[t:t + 1])
+        ref_all, _, _ = _reference_layer(layer, hs[:t + 1], params)
+        torch.testing.assert_close(out[0], ref_all[-1], rtol=1e-4, atol=1e-4)
+
+
+def test_layer_forward_without_metadata_returns_zero_core(monkeypatch):
+    params = _make_params(33)
+    metadata = {"value": None}
+    module = _load_layer_module(monkeypatch, metadata)
+    layer = _FakeLayer(params, 16, 34, ())
+    out = module.hpu_kda_forward(layer, torch.randn(5, 16))
+    assert out.shape == (5, 16)
+    assert float(out.abs().sum()) == 0.0
