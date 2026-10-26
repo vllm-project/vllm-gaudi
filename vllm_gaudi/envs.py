@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     VLLM_HPU_MOE_GATHER_VERIFY: bool = False
     VLLM_COMPACT_GDN: bool = False
     HPU_INLINE_MOE_ENTRY: bool = True
+    HPU_KIMI_KDA_IMPL: str = "real"
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -123,6 +124,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # upstream custom op. Independent of HPU_FUSED_MOE.
     "HPU_INLINE_MOE_ENTRY":
     lambda: os.environ.get("HPU_INLINE_MOE_ENTRY", "1").strip().lower() in ("1", "true"),
+
+    # Kimi-K3 KDA (linear attention) layers on HPU: "real" runs the PyTorch KDA
+    # (conv + gated delta rule with per-request state), "dummy" keeps the old
+    # stateless causal-SDPA stand-in (wrong outputs, for A/B performance runs only).
+    "HPU_KIMI_KDA_IMPL":
+    lambda: os.environ.get("HPU_KIMI_KDA_IMPL", "real").strip().lower(),
 }
 
 # end-env-vars-definition

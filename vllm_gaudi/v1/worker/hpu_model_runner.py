@@ -793,9 +793,15 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
         "GraniteMoeHybridForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration",
         "Qwen3NextForCausalLM", "NemotronHForCausalLM"
     ]
-    if not any(arch in getattr(model.config, 'architectures', []) for arch in mamba_like_arch):
+    # Kimi-K3: the KDA layers are ".self_attn" modules next to MLA ".self_attn" layers; they are told apart by
+    # the MambaSpec of their KV cache group.
+    kimi_arch = ["KimiK3ForConditionalGeneration", "KimiLinearForCausalLM"]
+    architectures = getattr(model.config, 'architectures', [])
+    is_kimi = any(arch in architectures for arch in kimi_arch)
+    if not is_kimi and not any(arch in architectures for arch in mamba_like_arch):
         return
-    mamba_like_layer = ['.mixer', '.linear_attn']
+    mamba_like_layer = ['.mixer', '.linear_attn'] + (['.self_attn'] if is_kimi else [])
+    named_modules = dict(model.named_modules()) if is_kimi else {}
 
     def _get_decoder_layer_by_idx(model_obj, idx: int):
         # Qwen3.5 multimodal path: model.language_model.model.layers
@@ -839,6 +845,14 @@ def maybe_set_mamba_kv_cache_groups_ids(model, kv_cache_config: KVCacheConfig):
                 layer = _get_decoder_layer_by_idx(model, layer_idx)
                 if layer is not None and hasattr(layer, "linear_attn"):
                     layer.linear_attn.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
+            elif is_kimi and layer_name.endswith('.self_attn') and isinstance(kv_group.kv_cache_spec, MambaSpec):
+                layer = named_modules.get(layer_name)
+                if layer is None:  # the registered prefix may lack the top-level wrapper name
+                    layer = next((m for n, m in named_modules.items() if n.endswith(layer_name)), None)
+                if layer is not None:
+                    layer.cache_group_idx = torch.tensor(group_idx, dtype=torch.long, device="hpu")
+                else:
+                    logger.warning("Kimi KDA layer %s not found in the model, cache_group_idx not set", layer_name)
 
 
 def maybe_set_chunked_attention_layers(model_runner):

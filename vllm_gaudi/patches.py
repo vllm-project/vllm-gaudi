@@ -1020,16 +1020,32 @@ def _patch_kimi_kda() -> None:
                 res = res.view(b, s, -1)
             return res
 
+        import vllm_gaudi.envs as gaudi_envs
+        from vllm_gaudi.extension.logger import logger as _ext_logger
+        kda_impl = gaudi_envs.HPU_KIMI_KDA_IMPL
+        _kda_forward = _hpu_kda_forward
+        if kda_impl == "real":
+            try:
+                from vllm_gaudi.models.kimi_k3_kda import hpu_kda_forward as _kda_forward
+            except Exception as exc:
+                _ext_logger().error("Real Kimi-K3 KDA is unavailable (%r): FALLING BACK to the dummy KDA, "
+                                    "model outputs will be wrong", exc)
+                kda_impl = "dummy"
+        elif kda_impl != "dummy":
+            _ext_logger().error("HPU_KIMI_KDA_IMPL must be 'real' or 'dummy', got %r: using the dummy KDA", kda_impl)
+            kda_impl = "dummy"
+        _ext_logger().info("Kimi-K3 KDA implementation on HPU: %s", kda_impl)
+
         if hasattr(_amd_kda, "KimiK3DeltaAttention"):
-            _amd_kda.KimiK3DeltaAttention.forward = _hpu_kda_forward
+            _amd_kda.KimiK3DeltaAttention.forward = _kda_forward
             _amd_kda.KimiK3DeltaAttention._forward = lambda *args, **kwargs: None
         if hasattr(_amd_kda, "GatedDeltaNetAttention"):
-            _amd_kda.GatedDeltaNetAttention.forward = _hpu_kda_forward
+            _amd_kda.GatedDeltaNetAttention.forward = _kda_forward
             _amd_kda.GatedDeltaNetAttention._forward = lambda *args, **kwargs: None
 
         try:
             import vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn as _gdn_mod
-            _gdn_mod.KimiGatedDeltaNetAttention.forward = _hpu_kda_forward
+            _gdn_mod.KimiGatedDeltaNetAttention.forward = _kda_forward
             _gdn_mod.KimiGatedDeltaNetAttention._forward = lambda *args, **kwargs: None
         except Exception:
             pass
