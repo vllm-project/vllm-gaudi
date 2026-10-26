@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     HPU_KIMI_KDA_IMPL: str = "real"
     HPU_KIMI_KDA_PREFILL: str = "chunked"
     HPU_KIMI_KDA_CHUNK_SIZE: int = 64
+    HPU_KIMI_KDA_MARK_STEP_CHUNKS: int = 1
     HPU_KIMI_SITU_IMPL: str = "exact"
 
 # The begin-* and end* here are used by the documentation generator
@@ -140,6 +141,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("HPU_KIMI_KDA_PREFILL", "chunked").strip().lower(),
     "HPU_KIMI_KDA_CHUNK_SIZE":
     lambda: int(os.environ.get("HPU_KIMI_KDA_CHUNK_SIZE", "64")),
+    # Lazy mode: number of KDA prefill chunks between two mark_steps (1 = every chunk is its own graph).
+    "HPU_KIMI_KDA_MARK_STEP_CHUNKS":
+    lambda: int(os.environ.get("HPU_KIMI_KDA_MARK_STEP_CHUNKS", "1")),
 
     # Kimi-K3 routed experts use the SiTU activation (beta*tanh(gate/beta)*sigmoid(gate)*up, soft-clipped up), which
     # the Habana fused MoE op does not have. "exact" computes the experts unfused with the real activation (MXFP4

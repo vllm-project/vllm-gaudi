@@ -26,10 +26,11 @@ _core_decode = torch.compiler.disable(kda_core_decode)
 
 
 @functools.lru_cache(maxsize=None)
-def _prefill_settings() -> tuple[str, int]:
-    """HPU_KIMI_KDA_PREFILL (chunked|loop) and HPU_KIMI_KDA_CHUNK_SIZE, read once through vllm_gaudi.envs."""
+def _prefill_settings() -> tuple[str, int, int]:
+    """HPU_KIMI_KDA_PREFILL (chunked|loop), HPU_KIMI_KDA_CHUNK_SIZE, HPU_KIMI_KDA_MARK_STEP_CHUNKS; read once."""
     import vllm_gaudi.envs as gaudi_envs
-    return gaudi_envs.HPU_KIMI_KDA_PREFILL, gaudi_envs.HPU_KIMI_KDA_CHUNK_SIZE
+    return (gaudi_envs.HPU_KIMI_KDA_PREFILL, gaudi_envs.HPU_KIMI_KDA_CHUNK_SIZE,
+            max(1, gaudi_envs.HPU_KIMI_KDA_MARK_STEP_CHUNKS))
 
 
 def _state_indices(self, attn_metadata) -> torch.Tensor:
@@ -100,7 +101,7 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                 if mask is not None:
                     mask = mask.reshape(num_seqs, seq_len)
                 step_hook = htorch.core.mark_step if htorch.utils.internal.is_lazy() else None
-                prefill_impl, chunk_size = _prefill_settings()
+                prefill_impl, chunk_size, mark_step_chunks = _prefill_settings()
                 core = _core_prefill(mixed_qkv.reshape(num_seqs, seq_len, -1),
                                      raw_g.reshape(num_seqs, seq_len, -1),
                                      raw_beta.reshape(num_seqs, seq_len, -1),
@@ -111,6 +112,7 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                                      step_hook=step_hook,
                                      prefill_impl=prefill_impl,
                                      chunk_size=chunk_size,
+                                     block_chunks=mark_step_chunks,
                                      **common)
                 # Keep post-processing out of the statement that calls the disabled core: ops chained on its last
                 # line end up in the dynamo resume frame without a source line, and the HPU compile backend then

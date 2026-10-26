@@ -638,7 +638,7 @@ def test_chunked_hook_called_between_chunk_blocks_only():
     calls = []
     kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=4, block_chunks=3,
                           step_hook=lambda: calls.append(1))
-    assert len(calls) == 3  # 10 chunks: after chunks 3, 6 and 9
+    assert len(calls) == 4  # after the whole-sequence preparation, then after chunks 3, 6 and 9 of 10
 
 
 def test_chunked_runs_far_fewer_ops_than_the_token_loop():
@@ -706,12 +706,13 @@ def test_prefill_settings_come_from_envs_once(monkeypatch):
     module._prefill_settings.cache_clear()
     monkeypatch.setenv("HPU_KIMI_KDA_PREFILL", "Loop")
     monkeypatch.setenv("HPU_KIMI_KDA_CHUNK_SIZE", "32")
-    assert module._prefill_settings() == ("loop", 32)
+    assert module._prefill_settings() == ("loop", 32, 1)
     monkeypatch.setenv("HPU_KIMI_KDA_CHUNK_SIZE", "64")  # cached: read once
-    assert module._prefill_settings() == ("loop", 32)
+    assert module._prefill_settings() == ("loop", 32, 1)
     module._prefill_settings.cache_clear()
     monkeypatch.delenv("HPU_KIMI_KDA_PREFILL")
-    assert module._prefill_settings() == ("chunked", 64)
+    monkeypatch.setenv("HPU_KIMI_KDA_MARK_STEP_CHUNKS", "4")
+    assert module._prefill_settings() == ("chunked", 64, 4)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -852,3 +853,30 @@ def test_residual_stream_test_detects_the_old_out_of_place_behaviour():
     broken_final, _, _ = _toy_residual_stream(out_of_place)
     ref_final, _, _ = _toy_residual_stream(reference_attn_res_kernel)
     assert not torch.allclose(broken_final, ref_final, rtol=1e-2, atol=1e-2)
+
+
+def test_default_is_one_lazy_graph_per_chunk():
+    q, k, v, log_gate, beta, state = _random_delta_inputs(150, 1, 64 * 5)
+    calls = []
+    kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=64, block_chunks=1,
+                          step_hook=lambda: calls.append(1))
+    assert len(calls) == 5  # preparation + after each of the first four chunks (not after the last one)
+
+
+def test_inverse_has_no_in_place_writes():
+    """In-place writes into views are what the lazy HPU mode handles with strided-insert ops and aliasing."""
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    names = []
+
+    class Recorder(TorchDispatchMode):
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            names.append(func.__name__)
+            return func(*args, **(kwargs or {}))
+
+    a = torch.tril(torch.rand(1, 3, 64, 64) * 0.5, -1)
+    with Recorder():
+        inv = kda._unit_lower_inverse(a)
+    assert not [n for n in names if n.endswith("_") or n in ("copy_", "slice_scatter", "select_scatter")]
+    torch.testing.assert_close(inv, torch.linalg.inv(torch.eye(64) + a), rtol=1e-3, atol=1e-3)

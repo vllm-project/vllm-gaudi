@@ -134,40 +134,36 @@ def kda_recurrent_steps(state: torch.Tensor,
     return torch.stack(outs, dim=1), state
 
 
-def _unit_lower_inverse_rows(a: torch.Tensor) -> torch.Tensor:
-    """(I + A)^-1 by row-wise forward substitution; A [..., n, n] strictly lower. Exact and stable (n steps)."""
-    n = a.shape[-1]
-    eye = torch.eye(n, dtype=a.dtype, device=a.device)
-    result = eye.expand(a.shape).clone()
-    for j in range(1, n):
-        correction = torch.matmul(a[..., j:j + 1, :j], result[..., :j, :])
-        result[..., j:j + 1, :] = eye[j] - correction
-    return result
+def _unit_lower_inverse(a: torch.Tensor) -> torch.Tensor:
+    """(I + A)^-1 for a strictly lower triangular A [..., C, C] by recursive block doubling.
 
-
-def _unit_lower_inverse(a: torch.Tensor, block: int = 16) -> torch.Tensor:
-    """(I + A)^-1 for a strictly lower triangular A [..., C, C], blockwise forward substitution.
-
-    The diagonal ``block`` x ``block`` blocks are inverted by exact forward substitution (all blocks at once, so
-    ``block`` steps instead of C), the block rows are then combined with
-    inv[b, :b] = -inv_bb @ (A[b, :b] @ inv[:b, :b]). A Neumann / repeated-squaring expansion would be cheaper but
-    loses all precision when neighbouring keys are nearly parallel and beta is close to 1.
+    The 1x1 diagonal blocks of I + A are 1; neighbouring blocks are merged level by level with the exact block
+    formula ``[[T, 0], [-B (C T), B]]`` (T, B the inverses of the two diagonal blocks, C the coupling block), all
+    pairs of a level in one batched matmul: log2(C) levels instead of C sequential substitution steps, no in-place
+    writes. It is algebraically the same as forward substitution and as accurate (checked against a float64
+    inverse, including nearly parallel keys with beta ~ 1), whereas a Neumann / repeated-squaring expansion loses
+    all precision there. A size that is not a power of two is padded with identity rows.
     """
     size = a.shape[-1]
-    if size <= block:
-        return _unit_lower_inverse_rows(a)
-    blocks = size // block
-    diag = torch.stack([a[..., b * block:(b + 1) * block, b * block:(b + 1) * block] for b in range(blocks)], dim=-3)
-    diag_inv = _unit_lower_inverse_rows(diag)  # [..., blocks, block, block]
-    result = torch.zeros_like(a)
-    for b in range(blocks):
-        rows = slice(b * block, (b + 1) * block)
-        result[..., rows, rows] = diag_inv[..., b, :, :]
-        if b:
-            cols = slice(0, b * block)
-            coupling = torch.matmul(a[..., rows, cols], result[..., cols, cols])
-            result[..., rows, cols] = -torch.matmul(diag_inv[..., b, :, :], coupling)
-    return result
+    padded = 1
+    while padded < size:
+        padded *= 2
+    if padded != size:
+        a = torch.nn.functional.pad(a, (0, padded - size, 0, padded - size))
+    lead = a.shape[:-2]
+    inv = a.new_ones(*lead, padded, 1, 1)  # inverses of the 1 x 1 diagonal blocks
+    block, count = 1, padded
+    while count > 1:
+        blocks = a.reshape(*lead, count, block, count, block)
+        # coupling between block 2p+1 (rows) and block 2p (columns), for every pair p
+        coupling = torch.diagonal(blocks[..., 1::2, :, 0::2, :], dim1=-4, dim2=-2)  # [..., block, block, count/2]
+        coupling = coupling.permute(*range(len(lead)), -1, -3, -2)  # [..., count/2, block, block]
+        top, bottom = inv[..., 0::2, :, :], inv[..., 1::2, :, :]
+        lower_left = -torch.matmul(bottom, torch.matmul(coupling, top))
+        inv = torch.cat((torch.cat((top, torch.zeros_like(top)), dim=-1), torch.cat((lower_left, bottom), dim=-1)),
+                        dim=-2)  # [..., count/2, 2 * block, 2 * block]
+        block, count = 2 * block, count // 2
+    return inv.reshape(*lead, padded, padded)[..., :size, :size]
 
 
 def kda_chunked_steps(state: torch.Tensor,
@@ -177,7 +173,7 @@ def kda_chunked_steps(state: torch.Tensor,
                       g: torch.Tensor,
                       beta: torch.Tensor,
                       chunk_size: int = 64,
-                      block_chunks: int = 8,
+                      block_chunks: int = 1,
                       step_hook: Callable[[], None] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Chunk-parallel (WY / UT form) delta rule, identical to ``kda_recurrent_steps``.
 
@@ -194,7 +190,7 @@ def kda_chunked_steps(state: torch.Tensor,
     g = 0 and beta = 0 (exact no-ops); the sequence is zero-padded to a multiple of ``chunk_size`` the same way.
     """
     if chunk_size <= 0 or (chunk_size > 16 and chunk_size % 16 != 0):
-        # _unit_lower_inverse works on 16-row blocks and would leave the last chunk_size % 16 rows zero
+        # keep the chunk (and with it every matmul of the inverse) tile friendly: multiples of 16 above 16
         raise ValueError(f"chunk_size must be positive and, above 16, a multiple of 16, got {chunk_size}")
     bsz, seq_len, heads, kdim = q.shape
     vdim = v.shape[-1]
@@ -222,6 +218,8 @@ def kda_chunked_steps(state: torch.Tensor,
     strict = torch.tril(torch.ones(chunk, chunk, dtype=q.dtype, device=q.device), -1)
     lower = torch.tril(torch.ones(chunk, chunk, dtype=q.dtype, device=q.device))
 
+    if step_hook is not None and num_chunks > 1:
+        step_hook()  # the whole-sequence preparation above is its own graph segment
     outs = []
     for n in range(num_chunks):
         g_n, k_n, q_n = cum[:, :, n], kc[:, :, n], qc[:, :, n]  # [B,H,C,K]
@@ -290,14 +288,16 @@ def kda_core_prefill(mixed_qkv: torch.Tensor,
                      block: int = 64,
                      step_hook: Callable[[], None] | None = None,
                      prefill_impl: str = "chunked",
-                     chunk_size: int = 64) -> torch.Tensor:
+                     chunk_size: int = 64,
+                     block_chunks: int = 1) -> torch.Tensor:
     """Uniform padded prefill batch.
 
     mixed_qkv [B,L,3P] (pre-conv), raw_g [B,L,P], raw_beta [B,L,H], token_mask [B,L] (1 = real token, padding at
     the end of each sequence) or None, state_idx [B] (-1 = padded row), has_initial_state [B] or None.
     Reads the initial conv/ssm state from the caches, writes the final ones back. Returns o [B,L,H,V] (fp32).
     ``prefill_impl`` selects the delta rule: "chunked" (chunk-parallel WY form, default) or "loop" (token loop,
-    kept for validation); ``block`` is the loop's hook period in tokens, ``chunk_size`` the chunk length.
+    kept for validation); ``block`` is the loop's hook period in tokens, ``chunk_size`` the chunk length and
+    ``block_chunks`` the number of chunks between two ``step_hook`` calls (1 = one lazy graph per chunk).
     """
     bsz, seq_len, channels = mixed_qkv.shape
     width = conv_weight.shape[-1]
@@ -337,7 +337,15 @@ def kda_core_prefill(mixed_qkv: torch.Tensor,
     if prefill_impl == "loop":
         out, state = kda_recurrent_steps(state, q, k, v, torch.exp(g), beta, block=block, step_hook=step_hook)
     elif prefill_impl == "chunked":
-        out, state = kda_chunked_steps(state, q, k, v, g, beta, chunk_size=chunk_size, step_hook=step_hook)
+        out, state = kda_chunked_steps(state,
+                                       q,
+                                       k,
+                                       v,
+                                       g,
+                                       beta,
+                                       chunk_size=chunk_size,
+                                       block_chunks=block_chunks,
+                                       step_hook=step_hook)
     else:
         raise ValueError(f"prefill_impl must be 'chunked' or 'loop', got {prefill_impl!r}")
     write_ssm_state(ssm_cache, slots, state)
