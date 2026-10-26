@@ -18,3 +18,16 @@ def profiling_max_batched_tokens(prompt_cfg: tuple | None, decode_cfg: tuple | N
     if decode_cfg:
         tokens = tokens + decode_cfg[0] if prompt_cfg else max(tokens, decode_cfg[0])
     return tokens
+
+
+def bucketing_max_batched_tokens(tokens: int, mamba_chunk_size: int, profiling: bool) -> int:
+    """Token budget handed to the bucketing manager.
+
+    HPUBucketingManager.initialize raises unless ``max_num_batched_tokens`` is divisible by the mamba-like chunk
+    size (128 for KDA/GDN models without an explicit one). A mixed profile budget (``bs * query + decode_bs``,
+    e.g. 8192 + 1) is not, which killed the engine right after start (build #859). Only the profile mode rounds
+    up; a misconfigured normal serve still fails loudly.
+    """
+    if not profiling or mamba_chunk_size <= 0:
+        return tokens
+    return -(-tokens // mamba_chunk_size) * mamba_chunk_size

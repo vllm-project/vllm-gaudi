@@ -24,3 +24,17 @@ def test_mixed_profile_reserves_one_token_per_decode_request():
 def test_decode_only_never_shrinks_the_budget_below_the_batch():
     assert cfg.profiling_max_batched_tokens(None, (1, 1, 53), 8192) == 8192
     assert cfg.profiling_max_batched_tokens(None, (16384, 1, 64), 8192) == 16384
+
+
+def test_bucketing_budget_is_a_multiple_of_the_mamba_chunk_in_profile_mode():
+    # build #859: 8192 + 1 = 8193 is not divisible by the default KDA/GDN chunk size 128 -> bucketing init raised
+    budget = cfg.profiling_max_batched_tokens((1, 8192, 0), (1, 1, 53), 8192)
+    assert budget % 128 != 0
+    assert cfg.bucketing_max_batched_tokens(budget, 128, profiling=True) == 8320
+    assert cfg.bucketing_max_batched_tokens(8192, 128, profiling=True) == 8192
+    assert cfg.bucketing_max_batched_tokens(budget, 256, profiling=True) == 8192 + 256
+
+
+def test_bucketing_budget_is_untouched_outside_profile_mode_or_without_mamba_layers():
+    assert cfg.bucketing_max_batched_tokens(8193, 128, profiling=False) == 8193  # real misconfig still fails loudly
+    assert cfg.bucketing_max_batched_tokens(8193, 0, profiling=True) == 8193
