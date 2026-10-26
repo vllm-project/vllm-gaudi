@@ -8,7 +8,7 @@ import logging
 import os
 import shutil
 import time
-from typing import Callable
+from typing import Callable, Mapping, Optional
 
 # under the 'vllm' logger tree: vLLM attaches its handler there, other names would drop the INFO lines
 _logger = logging.getLogger('vllm.gaudi.profiling')
@@ -41,6 +41,32 @@ def bucketing_max_batched_tokens(tokens: int, mamba_chunk_size: int, profiling: 
     if not profiling or mamba_chunk_size <= 0:
         return tokens
     return -(-tokens // mamba_chunk_size) * mamba_chunk_size
+
+
+# Paths of the traces written by make_trace_handler in this process (logged by hold_before_exit).
+WRITTEN_TRACES: list = []
+
+
+def profile_exit_delay_s(environ: Optional[Mapping[str, str]] = None) -> float:
+    """VLLM_PROFILE_EXIT_DELAY_S: seconds every rank holds after the traces are written, before the run ends with
+    'Finished profiling' (0 = no hold). Gives time to copy the traces off the pod; invalid/negative values mean 0."""
+    environ = os.environ if environ is None else environ
+    try:
+        return max(0.0, float(environ.get('VLLM_PROFILE_EXIT_DELAY_S', '0') or 0))
+    except ValueError:
+        return 0.0
+
+
+def hold_before_exit(delay_s: float, sleep: Callable[[float], None] = time.sleep) -> None:
+    """Log the written trace paths at WARNING and sleep ``delay_s`` s (no-op for 0).
+
+    Called on every rank after the post-profiling barrier with the same delay, so ranks stay aligned.
+    """
+    if delay_s <= 0:
+        return
+    _logger.warning("Profiling traces ready: %s; holding %g s before exit",
+                    ", ".join(WRITTEN_TRACES) or "none written on this rank", delay_s)
+    sleep(delay_s)
 
 
 def _remove_if_exists(path: str) -> None:
@@ -99,6 +125,7 @@ def make_trace_handler(output_dir: str, rank: int, use_gzip: bool = True) -> Cal
                     shutil.copyfileobj(src, dst)
                 os.remove(path)
                 path += ".gz"
+            WRITTEN_TRACES.append(path)
             _logger.info("Profiler trace written on rank %d: %s (%d bytes)", rank, path, os.path.getsize(path))
         except Exception as exc:
             _logger.warning("Cannot write the profiler trace on rank %d (%s): %r", rank, path, exc)

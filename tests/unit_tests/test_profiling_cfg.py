@@ -209,3 +209,33 @@ def test_all_attempts_failing_leaves_no_file_and_handler_writes_nothing(tmp_path
 
     cfg.make_trace_handler(str(tmp_path), 0, use_gzip=False)(Prof())
     assert list(tmp_path.iterdir()) == []
+
+
+def test_exit_delay_env_parsing():
+    assert cfg.profile_exit_delay_s({}) == 0.0
+    assert cfg.profile_exit_delay_s({"VLLM_PROFILE_EXIT_DELAY_S": "120"}) == 120.0
+    assert cfg.profile_exit_delay_s({"VLLM_PROFILE_EXIT_DELAY_S": "1.5"}) == 1.5
+    assert cfg.profile_exit_delay_s({"VLLM_PROFILE_EXIT_DELAY_S": "-5"}) == 0.0
+    assert cfg.profile_exit_delay_s({"VLLM_PROFILE_EXIT_DELAY_S": "abc"}) == 0.0
+    assert cfg.profile_exit_delay_s({"VLLM_PROFILE_EXIT_DELAY_S": ""}) == 0.0
+
+
+def test_hold_before_exit_logs_trace_names_and_sleeps(monkeypatch, caplog):
+    monkeypatch.setattr(cfg, "WRITTEN_TRACES", ["/d/0_1_2.pt.trace.json.gz"])
+    slept = []
+    with caplog.at_level("WARNING", logger="vllm.gaudi.profiling"):
+        cfg.hold_before_exit(30, sleep=slept.append)
+    assert slept == [30]
+    assert "0_1_2.pt.trace.json.gz" in caplog.text and "holding 30 s before exit" in caplog.text
+
+
+def test_hold_before_exit_is_a_noop_without_delay(caplog):
+    slept = []
+    cfg.hold_before_exit(0, sleep=slept.append)
+    assert slept == [] and caplog.text == ""
+
+
+def test_trace_handler_records_written_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg, "WRITTEN_TRACES", [])
+    cfg.make_trace_handler(str(tmp_path), 0, use_gzip=False)(_OneArgProf())
+    assert len(cfg.WRITTEN_TRACES) == 1 and cfg.WRITTEN_TRACES[0].endswith(".pt.trace.json")
