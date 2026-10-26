@@ -8,6 +8,8 @@ written straight from the KDA math: per head, per token loops with explicit oute
 import importlib.util
 import math
 import pathlib
+import subprocess
+import sys
 import types
 
 import pytest
@@ -451,3 +453,73 @@ def test_tag_kda_cache_groups_falls_back_to_module_name_without_prefix():
     tagged, untagged, _ = kda.tag_kda_cache_groups([("layers.1.self_attn", module)], groups,
                                                    lambda g: g.kind == "mamba", lambda gid: gid)
     assert tagged == {0: 1} and untagged == [] and module.cache_group_idx == 0
+
+
+def _unparsable_stack_trace_nodes(layer_forward, layer, hidden_states):
+    """Compile with a backend that checks every FX node the way the HPU lowering reads stack traces."""
+    from torch.fx.graph import _parse_stack_trace
+
+    bad = []
+
+    def backend(gm, example_inputs):
+        for node in gm.graph.nodes:
+            if node.op in ("placeholder", "output"):
+                continue
+            if node.stack_trace is None or _parse_stack_trace(node.stack_trace) is None:
+                bad.append((node.op, str(node.target), node.stack_trace))
+        return gm.forward
+
+    compiled = torch.compile(layer_forward, backend=backend, dynamic=False)
+    compiled(layer, hidden_states)
+    return bad
+
+
+def _compile_check(mode):
+    """Runs in a fresh interpreter (see the test): dynamo state from an earlier compile in the same process makes
+    the stubbed forward context of a later compile resolve to the earlier metadata."""
+    params = _make_params(40)
+    hidden = 16
+    caches = _new_caches(4, False)
+    metadata = {"value": None}
+
+    class _MonkeyPatch:
+
+        def setitem(self, mapping, key, value):
+            mapping[key] = value
+
+    module = _load_layer_module(_MonkeyPatch(), metadata)
+    layer = _FakeLayer(params, hidden, 41, caches)
+    g = torch.Generator().manual_seed(42)
+    if mode == "prefill":
+        metadata["value"] = types.SimpleNamespace(is_prompt=True,
+                                                   load_indices_tensor=torch.tensor([[0, 0], [1, 2]]),
+                                                   padding_mask_flat=torch.ones(16, 1),
+                                                   has_initial_states_p=torch.tensor([0, 0], dtype=torch.int32))
+        hidden_states = torch.randn(16, hidden, generator=g)
+    else:
+        metadata["value"] = types.SimpleNamespace(is_prompt=False, load_indices_tensor=torch.tensor([[0], [1]]))
+        hidden_states = torch.randn(1, hidden, generator=g)
+    return _unparsable_stack_trace_nodes(module.hpu_kda_forward, layer, hidden_states)
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode"])
+def test_compiled_layer_forward_has_parsable_fx_stack_traces(mode):
+    """Regression: ops chained on the last line of the call to the torch.compiler.disable'd KDA core ended up in
+    the dynamo resume frame without a source line; the HPU compile backend then crashed on the FX stack_trace
+    ("'NoneType' object has no attribute 'file'")."""
+    pytest.importorskip("torch._dynamo")
+    if not hasattr(torch.fx.graph, "_parse_stack_trace"):
+        pytest.skip("torch.fx.graph._parse_stack_trace is not available in this torch version")
+    result = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()), mode],
+                            capture_output=True,
+                            text=True,
+                            timeout=600)
+    assert result.returncode == 0, (
+        f"FX nodes without a parsable stack_trace or compile error:\n{result.stdout}\n{result.stderr[-2000:]}")
+
+
+if __name__ == "__main__":
+    unparsable = _compile_check(sys.argv[1])
+    for item in unparsable:
+        print(item)
+    sys.exit(1 if unparsable else 0)

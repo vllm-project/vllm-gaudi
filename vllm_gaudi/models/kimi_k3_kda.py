@@ -99,7 +99,11 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                                      token_mask=mask,
                                      block=_BLOCK,
                                      step_hook=step_hook,
-                                     **common).reshape(num_tokens, heads, head_dim)
+                                     **common)
+                # Keep post-processing out of the statement that calls the disabled core: ops chained on its last
+                # line end up in the dynamo resume frame without a source line, and the HPU compile backend then
+                # fails on the unparsable FX stack_trace ("'NoneType' object has no attribute 'file'").
+                core = core.reshape(num_tokens, heads, head_dim)
             else:
                 core = _core_decode(mixed_qkv, raw_g, raw_beta, state_idx=state_idx[:num_tokens], **common)
 
