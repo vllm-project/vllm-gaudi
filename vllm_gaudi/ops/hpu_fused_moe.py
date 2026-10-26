@@ -27,14 +27,14 @@ from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import
     RoutingSimulatorRouter, )
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter, )
-from vllm.logger import init_logger
 import vllm_gaudi.envs as gaudi_envs
+from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOp
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
-logger = init_logger(__name__)
+logger = init_logger()
 
 # Map model activation names to the activation strings the Gaudi fused-MoE op's
 # MoeActivationMode_t enum accepts. The synapse MoE kernel enumerates "gelu" (and
@@ -850,6 +850,9 @@ def install_inline_moe_forward_entry(model: torch.nn.Module) -> int:
     (``MoERunner.forward`` as well as runner subclasses such as the Kimi-K3 latent runner) in the process that
     owns the model. Only dp_size==1 / pcp_size==1 runners are replaced. Returns the number of runners changed.
     """
+    if not gaudi_envs.HPU_INLINE_MOE_ENTRY:
+        logger.info("Inline MoE forward entry is disabled (HPU_INLINE_MOE_ENTRY=0), pid %d", os.getpid())
+        return 0
     if not _MOE_COMPILE:
         return 0
     replaced = 0

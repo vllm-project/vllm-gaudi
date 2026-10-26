@@ -147,3 +147,24 @@ def test_install_inline_forward_entry_is_skipped_when_disabled(monkeypatch):
 
     assert hpu_fused_moe.install_inline_moe_forward_entry(model) == 0
     assert model.runner._forward_entry == "opaque"
+
+
+def test_patch_is_skipped_when_inline_entry_disabled(monkeypatch):
+    fake_cls, _ = _install_fake_latent_runner_module(monkeypatch)
+    original = fake_cls._fused_forward
+    monkeypatch.setattr(hpu_fused_moe, "_MOE_COMPILE", True)
+    monkeypatch.setenv("HPU_INLINE_MOE_ENTRY", "0")
+
+    patches._patch_latent_moe_runner_forward()
+
+    assert fake_cls._fused_forward is original
+
+
+def test_install_inline_forward_entry_is_skipped_when_inline_entry_disabled(monkeypatch):
+    monkeypatch.setattr(hpu_fused_moe, "_MOE_COMPILE", True)
+    monkeypatch.setenv("HPU_INLINE_MOE_ENTRY", "false")
+    model = torch.nn.Module()
+    model.runner = _make_fake_runner_instance()
+
+    assert hpu_fused_moe.install_inline_moe_forward_entry(model) == 0
+    assert model.runner._forward_entry == "opaque"

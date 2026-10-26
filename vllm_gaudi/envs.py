@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     VLLM_HPU_MOE_GATHER_RATIO: float = 0.4
     VLLM_HPU_MOE_GATHER_VERIFY: bool = False
     VLLM_COMPACT_GDN: bool = False
+    HPU_INLINE_MOE_ENTRY: bool = True
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -115,6 +116,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # it lazily rather than caching it at import time.
     "VLLM_COMPACT_GDN":
     lambda: os.environ.get("VLLM_COMPACT_GDN", "0").strip().lower() in ("1", "true"),
+
+    # Replace the opaque torch.ops.vllm.moe_forward[_shared] entry of the MoE
+    # runners (and the Kimi-K3 latent runner) with the inline HPU path so that
+    # the MoE layers stay inside the compiled graph. Set to 0/false to keep the
+    # upstream custom op. Independent of HPU_FUSED_MOE.
+    "HPU_INLINE_MOE_ENTRY":
+    lambda: os.environ.get("HPU_INLINE_MOE_ENTRY", "1").strip().lower() in ("1", "true"),
 }
 
 # end-env-vars-definition

@@ -1125,11 +1125,16 @@ def _patch_latent_moe_runner_forward() -> None:
 
     ``ROCmLatentMoERunner._fused_forward`` calls ``torch.ops.vllm.moe_forward_shared`` which the HPU compile
     backend executes eagerly ("Fallback required"), breaking the graph at every MoE layer. Replace it with the
-    dp_size==1 inline implementation used for the other MoE models. Disable with HPU_FUSED_MOE=0.
+    dp_size==1 inline implementation used for the other MoE models. Disable with HPU_FUSED_MOE=0 or
+    HPU_INLINE_MOE_ENTRY=0.
     """
-    from vllm.logger import init_logger
+    import vllm_gaudi.envs as gaudi_envs
+    from vllm_gaudi.extension.logger import logger as init_logger
 
-    logger = init_logger(__name__)
+    logger = init_logger()
+    if not gaudi_envs.HPU_INLINE_MOE_ENTRY:
+        logger.info("Kimi-K3 latent MoE runner patch skipped because HPU_INLINE_MOE_ENTRY=0")
+        return
     try:
         from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
         from vllm_gaudi.ops.hpu_fused_moe import _MOE_COMPILE, patched_latent_moe_fused_forward
