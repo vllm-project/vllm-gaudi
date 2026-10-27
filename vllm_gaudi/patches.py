@@ -416,6 +416,9 @@ def _patch_granite_moe_gate() -> None:
     """
     import vllm.model_executor.models.granitemoe as _granite_moe_mod
 
+    if getattr(_granite_moe_mod, "GateLinear", None) is _hpu_granite_moe_gate:
+        return  # load_general_plugins runs several times per process.
+
     moe_cls = getattr(_granite_moe_mod, "GraniteMoeMoE", None)
     if moe_cls is None:
         return  # Module shape changed — nothing to patch.
@@ -429,8 +432,8 @@ def _patch_granite_moe_gate() -> None:
         if "ReplicatedLinear(" not in source:
             from vllm_gaudi.extension.logger import logger
 
-            logger().warning("GraniteMoeMoE no longer builds its gate with GateLinear; the HPU bf16 "
-                             "router patch was not applied.")
+            logger().warning_once("GraniteMoeMoE no longer builds its gate with GateLinear; the HPU bf16 "
+                                  "router patch was not applied.")
         return
 
     _granite_moe_mod.GateLinear = _hpu_granite_moe_gate

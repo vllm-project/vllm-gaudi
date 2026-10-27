@@ -7,6 +7,7 @@ Run with:
 """
 
 import inspect
+import logging
 
 import torch
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -50,3 +51,17 @@ def test_granite_moe_gate_ignores_extra_gate_linear_args(default_vllm_config, di
 
     assert type(gate) is ReplicatedLinear
     assert gate.weight.dtype == torch.bfloat16
+
+
+def test_granite_moe_gate_patch_is_applied_once(monkeypatch, caplog):
+    import vllm.model_executor.models.granitemoe as granite_moe
+    from vllm.model_executor.layers.fused_moe import GateLinear
+
+    monkeypatch.setattr(granite_moe, "GateLinear", GateLinear)
+
+    with caplog.at_level(logging.INFO, logger="vllm"):
+        patches._patch_granite_moe_gate()
+        patches._patch_granite_moe_gate()
+
+    assert granite_moe.GateLinear is patches._hpu_granite_moe_gate
+    assert sum("GraniteMoeMoE gate patched" in r.getMessage() for r in caplog.records) == 1
