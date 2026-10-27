@@ -252,17 +252,27 @@ def _intra_chunk_terms(cum: torch.Tensor, kc: torch.Tensor, qc: torch.Tensor, vc
     ``Uv = (I + A)^-1 (beta V)``, ``Wk = (I + A)^-1 (beta K exp(G))``, so that the chunk output is
     ``O = q_eff S_0^T + o_intra`` (``q_eff = Q exp(G) - Aqk Wk``, ``o_intra = Aqk Uv``).
     """
+    # Fold B, H and the chunk group into one batch dimension: the HPU compiler rejects (strided_view, Invalid
+    # argument) the rank 6/7 views that the pairwise tensors and the block inverse would otherwise create.
+    lead = cum.shape[:3]
+
+    def fold(x):  # [B,H,G,C,D] -> [B*H*G,C,D]; reshape copies the non-contiguous slices of a chunk group
+        return x.reshape(-1, *x.shape[3:])
+
+    cum, kc, qc, vc, bc, k_gamma, q_gamma = (fold(x) for x in (cum, kc, qc, vc, bc, k_gamma, q_gamma))
     # exp(G_i - G_j) for j <= i; the clamp keeps the masked-out upper triangle finite (0 * inf would be NaN)
-    decay = torch.exp(torch.clamp(cum.unsqueeze(-2) - cum.unsqueeze(-3), max=0.0))  # [B,H,G,C(i),C(j),K]
+    decay = torch.exp(torch.clamp(cum.unsqueeze(-2) - cum.unsqueeze(-3), max=0.0))  # [N,C(i),C(j),K]
     k_decayed = decay * kc.unsqueeze(-3)  # k_j * exp(G_i - G_j)
     # contract with k_i (A) and q_i (Aqk) in one batched matmul over the rows i
-    both = torch.matmul(k_decayed, torch.stack((kc, qc), dim=-1))  # [B,H,G,C(i),C(j),2]
+    both = torch.matmul(k_decayed, torch.stack((kc, qc), dim=-1))  # [N,C(i),C(j),2]
     a_mat = both[..., 0] * strict * bc  # beta_i on the row
     aqk = both[..., 1] * lower
     inv = _unit_lower_inverse(a_mat)
     uv = torch.matmul(inv, bc * vc)
     wk = torch.matmul(inv, bc * k_gamma)
-    return uv, wk, q_gamma - torch.matmul(aqk, wk), torch.matmul(aqk, uv)
+    q_eff = q_gamma - torch.matmul(aqk, wk)
+    o_intra = torch.matmul(aqk, uv)
+    return tuple(x.reshape(*lead, *x.shape[1:]) for x in (uv, wk, q_eff, o_intra))
 
 
 def kda_chunked_steps_vec(state: torch.Tensor,
@@ -329,8 +339,9 @@ def kda_chunked_steps_vec(state: torch.Tensor,
         step_hook()
     s_t = state.transpose(-1, -2)  # [B,H,K,V]
     starts = []
-    for n, (uv_n, wk_n, tail_n,
-            gl_n) in enumerate(zip(uv.unbind(2), wk.unbind(2), k_tail_t.unbind(2), gamma_last.unbind(2))):
+    # chunk axis first and contiguous, so the loop only selects dense slices (no strided views of permuted tensors)
+    uv_c, wk_c, tail_c, gl_c = (x.movedim(2, 0).contiguous() for x in (uv, wk, k_tail_t, gamma_last))
+    for n, (uv_n, wk_n, tail_n, gl_n) in enumerate(zip(uv_c, wk_c, tail_c, gl_c)):
         starts.append(s_t)
         s_t = s_t * gl_n + torch.matmul(tail_n, uv_n - torch.matmul(wk_n, s_t))
         if step_hook is not None and (n + 1) % block_chunks == 0 and n + 1 < num_chunks:

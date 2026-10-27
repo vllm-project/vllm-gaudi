@@ -1083,6 +1083,42 @@ def test_prefill_step_only_reads_the_caches_and_write_completes_it(impl):
     assert all(torch.equal(a, b) for a, b in zip(caches, composed))
 
 
+def _max_tensor_rank(fn):
+    """Highest dim() of any tensor argument or result of any aten op executed by ``fn()``."""
+    from torch.utils._python_dispatch import TorchDispatchMode
+    from torch.utils._pytree import tree_leaves
+
+    ranks = []
+
+    class _Rank(TorchDispatchMode):
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            out = func(*args, **(kwargs or {}))
+            ranks.extend((t.dim(), str(func)) for t in tree_leaves((args, kwargs, out)) if isinstance(t, torch.Tensor))
+            return out
+
+    with _Rank():
+        fn()
+    return max(ranks)
+
+
+@pytest.mark.parametrize("lengths,padded,chunk,vec_chunks", [([70, 41], 96, 32, 2), ([37], 37, 16, 0),
+                                                              ([64, 5, 33], 64, 16, 3), ([9], 12, 4, 1)])
+def test_chunked_vec_prefill_step_has_no_tensor_above_rank_5(lengths, padded, chunk, vec_chunks):
+    """The HPU compiler fails with 'strided_view ... Invalid argument' on the rank 6/7 views of the batched
+    intra-chunk terms, so no op of the chunked_vec prefill may see a tensor with more than 5 dims."""
+    params = _make_params(140)
+    batch, mask = _pad_batch([_make_inputs(141 + i, n) for i, n in enumerate(lengths)], padded)
+    g = torch.Generator().manual_seed(150)
+    caches = tuple(c.copy_(torch.randn(c.shape, generator=g)) for c in _new_caches(len(lengths) + 1, False))
+    n = len(lengths)
+    args = (batch["mixed_qkv"], batch["raw_g"], batch["raw_beta"], params["conv_weight"], None, params["A_log"],
+            params["dt_bias"], params["lower_bound"], *caches, torch.arange(n), torch.tensor([1, 0, 1][:n]), mask, H, D)
+    rank, op = _max_tensor_rank(lambda: kda.kda_prefill_step(
+        *args, block=16, prefill_impl="chunked_vec", chunk_size=chunk, vec_chunks=vec_chunks))
+    assert rank <= 5, (rank, op)
+
+
 def test_prefill_step_rejects_unknown_impl():
     params = _make_params(138)
     batch, mask = _pad_batch([_make_inputs(139, 8)], 8)
