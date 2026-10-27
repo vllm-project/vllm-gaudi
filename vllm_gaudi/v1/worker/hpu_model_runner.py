@@ -620,6 +620,10 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         output.sampled_token_ids[:len(valid_sampled_token_ids)] = valid_sampled_token_ids
         return output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Return the step's KV connector output, salvaged when get_output() fails."""
+        return self._model_runner_output.kv_connector_output
+
 
 @dataclass
 class PromptDecodeInfo:
