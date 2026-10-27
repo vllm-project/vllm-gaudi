@@ -502,18 +502,36 @@ def test_compressed_tensors_wna16_moe_method_cpu_first_migration(default_vllm_co
     torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
 
 
-def test_wna16_rebias_uint4b8_to_int4():
-    """uint4b8 codes (value + 8) become the two's-complement nibbles int4_fused_weights reads."""
+@pytest.mark.parametrize("device", ["cpu", "hpu"])
+def test_wna16_rebias_uint4b8_to_int4(device):
+    """uint4b8 codes (value + 8) become the two's-complement nibbles int4_fused_weights reads.
+
+    Runs on both devices the load can rebias on (a CPU-first load does it on the host).
+    """
     values = torch.arange(-8, 8, dtype=torch.int32).repeat(2, 1)  # every int4 value
-    packed = pack_quantized_values_into_int32(values + 8, scalar_types.uint4b8, packed_dim=1)
+    packed = pack_quantized_values_into_int32(values + 8, scalar_types.uint4b8, packed_dim=1).to(device)
     original = packed.clone()
 
     rebias_uint4b8_to_int4_(packed)
-    nibbles = torch.stack([(packed >> (4 * i)) & 0xF for i in range(8)], dim=-1).reshape(values.shape)
+    codes = packed.cpu()
+    nibbles = torch.stack([(codes >> (4 * i)) & 0xF for i in range(8)], dim=-1).reshape(values.shape)
     torch.testing.assert_close(torch.where(nibbles >= 8, nibbles - 16, nibbles), values)
 
     rebias_uint4b8_to_int4_(packed)  # self-inverse
     torch.testing.assert_close(packed, original)
+
+
+def test_int4_moe_schema_miss_is_not_cached(monkeypatch):
+    """A failed int4_fused_weights lookup is retried, so an early probe cannot disable the native path for good."""
+    monkeypatch.setattr(hpu_ext_ops, "_CACHED_INT4_MOE_SCHEMA", None)
+    monkeypatch.setattr(torch.ops.hpu, "mixture_of_experts", SimpleNamespace())  # overload not registered yet
+    assert not hpu_ext_ops.int4_moe_native_available()
+
+    schema = SimpleNamespace(arguments=[SimpleNamespace(name="is_gated")])
+    monkeypatch.setattr(torch.ops.hpu, "mixture_of_experts",
+                        SimpleNamespace(int4_fused_weights=SimpleNamespace(_schema=schema)))
+    assert hpu_ext_ops.int4_moe_native_available()
+    assert hpu_ext_ops.int4_moe_supports_non_gated()
 
 
 @pytest.mark.parametrize("reason", ["g_idx", "w8a16", "no_overload"])

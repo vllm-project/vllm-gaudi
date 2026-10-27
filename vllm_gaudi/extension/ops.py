@@ -29,7 +29,6 @@ FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 if is_hpu_gaudi2:
     FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
 
-import functools
 import logging
 import os
 
@@ -1558,14 +1557,22 @@ class MoeWNA16Matmul(torch.nn.Module):
         raise NotImplementedError()
 
 
-@functools.cache
+# Schema of int4_fused_weights once found. A miss is not cached: a lookup made
+# before the bridge registered its ops must not disable the native int4 path for
+# the rest of the process.
+_CACHED_INT4_MOE_SCHEMA = None
+
+
 def _int4_moe_schema():
     """Schema of the bridge's int4_fused_weights overload, or None if it has none."""
-    try:
-        return torch.ops.hpu.mixture_of_experts.int4_fused_weights._schema
-    except (AttributeError, RuntimeError):
-        # Bridge predates the int4_fused_weights overload altogether.
-        return None
+    global _CACHED_INT4_MOE_SCHEMA
+    if _CACHED_INT4_MOE_SCHEMA is None:
+        try:
+            _CACHED_INT4_MOE_SCHEMA = torch.ops.hpu.mixture_of_experts.int4_fused_weights._schema
+        except (AttributeError, RuntimeError):
+            # Bridge predates the int4_fused_weights overload altogether.
+            return None
+    return _CACHED_INT4_MOE_SCHEMA
 
 
 def int4_moe_native_available() -> bool:
@@ -1591,7 +1598,11 @@ _UINT4B8_TO_INT4_XOR = -2004318072  # 0x88888888 as a signed int32
 
 def rebias_uint4b8_to_int4_(packed: torch.Tensor) -> torch.Tensor:
     """In place: int32-packed uint4b8 codes -> signed int4 nibbles (self-inverse)."""
-    return packed.bitwise_xor_(torch.tensor(_UINT4B8_TO_INT4_XOR, dtype=torch.int32, device=packed.device))
+    # The bridge keeps an int scalar exact (int64/double, never float32) and
+    # caches its device copy, so no mask tensor is built per call. no_grad lets
+    # callers pass the Parameter itself instead of its .data.
+    with torch.no_grad():
+        return packed.bitwise_xor_(_UINT4B8_TO_INT4_XOR)
 
 
 class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):

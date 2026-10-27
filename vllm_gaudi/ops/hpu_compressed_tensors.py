@@ -1008,15 +1008,17 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
                                       f"(VLLM_WNA16_NATIVE_INT4_MOE=1) on a Habana PyTorch bridge whose "
                                       f"mixture_of_experts.int4_fused_weights takes is_gated.")
 
-        packed = layer.w13_weight_packed.data
-        scale = layer.w13_weight_scale.data
+        packed = layer.w13_weight_packed
+        scale = layer.w13_weight_scale
         # Both are [num_experts, 2 * intermediate_per_partition, ...] with w1 in
         # the lower half. Mirror weights *and* scales: create_weights fills the
         # scale with ones, so the copy would otherwise dequantize wrongly.
         half = packed.shape[1] // 2
-        assert scale.shape[1] == 2 * half, (f"w13 scale/weight row mismatch: {scale.shape} vs {packed.shape}")
-        packed[:, half:, :] = packed[:, :half, :]
-        scale[:, half:, :] = scale[:, :half, :]
+        if scale.shape[1] != 2 * half:
+            raise ValueError(f"w13 scale/weight row mismatch: {scale.shape} vs {packed.shape}")
+        with torch.no_grad():
+            packed[:, half:, :] = packed[:, :half, :]
+            scale[:, half:, :] = scale[:, :half, :]
         if not HPUCompressedTensorsWNA16MoEMethod._nongated_logged:
             HPUCompressedTensorsWNA16MoEMethod._nongated_logged = True
             # warning, not info: in worker processes this logger propagates to a
@@ -1084,8 +1086,8 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
             # while compressed-tensors stores uint4b8 (value + 8). Rebias once here.
             # The bf16 dequant path can no longer decode them afterwards; the op
             # refuses it from now on (codes_signed).
-            rebias_uint4b8_to_int4_(layer.w13_weight_packed.data)
-            rebias_uint4b8_to_int4_(layer.w2_weight_packed.data)
+            rebias_uint4b8_to_int4_(layer.w13_weight_packed)
+            rebias_uint4b8_to_int4_(layer.w2_weight_packed)
             layer.moe_op.codes_signed = True
             layer.moe_op._cache_weight_lists()
         else:
