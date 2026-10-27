@@ -321,16 +321,16 @@ def kda_chunked_steps_vec(state: torch.Tensor,
             step_hook()  # the preparation and every group of intra-chunk terms are graph segments of their own
         sl = slice(start, start + group)
         terms.append(
-            _intra_chunk_terms(cum[:, :, sl], kc[:, :, sl], qc[:, :, sl], vc[:, :, sl], bc[:, :, sl],
-                               k_gamma[:, :, sl], q_gamma[:, :, sl], strict, lower))
+            _intra_chunk_terms(cum[:, :, sl], kc[:, :, sl], qc[:, :, sl], vc[:, :, sl], bc[:, :, sl], k_gamma[:, :, sl],
+                               q_gamma[:, :, sl], strict, lower))
     uv, wk, q_eff, o_intra = (torch.cat(parts, dim=2) if len(parts) > 1 else parts[0] for parts in zip(*terms))
 
     if step_hook is not None and num_chunks > 1:
         step_hook()
     s_t = state.transpose(-1, -2)  # [B,H,K,V]
     starts = []
-    for n, (uv_n, wk_n, tail_n, gl_n) in enumerate(
-            zip(uv.unbind(2), wk.unbind(2), k_tail_t.unbind(2), gamma_last.unbind(2))):
+    for n, (uv_n, wk_n, tail_n,
+            gl_n) in enumerate(zip(uv.unbind(2), wk.unbind(2), k_tail_t.unbind(2), gamma_last.unbind(2))):
         starts.append(s_t)
         s_t = s_t * gl_n + torch.matmul(tail_n, uv_n - torch.matmul(wk_n, s_t))
         if step_hook is not None and (n + 1) % block_chunks == 0 and n + 1 < num_chunks:
@@ -590,15 +590,9 @@ def tag_kda_cache_groups(named_modules, kv_cache_groups, is_mamba_group: Callabl
 # ---------------------------------------------------------------------------------------------------------------
 # Kimi-K3 attention residual (attn_res), pure PyTorch twin of vllm/models/kimi_k3/amd/ops/attn_res.py
 # ---------------------------------------------------------------------------------------------------------------
-def attn_res_functional(prefix: torch.Tensor,
-                        delta: torch.Tensor | None,
-                        blocks: torch.Tensor,
-                        norm_weight: torch.Tensor,
-                        qk_weight: torch.Tensor,
-                        output_norm_weight: torch.Tensor | None,
-                        num_blocks: int,
-                        block_write_idx: int,
-                        eps: float,
+def attn_res_functional(prefix: torch.Tensor, delta: torch.Tensor | None, blocks: torch.Tensor,
+                        norm_weight: torch.Tensor, qk_weight: torch.Tensor, output_norm_weight: torch.Tensor | None,
+                        num_blocks: int, block_write_idx: int, eps: float,
                         output_norm_eps: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Out-of-place ``attn_res``: returns ``(new_prefix, new_blocks, mixed)``, no input is modified.
 
@@ -621,9 +615,9 @@ def attn_res_functional(prefix: torch.Tensor,
         updated = prefix.float()
     new_blocks = blocks
     if block_write_idx >= 0:
-        new_blocks = torch.cat((blocks[:, :block_write_idx], updated.to(blocks.dtype).unsqueeze(1),
-                                blocks[:, block_write_idx + 1:]),
-                               dim=1)
+        new_blocks = torch.cat(
+            (blocks[:, :block_write_idx], updated.to(blocks.dtype).unsqueeze(1), blocks[:, block_write_idx + 1:]),
+            dim=1)
 
     if num_blocks == 0:
         mixed = updated
@@ -691,9 +685,9 @@ def forward_attn_residual_functional(self, positions, hidden_states, block_resid
     prefix_sum = hidden_states
     write_idx = self.block_write_idx if self.is_block_write_layer else -1
     new_prefix, block_residual, hidden_states = _layer_attn_res(prefix_sum, block_residual,
-                                                                 self.self_attention_res_proj,
-                                                                 self.self_attention_res_norm, self.prev_valid_blocks,
-                                                                 prefix_delta, self.input_layernorm, write_idx)
+                                                                self.self_attention_res_proj,
+                                                                self.self_attention_res_norm, self.prev_valid_blocks,
+                                                                prefix_delta, self.input_layernorm, write_idx)
     # in a block-write layer the updated prefix lives in the bank and the attention output starts the new prefix
     prefix_sum = None if self.is_block_write_layer else new_prefix
 
@@ -706,8 +700,8 @@ def forward_attn_residual_functional(self, positions, hidden_states, block_resid
 
     mlp_valid_blocks = self.prev_valid_blocks + (1 if self.is_block_write_layer else 0)
     prefix_sum, block_residual, hidden_states = _layer_attn_res(prefix_sum, block_residual, self.mlp_res_proj,
-                                                                 self.mlp_res_norm, mlp_valid_blocks, prefix_delta,
-                                                                 self.post_attention_layernorm, -1)
+                                                                self.mlp_res_norm, mlp_valid_blocks, prefix_delta,
+                                                                self.post_attention_layernorm, -1)
     hidden_states = self.mlp(hidden_states)
     return prefix_sum, block_residual, hidden_states
 
@@ -773,6 +767,5 @@ def attn_res_layer_variants(modules) -> int:
 
 def _layer_attn_res(prefix_sum, block_residual, proj, norm, num_valid_blocks, delta, output_norm, block_write_idx):
     return attn_res_functional(prefix_sum, delta, block_residual, norm.weight, proj.weight.squeeze(0),
-                               None if output_norm is None else output_norm.weight, num_valid_blocks,
-                               block_write_idx, norm.variance_epsilon,
-                               0.0 if output_norm is None else output_norm.variance_epsilon)
+                               None if output_norm is None else output_norm.weight, num_valid_blocks, block_write_idx,
+                               norm.variance_epsilon, 0.0 if output_norm is None else output_norm.variance_epsilon)

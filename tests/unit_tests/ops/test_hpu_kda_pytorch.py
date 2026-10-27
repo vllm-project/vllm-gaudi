@@ -372,9 +372,23 @@ def test_step_hook_is_called_between_blocks_only():
     batch, mask = _pad_batch([x], 10)
     caches = _new_caches(3, True)
     conv, ssm = caches
-    kda.kda_core_prefill(batch["mixed_qkv"], batch["raw_g"], batch["raw_beta"], params["conv_weight"], None,
-                         params["A_log"], params["dt_bias"], params["lower_bound"], conv, ssm, torch.tensor([1]),
-                         torch.tensor([0]), mask, H, D, block=4, step_hook=lambda: calls.append(1),
+    kda.kda_core_prefill(batch["mixed_qkv"],
+                         batch["raw_g"],
+                         batch["raw_beta"],
+                         params["conv_weight"],
+                         None,
+                         params["A_log"],
+                         params["dt_bias"],
+                         params["lower_bound"],
+                         conv,
+                         ssm,
+                         torch.tensor([1]),
+                         torch.tensor([0]),
+                         mask,
+                         H,
+                         D,
+                         block=4,
+                         step_hook=lambda: calls.append(1),
                          prefill_impl="loop")
     assert len(calls) == 2  # after tokens 4 and 8 (not after the last token)
 
@@ -415,13 +429,13 @@ def _load_layer_module(monkeypatch, metadata):
 
     context = _ForwardContext()
     forward_context.get_forward_context = lambda: context
-    for name, mod in (("habana_frameworks", habana), ("habana_frameworks.torch", habana_torch),
-                      ("vllm", types.ModuleType("vllm")), ("vllm.forward_context", forward_context),
-                      ("vllm_gaudi", types.ModuleType("vllm_gaudi")),
+    for name, mod in (("habana_frameworks", habana), ("habana_frameworks.torch",
+                                                      habana_torch), ("vllm", types.ModuleType("vllm")),
+                      ("vllm.forward_context", forward_context), ("vllm_gaudi", types.ModuleType("vllm_gaudi")),
                       ("vllm_gaudi.ops", types.ModuleType("vllm_gaudi.ops")), ("vllm_gaudi.ops.hpu_kda_pytorch", kda),
                       ("vllm_gaudi.extension", types.ModuleType("vllm_gaudi.extension")),
-                      ("vllm_gaudi.extension.graph_state", _load_graph_state_module()),
-                      ("vllm_gaudi.envs", _load_envs_module())):
+                      ("vllm_gaudi.extension.graph_state", _load_graph_state_module()), ("vllm_gaudi.envs",
+                                                                                         _load_envs_module())):
         monkeypatch.setitem(sys.modules, name, mod)
     path = _MODULE_PATH.parents[1] / "models" / "kimi_k3_kda.py"
     spec = importlib.util.spec_from_file_location("kimi_k3_kda_under_test", path)
@@ -457,7 +471,6 @@ class _FakeLayer:
         return (x @ self.w_o.t(), None)
 
 
-
 def _reference_layer(layer, hidden_states, params, conv_state=None, ssm_state=None):
     proj = hidden_states @ layer.w_in.t()
     qkv, gate = proj[:, :3 * P], proj[:, 3 * P:4 * P]
@@ -486,9 +499,9 @@ def test_layer_forward_prefill_then_decode_matches_reference(monkeypatch):
     mask = torch.zeros(2, 8)
     mask[0, :7] = 1.0
     metadata["value"] = types.SimpleNamespace(is_prompt=True,
-                                               load_indices_tensor=torch.tensor([[0, 0], [2, -1]]),
-                                               padding_mask_flat=mask.reshape(-1, 1),
-                                               has_initial_states_p=torch.tensor([0, 0], dtype=torch.int32))
+                                              load_indices_tensor=torch.tensor([[0, 0], [2, -1]]),
+                                              padding_mask_flat=mask.reshape(-1, 1),
+                                              has_initial_states_p=torch.tensor([0, 0], dtype=torch.int32))
     out = module.hpu_kda_forward(layer, prompt.reshape(-1, hidden))
     ref, conv_s, ssm_s = _reference_layer(layer, hs[:7], params)
     torch.testing.assert_close(out.reshape(2, 8, hidden)[0, :7], ref, rtol=1e-4, atol=1e-4)
@@ -601,9 +614,9 @@ def _compile_check(mode):
     g = torch.Generator().manual_seed(42)
     if mode == "prefill":
         metadata["value"] = types.SimpleNamespace(is_prompt=True,
-                                                   load_indices_tensor=torch.tensor([[0, 0], [1, 2]]),
-                                                   padding_mask_flat=torch.ones(16, 1),
-                                                   has_initial_states_p=torch.tensor([0, 0], dtype=torch.int32))
+                                                  load_indices_tensor=torch.tensor([[0, 0], [1, 2]]),
+                                                  padding_mask_flat=torch.ones(16, 1),
+                                                  has_initial_states_p=torch.tensor([0, 0], dtype=torch.int32))
         hidden_states = torch.randn(16, hidden, generator=g)
     else:
         metadata["value"] = types.SimpleNamespace(is_prompt=False, load_indices_tensor=torch.tensor([[0], [1]]))
@@ -653,13 +666,12 @@ def _decode_graph_check(prefill=False):
         mask = torch.ones(2, 8)
         mask[1, 5:] = 0.0
         metadata["value"] = types.SimpleNamespace(is_prompt=True,
-                                                   load_indices_tensor=torch.tensor([[0, 0], [1, 3]]),
-                                                   padding_mask_flat=mask.reshape(-1, 1),
-                                                   has_initial_states_p=torch.tensor([1, 1], dtype=torch.int32))
+                                                  load_indices_tensor=torch.tensor([[0, 0], [1, 3]]),
+                                                  padding_mask_flat=mask.reshape(-1, 1),
+                                                  has_initial_states_p=torch.tensor([1, 1], dtype=torch.int32))
         hidden_states = torch.randn(16, hidden, generator=g)
     else:
-        metadata["value"] = types.SimpleNamespace(is_prompt=False,
-                                                   load_indices_tensor=torch.tensor([[0, 0], [1, 3]]))
+        metadata["value"] = types.SimpleNamespace(is_prompt=False, load_indices_tensor=torch.tensor([[0, 0], [1, 3]]))
         hidden_states = torch.randn(2, hidden, generator=g)
     eager_layer = _FakeLayer(params, hidden, 45, tuple(cache.clone() for cache in caches))
     expected = module.hpu_kda_forward(eager_layer, hidden_states)
@@ -672,8 +684,8 @@ def _decode_graph_check(prefill=False):
         os.environ["HPU_KIMI_KDA_PREFILL"] = "chunked_vec"
         assert module._prefill_settings()[0] == "chunked_vec"
         assert torch.allclose(chunked, expected, rtol=1e-5, atol=1e-5)
-        assert all(torch.allclose(a, b, rtol=1e-5, atol=1e-5) for a, b in zip(chunked_layer.kv_cache,
-                                                                              eager_layer.kv_cache))
+        assert all(
+            torch.allclose(a, b, rtol=1e-5, atol=1e-5) for a, b in zip(chunked_layer.kv_cache, eager_layer.kv_cache))
 
     graphs, mutated = [], []
 
@@ -722,10 +734,11 @@ def test_compiled_layer_chunked_vec_prefill_traces_the_step_and_mutates_no_graph
     import json
 
     pytest.importorskip("torch._dynamo")
-    result = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()), "prefill_vec_graphs"],
-                            capture_output=True,
-                            text=True,
-                            timeout=600)
+    result = subprocess.run(
+        [sys.executable, str(pathlib.Path(__file__).resolve()), "prefill_vec_graphs"],
+        capture_output=True,
+        text=True,
+        timeout=600)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr[-2000:]}"
     stats = json.loads(result.stdout.strip().splitlines()[-1])
     assert stats["mutated"] == []
@@ -811,9 +824,23 @@ def test_core_prefill_impls_match_reference_long_multi_sequence(impl):
     batch, mask = _pad_batch([xa, xb], 160)
     conv, ssm = caches
 
-    out = kda.kda_core_prefill(batch["mixed_qkv"], batch["raw_g"], batch["raw_beta"], params["conv_weight"], None,
-                               params["A_log"], params["dt_bias"], params["lower_bound"], conv, ssm,
-                               torch.tensor([1, 3]), torch.tensor([0, 1]), mask, H, D, block=32, prefill_impl=impl,
+    out = kda.kda_core_prefill(batch["mixed_qkv"],
+                               batch["raw_g"],
+                               batch["raw_beta"],
+                               params["conv_weight"],
+                               None,
+                               params["A_log"],
+                               params["dt_bias"],
+                               params["lower_bound"],
+                               conv,
+                               ssm,
+                               torch.tensor([1, 3]),
+                               torch.tensor([0, 1]),
+                               mask,
+                               H,
+                               D,
+                               block=32,
+                               prefill_impl=impl,
                                chunk_size=32)
 
     ref_a, conv_a, ssm_a = reference_kda(xa, params)
@@ -833,11 +860,29 @@ def test_chunked_prefill_then_decode_continues_the_state(impl):
     head = {key: val[:130] for key, val in full.items()}
     batch, mask = _pad_batch([head], 192)  # 192 = 6 chunks of 32, 62 padded tokens
     conv, ssm = caches
-    kda.kda_core_prefill(batch["mixed_qkv"], batch["raw_g"], batch["raw_beta"], params["conv_weight"], None,
-                         params["A_log"], params["dt_bias"], params["lower_bound"], conv, ssm, torch.tensor([2]),
-                         torch.tensor([0]), mask, H, D, prefill_impl=impl, chunk_size=32)
-    decoded = [_run_decode(params, {key: val[t:t + 1] for key, val in full.items()}, caches, torch.tensor([2]))[0]
-               for t in range(130, 140)]
+    kda.kda_core_prefill(batch["mixed_qkv"],
+                         batch["raw_g"],
+                         batch["raw_beta"],
+                         params["conv_weight"],
+                         None,
+                         params["A_log"],
+                         params["dt_bias"],
+                         params["lower_bound"],
+                         conv,
+                         ssm,
+                         torch.tensor([2]),
+                         torch.tensor([0]),
+                         mask,
+                         H,
+                         D,
+                         prefill_impl=impl,
+                         chunk_size=32)
+    decoded = [
+        _run_decode(params, {
+            key: val[t:t + 1]
+            for key, val in full.items()
+        }, caches, torch.tensor([2]))[0] for t in range(130, 140)
+    ]
     ref_out, _, ref_ssm = reference_kda(full, params)
     torch.testing.assert_close(torch.stack(decoded), ref_out[130:], rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(caches[1][2], ref_ssm, rtol=1e-4, atol=1e-4)
@@ -856,7 +901,14 @@ def test_chunked_bf16_inputs_close_to_fp32(impl):
 def test_chunked_hook_called_between_chunk_blocks_only():
     q, k, v, log_gate, beta, state = _random_delta_inputs(91, 1, 40)
     calls = []
-    kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=4, block_chunks=3,
+    kda.kda_chunked_steps(state,
+                          q,
+                          k,
+                          v,
+                          log_gate,
+                          beta,
+                          chunk_size=4,
+                          block_chunks=3,
                           step_hook=lambda: calls.append(1))
     assert len(calls) == 4  # after the whole-sequence preparation, then after chunks 3, 6 and 9 of 10
 
@@ -930,7 +982,13 @@ def test_chunked_vec_matches_loop_and_chunked_for_any_grouping(length, chunk, ve
     q, k, v, log_gate, beta, state = _random_delta_inputs(120 + length, 2, length)
     out_loop, state_loop = kda.kda_recurrent_steps(state, q, k, v, torch.exp(log_gate), beta)
     out_chunk, state_chunk = kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=chunk)
-    out_vec, state_vec = kda.kda_chunked_steps_vec(state, q, k, v, log_gate, beta, chunk_size=chunk,
+    out_vec, state_vec = kda.kda_chunked_steps_vec(state,
+                                                   q,
+                                                   k,
+                                                   v,
+                                                   log_gate,
+                                                   beta,
+                                                   chunk_size=chunk,
                                                    vec_chunks=vec_chunks)
     assert out_vec.shape == out_loop.shape and state_vec.shape == state_loop.shape
     torch.testing.assert_close(out_vec, out_loop, rtol=1e-4, atol=1e-4)
@@ -956,8 +1014,7 @@ def test_chunked_vec_in_bf16_stays_close_to_fp32_loop():
     q, k, v, log_gate, beta, state = _random_delta_inputs(131, 1, 200)
     out_loop, state_loop = kda.kda_recurrent_steps(state, q, k, v, torch.exp(log_gate), beta)
     bf = lambda x: x.to(torch.bfloat16)  # noqa: E731
-    out16, state16 = kda.kda_chunked_steps_vec(bf(state), bf(q), bf(k), bf(v), bf(log_gate), bf(beta),
-                                               chunk_size=64)
+    out16, state16 = kda.kda_chunked_steps_vec(bf(state), bf(q), bf(k), bf(v), bf(log_gate), bf(beta), chunk_size=64)
     assert out16.dtype == torch.bfloat16
     torch.testing.assert_close(out16.float(), out_loop, rtol=0.1, atol=0.1)
     torch.testing.assert_close(state16.float(), state_loop, rtol=0.1, atol=0.1)
@@ -966,14 +1023,24 @@ def test_chunked_vec_in_bf16_stays_close_to_fp32_loop():
 def test_chunked_vec_hook_called_per_group_and_between_chunk_blocks():
     q, k, v, log_gate, beta, state = _random_delta_inputs(132, 1, 40)
     calls = []
-    kda.kda_chunked_steps_vec(state, q, k, v, log_gate, beta, chunk_size=4, block_chunks=3, vec_chunks=4,
+    kda.kda_chunked_steps_vec(state,
+                              q,
+                              k,
+                              v,
+                              log_gate,
+                              beta,
+                              chunk_size=4,
+                              block_chunks=3,
+                              vec_chunks=4,
                               step_hook=lambda: calls.append(1))
     # before each of the 3 groups of intra-chunk terms (10 chunks / 4), before the recurrence, after chunks 3, 6, 9
     assert len(calls) == 7
 
 
-_VIEW_OPS = {"view", "_unsafe_view", "expand", "slice", "select", "unsqueeze", "squeeze", "permute", "transpose",
-             "alias", "diagonal", "t", "unbind", "split"}
+_VIEW_OPS = {
+    "view", "_unsafe_view", "expand", "slice", "select", "unsqueeze", "squeeze", "permute", "transpose", "alias",
+    "diagonal", "t", "unbind", "split"
+}
 
 
 def _ops_per_chunk(fn, **kwargs):
@@ -1020,9 +1087,21 @@ def test_prefill_step_rejects_unknown_impl():
     params = _make_params(138)
     batch, mask = _pad_batch([_make_inputs(139, 8)], 8)
     with pytest.raises(ValueError, match="chunked_vec"):
-        kda.kda_prefill_step(batch["mixed_qkv"], batch["raw_g"], batch["raw_beta"], params["conv_weight"], None,
-                             params["A_log"], params["dt_bias"], params["lower_bound"], *_new_caches(2, True),
-                             torch.tensor([0]), None, mask, H, D, prefill_impl="vec")
+        kda.kda_prefill_step(batch["mixed_qkv"],
+                             batch["raw_g"],
+                             batch["raw_beta"],
+                             params["conv_weight"],
+                             None,
+                             params["A_log"],
+                             params["dt_bias"],
+                             params["lower_bound"],
+                             *_new_caches(2, True),
+                             torch.tensor([0]),
+                             None,
+                             mask,
+                             H,
+                             D,
+                             prefill_impl="vec")
 
 
 def test_prefill_settings_come_from_envs_once(monkeypatch):
@@ -1099,8 +1178,8 @@ def test_attn_res_torch_matches_kernel_results_and_side_effects(dtype, has_delta
     delta = delta if has_delta else None
     out_w = out_w if output_norm else None
     ref_prefix, ref_blocks = prefix.clone(), blocks.clone()
-    ref_out = reference_attn_res_kernel(ref_prefix, delta, ref_blocks, norm_w, qk_w, out_w, num_blocks,
-                                        block_write_idx, 1e-6, 1e-6)
+    ref_out = reference_attn_res_kernel(ref_prefix, delta, ref_blocks, norm_w, qk_w, out_w, num_blocks, block_write_idx,
+                                        1e-6, 1e-6)
 
     out = kda.attn_res_torch(prefix, delta, blocks, norm_w, qk_w, out_w, num_blocks, block_write_idx, 1e-6, 1e-6)
 
@@ -1178,6 +1257,7 @@ def test_residual_stream_accumulates_across_layers_like_the_kernel():
 
 
 def test_residual_stream_test_detects_the_old_out_of_place_behaviour():
+
     def out_of_place(prefix, delta, *args):
         # what the previous fallback did: add the delta to a local copy only
         if delta is not None:
@@ -1192,7 +1272,14 @@ def test_residual_stream_test_detects_the_old_out_of_place_behaviour():
 def test_default_is_one_lazy_graph_per_chunk():
     q, k, v, log_gate, beta, state = _random_delta_inputs(150, 1, 64 * 5)
     calls = []
-    kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=64, block_chunks=1,
+    kda.kda_chunked_steps(state,
+                          q,
+                          k,
+                          v,
+                          log_gate,
+                          beta,
+                          chunk_size=64,
+                          block_chunks=1,
                           step_hook=lambda: calls.append(1))
     assert len(calls) == 5  # preparation + after each of the first four chunks (not after the last one)
 
@@ -1281,7 +1368,9 @@ def _run_toy_layers(wrap, num_layers=14, block_size=4, tokens=5, hidden=16, seed
 
 def test_functional_layers_match_the_in_place_upstream_flow():
     prefix, bank, delta = _run_toy_layers(lambda layer: layer)
-    ref_final, ref_prefix, ref_bank = _toy_residual_stream(reference_attn_res_kernel, num_layers=14, block_size=4,
+    ref_final, ref_prefix, ref_bank = _toy_residual_stream(reference_attn_res_kernel,
+                                                           num_layers=14,
+                                                           block_size=4,
                                                            seed=140)
     # the toy stream's final attn_res adds the last mlp output into the prefix in place
     torch.testing.assert_close(prefix + delta, ref_prefix, rtol=1e-4, atol=1e-4)

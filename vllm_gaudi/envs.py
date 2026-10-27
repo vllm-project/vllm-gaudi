@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
+
 # begin-env-vars-definition
 def _situ_timing_budget() -> int:
     """HPU_KIMI_SITU_TIMING: a non-negative integer; an invalid value is reported and means 0 (off)."""

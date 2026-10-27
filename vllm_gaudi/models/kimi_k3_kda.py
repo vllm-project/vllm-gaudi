@@ -15,8 +15,8 @@ import functools
 import torch
 
 from vllm_gaudi.extension.graph_state import lazy_step_hook
-from vllm_gaudi.ops.hpu_kda_pytorch import (gated_rmsnorm_sigmoid, kda_core_prefill, kda_decode_step,
-                                            kda_prefill_step, write_kda_decode_state)
+from vllm_gaudi.ops.hpu_kda_pytorch import (gated_rmsnorm_sigmoid, kda_core_prefill, kda_decode_step, kda_prefill_step,
+                                            write_kda_decode_state)
 
 _BLOCK = 64  # tokens per traced block of the prefill token loop
 
@@ -35,7 +35,7 @@ def _write_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows):
     return core
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 @torch.compiler.assume_constant_result  # dynamo ignores lru_cache and would trace the env import (graph break)
 def _prefill_settings() -> tuple[str, int, int, int]:
     """HPU_KIMI_KDA_PREFILL (chunked|chunked_vec|loop), HPU_KIMI_KDA_CHUNK_SIZE, HPU_KIMI_KDA_MARK_STEP_CHUNKS,
@@ -51,9 +51,8 @@ def _state_indices(self, attn_metadata) -> torch.Tensor:
         group = getattr(self, "cache_group_idx", None)
         if group is None:
             if indices.shape[0] != 1:
-                raise RuntimeError("KDA layer %s has no cache_group_idx but the batch has %d cache groups; "
-                                   "maybe_tag_kda_cache_groups did not tag this layer" %
-                                   (getattr(self, "prefix", "?"), indices.shape[0]))
+                raise RuntimeError(f"KDA layer {getattr(self, 'prefix', '?')} has no cache_group_idx but the batch has "
+                                   f"{indices.shape[0]} cache groups; maybe_tag_kda_cache_groups did not tag this layer")
             return indices[0]
         return indices.index_select(0, group.view(1)).squeeze(0)
     return indices
@@ -130,10 +129,8 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                                                                         **prefill)
                     core = _write_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
                 else:
-                    core = _core_prefill(mixed_qkv.reshape(num_seqs, seq_len, -1),
-                                         raw_g.reshape(num_seqs, seq_len, -1),
-                                         raw_beta.reshape(num_seqs, seq_len, -1),
-                                         **prefill)
+                    core = _core_prefill(mixed_qkv.reshape(num_seqs, seq_len, -1), raw_g.reshape(num_seqs, seq_len, -1),
+                                         raw_beta.reshape(num_seqs, seq_len, -1), **prefill)
                 # Keep post-processing out of the statement that calls the disabled core: ops chained on its last
                 # line end up in the dynamo resume frame without a source line, and the HPU compile backend then
                 # fails on the unparsable FX stack_trace ("'NoneType' object has no attribute 'file'").
