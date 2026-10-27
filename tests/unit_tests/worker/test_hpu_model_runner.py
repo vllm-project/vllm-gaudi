@@ -13,7 +13,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, SchedulerConf
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.core.kv_cache_utils import (estimate_max_model_len, get_kv_cache_configs)
+from vllm.v1.core.kv_cache_planning import (estimate_max_model_len, get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.sample.metadata import SamplingMetadata
