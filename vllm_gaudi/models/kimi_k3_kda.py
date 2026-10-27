@@ -16,30 +16,33 @@ import torch
 
 from vllm_gaudi.extension.graph_state import lazy_step_hook
 from vllm_gaudi.ops.hpu_kda_pytorch import (gated_rmsnorm_sigmoid, kda_core_prefill, kda_decode_step,
-                                            write_kda_decode_state)
+                                            kda_prefill_step, write_kda_decode_state)
 
 _BLOCK = 64  # tokens per traced block of the prefill token loop
 
 # The state update mutates the cache tensors in place and the prefill loop is long: run both outside of any
 # torch.compile graph (HPU compile silently drops in-place index_copy_ on aliased tensors, see qwen3_5.py).
-# Decode keeps only the two cache writes outside (the step itself is out of place and traced with the layer).
-# In lazy mode dynamo is disabled anyway, so this is a no-op there.
+# Decode and the "chunked_vec" prefill keep only the two cache writes outside (the step itself is out of place
+# and traced with the layer). In lazy mode dynamo is disabled anyway, so this is a no-op there.
 _core_prefill = torch.compiler.disable(kda_core_prefill)
 
 
 @torch.compiler.disable
-def _write_decode_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows):
-    """Stores the decode state rows and passes ``core`` through, so the write is ordered before its consumers."""
+def _write_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows):
+    """Stores the decode / prefill state rows and passes ``core`` through, so the write is ordered before its
+    consumers."""
     write_kda_decode_state(conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
     return core
 
 
 @functools.lru_cache(maxsize=None)
-def _prefill_settings() -> tuple[str, int, int]:
-    """HPU_KIMI_KDA_PREFILL (chunked|loop), HPU_KIMI_KDA_CHUNK_SIZE, HPU_KIMI_KDA_MARK_STEP_CHUNKS; read once."""
+@torch.compiler.assume_constant_result  # dynamo ignores lru_cache and would trace the env import (graph break)
+def _prefill_settings() -> tuple[str, int, int, int]:
+    """HPU_KIMI_KDA_PREFILL (chunked|chunked_vec|loop), HPU_KIMI_KDA_CHUNK_SIZE, HPU_KIMI_KDA_MARK_STEP_CHUNKS,
+    HPU_KIMI_KDA_VEC_CHUNKS; read once."""
     import vllm_gaudi.envs as gaudi_envs
     return (gaudi_envs.HPU_KIMI_KDA_PREFILL, gaudi_envs.HPU_KIMI_KDA_CHUNK_SIZE,
-            max(1, gaudi_envs.HPU_KIMI_KDA_MARK_STEP_CHUNKS))
+            max(1, gaudi_envs.HPU_KIMI_KDA_MARK_STEP_CHUNKS), gaudi_envs.HPU_KIMI_KDA_VEC_CHUNKS)
 
 
 def _state_indices(self, attn_metadata) -> torch.Tensor:
@@ -109,19 +112,28 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                 if mask is not None:
                     mask = mask.reshape(num_seqs, seq_len)
                 step_hook = lazy_step_hook()  # lazy and outside HPU graphs only (a mark_step breaks a capture)
-                prefill_impl, chunk_size, mark_step_chunks = _prefill_settings()
-                core = _core_prefill(mixed_qkv.reshape(num_seqs, seq_len, -1),
-                                     raw_g.reshape(num_seqs, seq_len, -1),
-                                     raw_beta.reshape(num_seqs, seq_len, -1),
-                                     state_idx=state_idx,
-                                     has_initial_state=getattr(attn_metadata, "has_initial_states_p", None),
-                                     token_mask=mask,
-                                     block=_BLOCK,
-                                     step_hook=step_hook,
-                                     prefill_impl=prefill_impl,
-                                     chunk_size=chunk_size,
-                                     block_chunks=mark_step_chunks,
-                                     **common)
+                prefill_impl, chunk_size, mark_step_chunks, vec_chunks = _prefill_settings()
+                prefill = dict(state_idx=state_idx,
+                               has_initial_state=getattr(attn_metadata, "has_initial_states_p", None),
+                               token_mask=mask,
+                               block=_BLOCK,
+                               step_hook=step_hook,
+                               prefill_impl=prefill_impl,
+                               chunk_size=chunk_size,
+                               block_chunks=mark_step_chunks,
+                               vec_chunks=vec_chunks,
+                               **common)
+                if prefill_impl == "chunked_vec":  # out of place: traced with the layer, only the writes eager
+                    core, slots, conv_rows, ssm_rows = kda_prefill_step(mixed_qkv.reshape(num_seqs, seq_len, -1),
+                                                                        raw_g.reshape(num_seqs, seq_len, -1),
+                                                                        raw_beta.reshape(num_seqs, seq_len, -1),
+                                                                        **prefill)
+                    core = _write_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
+                else:
+                    core = _core_prefill(mixed_qkv.reshape(num_seqs, seq_len, -1),
+                                         raw_g.reshape(num_seqs, seq_len, -1),
+                                         raw_beta.reshape(num_seqs, seq_len, -1),
+                                         **prefill)
                 # Keep post-processing out of the statement that calls the disabled core: ops chained on its last
                 # line end up in the dynamo resume frame without a source line, and the HPU compile backend then
                 # fails on the unparsable FX stack_trace ("'NoneType' object has no attribute 'file'").
@@ -133,7 +145,7 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                                                                    state_idx=state_idx[:num_tokens],
                                                                    **common)
                 # the statement ends with the disabled call (see the prefill comment above)
-                core = _write_decode_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
+                core = _write_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
 
     if core is None:  # profile run without metadata: keep shapes, no state
         core = torch.zeros(num_tokens, heads, head_dim, dtype=torch.float32, device=hidden_states.device)

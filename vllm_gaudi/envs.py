@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     HPU_KIMI_KDA_IMPL: str = "real"
     HPU_KIMI_KDA_PREFILL: str = "chunked"
     HPU_KIMI_KDA_CHUNK_SIZE: int = 64
+    HPU_KIMI_KDA_VEC_CHUNKS: int = 16
     HPU_KIMI_KDA_MARK_STEP_CHUNKS: int = 1
     HPU_KIMI_SITU_IMPL: str = "exact"
     HPU_KIMI_SITU_MARK_STEP: bool = True
@@ -153,12 +154,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "HPU_KIMI_KDA_IMPL":
     lambda: os.environ.get("HPU_KIMI_KDA_IMPL", "real").strip().lower(),
 
-    # Real Kimi-K3 KDA prefill: "chunked" (chunk-parallel WY form, default) or "loop" (token loop, validation only),
-    # and the chunk length of the chunked form.
+    # Real Kimi-K3 KDA prefill: "chunked" (chunk-parallel WY form, default), "chunked_vec" (intra-chunk terms
+    # batched over chunks, only the state recurrence per chunk; traced into the compiled graph in torch.compile
+    # mode) or "loop" (token loop, validation only), and the chunk length of the chunked forms.
     "HPU_KIMI_KDA_PREFILL":
     lambda: os.environ.get("HPU_KIMI_KDA_PREFILL", "chunked").strip().lower(),
     "HPU_KIMI_KDA_CHUNK_SIZE":
     lambda: int(os.environ.get("HPU_KIMI_KDA_CHUNK_SIZE", "64")),
+    # chunked_vec: chunks whose intra-chunk terms are computed together (0 = all chunks of the prompt at once).
+    "HPU_KIMI_KDA_VEC_CHUNKS":
+    lambda: int(os.environ.get("HPU_KIMI_KDA_VEC_CHUNKS", "16")),
     # Lazy mode: number of KDA prefill chunks between two mark_steps (1 = every chunk is its own graph).
     "HPU_KIMI_KDA_MARK_STEP_CHUNKS":
     lambda: int(os.environ.get("HPU_KIMI_KDA_MARK_STEP_CHUNKS", "1")),

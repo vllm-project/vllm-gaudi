@@ -7,6 +7,7 @@ written straight from the KDA math: per head, per token loops with explicit oute
 
 import importlib.util
 import math
+import os
 import pathlib
 import subprocess
 import sys
@@ -610,7 +611,7 @@ def _compile_check(mode):
     return _unparsable_stack_trace_nodes(module.hpu_kda_forward, layer, hidden_states)
 
 
-@pytest.mark.parametrize("mode", ["prefill", "decode"])
+@pytest.mark.parametrize("mode", ["prefill", "prefill_vec", "decode"])
 def test_compiled_layer_forward_has_parsable_fx_stack_traces(mode):
     """Regression: ops chained on the last line of the call to the torch.compiler.disable'd KDA core ended up in
     the dynamo resume frame without a source line; the HPU compile backend then crashed on the FX stack_trace
@@ -626,10 +627,14 @@ def test_compiled_layer_forward_has_parsable_fx_stack_traces(mode):
         f"FX nodes without a parsable stack_trace or compile error:\n{result.stdout}\n{result.stderr[-2000:]}")
 
 
-def _decode_graph_check():
-    """Fresh interpreter like ``_compile_check``: compiles the layer decode through aot_autograd with
-    keep_inference_input_mutations=True (input mutations stay visible as copy_ on the placeholders) and returns
-    the forward graphs' sizes, the in-place targets on graph inputs and whether result and caches match eager."""
+_VEC_PREFILL_ENV = dict(HPU_KIMI_KDA_PREFILL="chunked_vec", HPU_KIMI_KDA_CHUNK_SIZE="4", HPU_KIMI_KDA_VEC_CHUNKS="1")
+
+
+def _decode_graph_check(prefill=False):
+    """Fresh interpreter like ``_compile_check``: compiles the layer decode (or, with ``prefill``, the prefill under
+    ``_VEC_PREFILL_ENV``) through aot_autograd with keep_inference_input_mutations=True (input mutations stay
+    visible as copy_ on the placeholders) and returns the forward graphs' sizes, the in-place targets on graph
+    inputs and whether result and caches match eager."""
     from torch._dynamo.backends.common import aot_autograd
 
     params = _make_params(43)
@@ -644,10 +649,31 @@ def _decode_graph_check():
             mapping[key] = value
 
     module = _load_layer_module(_MonkeyPatch(), metadata)
-    metadata["value"] = types.SimpleNamespace(is_prompt=False, load_indices_tensor=torch.tensor([[0, 0], [1, 3]]))
-    hidden_states = torch.randn(2, hidden, generator=g)
+    if prefill:  # 2 sequences of 8 tokens (the second one with 5 real ones), both continuing from a cached state
+        mask = torch.ones(2, 8)
+        mask[1, 5:] = 0.0
+        metadata["value"] = types.SimpleNamespace(is_prompt=True,
+                                                   load_indices_tensor=torch.tensor([[0, 0], [1, 3]]),
+                                                   padding_mask_flat=mask.reshape(-1, 1),
+                                                   has_initial_states_p=torch.tensor([1, 1], dtype=torch.int32))
+        hidden_states = torch.randn(16, hidden, generator=g)
+    else:
+        metadata["value"] = types.SimpleNamespace(is_prompt=False,
+                                                   load_indices_tensor=torch.tensor([[0, 0], [1, 3]]))
+        hidden_states = torch.randn(2, hidden, generator=g)
     eager_layer = _FakeLayer(params, hidden, 45, tuple(cache.clone() for cache in caches))
     expected = module.hpu_kda_forward(eager_layer, hidden_states)
+    if prefill:  # the vectorized prefill gives the same result as the default chunked one
+        module._prefill_settings.cache_clear()
+        os.environ["HPU_KIMI_KDA_PREFILL"] = "chunked"
+        chunked_layer = _FakeLayer(params, hidden, 45, tuple(cache.clone() for cache in caches))
+        chunked = module.hpu_kda_forward(chunked_layer, hidden_states)
+        module._prefill_settings.cache_clear()
+        os.environ["HPU_KIMI_KDA_PREFILL"] = "chunked_vec"
+        assert module._prefill_settings()[0] == "chunked_vec"
+        assert torch.allclose(chunked, expected, rtol=1e-5, atol=1e-5)
+        assert all(torch.allclose(a, b, rtol=1e-5, atol=1e-5) for a, b in zip(chunked_layer.kv_cache,
+                                                                              eager_layer.kv_cache))
 
     graphs, mutated = [], []
 
@@ -690,12 +716,32 @@ def test_compiled_layer_decode_traces_the_step_and_mutates_no_graph_input():
     assert stats["graph_ops"][0] > 30, stats  # the decode math is inside the first graph
 
 
+def test_compiled_layer_chunked_vec_prefill_traces_the_step_and_mutates_no_graph_input():
+    """HPU_KIMI_KDA_PREFILL=chunked_vec: like decode, the whole prefill (conv, intra-chunk terms of every group,
+    the state recurrence) is in the first compiled graph and only the two cache writes run eagerly."""
+    import json
+
+    pytest.importorskip("torch._dynamo")
+    result = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()), "prefill_vec_graphs"],
+                            capture_output=True,
+                            text=True,
+                            timeout=600)
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr[-2000:]}"
+    stats = json.loads(result.stdout.strip().splitlines()[-1])
+    assert stats["mutated"] == []
+    assert stats["out_equal"] and stats["caches_equal"]
+    assert len(stats["graph_ops"]) == 2, stats  # step graph | 2 x index_copy_ (eager) | resume graph
+    assert stats["graph_ops"][0] > 100, stats
+
+
 if __name__ == "__main__":
-    if sys.argv[1] == "decode_graphs":
+    if sys.argv[1] in ("prefill_vec", "prefill_vec_graphs"):
+        os.environ.update(_VEC_PREFILL_ENV)
+    if sys.argv[1] in ("decode_graphs", "prefill_vec_graphs"):
         import json
-        print(json.dumps(_decode_graph_check()))
+        print(json.dumps(_decode_graph_check(prefill=sys.argv[1] == "prefill_vec_graphs")))
         sys.exit(0)
-    unparsable = _compile_check(sys.argv[1])
+    unparsable = _compile_check("prefill" if sys.argv[1] == "prefill_vec" else sys.argv[1])
     for item in unparsable:
         print(item)
     sys.exit(1 if unparsable else 0)
@@ -715,6 +761,9 @@ def _random_delta_inputs(seed, batch, length, heads=H, dim=D, gate_scale=5.0):
     return q, k, v, log_gate, beta, state
 
 
+_CHUNKED_IMPLS = {"chunked": kda.kda_chunked_steps, "chunked_vec": kda.kda_chunked_steps_vec}
+
+
 @pytest.mark.parametrize("length,chunk", [(1, 8), (7, 8), (8, 8), (13, 8), (64, 16), (100, 32), (1030, 64)])
 def test_chunked_matches_token_loop(length, chunk):
     q, k, v, log_gate, beta, state = _random_delta_inputs(50 + length, 2, length)
@@ -725,29 +774,31 @@ def test_chunked_matches_token_loop(length, chunk):
     torch.testing.assert_close(state_chunk, state_loop, rtol=1e-4, atol=1e-4)
 
 
-def test_chunked_is_finite_and_matches_for_extreme_gates():
+@pytest.mark.parametrize("impl", _CHUNKED_IMPLS)
+def test_chunked_is_finite_and_matches_for_extreme_gates(impl):
     # gate -5 on every step: exp(-sum g) over a 64 chunk would be exp(320) (overflow), the relative form must not
     q, k, v, _, beta, state = _random_delta_inputs(60, 1, 256)
     log_gate = torch.full((1, 256, H, D), -5.0)
     out_loop, state_loop = kda.kda_recurrent_steps(state, q, k, v, torch.exp(log_gate), beta)
-    out_chunk, state_chunk = kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=64)
+    out_chunk, state_chunk = _CHUNKED_IMPLS[impl](state, q, k, v, log_gate, beta, chunk_size=64)
     assert torch.isfinite(out_chunk).all() and torch.isfinite(state_chunk).all()
     torch.testing.assert_close(out_chunk, out_loop, rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(state_chunk, state_loop, rtol=1e-4, atol=1e-4)
 
 
-def test_chunked_matches_for_nearly_equal_keys():
+@pytest.mark.parametrize("impl", _CHUNKED_IMPLS)
+def test_chunked_matches_for_nearly_equal_keys(impl):
     # beta close to 1 and repeated key directions stress the triangular inverse
     q, k, v, log_gate, beta, state = _random_delta_inputs(61, 1, 128, gate_scale=0.05)
     k = kda.l2norm(k[:, :1].expand_as(k) + 0.01 * k)
     beta = torch.full_like(beta, 0.99)
     out_loop, state_loop = kda.kda_recurrent_steps(state, q, k, v, torch.exp(log_gate), beta)
-    out_chunk, state_chunk = kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=64)
+    out_chunk, state_chunk = _CHUNKED_IMPLS[impl](state, q, k, v, log_gate, beta, chunk_size=64)
     torch.testing.assert_close(out_chunk, out_loop, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(state_chunk, state_loop, rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("impl", ["chunked", "loop"])
+@pytest.mark.parametrize("impl", ["chunked", "chunked_vec", "loop"])
 def test_core_prefill_impls_match_reference_long_multi_sequence(impl):
     params = _make_params(70)
     xa, xb = _make_inputs(71, 150), _make_inputs(72, 97)  # lengths not divisible by the chunk size
@@ -774,7 +825,8 @@ def test_core_prefill_impls_match_reference_long_multi_sequence(impl):
     torch.testing.assert_close(_conv_of(caches[0], 3, True), conv_b, rtol=1e-4, atol=1e-4)
 
 
-def test_chunked_prefill_then_decode_continues_the_state():
+@pytest.mark.parametrize("impl", _CHUNKED_IMPLS)
+def test_chunked_prefill_then_decode_continues_the_state(impl):
     params = _make_params(80)
     full = _make_inputs(81, 140)
     caches = _new_caches(3, True)
@@ -783,7 +835,7 @@ def test_chunked_prefill_then_decode_continues_the_state():
     conv, ssm = caches
     kda.kda_core_prefill(batch["mixed_qkv"], batch["raw_g"], batch["raw_beta"], params["conv_weight"], None,
                          params["A_log"], params["dt_bias"], params["lower_bound"], conv, ssm, torch.tensor([2]),
-                         torch.tensor([0]), mask, H, D, prefill_impl="chunked", chunk_size=32)
+                         torch.tensor([0]), mask, H, D, prefill_impl=impl, chunk_size=32)
     decoded = [_run_decode(params, {key: val[t:t + 1] for key, val in full.items()}, caches, torch.tensor([2]))[0]
                for t in range(130, 140)]
     ref_out, _, ref_ssm = reference_kda(full, params)
@@ -791,11 +843,12 @@ def test_chunked_prefill_then_decode_continues_the_state():
     torch.testing.assert_close(caches[1][2], ref_ssm, rtol=1e-4, atol=1e-4)
 
 
-def test_chunked_bf16_inputs_close_to_fp32():
+@pytest.mark.parametrize("impl", _CHUNKED_IMPLS)
+def test_chunked_bf16_inputs_close_to_fp32(impl):
     q, k, v, log_gate, beta, state = _random_delta_inputs(90, 1, 200)
-    out32, state32 = kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=64)
+    out32, state32 = _CHUNKED_IMPLS[impl](state, q, k, v, log_gate, beta, chunk_size=64)
     bf = lambda x: x.to(torch.bfloat16).float()  # noqa: E731
-    out16, state16 = kda.kda_chunked_steps(bf(state), bf(q), bf(k), bf(v), log_gate, bf(beta), chunk_size=64)
+    out16, state16 = _CHUNKED_IMPLS[impl](bf(state), bf(q), bf(k), bf(v), log_gate, bf(beta), chunk_size=64)
     torch.testing.assert_close(out16, out32, rtol=0.1, atol=0.1)
     torch.testing.assert_close(state16, state32, rtol=0.1, atol=0.1)
 
@@ -841,31 +894,135 @@ def test_unit_lower_inverse_matches_exact_inverse_even_when_ill_conditioned(size
         torch.testing.assert_close(got[1, 2], ref, rtol=1e-3, atol=1e-3 * float(ref.abs().max()))
 
 
-def test_chunked_handles_identical_keys_with_beta_one():
+@pytest.mark.parametrize("impl", _CHUNKED_IMPLS)
+def test_chunked_handles_identical_keys_with_beta_one(impl):
     q, k, v, _, beta, state = _random_delta_inputs(101, 1, 130)
     k = k[:, :1].expand_as(k).contiguous()
     beta = torch.ones_like(beta)
     log_gate = torch.zeros(1, 130, H, D)
     out_loop, state_loop = kda.kda_recurrent_steps(state, q, k, v, torch.exp(log_gate), beta)
-    out_chunk, state_chunk = kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=64)
+    out_chunk, state_chunk = _CHUNKED_IMPLS[impl](state, q, k, v, log_gate, beta, chunk_size=64)
     torch.testing.assert_close(out_chunk, out_loop, rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(state_chunk, state_loop, rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.parametrize("impl", _CHUNKED_IMPLS)
 @pytest.mark.parametrize("chunk", [0, -16, 24, 100, 17])
-def test_chunked_rejects_invalid_chunk_sizes(chunk):
+def test_chunked_rejects_invalid_chunk_sizes(chunk, impl):
     q, k, v, log_gate, beta, state = _random_delta_inputs(110, 1, 40)
     with pytest.raises(ValueError, match="chunk_size"):
-        kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=chunk)
+        _CHUNKED_IMPLS[impl](state, q, k, v, log_gate, beta, chunk_size=chunk)
 
 
+@pytest.mark.parametrize("impl", _CHUNKED_IMPLS)
 @pytest.mark.parametrize("chunk", [5, 16, 32, 48, 128])
-def test_chunked_valid_non_default_chunk_sizes_match_the_loop(chunk):
+def test_chunked_valid_non_default_chunk_sizes_match_the_loop(chunk, impl):
     q, k, v, log_gate, beta, state = _random_delta_inputs(111, 1, 300)
     out_loop, state_loop = kda.kda_recurrent_steps(state, q, k, v, torch.exp(log_gate), beta)
-    out_chunk, state_chunk = kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=chunk)
+    out_chunk, state_chunk = _CHUNKED_IMPLS[impl](state, q, k, v, log_gate, beta, chunk_size=chunk)
     torch.testing.assert_close(out_chunk, out_loop, rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(state_chunk, state_loop, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("length,chunk,vec_chunks", [(1, 8, 16), (7, 8, 1), (13, 8, 0), (100, 32, 2), (300, 16, 3),
+                                                     (1030, 64, 16), (1030, 64, 0)])
+def test_chunked_vec_matches_loop_and_chunked_for_any_grouping(length, chunk, vec_chunks):
+    q, k, v, log_gate, beta, state = _random_delta_inputs(120 + length, 2, length)
+    out_loop, state_loop = kda.kda_recurrent_steps(state, q, k, v, torch.exp(log_gate), beta)
+    out_chunk, state_chunk = kda.kda_chunked_steps(state, q, k, v, log_gate, beta, chunk_size=chunk)
+    out_vec, state_vec = kda.kda_chunked_steps_vec(state, q, k, v, log_gate, beta, chunk_size=chunk,
+                                                   vec_chunks=vec_chunks)
+    assert out_vec.shape == out_loop.shape and state_vec.shape == state_loop.shape
+    torch.testing.assert_close(out_vec, out_loop, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(state_vec, state_loop, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(out_vec, out_chunk, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(state_vec, state_chunk, rtol=1e-5, atol=1e-5)
+
+
+def test_chunked_vec_near_parallel_keys_beta_one_long_sequence():
+    # several chunks of nearly parallel keys with beta ~ 1 and a slow gate: (I + A) is badly conditioned in every
+    # chunk and the error of the batched inverse would compound through the recurrence
+    q, k, v, log_gate, beta, state = _random_delta_inputs(130, 2, 333, gate_scale=0.05)
+    k = kda.l2norm(k[:, :1].expand_as(k) + 0.01 * k)
+    beta = torch.full_like(beta, 0.999)
+    out_loop, state_loop = kda.kda_recurrent_steps(state, q, k, v, torch.exp(log_gate), beta)
+    out_vec, state_vec = kda.kda_chunked_steps_vec(state, q, k, v, log_gate, beta, chunk_size=64, vec_chunks=2)
+    assert torch.isfinite(out_vec).all() and torch.isfinite(state_vec).all()
+    torch.testing.assert_close(out_vec, out_loop, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(state_vec, state_loop, rtol=1e-3, atol=1e-3)
+
+
+def test_chunked_vec_in_bf16_stays_close_to_fp32_loop():
+    q, k, v, log_gate, beta, state = _random_delta_inputs(131, 1, 200)
+    out_loop, state_loop = kda.kda_recurrent_steps(state, q, k, v, torch.exp(log_gate), beta)
+    bf = lambda x: x.to(torch.bfloat16)  # noqa: E731
+    out16, state16 = kda.kda_chunked_steps_vec(bf(state), bf(q), bf(k), bf(v), bf(log_gate), bf(beta),
+                                               chunk_size=64)
+    assert out16.dtype == torch.bfloat16
+    torch.testing.assert_close(out16.float(), out_loop, rtol=0.1, atol=0.1)
+    torch.testing.assert_close(state16.float(), state_loop, rtol=0.1, atol=0.1)
+
+
+def test_chunked_vec_hook_called_per_group_and_between_chunk_blocks():
+    q, k, v, log_gate, beta, state = _random_delta_inputs(132, 1, 40)
+    calls = []
+    kda.kda_chunked_steps_vec(state, q, k, v, log_gate, beta, chunk_size=4, block_chunks=3, vec_chunks=4,
+                              step_hook=lambda: calls.append(1))
+    # before each of the 3 groups of intra-chunk terms (10 chunks / 4), before the recurrence, after chunks 3, 6, 9
+    assert len(calls) == 7
+
+
+_VIEW_OPS = {"view", "_unsafe_view", "expand", "slice", "select", "unsqueeze", "squeeze", "permute", "transpose",
+             "alias", "diagonal", "t", "unbind", "split"}
+
+
+def _ops_per_chunk(fn, **kwargs):
+    """aten ops (all, and without views) added by one more 64-token chunk."""
+    counts = []
+    for length in (256, 512):
+        inputs = _random_delta_inputs(133, 1, length)
+        ops = _aten_ops(lambda inputs=inputs: fn(*inputs[-1:], *inputs[:-1], chunk_size=64, **kwargs))
+        counts.append((len(ops), sum(op not in _VIEW_OPS for op in ops)))
+    return tuple((b - a) / 4 for a, b in zip(*counts))
+
+
+def test_chunked_vec_leaves_only_the_state_recurrence_per_chunk():
+    """Per extra chunk the old loop runs the whole intra-chunk part (pairwise decay, A, Aqk, the log2(C) level
+    inverse); the vectorized form only U = Uv - Wk s and the state update (2 matmuls, sub, mul, add)."""
+    old_all, old_compute = _ops_per_chunk(kda.kda_chunked_steps)
+    new_all, new_compute = _ops_per_chunk(kda.kda_chunked_steps_vec, vec_chunks=0)
+    assert new_compute <= 6, (new_all, new_compute)
+    assert old_compute >= 10 * new_compute and old_all >= 10 * new_all, (old_all, old_compute, new_all, new_compute)
+
+
+@pytest.mark.parametrize("impl", ["chunked", "chunked_vec", "loop"])
+def test_prefill_step_only_reads_the_caches_and_write_completes_it(impl):
+    params = _make_params(134)
+    xa, xb = _make_inputs(135, 70), _make_inputs(136, 41)
+    g = torch.Generator().manual_seed(137)
+    caches = tuple(c.copy_(torch.randn(c.shape, generator=g)) for c in _new_caches(5, False))
+    batch, mask = _pad_batch([xa, xb], 96)
+    args = (batch["mixed_qkv"], batch["raw_g"], batch["raw_beta"], params["conv_weight"], None, params["A_log"],
+            params["dt_bias"], params["lower_bound"])
+    rest = (torch.tensor([1, -1]), torch.tensor([1, 0]), mask, H, D)
+    kwargs = dict(block=16, prefill_impl=impl, chunk_size=32, vec_chunks=2)
+    composed = tuple(c.clone() for c in caches)
+    expected = kda.kda_core_prefill(*args, *composed, *rest, **kwargs)
+    before = tuple(c.clone() for c in caches)
+    out, slots, conv_rows, ssm_rows = kda.kda_prefill_step(*args, *caches, *rest, **kwargs)
+    assert all(torch.equal(a, b) for a, b in zip(caches, before))
+    kda.write_kda_decode_state(*caches, slots, conv_rows, ssm_rows)
+    assert torch.equal(out, expected)
+    assert all(torch.equal(a, b) for a, b in zip(caches, composed))
+
+
+def test_prefill_step_rejects_unknown_impl():
+    params = _make_params(138)
+    batch, mask = _pad_batch([_make_inputs(139, 8)], 8)
+    with pytest.raises(ValueError, match="chunked_vec"):
+        kda.kda_prefill_step(batch["mixed_qkv"], batch["raw_g"], batch["raw_beta"], params["conv_weight"], None,
+                             params["A_log"], params["dt_bias"], params["lower_bound"], *_new_caches(2, True),
+                             torch.tensor([0]), None, mask, H, D, prefill_impl="vec")
 
 
 def test_prefill_settings_come_from_envs_once(monkeypatch):
@@ -873,13 +1030,18 @@ def test_prefill_settings_come_from_envs_once(monkeypatch):
     module._prefill_settings.cache_clear()
     monkeypatch.setenv("HPU_KIMI_KDA_PREFILL", "Loop")
     monkeypatch.setenv("HPU_KIMI_KDA_CHUNK_SIZE", "32")
-    assert module._prefill_settings() == ("loop", 32, 1)
+    assert module._prefill_settings() == ("loop", 32, 1, 16)
     monkeypatch.setenv("HPU_KIMI_KDA_CHUNK_SIZE", "64")  # cached: read once
-    assert module._prefill_settings() == ("loop", 32, 1)
+    assert module._prefill_settings() == ("loop", 32, 1, 16)
     module._prefill_settings.cache_clear()
     monkeypatch.delenv("HPU_KIMI_KDA_PREFILL")
     monkeypatch.setenv("HPU_KIMI_KDA_MARK_STEP_CHUNKS", "4")
-    assert module._prefill_settings() == ("chunked", 64, 4)
+    monkeypatch.setenv("HPU_KIMI_KDA_VEC_CHUNKS", "0")
+    assert module._prefill_settings() == ("chunked", 64, 4, 0)
+    module._prefill_settings.cache_clear()
+    monkeypatch.setenv("HPU_KIMI_KDA_PREFILL", " Chunked_Vec ")
+    assert module._prefill_settings()[0] == "chunked_vec"
+    module._prefill_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------------------------------------------
