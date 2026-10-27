@@ -90,13 +90,6 @@ Currently:
   version that uses FusedSDPA when the ``fsdpa_impl`` attention implementation
   is configured, providing 1.4-2x performance improvement for models that use
   transformers SDPA attention (e.g., vision encoders in Gemma4 models).
-
-* ``vllm.model_executor.models.granitemoe.GateLinear`` — upstream PR #58234
-  builds the Granite MoE router with ``GateLinear``, which has no HPU router
-  GEMM.  With it, Granite-4.0-H-Small IFEval accuracy on Gaudi3 drops by
-  about 1.3 points.  We rebind the name inside ``granitemoe`` only, so
-  ``GraniteMoeMoE`` builds a bf16 ``ReplicatedLinear`` router again and other
-  ``GateLinear`` users are untouched.
 """
 
 import functools
@@ -371,76 +364,6 @@ def _patch_granite_hybrid_layer_types() -> None:
 
     layer_types["full_attention"] = layer_types["attention"]
     layer_types["linear_attention"] = layer_types["mamba"]
-
-
-def _hpu_granite_moe_gate(
-    input_size: int,
-    output_size: int,
-    params_dtype: Optional[torch.dtype] = None,
-    prefix: str = "",
-    **kwargs,
-):
-    """bf16 ``ReplicatedLinear`` router for ``GraniteMoeMoE`` on HPU."""
-    from vllm.model_executor.layers.linear import ReplicatedLinear
-
-    if kwargs:
-        from vllm_gaudi.extension.logger import logger
-
-        logger().warning_once("GraniteMoeMoE passes %s to GateLinear; the HPU bf16 router ignores them.",
-                              ", ".join(sorted(kwargs)))
-
-    return ReplicatedLinear(
-        input_size,
-        output_size,
-        bias=False,
-        params_dtype=params_dtype,
-        quant_config=None,
-        prefix=prefix,
-    )
-
-
-def _patch_granite_moe_gate() -> None:
-    """Build the Granite MoE router as bf16 ``ReplicatedLinear`` on HPU.
-
-    vllm PR #58234 switched ``GraniteMoeMoE.gate`` from ``ReplicatedLinear``
-    to ``GateLinear``. With ``GateLinear``, granite-4.0-h-small IFEval (fp8
-    experts) on Gaudi3 drops by about 1.3 points; the ``ReplicatedLinear``
-    router restores the previous accuracy. ``GraniteMoeHybrid`` and
-    ``GraniteMoeShared`` reuse ``GraniteMoeMoE``, so they are covered too.
-
-    Guarded by ``inspect.getsource``: if ``GraniteMoeMoE`` stops building its
-    gate through ``GateLinear``, this logs a warning instead of patching, so
-    the regression does not come back silently.
-
-    Upstream ref: https://github.com/vllm-project/vllm/pull/58234
-    """
-    import vllm.model_executor.models.granitemoe as _granite_moe_mod
-
-    if getattr(_granite_moe_mod, "GateLinear", None) is _hpu_granite_moe_gate:
-        return  # load_general_plugins runs several times per process.
-
-    moe_cls = getattr(_granite_moe_mod, "GraniteMoeMoE", None)
-    if moe_cls is None:
-        return  # Module shape changed — nothing to patch.
-
-    try:
-        source = inspect.getsource(moe_cls.__init__)
-    except (OSError, TypeError):
-        source = ""
-
-    if "GateLinear(" not in source or getattr(_granite_moe_mod, "GateLinear", None) is None:
-        if "ReplicatedLinear(" not in source:
-            from vllm_gaudi.extension.logger import logger
-
-            logger().warning_once("GraniteMoeMoE no longer builds its gate with GateLinear; the HPU bf16 "
-                                  "router patch was not applied.")
-        return
-
-    _granite_moe_mod.GateLinear = _hpu_granite_moe_gate
-
-    from vllm_gaudi.extension.logger import logger
-
-    logger().info("HPU: GraniteMoeMoE gate patched to bf16 ReplicatedLinear.")
 
 
 def _hpu_mamba_bind_kv_cache(self, kv_cache) -> None:
@@ -1008,7 +931,6 @@ def apply() -> None:
         _patch_batched_count_greater_than()
         _patch_gather_logprobs()
         _patch_granite_hybrid_layer_types()
-        _patch_granite_moe_gate()
         _patch_get_num_layers_by_block_type()
         _patch_use_sequence_parallel_moe()
         _patch_check_shm_free_space()
