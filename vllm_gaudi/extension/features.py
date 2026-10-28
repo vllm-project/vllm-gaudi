@@ -120,7 +120,7 @@ def get_features():
         # EAGLE-style drafters, no structured output). On by default for
         # Nemotron-H, where it is validated, unless contiguous PA is on. Off:
         # speculative decoding schedules synchronously. HpuPlatform mirrors the
-        # default.
+        # default, and turns it off for prefix caching on hybrid models.
         Value('async_spec_decode',
               All(ModelType('nemotron_h'), Disabled('use_contiguous_pa')),
               env_var='VLLM_HPU_ASYNC_SPEC_DECODE',

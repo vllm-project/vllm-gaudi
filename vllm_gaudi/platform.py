@@ -284,16 +284,33 @@ class HpuPlatform(Platform):
         # NOTE: vLLM enables async scheduling by default, also with speculative
         # decoding. The HPU runner supports the two together only for one draft
         # token of an EAGLE-style drafter (EAGLE, EAGLE3, MTP), by default only
-        # on Nemotron-H (see _async_spec_decode_enabled); otherwise speculative
-        # decoding runs with synchronous scheduling.
+        # on Nemotron-H, and not with prefix caching on hybrid models (see
+        # _async_spec_decode_enabled); otherwise speculative decoding runs with
+        # synchronous scheduling.
         spec_config = vllm_config.speculative_config
         cls._speculative_decoding = spec_config is not None
         if spec_config is not None and vllm_config.scheduler_config.async_scheduling and not (
                 cls._async_spec_decode_enabled(vllm_config) and spec_config.use_eagle()
                 and spec_config.num_speculative_tokens == 1):
             vllm_config.scheduler_config.async_scheduling = False
+        cls._maybe_use_hpu_scheduler(vllm_config)
 
         cls._maybe_disable_chunked_mm_input(vllm_config)
+
+    @classmethod
+    def _maybe_use_hpu_scheduler(cls, vllm_config: VllmConfig) -> None:
+        """Keep HPUAsyncScheduler's prefill chunks for synchronous speculative decoding on hybrids.
+
+        With prefix caching, upstream's synchronous scheduler ends the prefill
+        chunks of a hybrid model on KV cache block boundaries. HPUScheduler
+        splits them as HPUAsyncScheduler does, on the mamba chunk grid that the
+        HPU prefill path and its buckets expect.
+        """
+        scheduler_config = vllm_config.scheduler_config
+        if (vllm_config.speculative_config is not None and not scheduler_config.async_scheduling
+                and scheduler_config.scheduler_cls is None and vllm_config.cache_config.enable_prefix_caching
+                and getattr(vllm_config.model_config, 'is_hybrid', False)):
+            scheduler_config.scheduler_cls = "vllm_gaudi.v1.core.sched.hpu_scheduler.HPUScheduler"
 
     @classmethod
     def validate_request(cls, processed_inputs, params) -> None:
@@ -321,13 +338,20 @@ class HpuPlatform(Platform):
         Mirrors the async_spec_decode feature value, which the worker resolves
         once it knows the model type; the runtime config does not know it yet
         at engine-construction time. On by default for Nemotron-H unless
-        contiguous PA is on. An explicitly set VLLM_HPU_ASYNC_SPEC_DECODE always
-        takes precedence.
+        contiguous PA is on. An explicitly set VLLM_HPU_ASYNC_SPEC_DECODE takes
+        precedence, except with prefix caching on a hybrid model: there the
+        mamba state blocks of a step follow the tokens the previous step
+        accepted, which async scheduling only knows on the device.
         """
         explicit = get_config().VLLM_HPU_ASYNC_SPEC_DECODE
+        model_config = getattr(vllm_config, 'model_config', None)
+        if vllm_config.cache_config.enable_prefix_caching and getattr(model_config, 'is_hybrid', False):
+            if explicit:
+                logger.warning_once("VLLM_HPU_ASYNC_SPEC_DECODE is ignored: speculative decoding with prefix caching "
+                                    "on a hybrid model runs with synchronous scheduling.")
+            return False
         if explicit is not None:
             return explicit
-        model_config = getattr(vllm_config, 'model_config', None)
         return (model_config is not None and getattr(model_config.hf_config, 'model_type', None) == 'nemotron_h'
                 and not get_config().VLLM_CONTIGUOUS_PA)
 

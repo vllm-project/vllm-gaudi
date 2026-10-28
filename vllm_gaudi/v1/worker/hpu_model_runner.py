@@ -1617,9 +1617,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # HPUMambaMixer2. _mamba_num_accepted maps req_id -> tokens the
         # request accepted in its last step (accepted drafts + 1); it lives
         # outside the persistent batch so it survives the remove/re-add of
-        # requests that are not scheduled for a step.
+        # requests that are not scheduled for a step. With prefix caching the
+        # state slots move along the block table, and _mamba_state_col maps
+        # req_id -> the first column of the slots of its last decode step (see
+        # _mamba_spec_window_cols).
         self._mamba_spec_decode = False
         self._mamba_num_accepted: dict[str, int] = {}
+        self._mamba_state_col: dict[str, int] = {}
         # Async scheduling with speculative decoding keeps the previous step's
         # results on the device: the drafts each of its rows verified, and the
         # valid output tokens per row (see _async_spec_shift). Requests that
@@ -1790,13 +1794,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return torch.stack(all_state_indices_cpu, dim=0)  # Shape: [num_groups, target_bs]
 
-    def _prepare_mamba_spec_decode_idxs(self, req_indices, target_bs, num_tokens):
+    def _prepare_mamba_spec_decode_idxs(self, req_indices, target_bs, num_tokens, window_cols=None):
         """Mamba2 state indices of a speculative decode step (see HPUMambaMixer2).
 
         With K speculative tokens a request owns 1 + K state blocks per mamba
-        group (block table columns 0..K). The step resumes from column
-        num_accepted - 1, i.e. the state after the previous step's last
-        accepted token, and writes the state after query token t to column t.
+        group, block table columns 0..K. With prefix caching they move along
+        the table: window_cols holds per request the first column of the
+        previous step's slots and of this step's (see _mamba_spec_window_cols).
+        The step resumes from the previous slots at num_accepted - 1, i.e. the
+        state after the previous step's last accepted token, and writes the
+        state after query token t to slot t.
         Returns load [num_groups, target_bs], store [num_groups, target_bs,
         num_tokens] and the conv window offsets [target_bs].
         """
@@ -1804,13 +1811,122 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         last_accepted = [
             self._mamba_num_accepted.get(req_ids[i] if i < len(req_ids) else None, 1) - 1 for i in req_indices
         ]
-        load = self.prepare_mamba_state_idxs(req_indices, last_accepted, target_bs)
-        store = torch.stack(
-            [self.prepare_mamba_state_idxs(req_indices, [t] * len(req_indices), target_bs) for t in range(num_tokens)],
-            dim=-1)
+        prev_cols, curr_cols = window_cols or ([0] * len(req_indices), [0] * len(req_indices))
+        load = self.prepare_mamba_state_idxs(req_indices,
+                                             [col + offset for col, offset in zip(prev_cols, last_accepted)], target_bs)
+        store = torch.stack([
+            self.prepare_mamba_state_idxs(req_indices, [col + t for col in curr_cols], target_bs)
+            for t in range(num_tokens)
+        ],
+                            dim=-1)
         conv_offsets = torch.zeros(target_bs, dtype=torch.int32)
         conv_offsets[:len(req_indices)] = torch.tensor(last_accepted, dtype=torch.int32)
         return load, store, conv_offsets
+
+    def _mamba_spec_window_cols(self, req_indices, context_lens, num_scheduled_tokens) -> tuple[list[int], list[int]]:
+        """First block table columns of the Mamba2 state slots of a decode step with drafts and prefix caching.
+
+        In the "align" cache mode a mamba block table is indexed by position:
+        column j holds the state after (j + 1) * mamba_block_size tokens. As
+        upstream, a step's 1 + K slots start at the column of its last query
+        token (curr), and it resumes from the previous step's slots (prev).
+        Returns (prev, curr) per request and records curr for the next step.
+        """
+        block_size = self.cache_config.mamba_block_size
+        prev_cols, curr_cols = [], []
+        for i, req_idx in enumerate(req_indices):
+            req_id = self.input_batch.req_ids[req_idx]
+            num_computed = int(context_lens[i])
+            curr = cdiv(num_computed + int(num_scheduled_tokens[i]), block_size) - 1
+            # Without a decode step before, the state is where the last prefill
+            # chunk left it: in the column of its last token.
+            prev_cols.append(self._mamba_state_col.get(req_id, max(num_computed - 1, 0) // block_size))
+            curr_cols.append(curr)
+            self._mamba_state_col[req_id] = curr
+        return prev_cols, curr_cols
+
+    def _copy_mamba_spec_boundary_states(self, scheduler_output: "SchedulerOutput", num_decodes: int) -> None:
+        """Copy the Mamba2 states at block boundaries that this step's accepted tokens crossed (prefix caching).
+
+        A decode step writes the state after each of its query tokens to its
+        slots (see _mamba_spec_window_cols). Column j must hold the state after
+        (j + 1) * mamba_block_size tokens once the request has passed that
+        point, since the KV cache manager may cache that block. So when the
+        accepted tokens cross a boundary, the state there is copied to its
+        column, as upstream's postprocess_mamba does: the recurrent state of
+        the slot of that token, and the conv window from that token on. When
+        the boundary column is the first slot, the request resumes from it.
+        Runs with synchronous scheduling, once the step's accepted tokens are
+        known.
+        """
+        block_size = self.cache_config.mamba_block_size
+        rows, src_cols, biases, dest_cols = [], [], [], []
+        for i, req_id in enumerate(self.input_batch.req_ids[:num_decodes]):
+            num_accepted = self._mamba_num_accepted.get(req_id, 1)
+            # The tokens whose state is in the first slot: up to and including
+            # the step's first query token.
+            num_running = (int(self.input_batch.num_computed_tokens_cpu[i]) +
+                           scheduler_output.num_scheduled_tokens[req_id] -
+                           len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ())))
+            aligned = (num_running + num_accepted - 1) // block_size * block_size
+            if aligned < num_running:
+                continue
+            src, bias, dest = self._mamba_state_col[req_id], aligned - num_running, aligned // block_size - 1
+            if dest == src:
+                self._mamba_num_accepted[req_id] = 1
+                if bias == 0:
+                    continue
+            rows.append(i)
+            src_cols.append(src)
+            biases.append(bias)
+            dest_cols.append(dest)
+        if not rows:
+            return
+
+        from vllm_gaudi.ops.hpu_mamba_mixer2 import HPUMambaMixer2
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        rows_t, src_cols_t, dest_cols_t = torch.tensor(rows), torch.tensor(src_cols), torch.tensor(dest_cols)
+        biases_t = torch.tensor(biases)
+        bias_t = biases_t.to(torch.int32).to(self.device).view(-1, 1, 1)
+        for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            if not isinstance(group.kv_cache_spec, MambaSpec):
+                continue
+            block_table = self.input_batch.block_table[group_idx].get_cpu_tensor()
+            ssm_src = block_table[rows_t, src_cols_t + biases_t].long().to(self.device)
+            conv_src = block_table[rows_t, src_cols_t].long().to(self.device)
+            dest = block_table[rows_t, dest_cols_t].long().to(self.device)
+            for layer_name in group.layer_names:
+                layer = forward_context.get(layer_name)
+                if not isinstance(layer, HPUMambaMixer2):
+                    continue
+                conv_state, ssm_state = layer.kv_cache[0], layer.kv_cache[1]
+                ssm_state.index_copy_(0, dest, ssm_state.index_select(0, ssm_src))
+                # The conv window from the boundary token on becomes the
+                # window's history, which is its first width - 1 rows.
+                state_len = layer.conv_kernel_size - 1
+                window = conv_state.index_select(0, conv_src)
+                history = window[:, :state_len]
+                for offset in range(1, window.size(1) - state_len + 1):
+                    history = torch.where(bias_t == offset, window[:, offset:offset + state_len], history)
+                dest_window = conv_state.index_select(0, dest)
+                conv_state.index_copy_(0, dest, torch.cat([history, dest_window[:, state_len:]], dim=1))
+
+    def _drop_stale_mamba_blocks(self, blocks: torch.Tensor, group_idx: int, req_index: int, first_col: int) -> None:
+        """Turn the block boundary writes of a prefill chunk to stale columns into padding (drafts, prefix caching).
+
+        blocks are the ids of block table columns first_col.. that the chunk
+        writes the states at its block boundaries to, the last one its final
+        state. With drafts the KV cache manager moves the extra state blocks a
+        chunk leaves behind to the end of the request's row and nulls their
+        old columns, but the worker appends to the row, so those columns keep
+        the ids. Only the last occurrence of an id in a row is live, and a
+        write to an earlier one would overwrite the block where it lives now.
+        """
+        table = self.input_batch.block_table[group_idx]
+        row = table.get_cpu_tensor()[req_index, :int(table.num_blocks_per_row[req_index])]
+        for k in range(blocks.numel() - 1):
+            if bool((row[first_col + k + 1:] == blocks[k]).any()):
+                blocks[k] = self._MAMBA_PAD_BLOCK_ID
 
     def _async_spec_shift_active(self, scheduler_output) -> bool:
         """Whether this step's token counts may be ahead of the verified tokens.
@@ -2145,6 +2261,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self._mamba_num_accepted.pop(req_id, None)
+            self._mamba_state_col.pop(req_id, None)
+        if self._mamba_spec_decode and self.use_prefix_caching:
+            # Preempted requests compute their state again, from a prefix cache
+            # hit if there is one, as upstream's cleanup_mamba_state_idx.
+            for req_id in itertools.chain(
+                    getattr(scheduler_output, "preempted_req_ids", None) or (),
+                    getattr(scheduler_output.scheduled_cached_reqs, "resumed_req_ids", None) or ()):
+                self._mamba_num_accepted.pop(req_id, None)
+                self._mamba_state_col.pop(req_id, None)
         if (self.use_async_spec_decode and self._mamba_spec_decode
                 and len(self._mamba_num_accepted) > 2 * len(self.requests) + 64):
             # The output thread can record a request that finished meanwhile.
@@ -3358,6 +3483,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     last = block_idx_last_scheduled_token_cpu[0]
                     blocks_caching_range = block_table_cpu_tensor[req_indices[0], first:last + 1].clone()
                     n_blocks = blocks_caching_range.shape[0]
+                    if self._mamba_spec_decode and isinstance(
+                            self.kv_cache_config.kv_cache_groups[group_idx].kv_cache_spec, MambaSpec):
+                        self._drop_stale_mamba_blocks(blocks_caching_range, group_idx, req_indices[0], int(first))
 
                     # Compute scheduled-chunk index for each block's last chunk;
                     # clamp so partial last block maps to the last physical chunk.
@@ -3798,7 +3926,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 )
 
             req_indices = list(range(num_decodes))
-            if self.use_prefix_caching:
+            spec_window_cols = None
+            if self._mamba_spec_decode and self.use_prefix_caching and scheduler_output is not None:
+                # The conv window is read from the first slot of the previous
+                # step and written to the first slot of this one.
+                spec_window_cols = self._mamba_spec_window_cols(req_indices, context_lens, num_scheduled_tokens)
+                load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, spec_window_cols[0],
+                                                                       padded_batch_size)
+                store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, spec_window_cols[1],
+                                                                        padded_batch_size)
+            elif self.use_prefix_caching:
                 load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu,
                                                                        padded_batch_size)
                 store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_scheduled_token_cpu,
@@ -3836,7 +3973,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             mamba_spec_load_indices = mamba_spec_store_indices = mamba_spec_conv_offsets = None
             if self._mamba_spec_decode:
                 spec_load_cpu, spec_store_cpu, spec_conv_offsets_cpu = \
-                    self._prepare_mamba_spec_decode_idxs(req_indices, padded_batch_size, num_tokens)
+                    self._prepare_mamba_spec_decode_idxs(req_indices, padded_batch_size, num_tokens, spec_window_cols)
                 mamba_spec_load_indices = async_h2d_copy(spec_load_cpu, device=self.device)
                 mamba_spec_store_indices = async_h2d_copy(spec_store_cpu, device=self.device)
                 mamba_spec_conv_offsets = async_h2d_copy(spec_conv_offsets_cpu, device=self.device)
@@ -5315,6 +5452,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # leave their state in slot 0. Decodes come first in the batch.
                 # (Async scheduling: see _async_spec_accepted_recorder.)
                 self._mamba_num_accepted[req_id] = max(num_tokens, 1) if i < num_decodes else 1
+                if i >= num_decodes:
+                    # Prefix caching: the next decode resumes from the column
+                    # of the chunk's last token (see _mamba_spec_window_cols).
+                    self._mamba_state_col.pop(req_id, None)
+        if self._mamba_spec_decode and self.use_prefix_caching and num_decodes > 0 and not warmup_mode:
+            self._copy_mamba_spec_boundary_states(scheduler_output, num_decodes)
 
         # NOTE(chendi): enable cache based on PR(#20291)
         # Cache the sampled tokens in the model runner, so that the scheduler
@@ -5417,13 +5560,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         from vllm_gaudi.ops.hpu_mamba_mixer2 import HPUMambaMixer2
         if not any(isinstance(module, HPUMambaMixer2) for module in self.model.modules()):
             return False
-        if self.use_prefix_caching:
-            raise NotImplementedError("Speculative decoding with Mamba2 hybrid models (e.g. Nemotron-H MTP) does "
-                                      "not support prefix caching on HPU yet. Start the server with "
-                                      "--no-enable-prefix-caching.")
+        # HpuPlatform keeps async scheduling off for prefix caching on hybrids:
+        # copying the states at block boundaries needs the accepted tokens.
+        assert not (self.use_prefix_caching and self.use_async_spec_decode), \
+            "Speculative decoding with prefix caching on a Mamba2 hybrid requires synchronous scheduling."
         logger.info(
             "Speculative decoding on a Mamba2 hybrid: verifying up to %d draft tokens per step with one "
-            "mamba state slot per speculative position.", self.speculative_config.num_speculative_tokens)
+            "mamba state slot per speculative position%s.", self.speculative_config.num_speculative_tokens,
+            ", moving along the block table with prefix caching" if self.use_prefix_caching else "")
         return True
 
     @with_thread_limits()

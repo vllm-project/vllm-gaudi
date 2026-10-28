@@ -140,7 +140,12 @@ def test_pt_hpu_enable_lazy_collectives_default_and_respect():
     assert os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] == "false"
 
 
-def _fake_vllm_config(*, model_type="qwen3_next", gdn_layers=0, kv_transfer=None, prefix_caching=False):
+def _fake_vllm_config(*,
+                      model_type="qwen3_next",
+                      gdn_layers=0,
+                      kv_transfer=None,
+                      prefix_caching=False,
+                      is_hybrid=False):
     """Minimal vllm_config stub for the compact-GDN detection helpers."""
 
     def get_num_layers_by_block_type(parallel_config, block_type):
@@ -149,6 +154,7 @@ def _fake_vllm_config(*, model_type="qwen3_next", gdn_layers=0, kv_transfer=None
     model_config = SimpleNamespace(
         hf_config=SimpleNamespace(model_type=model_type),
         get_num_layers_by_block_type=get_num_layers_by_block_type,
+        is_hybrid=is_hybrid,
     )
     return SimpleNamespace(
         model_config=model_config,
@@ -222,6 +228,42 @@ def test_async_spec_decode_explicit_env_overrides_default():
         assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="llama")) is True
     with _runtime_flags(async_spec_decode=False):  # force off where the default is on
         assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="nemotron_h")) is False
+
+
+def test_async_spec_decode_off_with_prefix_caching_on_hybrid_models():
+    cfg = _fake_vllm_config(model_type="nemotron_h", prefix_caching=True, is_hybrid=True)
+    with _runtime_flags():
+        assert HpuPlatform._async_spec_decode_enabled(cfg) is False
+    with _runtime_flags(async_spec_decode=True):  # an explicit request is ignored
+        assert HpuPlatform._async_spec_decode_enabled(cfg) is False
+    with _runtime_flags(async_spec_decode=True):  # models without mamba layers keep it
+        assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="llama",
+                                                                        prefix_caching=True)) is True
+
+
+@pytest.mark.parametrize("change", [
+    dict(),
+    dict(prefix_caching=False),
+    dict(is_hybrid=False),
+    dict(async_scheduling=True),
+    dict(speculative=False),
+    dict(scheduler_cls="my.Scheduler"),
+])
+def test_sync_spec_decode_with_prefix_caching_on_hybrids_uses_hpu_scheduler(change):
+    """HPUScheduler keeps HPUAsyncScheduler's prefill chunks when speculative decoding schedules synchronously."""
+    settings = dict(prefix_caching=True, is_hybrid=True, async_scheduling=False, speculative=True, scheduler_cls=None)
+    settings.update(change)
+    cfg = _fake_vllm_config(model_type="nemotron_h",
+                            prefix_caching=settings["prefix_caching"],
+                            is_hybrid=settings["is_hybrid"])
+    cfg.speculative_config = SimpleNamespace() if settings["speculative"] else None
+    cfg.scheduler_config = SimpleNamespace(async_scheduling=settings["async_scheduling"],
+                                           scheduler_cls=settings["scheduler_cls"])
+
+    HpuPlatform._maybe_use_hpu_scheduler(cfg)
+
+    expected = "vllm_gaudi.v1.core.sched.hpu_scheduler.HPUScheduler" if not change else settings["scheduler_cls"]
+    assert cfg.scheduler_config.scheduler_cls == expected
 
 
 def _sampling_params(**constraint):

@@ -564,6 +564,7 @@ class HPUMambaMixer2(MambaMixer2):
                     conv_state_indices=store_indices_tensor,
                     history_offsets=spec_conv_offsets,
                     num_tokens=spec_store_indices.size(-1),
+                    load_state_indices=load_indices_tensor,
                 )
             else:
                 hidden_states_B_C = granite_causal_conv1d_update(

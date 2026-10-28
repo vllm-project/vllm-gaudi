@@ -167,6 +167,38 @@ def test_spec_decode_matches_sequential_decode(num_spec):
 
 
 @pytest.mark.parametrize("num_spec", [1, 3])
+def test_spec_decode_conv_window_moves_to_another_slot(num_spec):
+    """Prefix caching: the window is read from one slot and written to another,
+    with the same result as reading and writing it in place."""
+    torch.manual_seed(0)
+    weights = _MambaWeights(DEVICE)
+    batch, num_tokens = 3, 1 + num_spec
+    conv_state = torch.randn(2 * batch + 1, STATE_LEN + num_spec, CONV_DIM, device=DEVICE)
+    load = torch.arange(1, batch + 1, dtype=torch.int32, device=DEVICE)
+    store = load + batch
+    in_place = conv_state.clone()
+    in_place[store.long()] = conv_state[load.long()]
+    offsets = torch.tensor([0, num_spec, 0], dtype=torch.int32, device=DEVICE)
+    u = torch.randn(batch * num_tokens, CONV_DIM, device=DEVICE)
+
+    expected = granite_causal_conv1d_update_spec(u, in_place, weights.conv_w, weights.conv_b, "silu", store, offsets,
+                                                 num_tokens)
+    got = granite_causal_conv1d_update_spec(u,
+                                            conv_state,
+                                            weights.conv_w,
+                                            weights.conv_b,
+                                            "silu",
+                                            store,
+                                            offsets,
+                                            num_tokens,
+                                            load_state_indices=load)
+
+    torch.testing.assert_close(got, expected)
+    # The new windows are in the store slots; the load slots keep the old ones.
+    torch.testing.assert_close(conv_state, in_place)
+
+
+@pytest.mark.parametrize("num_spec", [1, 3])
 def test_prefill_history_is_read_by_spec_decode(num_spec):
     """Prefill writes the conv history where the speculative decode reads it."""
     torch.manual_seed(0)

@@ -233,6 +233,7 @@ def granite_causal_conv1d_update_spec(
     conv_state_indices: torch.Tensor,
     history_offsets: torch.Tensor,
     num_tokens: int,
+    load_state_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Decode conv update for speculative decoding (verify ``num_tokens`` per request).
 
@@ -241,11 +242,14 @@ def granite_causal_conv1d_update_spec(
     ``width - 2`` inputs of its history followed by every input of the
     previous query, accepted or not.  Its live history therefore starts at
     ``history_offsets = num_accepted - 1`` of the previous step, and rejected
-    drafts never need to be undone.
+    drafts never need to be undone.  With prefix caching the window moves to
+    another slot when a step crosses a block boundary: it is read from
+    ``load_state_indices`` (default ``conv_state_indices``) and written to
+    ``conv_state_indices``.
 
     x: [batch * num_tokens, dim], request-major (padded tokens at the end).
     conv_state: [num_slots, (width - 1) + num_speculative_tokens, dim].
-    conv_state_indices, history_offsets: [batch].
+    conv_state_indices, history_offsets, load_state_indices: [batch].
     Returns [batch * num_tokens, dim].
     """
     activation = _normalize_activation(activation)
@@ -259,8 +263,9 @@ def granite_causal_conv1d_update_spec(
     assert 1 <= num_tokens <= max_offset + 1, (f"{num_tokens=} does not fit a conv window of {window_len} "
                                                f"(kernel width {width})")
     conv_state_indices = conv_state_indices.long()  # index_copy_ needs int64 indices
+    load_state_indices = conv_state_indices if load_state_indices is None else load_state_indices.long()
 
-    window = conv_state.index_select(0, conv_state_indices)  # [batch, window_len, dim]
+    window = conv_state.index_select(0, load_state_indices)  # [batch, window_len, dim]
     # Select history rows [offset, offset + state_len) without data-dependent
     # indexing. torch.where (not a 0/1 multiply) so uninitialised rows can never
     # leak NaN/Inf into the selected history.
