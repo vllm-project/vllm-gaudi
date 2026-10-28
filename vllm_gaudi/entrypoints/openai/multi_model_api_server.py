@@ -42,6 +42,7 @@ from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.system_utils import decorate_logs
+from vllm.v1.engine import CheckpointState, PauseMode
 
 from vllm_gaudi.v1.engine.multi_model_async_llm import MultiModelAsyncLLM
 
@@ -171,6 +172,15 @@ class MultiModelEngineClient(EngineClient):
 
     async def is_sleeping(self) -> bool:
         return await self._engine.is_sleeping()
+
+    async def checkpoint_prepare(self, mode: PauseMode = "wait") -> str | None:
+        return await self._engine.checkpoint_prepare(mode)
+
+    async def checkpoint_restore(self) -> None:
+        await self._engine.checkpoint_restore()
+
+    async def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
+        return await self._engine.checkpoint_state()
 
     async def add_lora(self, lora_request) -> bool:
         return await self._engine.add_lora(lora_request)
