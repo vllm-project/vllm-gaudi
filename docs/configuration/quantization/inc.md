@@ -5,9 +5,9 @@ title: Intel® Neural Compressor
 
 # Intel® Neural Compressor
 
-vLLM Hardware Plugin for Intel® Gaudi® supports 8-bit floating point (FP8) weight and activation quantization using Intel® Neural Compressor on Intel® Gaudi® 2 and Intel® Gaudi® 3 AI accelerators. Intel® Gaudi® supports quantization of various modules and functions, including `Linear`, `KVCache`, `Matmul`, and `Softmax`. For more information, see [Custom Patched Modules](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#custom-patched-modules). Currently, quantization is validated only on Llama models.
+vLLM Hardware Plugin for Intel® Gaudi® supports 8-bit floating point (FP8) weight and activation quantization using Intel® Neural Compressor on Intel® Gaudi® 2 and Intel® Gaudi® 3 AI accelerators. Intel® Gaudi® supports quantization of various modules and functions, including `Linear`, `KVCache`, `Matmul`, and `Softmax`. For more information, see [Custom Patched Modules](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#custom-patched-modules).
 
-This guide describes the steps for quantization and inference. Because inference depends on prior calibration, the process begins with calibrating your model. Calibration generates the necessary measurements, quantization files, and configuration data that are required for running quantized models. These calibration outputs are essential as they provide model-specific metrics and define the quantization parameters applied during inference. To calibrate your model, follow the [Calibration](../calibration/calibration.md) guide. Once calibration is complete, you can proceed with offline or online inference described in this document.
+This guide describes the steps for quantization and inference. Because inference depends on prior calibration, the process begins with calibrating your model. Calibration generates the necessary measurements, quantization files, and configuration data that are required for running quantized models. These calibration outputs are essential as they provide model-specific metrics and define the quantization parameters applied during inference. To calibrate your model, use the `vllm-gaudi-calibrate` command described in the [Calibration Quick Start](../calibration/quickstart.md). For how calibration works and which models and options it supports, see the [Calibration Overview](../calibration/calibration.md). Once calibration is complete, you can proceed with offline or online inference described in this document.
 
 For an end-to-end example tutorial for quantizing a BF16 Llama 3.1 model to FP8 and then running inference, see [this guide](https://github.com/HabanaAI/Gaudi-tutorials/blob/main/PyTorch/vLLM_Tutorials/FP8_Quantization_using_INC/FP8_Quantization_using_INC.ipynb).
 
@@ -30,7 +30,7 @@ For an end-to-end example tutorial for quantizing a BF16 Llama 3.1 model to FP8 
 
 - When running FP8 models with `scale_format=scalar` and lazy mode (`PT_HPU_LAZY_MODE=1`), you can set `RUNTIME_SCALE_PATCHING=1` to significantly reduce warm-up time. However, it may introduce a small performance degradation. Runtime Scale Patching is enabled by default for Torch compile.
 
-- For advanced quantization customization, you can use JSON configuration files to control aspects such as scale calculation methods, module selection, and performance optimizations. For more information, see the [Configuration](../calibration/calibration.md#configuration) chapter in the Calibration guide.
+- For advanced quantization customization, you can use JSON configuration files to control aspects such as scale calculation methods, module selection, and performance optimizations. For more information, see [INC Configuration](../calibration/reference.md#inc-configuration) in the Calibration Reference.
 
 ## Running Online Inference
 
