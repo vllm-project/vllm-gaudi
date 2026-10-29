@@ -499,3 +499,8 @@ def test_selective_sampling_metadata_rekeys_bad_words(device: str):
     # Several requests in an order that differs from the batch order.
     metadata = input_batch.make_selective_sampling_metadata([("req_2", []), ("req_0", []), ("req_1", [])])
     assert metadata.bad_words_token_ids == {0: [[8, 9]], 2: [[7]]}
+
+    # Padded selection: duplicates of the first request must not get entries.
+    metadata = input_batch.make_selective_sampling_metadata([("req_2", []), ("req_1", []), ("req_2", []),
+                                                             ("req_2", [])])
+    assert metadata.bad_words_token_ids == {0: [[8, 9]], 1: [[7]]}
