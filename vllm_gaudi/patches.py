@@ -1548,6 +1548,7 @@ def _patch_compressed_tensors_mxfp4() -> None:
                 block_size=self.group_size,
                 has_bias=has_bias,
                 dispatch_fn=dispatch_fn,
+                in_graph_call=_current_config_is_kimi_k3(),
             )
 
             for expert_id in range(num_experts):

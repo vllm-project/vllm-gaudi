@@ -1892,9 +1892,12 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
                  has_bias: bool = False,
                  alpha: float = 1.702,
                  limit: float = 7.0,
-                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None,
+                 in_graph_call: bool = False):
         super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, None, dispatch_fn)
         self.block_size = block_size
+        # Set for Kimi-K3 layers only: inside a compiled region call the op directly (see _get_compiled_forward).
+        self.in_graph_call = in_graph_call
         # GPT-OSS SwiGLU-OAI: per-expert bias on both projections + alpha/limit.
         # When has_bias is set, the op applies gpt_swiglu (clamp ±limit, alpha-silu)
         # internally and the "activation" string is ignored.
@@ -1937,10 +1940,11 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
         return ret
 
     def _get_compiled_forward(self):
-        # Inside a compiled region call the op directly: building the nested torch.compile wrapper there is a
-        # graph break ('torch.compile call with > 1 args'), and Dynamo keeps the frames split at that break for
-        # every layer traced before the wrapper existed, even after it is cached.
-        if torch.compiler.is_compiling():
+        # Kimi-K3 (in_graph_call): inside a compiled region call the op directly. Building the nested torch.compile
+        # wrapper there is a graph break ('torch.compile call with > 1 args'), and Dynamo keeps the frames split at
+        # that break for every layer traced before the wrapper existed, even after it is cached. Other models keep
+        # the upstream behaviour (nested wrapper), which is faster for them.
+        if self.in_graph_call and torch.compiler.is_compiling():
             return _mxfp4_bias_fused_fwd if self.has_bias else _mxfp4_fused_fwd
         if self._compiled_forward is None:
             fwd = _mxfp4_bias_fused_fwd if self.has_bias else _mxfp4_fused_fwd

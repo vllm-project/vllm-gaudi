@@ -85,6 +85,7 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         # carries w13_bias/w2_bias, route through bias_mxfp4_fused_weights.
         has_bias = hasattr(layer, "w13_bias") and hasattr(layer, "w2_bias")
 
+        from vllm_gaudi.patches import _current_config_is_kimi_k3
         layer.moe_op = VllmMixtureOfExpertsOpMXFP4(
             layer.global_num_experts,
             num_experts,
@@ -93,6 +94,7 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
             block_size=self.MXFP4_BLOCK_SIZE,
             has_bias=has_bias,
             dispatch_fn=dispatch_fn,
+            in_graph_call=_current_config_is_kimi_k3(),
         )
 
         for expert_id in range(num_experts):
@@ -151,8 +153,12 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
         # The fused kernel has no SiTU: exact unfused routed experts (see ops/hpu_situ_moe.py).
-        output = maybe_situ_moe(layer, x, topk_ids, topk_weights, situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL),
-                                MXFP4_BLOCK, gaudi_envs.VLLM_MINIMAX_M3_MOE_TOKEN_TILE)
+        # Bisect: env reads and the SiTU helper only for SiTU layers, other models call the fused op directly.
+        output = None
+        if getattr(layer.activation, "value", layer.activation) == "situ":
+            output = maybe_situ_moe(layer, x, topk_ids, topk_weights,
+                                    situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL), MXFP4_BLOCK,
+                                    gaudi_envs.VLLM_MINIMAX_M3_MOE_TOKEN_TILE)
         if output is None:
             output = layer.moe_op(
                 x,
