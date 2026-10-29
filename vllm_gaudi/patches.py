@@ -979,6 +979,16 @@ def _is_kimi_k3_config(model_config) -> bool:
     return any(a in _KIMI_K3_ARCHITECTURES for a in archs)
 
 
+def _current_config_is_kimi_k3() -> bool:
+    """True when the vllm config being built/used right now is for a Kimi-K3 model (False when there is none)."""
+    try:
+        from vllm.config import get_current_vllm_config_or_none
+        vllm_config = get_current_vllm_config_or_none()
+    except ImportError:
+        return False
+    return vllm_config is not None and _is_kimi_k3_config(getattr(vllm_config, "model_config", None))
+
+
 def _optional_runner_absent(exc: BaseException, mod_name: str, cls_name: str) -> bool:
     """True when the ROCm-only latent MoE runner does not exist in this vllm build (not a failure on HPU)."""
     if cls_name != "ROCmLatentMoERunner":
@@ -1171,7 +1181,14 @@ def _patch_kimi_k3_hybrid_config() -> None:
 
 
 def _patch_moe_runner_delegation() -> None:
-    """Delegate missing attribute lookups on MoERunner to routed_experts."""
+    """Delegate missing attribute lookups on MoERunner to routed_experts, for Kimi-K3 runners only.
+
+    The patch is installed on the classes for every model (load_general_plugins runs before any ModelConfig exists),
+    so the decision is made per runner: ``hasattr(runner, name)`` must stay False for the attributes only
+    ``routed_experts`` has, or any other model's ``register_parameter`` on the runner raises
+    ``KeyError: attribute '...' already exists``. The flag is set when the runner is built, where the current vllm
+    config is that of the model being built; runner classes defined in vllm.models.kimi_k3 always delegate.
+    """
     for mod_name, cls_name in [
         ("vllm.model_executor.layers.fused_moe.runner.moe_runner", "MoERunner"),
         ("vllm.models.kimi_k3.amd.latent_moe_runner", "ROCmLatentMoERunner"),
@@ -1188,6 +1205,17 @@ def _patch_moe_runner_delegation() -> None:
                                                cls_name)
                 continue
             orig_getattr = getattr(cls, "__getattr__", None)
+            orig_init = cls.__init__
+
+            def _make_init(og_init):
+
+                @functools.wraps(og_init)
+                def _init(self, *args, **kwargs):
+                    og_init(self, *args, **kwargs)
+                    self.__dict__["_kimi_k3_delegation"] = _current_config_is_kimi_k3() or any(
+                        c.__module__.startswith(_KIMI_K3_MODULE) for c in type(self).__mro__)
+
+                return _init
 
             def _make_getattr(og_get, target_cls):
 
@@ -1197,6 +1225,9 @@ def _patch_moe_runner_delegation() -> None:
                             return og_get(self, name)
                         return super(target_cls, self).__getattr__(name)
                     except AttributeError:
+                        # __dict__ lookup: no recursion into __getattr__ while the runner is still being built
+                        if not self.__dict__.get("_kimi_k3_delegation", False):
+                            raise
                         routed = getattr(self, "routed_experts", None)
                         if routed is not None and hasattr(routed, name):
                             return getattr(routed, name)
@@ -1204,6 +1235,7 @@ def _patch_moe_runner_delegation() -> None:
 
                 return _getattr
 
+            cls.__init__ = _make_init(orig_init)
             cls.__getattr__ = _make_getattr(orig_getattr, cls)
             cls._patched_delegation = True
             _kimi_patch_installed(f"moe_runner_delegation[{cls_name}]")
