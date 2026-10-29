@@ -779,6 +779,12 @@ class HPUMPLinearKernel(MPLinearKernel):
 # relu2 bit-for-bit.
 _NONGATED_AS_GATED_ACTIVATION = {"relu2": "relu"}
 
+# Non-gated activations the native int4 kernel runs with is_gated=False; only
+# squared-ReLU is validated there. Any other would reach the bridge unchecked
+# (e.g. "silu_no_mul" is no kernel activation name, so it would fail only at
+# warmup), so it takes the mirror path instead, which refuses it at load.
+_NATIVE_NON_GATED_INT4_ACTIVATIONS = frozenset({"relu2"})
+
 
 @CustomOp.register_oot(name='CompressedTensorsWNA16MarlinMoEMethod')
 class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
@@ -843,9 +849,12 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         other path, which only has gated kernels. Must agree with the eligibility
         decided in process_weights_after_loading: g_idx only exists for
         actorder "group", and an is_gated-capable overload is also present.
+        Activations outside _NATIVE_NON_GATED_INT4_ACTIVATIONS take the mirror
+        path, which refuses what it cannot express.
         """
-        return (not layer.moe_config.is_act_and_mul and self._native_int4_refusal() is None and self.actorder != "group"
-                and int4_moe_supports_non_gated())
+        return (not layer.moe_config.is_act_and_mul
+                and _normalize_moe_activation(layer.activation) in _NATIVE_NON_GATED_INT4_ACTIVATIONS
+                and self._native_int4_refusal() is None and self.actorder != "group" and int4_moe_supports_non_gated())
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -1002,11 +1011,10 @@ class HPUCompressedTensorsWNA16MoEMethod(CompressedTensorsWNA16MarlinMoEMethod):
         act = _normalize_moe_activation(layer.activation)
         gated_act = _NONGATED_AS_GATED_ACTIVATION.get(act)
         if gated_act is None:
-            raise NotImplementedError(f"Non-gated MoE activation {act!r} cannot be expressed on a gated-only HPU "
-                                      f"fused-MoE kernel. Only {sorted(_NONGATED_AS_GATED_ACTIVATION)} can be "
-                                      f"emulated there; others need the native int4 path "
-                                      f"(VLLM_WNA16_NATIVE_INT4_MOE=1) on a Habana PyTorch bridge whose "
-                                      f"mixture_of_experts.int4_fused_weights takes is_gated.")
+            raise NotImplementedError(f"Non-gated MoE activation {act!r} is not supported for WNA16 MoE on HPU: a "
+                                      f"gated-only fused-MoE kernel can emulate only "
+                                      f"{sorted(_NONGATED_AS_GATED_ACTIVATION)}, and the native int4 kernel runs only "
+                                      f"{sorted(_NATIVE_NON_GATED_INT4_ACTIVATIONS)} with is_gated=False.")
 
         packed = layer.w13_weight_packed
         scale = layer.w13_weight_scale

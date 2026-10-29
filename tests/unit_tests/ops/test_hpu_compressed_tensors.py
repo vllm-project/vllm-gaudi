@@ -693,6 +693,31 @@ def test_compressed_tensors_wna16_moe_method_non_gated(default_vllm_config: None
         assert call["activation"] == "relu"
 
 
+@pytest.mark.parametrize("activation", ["silu_no_mul", "gelu_no_mul", "gelu_tanh_no_mul"])
+def test_compressed_tensors_wna16_moe_method_non_gated_unsupported_activation(default_vllm_config: None, dist_init,
+                                                                              monkeypatch, activation):
+    """A non-gated activation the native int4 kernel isn't validated for is refused at load, even with is_gated.
+
+    The layer must not take the native non-gated path (I-wide w13, activation
+    passed to the kernel unchecked) but the mirror layout, whose fix-up raises
+    because the gated kernels cannot express the activation either.
+    """
+    monkeypatch.setattr(hpu_ext_ops, "int4_moe_native_available", lambda: True)
+    monkeypatch.setattr(hpu_ct, "int4_moe_supports_non_gated", lambda: True)
+    monkeypatch.setattr(hpu_ct, "get_config", lambda: SimpleNamespace(wna16_native_int4_moe=True))
+
+    oot_op = create_fused_moe(_wna16_moe_quant_config(),
+                              activation=activation,
+                              ckpt_names=("up_proj", "down_proj", None))
+    experts = oot_op.routed_experts
+    assert isinstance(experts.quant_method, HPUCompressedTensorsWNA16MoEMethod)
+    assert not experts.hpu_wna16_native_non_gated
+    assert experts.w13_weight_packed.shape[1] == 2 * 256  # mirror layout, 2 * create_fused_moe's intermediate size
+
+    with pytest.raises(NotImplementedError, match=f"'{activation}' is not supported"):
+        experts.quant_method.process_weights_after_loading(experts)
+
+
 def test_compressed_tensors_linear_method_w8a8int8_bf16fallback_static_per_channel(default_vllm_config: None,
                                                                                    dist_init):
 
