@@ -1119,7 +1119,7 @@ def _patch_kimi_kda() -> None:
 
 
 def _patch_mla_prefill_selector() -> None:
-    """Return _DummyPrefillBackend for MLA prefill on HPU."""
+    """Return _DummyPrefillBackend for MLA prefill on HPU for Kimi-K3 configs; others keep the original selector."""
     try:
         import vllm.v1.attention.backends.mla.prefill.selector as sel_mod
         from vllm_gaudi.attention.oot_mla import _DummyPrefillBackend
@@ -1127,6 +1127,8 @@ def _patch_mla_prefill_selector() -> None:
 
         def hpu_get_prefill(vllm_config):
             from vllm.platforms import current_platform
+            if orig_fn and not _is_kimi_k3_config(getattr(vllm_config, "model_config", None)):
+                return orig_fn(vllm_config)
             if getattr(current_platform, "device_type", None) == "hpu" or getattr(current_platform, "device_name",
                                                                                   None) == "hpu":
                 return _DummyPrefillBackend
@@ -1157,9 +1159,10 @@ def _patch_kimi_k3_hybrid_config() -> None:
                 orig_post_init(self, *args, **kwargs)
                 _report_kimi_config_patches(self)
                 # Ensure KimiMoE does not pad moe_intermediate_size from 3072 to 4096 under EP (saves ~30 GB memory per card)
-                for cfg_obj in (getattr(self, "hf_text_config", None), getattr(self, "hf_config", None)):
-                    if cfg_obj is not None:
-                        setattr(cfg_obj, "min_moe_intermediate_per_partition", 1)
+                if _is_kimi_k3_config(self):
+                    for cfg_obj in (getattr(self, "hf_text_config", None), getattr(self, "hf_config", None)):
+                        if cfg_obj is not None:
+                            setattr(cfg_obj, "min_moe_intermediate_per_partition", 1)
                 lac = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(
                     self.hf_config, "linear_attn_config", None)
                 if lac is not None and not getattr(self.hf_text_config, "layer_types", None):

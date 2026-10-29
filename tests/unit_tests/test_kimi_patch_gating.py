@@ -138,3 +138,88 @@ def test_attribute_miss_during_init_does_not_recurse(patches):
 
     patches.test_current["config"] = _Config(["KimiK3ForConditionalGeneration"])
     assert Probing(_experts_with_packed_weights()).routed_experts is not None
+
+
+@pytest.fixture
+def config_patches(monkeypatch):
+    """vllm_gaudi.patches with stubbed ModelConfig, MLA prefill selector and platform for the config patches."""
+
+    class ModelConfig:
+
+        def __init__(self, architectures):
+            self.architectures = architectures
+            self.hf_config = types.SimpleNamespace(architectures=architectures)
+            self.hf_text_config = self.hf_config
+            self.__post_init__()
+
+        def __post_init__(self):
+            pass
+
+    original_selector = lambda vllm_config: "original"  # noqa: E731
+    dummy_backend = type("_DummyPrefillBackend", (), {})
+    selector = types.ModuleType("vllm.v1.attention.backends.mla.prefill.selector")
+    selector.get_mla_prefill_backend = original_selector
+    mla_attention = types.ModuleType("vllm.model_executor.layers.attention.mla_attention")
+    mla_attention.get_mla_prefill_backend = original_selector
+
+    def module(name, **attrs):
+        mod = types.ModuleType(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, mod)
+        return mod
+
+    module("vllm", envs=module("vllm.envs"))
+    module("vllm.config", ModelConfig=ModelConfig)
+    for name in ("vllm.v1", "vllm.v1.attention", "vllm.v1.attention.backends", "vllm.v1.attention.backends.mla",
+                 "vllm.v1.attention.backends.mla.prefill", "vllm.model_executor", "vllm.model_executor.layers",
+                 "vllm.model_executor.layers.attention", "vllm_gaudi.attention"):
+        module(name)
+    module("vllm.platforms", current_platform=types.SimpleNamespace(device_type="hpu"))
+    module("vllm_gaudi.attention.oot_mla", _DummyPrefillBackend=dummy_backend)
+    monkeypatch.setitem(sys.modules, "vllm.v1.attention.backends.mla.prefill.selector", selector)
+    monkeypatch.setitem(sys.modules, "vllm.model_executor.layers.attention.mla_attention", mla_attention)
+
+    monkeypatch.delitem(sys.modules, "vllm_gaudi.patches", raising=False)
+    mod = importlib.import_module("vllm_gaudi.patches")
+    monkeypatch.setattr(mod, "_KIMI_PATCHES_INSTALLED", [])
+    monkeypatch.setattr(mod, "_KIMI_PATCHES_FAILED", {})
+    mod._patch_kimi_k3_hybrid_config()
+    mod._patch_mla_prefill_selector()
+    mod.test_model_config = ModelConfig
+    mod.test_selector = selector
+    mod.test_dummy = dummy_backend
+    yield mod
+    sys.modules.pop("vllm_gaudi.patches", None)
+
+
+def test_config_patches_install(config_patches):
+    assert not config_patches._KIMI_PATCHES_FAILED
+    assert "mla_prefill_selector" in config_patches._KIMI_PATCHES_INSTALLED
+
+
+@pytest.mark.parametrize(
+    "architectures", [["Kimi_K25ForConditionalGeneration"], ["Llama4ForConditionalGeneration"], ["GptOssForCausalLM"]])
+def test_non_k3_config_keeps_moe_padding_attribute_unset(config_patches, architectures):
+    cfg = config_patches.test_model_config(architectures)
+
+    assert not hasattr(cfg.hf_config, "min_moe_intermediate_per_partition")
+
+
+@pytest.mark.parametrize("architectures", [["KimiK3ForConditionalGeneration"], ["KimiLinearForCausalLM"]])
+def test_k3_config_disables_moe_padding(config_patches, architectures):
+    cfg = config_patches.test_model_config(architectures)
+
+    assert cfg.hf_config.min_moe_intermediate_per_partition == 1
+
+
+@pytest.mark.parametrize("architectures", [["Kimi_K25ForConditionalGeneration"], ["DeepseekV3ForCausalLM"]])
+def test_non_k3_mla_model_uses_the_original_prefill_selector(config_patches, architectures):
+    vllm_config = _Config(architectures)
+
+    assert config_patches.test_selector.get_mla_prefill_backend(vllm_config) == "original"
+
+
+def test_k3_mla_model_gets_the_dummy_prefill_backend(config_patches):
+    vllm_config = _Config(["KimiK3ForConditionalGeneration"])
+
+    assert config_patches.test_selector.get_mla_prefill_backend(vllm_config) is config_patches.test_dummy
