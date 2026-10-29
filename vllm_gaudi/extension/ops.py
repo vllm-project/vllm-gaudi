@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import math
 import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.utils import get_kv_fetch_extra_args
+from vllm_gaudi.extension.utils import FP8Matmul, get_kv_fetch_extra_args
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 import vllm.model_executor.layers.quantization as vllm_quant
 import habana_frameworks.torch.utils.experimental as htexp
@@ -155,7 +155,13 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, bat
             block_adjustment = block_adjustment.to(value.dtype)
         sum_adjusted = block_sums.mul(block_adjustment)
 
-        # Sum block's sums that belongs to the same sequences
+        # Sum block's sums that belongs to the same sequences.
+        # With an FP8 KV cache the b2b ops are unit-scale FP8Matmul, which would cast these softmax
+        # denominators to FP8. On Gaudi2 that corrupts batched decode, so keep this reduction in the native dtype.
+        if isinstance(block2batch_matmul_op, FP8Matmul):
+            block2batch_matmul_op = torch.matmul
+        if isinstance(batch2block_matmul_op, FP8Matmul):
+            batch2block_matmul_op = torch.matmul
         group_sum_adjusted = block2batch(sum_adjusted, block_mapping, block2batch_matmul_op)
         group_sum_adjusted = batch2block(group_sum_adjusted, block_mapping, batch2block_matmul_op)
         sum_adjusted = sum_adjusted.view(*adjustment_target_shape)
