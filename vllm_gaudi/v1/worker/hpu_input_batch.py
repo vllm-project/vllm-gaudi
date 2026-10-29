@@ -704,7 +704,6 @@ class InputBatch:
         async_h2d_copy(self.temperature_cpu_tensor, self.temperature)
         async_h2d_copy(self.top_p_cpu_tensor, self.top_p)
         async_h2d_copy(self.top_k_cpu_tensor, self.top_k)
-        async_h2d_copy(self.min_p_cpu_tensor, self.min_p)
         if not self.no_penalties:
             async_h2d_copy(self.frequency_penalties_cpu_tensor, self.frequency_penalties)
             async_h2d_copy(self.presence_penalties_cpu_tensor, self.presence_penalties)

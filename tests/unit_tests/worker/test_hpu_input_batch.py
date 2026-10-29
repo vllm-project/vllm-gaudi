@@ -506,6 +506,8 @@ def test_selective_sampling_metadata_after_swap(device: str):
         batch.add_request(make_req(i))
     batch.refresh_sampling_metadata()
     selective(batch, [0, 1, 2], skip_copy=False)
+    # Steady decode step: fills the prompt token ids cache in the old row order.
+    selective(batch, [0, 1, 2], skip_copy=True)
 
     # Step 2: nobody joins or leaves, but the batch reorders its rows.
     batch.swap_states(0, 1)
