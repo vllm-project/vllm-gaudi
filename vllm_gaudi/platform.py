@@ -76,6 +76,31 @@ class HpuPlatform(Platform):
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
+    # VLLM_* variables read by vllm-gaudi itself. Upstream Platform.validate_environ warns about every VLLM_* name
+    # missing from vllm.envs, which would flag these as unknown.
+    gaudi_env_vars: tuple[str, ...] = (
+        "VLLM_BUCKETING_FROM_FILE",
+        "VLLM_EXPONENTIAL_BUCKETING",
+        "VLLM_FULL_WARMUP",
+        "VLLM_GRAPH_RESERVED_MEM",
+        "VLLM_HPU_BIND_NUMA",
+        "VLLM_MOE_CHUNK",
+        "VLLM_MOE_TOKEN_BOUNDARY",
+        "VLLM_MULTIMODAL_RESOLUTIONS",
+        "VLLM_SKIP_WARMUP",
+        "VLLM_WEIGHT_LOAD_FORCE_SYNC",
+    )
+
+    @classmethod
+    def validate_environ(cls, hard_fail: bool) -> None:
+        import vllm_gaudi.envs as gaudi_envs
+        known = set(envs.environment_variables) | set(gaudi_envs.environment_variables) | set(cls.gaudi_env_vars)
+        for env in os.environ:
+            if env.startswith("VLLM_") and env not in known:
+                if hard_fail:
+                    raise ValueError(f"Unknown vLLM environment variable detected: {env}")
+                logger.warning("Unknown vLLM environment variable detected: %s", env)
+
     @classmethod
     def is_hpu(cls) -> bool:
         return True
