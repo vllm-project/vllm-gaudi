@@ -36,6 +36,7 @@ from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.host_headroom import host_identity, host_memory_headroom_bytes
+from vllm_gaudi.v1.worker.hpu_affinity import apply_affinity
 from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, _GDN_MAMBA_TYPES, _rebind_moe_expert_weights)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
@@ -378,6 +379,9 @@ class HPUWorker(WorkerBase):
         init_worker_distributed_environment(self.vllm_config, self.rank, self.distributed_init_method, self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
+        # The device is open now (the opened /dev/accel node identifies the card); threads created from here on
+        # inherit the mask and the ones that already exist are pinned explicitly.
+        apply_affinity(self.rank, self.local_rank)
         with set_current_vllm_config(self.vllm_config):
             self.model_runner = HPUModelRunner(vllm_config=self.vllm_config, is_driver_worker=self.is_driver_worker)
         self.init_profiler()
@@ -981,7 +985,9 @@ class HPUWorker(WorkerBase):
                 with HabanaMemoryProfiler() as m:
                     self.model_runner.initialize_kv_cache(self.kv_cache_config)
                     self.model_runner.defragmenter = OnlineDefragmenter(self.model_runner.kv_caches,
-                                                                        self.model_runner.block_size)
+                                                                        self.model_runner.block_size,
+                                                                        hybrid=self.model_runner.num_mamba_like_layers
+                                                                        > 0)
                     gc.collect()
                     torch.hpu.synchronize()
                 msg = f"Waking up KV cache, reinitializing it took {m.get_summary_string()}"
