@@ -159,3 +159,16 @@ def test_in_graph_call_skips_the_nested_wrapper_only_while_compiling(ops, monkey
     monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
     op._get_compiled_forward()
     assert calls == [ops._mxfp4_fused_fwd]
+
+
+def test_first_moe_op_per_process_logs_in_graph_call_once(ops, caplog):
+    ops._mxfp4_moe_op_logged = False
+    with caplog.at_level("INFO", logger="vllm"):
+        _make_moe_op(ops, in_graph_call=True)
+        _make_moe_op(ops, in_graph_call=False)
+
+    records = [r for r in caplog.records if "VllmMixtureOfExpertsOpMXFP4 built" in r.getMessage()]
+    assert [r.getMessage() for r in records
+            ] == ["VllmMixtureOfExpertsOpMXFP4 built (first layer in this process): in_graph_call=True"]
+    # vLLM installs handlers on the "vllm" logger tree only; anything else never reaches server.log
+    assert records[0].name.startswith("vllm.")

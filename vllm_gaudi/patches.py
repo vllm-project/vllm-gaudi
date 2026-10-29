@@ -893,15 +893,6 @@ def _patch_sdpa_attention_forward() -> None:
     _ensure_fsdpa_cached()
 
 
-def _patch_triton_for_hpu() -> None:
-    """Disable Triton compiler on HPU to prevent incompatible kernel generation."""
-    try:
-        import vllm.triton_utils.importing as imp
-        imp.HAS_TRITON = False
-    except Exception:
-        pass
-
-
 _KIMI_PATCHES_INSTALLED: list[str] = []
 _KIMI_PATCHES_FAILED: dict[str, str] = {}
 
@@ -1036,62 +1027,19 @@ def _report_kimi_config_patches(model_config) -> None:
     _kimi_patches_log_failed(only=_KIMI_CONFIG_PATCHES)
 
 
-def _patch_rocm_platform_for_hpu() -> None:
-    """Neutralize vllm.platforms.rocm queries on HPU."""
-    try:
-        import sys
-        import types
-
-        if "vllm.platforms.rocm" in sys.modules:
-            rmod = sys.modules["vllm.platforms.rocm"]
-        else:
-            rmod = types.ModuleType("vllm.platforms.rocm")
-            sys.modules["vllm.platforms.rocm"] = rmod
-
-        rmod._GCN_ARCH = ""
-        rmod._get_gcn_arch = lambda: ""
-        for arch in [
-                "on_gfx1x",
-                "on_gfx11",
-                "on_gfx1100",
-                "on_gfx1151",
-                "on_gfx12x",
-                "on_gfx1250",
-                "on_rdna4",
-                "on_mi3xx",
-                "on_gfx9",
-                "on_gfx90a",
-                "on_gfx942",
-                "on_gfx950",
-                "on_cdna",
-                "on_rdna",
-        ]:
-            setattr(rmod, arch, lambda: False)
-        rmod._ON_GFX1X = False
-        rmod._ON_GFX11 = False
-        rmod._ON_GFX1100 = False
-        rmod._ON_GFX1151 = False
-        rmod._ON_GFX12X = False
-        rmod._ON_MI3XX = False
-        rmod._ON_GFX9 = False
-        rmod._ON_GFX90A = False
-        rmod._ON_GFX942 = False
-        rmod._ON_GFX950 = False
-        rmod._ON_GFX1250 = False
-        rmod._ON_CDNA = False
-        rmod._ON_RDNA = False
-        rmod.RocmPlatform = type("RocmPlatform", (), {})
-        _kimi_patch_ok("rocm_platform_stub")
-    except Exception:
-        _kimi_patch_failed("rocm_platform_stub")
-
-
 def _patch_kimi_kda() -> None:
     """Pure PyTorch fallback for KDA on HPU (disabling GPU Triton kernels and dict metadata assertion)."""
     try:
         import vllm.models.kimi_k3.amd.kda as _amd_kda
-        _amd_kda.is_fused_kda_decode_supported = lambda *args, **kwargs: False
+        import vllm.models.kimi_k3.amd.ops.kda_chunk as _kda_chunk
+        import vllm.models.kimi_k3.amd.ops.kda_decode as _kda_decode
+
+        # The fused KDA checks query vllm.platforms.rocm (amdsmi), which fails on HPU. They are the only users of
+        # that module in kimi_k3/amd, so answer False where they are defined and where amd.kda imported them by name.
+        _kda_chunk.is_fused_kda_chunk_supported = lambda *args, **kwargs: False
+        _kda_decode.is_fused_kda_decode_supported = lambda *args, **kwargs: False
         _amd_kda.is_fused_kda_chunk_supported = lambda *args, **kwargs: False
+        _amd_kda.is_fused_kda_decode_supported = lambda *args, **kwargs: False
 
         def _kda_forward(self, hidden_states, positions=None):
             # Imported on first use: importing vllm_gaudi.models here (plugin-apply time) hits a circular
@@ -1153,7 +1101,7 @@ def _patch_kimi_k3_hybrid_config() -> None:
     try:
         from vllm.config import ModelConfig
         orig_post_init = getattr(ModelConfig, "__post_init__", None)
-        if orig_post_init is not None:
+        if orig_post_init is not None and not getattr(orig_post_init, "_hpu_kimi_post_init", False):
 
             def _hpu_post_init(self, *args, **kwargs):
                 orig_post_init(self, *args, **kwargs)
@@ -1177,6 +1125,7 @@ def _patch_kimi_k3_hybrid_config() -> None:
                     if hasattr(self.hf_config, "text_config"):
                         self.hf_config.text_config.layer_types = l_types
 
+            _hpu_post_init._hpu_kimi_post_init = True
             ModelConfig.__post_init__ = _hpu_post_init
         _kimi_patch_ok("hybrid_config")
     except Exception:
@@ -1393,7 +1342,6 @@ def _patch_kimi_attn_res() -> None:
 def _patch_kimi_k3_arch() -> None:
     """Route Kimi-K3 models to the platform-independent AMD implementation on HPU."""
     try:
-        _patch_rocm_platform_for_hpu()
         _patch_kimi_kda()
         _patch_moe_runner_delegation()
         _patch_kimi_attn_res()
@@ -1730,8 +1678,6 @@ def apply() -> None:
         torch._C._host_emptyCache = lambda: None
 
     _patch_hf3fs_mock_client_for_cpu_only()
-    _patch_triton_for_hpu()
-    _patch_rocm_platform_for_hpu()
     _patch_kimi_kda()
     _patch_kimi_attn_res()
     _patch_mla_prefill_selector()

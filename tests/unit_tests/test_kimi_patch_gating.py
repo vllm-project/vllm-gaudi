@@ -223,3 +223,90 @@ def test_k3_mla_model_gets_the_dummy_prefill_backend(config_patches):
     vllm_config = _Config(["KimiK3ForConditionalGeneration"])
 
     assert config_patches.test_selector.get_mla_prefill_backend(vllm_config) is config_patches.test_dummy
+
+
+def test_hybrid_config_patch_does_not_wrap_post_init_twice(config_patches):
+    wrapped = config_patches.test_model_config.__post_init__
+    config_patches._patch_kimi_k3_hybrid_config()
+
+    assert config_patches.test_model_config.__post_init__ is wrapped
+
+
+@pytest.fixture
+def kda_modules(config_patches, monkeypatch):
+    """Stubbed vllm.models.kimi_k3.amd KDA modules whose fused checks would query vllm.platforms.rocm."""
+    real_rocm = types.ModuleType("vllm.platforms.rocm")
+    monkeypatch.setitem(sys.modules, "vllm.platforms.rocm", real_rocm)
+
+    def fused_check(*args, **kwargs):
+        raise AssertionError("queried vllm.platforms.rocm")
+
+    mods = {}
+    for name in ("vllm.models", "vllm.models.kimi_k3", "vllm.models.kimi_k3.amd", "vllm.models.kimi_k3.amd.ops"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    for name, attrs in (("kda", ("is_fused_kda_chunk_supported", "is_fused_kda_decode_supported")),
+                        ("ops.kda_chunk", ("is_fused_kda_chunk_supported", )),
+                        ("ops.kda_decode", ("is_fused_kda_decode_supported", ))):
+        full = f"vllm.models.kimi_k3.amd.{name}"
+        mod = types.ModuleType(full)
+        for attr in attrs:
+            setattr(mod, attr, fused_check)
+        monkeypatch.setitem(sys.modules, full, mod)
+        mods[name] = mod
+    config_patches.test_kda_modules = mods
+    config_patches.test_rocm = real_rocm
+    return config_patches
+
+
+def test_k3_kda_patch_makes_both_fused_checks_return_false_everywhere(kda_modules):
+    kda_modules._patch_kimi_kda()
+
+    mods = kda_modules.test_kda_modules
+    assert mods["ops.kda_chunk"].is_fused_kda_chunk_supported() is False
+    assert mods["ops.kda_decode"].is_fused_kda_decode_supported(1, 2, x=3) is False
+    assert mods["kda"].is_fused_kda_chunk_supported() is False
+    assert mods["kda"].is_fused_kda_decode_supported() is False
+
+
+def test_k3_arch_patch_does_not_replace_the_rocm_module(kda_modules):
+    kda_modules._patch_kimi_k3_arch()
+
+    assert sys.modules["vllm.platforms.rocm"] is kda_modules.test_rocm
+    assert not hasattr(kda_modules.test_rocm, "on_gfx9")
+    assert not hasattr(kda_modules, "_patch_rocm_platform_for_hpu")
+    assert not hasattr(kda_modules, "_patch_triton_for_hpu")
+
+
+def test_apply_and_plugin_loader_wrapper_leave_rocm_module_and_triton_flag_alone(kda_modules, monkeypatch):
+    rocm = kda_modules.test_rocm
+    importing = types.ModuleType("vllm.triton_utils.importing")
+    importing.HAS_TRITON = True
+    monkeypatch.setitem(sys.modules, "vllm.triton_utils.importing", importing)
+    plugins = types.ModuleType("vllm.plugins")
+    plugins.load_general_plugins = lambda: None
+    monkeypatch.setitem(sys.modules, "vllm.plugins", plugins)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", torch.accelerator.empty_cache)
+    if hasattr(torch.accelerator, "empty_host_cache"):
+        monkeypatch.setattr(torch.accelerator, "empty_host_cache", torch.accelerator.empty_host_cache)
+    monkeypatch.setattr(torch._C, "_host_emptyCache", getattr(torch._C, "_host_emptyCache", lambda: None),
+                        raising=False)
+
+    # the non-Kimi patches import real vllm; keep only the ones that belong to the Kimi-K3 support
+    kimi_related = ("kimi", "moe_runner_delegation", "mla_prefill", "mla_bind")
+    for name in [n for n in vars(kda_modules) if n.startswith("_patch_") and not any(k in n for k in kimi_related)]:
+        monkeypatch.setattr(kda_modules, name, lambda *args, **kwargs: None)
+
+    kda_modules.apply()
+    plugins.load_general_plugins()
+
+    assert sys.modules["vllm.platforms.rocm"] is rocm
+    assert not hasattr(rocm, "on_gfx9")
+    assert importing.HAS_TRITON is True
+
+
+def test_mxfp4_moe_method_alias_is_not_installed():
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[2] / "vllm_gaudi" / "ops" / "hpu_mxfp4.py").read_text()
+
+    assert "mxfp4_module.GptOssMxfp4MoEMethod = HPUGptOssMxfp4MoEMethod" in src
+    assert "mxfp4_module.Mxfp4MoEMethod" not in src
