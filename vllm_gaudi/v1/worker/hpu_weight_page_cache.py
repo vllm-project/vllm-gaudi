@@ -12,9 +12,10 @@ Only vLLM's DefaultModelLoader safetensors path is covered (not the torchao / pr
 enable_multithread_load, fastsafetensors, instanttensor or .pt checkpoints).
 
 Environment:
-  VLLM_HPU_DROP_WEIGHT_PAGE_CACHE      unset/auto: active only when the safetensors shards together are larger
-                                       than 25% of MemTotal (small checkpoints keep the upstream iterator,
-                                       including its auto-prefetch); 1 forces it on, 0 keeps the upstream loader
+  VLLM_HPU_DROP_WEIGHT_PAGE_CACHE      unset/auto: active only for Kimi-K3 configs, and then only when the
+                                       safetensors shards together are larger than 25% of MemTotal (small
+                                       checkpoints keep the upstream iterator, including its auto-prefetch);
+                                       1 forces it on for any model, 0 keeps the upstream loader
 
 The fadvise calls run in one daemon thread per process, so a slow call (all ranks of a node advise the same shard
 at once, on network file systems that takes seconds) does not delay the loading of the next shard.
@@ -175,6 +176,14 @@ class _BackgroundDropper:
 
 
 _dropper = _BackgroundDropper()
+_EXHAUSTED = object()
+
+
+def _submit_quietly(path: str, batch: "_DropBatch") -> None:
+    try:
+        _dropper.submit(path, batch)
+    except Exception as exc:
+        logger.warning("Weight page cache: could not schedule the drop of %s: %s", path, exc)
 
 
 def wrap_safetensors_iterator(original: Callable[..., Iterator[tuple[str, torch.Tensor]]],
@@ -213,6 +222,7 @@ def wrap_safetensors_iterator(original: Callable[..., Iterator[tuple[str, torch.
 
         # None lets the upstream iterator size the whole checkpoint and may start a prefetch (plus an info_once log)
         # per call; "lazy" is the plain safe_open path it takes otherwise, without that per-shard side effect.
+        requested_strategy = safetensors_load_strategy
         if safetensors_load_strategy is None:
             safetensors_load_strategy = "lazy"
         files = sorted(hf_weights_files, key=sort_key) if sort_key else sorted(hf_weights_files)
@@ -224,6 +234,7 @@ def wrap_safetensors_iterator(original: Callable[..., Iterator[tuple[str, torch.
         batch = _DropBatch()
         started = 0  # shards opened so far
         next_drop = 0  # first shard whose cache is not dropped yet
+        yielded = False  # a tensor has been handed to the loader
         try:
             for i, st_file in enumerate(
                     tqdm(files,
@@ -232,32 +243,60 @@ def wrap_safetensors_iterator(original: Callable[..., Iterator[tuple[str, torch.
                          bar_format=bar_format)):
                 started = i + 1
                 # One shard per call: the shard's safe_open handle (and its mmap) is closed when the call ends.
-                yield from original([st_file], False, safetensors_load_strategy, *args, **kwargs)
+                shard = original([st_file], False, safetensors_load_strategy, *args, **kwargs)
+                if not yielded:
+                    try:
+                        first = next(shard, _EXHAUSTED)
+                    except Exception as exc:
+                        # Nothing reached the loader yet, so the upstream iterator can still take over everything.
+                        logger.warning(
+                            "Weight page cache: per-shard loading failed before the first tensor (%s: %s), "
+                            "falling back to the upstream iterator for all %d shards",
+                            type(exc).__name__, exc, len(files))
+                        yield from original(hf_weights_files, use_tqdm_on_load, requested_strategy, *args, **kwargs)
+                        return
+                    if first is not _EXHAUSTED:
+                        yielded = True
+                        yield first
+                yield from shard
                 while next_drop <= i - lag:
-                    _dropper.submit(files[next_drop], batch)
+                    _submit_quietly(files[next_drop], batch)
                     next_drop += 1
         finally:
             # Also runs when loading stops early, so no opened shard stays cached because of this process.
-            for st_file in files[next_drop:started]:
-                _dropper.submit(st_file, batch)
-            if not batch.wait(_WAIT_S):
-                logger.warning("Weight page cache: %d background drops still pending after %.0f s", batch.pending,
-                               _WAIT_S)
-            logger.info(
-                "Weight page cache: loader finished, fadvise(DONTNEED) called for %d shards (%d failed); "
-                "background fadvise time total %.1f s, max %.2f s per shard", batch.dropped, batch.failed,
-                batch.total_s, batch.max_s)
+            # Nothing here may raise: it would replace the error of the loader, or fail an otherwise good load.
+            try:
+                for st_file in files[next_drop:started]:
+                    _submit_quietly(st_file, batch)
+                if not batch.wait(_WAIT_S):
+                    logger.warning("Weight page cache: %d background drops still pending after %.0f s", batch.pending,
+                                   _WAIT_S)
+                logger.info(
+                    "Weight page cache: loader finished, fadvise(DONTNEED) called for %d shards (%d failed); "
+                    "background fadvise time total %.1f s, max %.2f s per shard", batch.dropped, batch.failed,
+                    batch.total_s, batch.max_s)
+            except Exception as exc:
+                logger.warning("Weight page cache: end-of-load bookkeeping failed: %s", exc)
 
     return iterator
 
 
 @contextlib.contextmanager
-def drop_weight_page_cache_during_load():
+def drop_weight_page_cache_during_load(model_config=None):
     """Use the page-cache-dropping iterator in vLLM's default loader for the duration of the block.
+
+    In auto mode this is done for Kimi-K3 configs only (then further gated by the checkpoint size); any other model
+    keeps the upstream loader unless the env var is 1.
 
     DONTNEED skips pages that are still mapped, so the shards seen are advised once more when the block ends, i.e.
     after the loader's post-processing released its mappings and CPU tensors."""
     mode = drop_mode()
+    if mode == "auto":
+        from vllm_gaudi.patches import _is_kimi_k3_config
+
+        if not _is_kimi_k3_config(model_config):
+            logger.info("Weight page cache: disabled (auto mode is limited to Kimi-K3; set %s=1 to force)", _ENV_DROP)
+            mode = "off"
     if mode == "off":
         yield
         return

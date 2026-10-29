@@ -5027,7 +5027,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 else contextlib.nullcontext()
             # The shards' page cache would otherwise fill host memory and trip the bridge's host memory
             # threshold (recipe cache eviction), see hpu_weight_page_cache.
-            with ctx, drop_weight_page_cache_during_load():
+            with ctx, drop_weight_page_cache_during_load(self.model_config):
                 try:
                     self.model = get_model(vllm_config=self.vllm_config)
                 except Exception:
