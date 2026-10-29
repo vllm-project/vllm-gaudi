@@ -243,9 +243,9 @@ def wrap_safetensors_iterator(original: Callable[..., Iterator[tuple[str, torch.
                          bar_format=bar_format)):
                 started = i + 1
                 # One shard per call: the shard's safe_open handle (and its mmap) is closed when the call ends.
-                shard = original([st_file], False, safetensors_load_strategy, *args, **kwargs)
                 if not yielded:
-                    try:
+                    try:  # the call itself may fail too (signature mismatch), not only the iteration
+                        shard = original([st_file], False, safetensors_load_strategy, *args, **kwargs)
                         first = next(shard, _EXHAUSTED)
                     except Exception as exc:
                         # Nothing reached the loader yet, so the upstream iterator can still take over everything.
@@ -258,6 +258,8 @@ def wrap_safetensors_iterator(original: Callable[..., Iterator[tuple[str, torch.
                     if first is not _EXHAUSTED:
                         yielded = True
                         yield first
+                else:
+                    shard = original([st_file], False, safetensors_load_strategy, *args, **kwargs)
                 yield from shard
                 while next_drop <= i - lag:
                     _submit_quietly(files[next_drop], batch)
