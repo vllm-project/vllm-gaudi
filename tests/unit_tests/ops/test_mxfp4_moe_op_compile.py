@@ -62,11 +62,12 @@ def ops(monkeypatch):
     dynamo.reset()
 
 
-def _make_moe_op(ops, num_experts=4):
+def _make_moe_op(ops, num_experts=4, in_graph_call=False):
     op = ops.VllmMixtureOfExpertsOpMXFP4(global_num_experts=num_experts,
                                          num_total_experts=num_experts,
                                          experts_min=0,
-                                         experts_max=num_experts - 1)
+                                         experts_max=num_experts - 1,
+                                         in_graph_call=in_graph_call)
     for i in range(num_experts):
         op.w13_list[i].set_weight(torch.full((8, 4), i, dtype=torch.uint8))
         op.w13_list[i].set_scale(torch.ones(8, 1, dtype=torch.uint8))
@@ -95,10 +96,11 @@ def _inputs():
 
 
 def test_first_trace_of_every_layer_has_no_graph_break(ops):
+    # in_graph_call is set for Kimi-K3 layers only (see test_in_graph_call_is_off_by_default).
     # Regional compilation: every layer is compiled separately but they share one code object. Before the fix the
     # first call of each layer built the nested torch.compile wrapper inside the trace, which broke the graph and
     # left the layer split into nested frames.
-    layers = [_Layer(_make_moe_op(ops)) for _ in range(3)]
+    layers = [_Layer(_make_moe_op(ops, in_graph_call=True)) for _ in range(3)]
     counter = CompileCounter()
     compiled = [torch.compile(layer, backend=counter, fullgraph=True) for layer in layers]
 
@@ -130,3 +132,30 @@ def test_eager_call_still_compiles_the_op_once(ops, monkeypatch):
     assert calls[0][1] == {"backend": "hpu_backend"}
     expected = hidden_states * weights.sum(-1, keepdim=True)
     assert first.shape == expected.shape
+
+
+def test_in_graph_call_is_off_by_default(ops, monkeypatch):
+    calls = []
+    monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: calls.append(fn) or fn)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    op = _make_moe_op(ops)
+
+    assert op.in_graph_call is False
+    # upstream path even inside a compiled region: the nested torch.compile wrapper, cached on the op
+    assert op._get_compiled_forward() is ops._mxfp4_fused_fwd
+    assert calls == [ops._mxfp4_fused_fwd]
+    assert op._compiled_forward is ops._mxfp4_fused_fwd
+
+
+def test_in_graph_call_skips_the_nested_wrapper_only_while_compiling(ops, monkeypatch):
+    calls = []
+    monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: calls.append(fn) or fn)
+    op = _make_moe_op(ops, in_graph_call=True)
+
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    assert op._get_compiled_forward() is ops._mxfp4_fused_fwd
+    assert not calls and op._compiled_forward is None
+
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
+    op._get_compiled_forward()
+    assert calls == [ops._mxfp4_fused_fwd]
