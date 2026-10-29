@@ -27,13 +27,14 @@ def _write_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows):
     return core
 
 
-# State writes are deferred: a KDA layer (decode or prefill) stores its new state rows in its own ``_kda_pending``
-# attribute instead of writing them (an inline write is a graph break per KDA layer), and
-# run_with_deferred_kda_state() writes the rows of all KDA layers eagerly once the decoder layers of the step are
-# done. Each layer reads and writes only its own cache once per step, so the order of the writes does not matter.
-# The rows live on the layer module (not in a shared container): all decoder layers share one dynamo code object
-# under regional compilation, and a shared list would make dynamo guard on its length, i.e. one cache entry per layer
-# index. _DEFER_ACTIVE keeps layers that run outside of a wrapped model forward on the inline write.
+# Decode state writes are deferred: a decode layer stores its new state rows in its own ``_kda_pending`` attribute
+# instead of writing them (an inline write is a graph break per KDA layer), and run_with_deferred_kda_state() writes
+# the rows of all KDA layers eagerly once the decoder layers of the step are done. The rows live on the layer module
+# (not in a shared container): all decoder layers share one dynamo code object under regional compilation, and a
+# shared list would make dynamo guard on its length, i.e. one cache entry per layer index. _DEFER_ACTIVE keeps
+# layers that run outside of a wrapped model forward (and prefill layers) on the inline write. Prefill stays inline on
+# purpose: deferring it as well (one graph per decoder layer, rows of all KDA layers alive until the end of the
+# forward) ran the device out of memory in the warmup of the large prompt buckets.
 _DEFER_ACTIVE: list = [False]
 
 
@@ -71,7 +72,7 @@ def _drop_pending_state(layers) -> None:
 
 
 def run_with_deferred_kda_state(model, forward, *args, **kwargs):
-    """Runs ``forward(*args, **kwargs)`` of ``model`` and writes the state rows stashed by the KDA layers
+    """Runs ``forward(*args, **kwargs)`` of ``model`` and writes the decode state rows stashed by the KDA layers
     after it returns. If the forward raises, the stash is dropped without writing."""
     layers = _kda_layers(model)
     _drop_pending_state(layers)
@@ -174,10 +175,7 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                                                                     chunk_size=chunk_size,
                                                                     vec_chunks=vec_chunks,
                                                                     **common)
-                if _DEFER_ACTIVE[0]:
-                    self._kda_pending = (conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
-                else:
-                    core = _write_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
+                core = _write_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
                 # Keep post-processing out of the statement that calls the disabled write: ops chained on its last
                 # line end up in the dynamo resume frame without a source line, and the HPU compile backend then
                 # fails on the unparsable FX stack_trace ("'NoneType' object has no attribute 'file'").
