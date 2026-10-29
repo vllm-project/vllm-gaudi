@@ -59,8 +59,11 @@ class HpuKimiK25DummyInputsBuilder(KimiK25DummyInputsBuilder):
 
 
 # Re-register the multimodal processor on the upstream model class with the
-# fixed dummy-inputs builder. ``register_processor`` overwrites the existing
-# ``_processor_factory`` (it logs a warning on override, which is expected).
+# fixed dummy-inputs builder. ``register_processor`` logs a warning when the class
+# already has a ``_processor_factory``; the override is intentional, so drop the
+# upstream factory first instead of overwriting it.
+if "_processor_factory" in KimiK25ForConditionalGeneration.__dict__:
+    del KimiK25ForConditionalGeneration._processor_factory
 MULTIMODAL_REGISTRY.register_processor(
     KimiK25MultiModalProcessor,
     info=KimiK25ProcessingInfo,
