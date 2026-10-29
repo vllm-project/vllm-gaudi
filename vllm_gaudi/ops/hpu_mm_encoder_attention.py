@@ -3,6 +3,39 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 
 
+# The per-sequence loop needs the sequence boundaries on the host: traced, the .tolist() is a graph break and the
+# resume frame specializes on the boundary values (one recompile per image layout), so it runs eagerly.
+@torch.compiler.disable
+def _varlen_fsdpa(fsdpa_op, query, key, value, cu_seqlens, scale):
+    cu_seqlens_list = cu_seqlens.to("cpu").tolist()
+    outputs = []
+    start_idx = 0
+    # Iterate through sequence boundaries using tensor operations
+    for i in range(len(cu_seqlens_list) - 1):
+        end_idx = cu_seqlens_list[i + 1]
+
+        # Extract chunks using tensor indexing
+        q_i = query[:, :, start_idx:end_idx, :]
+        k_i = key[:, :, start_idx:end_idx, :]
+        v_i = value[:, :, start_idx:end_idx, :]
+
+        # Process each chunk
+        output_i = fsdpa_op(q_i,
+                            k_i,
+                            v_i,
+                            None,
+                            dropout_p=0.0,
+                            is_causal=False,
+                            scale=scale,
+                            softmax_mode="fast",
+                            recompute_mode=True,
+                            valid_sequence_lengths=None)
+        outputs.append(output_i)
+        start_idx = end_idx
+    out = torch.cat(outputs, dim=2)
+    return out.transpose(1, 2)
+
+
 @MMEncoderAttention.register_oot()
 class HpuMMEncoderAttention(MMEncoderAttention):
 
@@ -53,33 +86,7 @@ class HpuMMEncoderAttention(MMEncoderAttention):
                                recompute_mode=True,
                                valid_sequence_lengths=None)
             else:
-                cu_seqlens_list = cu_seqlens.to("cpu").tolist()
-                outputs = []
-                start_idx = 0
-                # Iterate through sequence boundaries using tensor operations
-                for i in range(len(cu_seqlens_list) - 1):
-                    end_idx = cu_seqlens_list[i + 1]
-
-                    # Extract chunks using tensor indexing
-                    q_i = query[:, :, start_idx:end_idx, :]
-                    k_i = key[:, :, start_idx:end_idx, :]
-                    v_i = value[:, :, start_idx:end_idx, :]
-
-                    # Process each chunk
-                    output_i = fsdpa_op(q_i,
-                                        k_i,
-                                        v_i,
-                                        None,
-                                        dropout_p=0.0,
-                                        is_causal=False,
-                                        scale=self.scale,
-                                        softmax_mode="fast",
-                                        recompute_mode=True,
-                                        valid_sequence_lengths=None)
-                    outputs.append(output_i)
-                    start_idx = end_idx
-                out = torch.cat(outputs, dim=2)
-                return out.transpose(1, 2)
+                return _varlen_fsdpa(fsdpa_op, query, key, value, cu_seqlens, self.scale)
         else:
             out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
 
