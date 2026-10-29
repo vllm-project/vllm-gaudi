@@ -534,14 +534,16 @@ def test_deferred_state_is_not_written_outside_a_wrapped_forward_or_after_an_err
     assert all(c.abs().sum() == 0 for c in layer.kv_cache)  # nothing leaked into the caches
 
 
-def test_deferred_decode_layer_compiles_without_graph_break_or_cache_mutation(monkeypatch, request):
+@pytest.mark.parametrize("is_prompt", [False, True])
+def test_deferred_layer_compiles_without_graph_break_or_cache_mutation(monkeypatch, request, is_prompt):
     from functorch.compile import make_boxed_func
     from torch._dynamo.backends.common import aot_autograd
 
-    meta = _step_metadata(False, [1, 2])
+    tokens = 40 if is_prompt else 2
+    meta = _step_metadata(is_prompt, [1, 2], tokens)
     module = _load_layer_module(monkeypatch, {"value": meta})
     params = _make_params(230)
-    x = torch.randn(2, 24, generator=torch.Generator().manual_seed(231))
+    x = torch.randn(tokens, 24, generator=torch.Generator().manual_seed(231))
     ref_layer = _deferred_layer(params, 24, 232, _new_caches(6, False))
     layer = _deferred_layer(params, 24, 232, _new_caches(6, False))
     graphs = []
