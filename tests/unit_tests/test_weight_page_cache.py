@@ -112,6 +112,22 @@ def test_per_shard_failure_before_first_tensor_falls_back_to_the_whole_list(monk
     assert sum("falling back to the upstream iterator" in m for m in messages) == 1
 
 
+def test_call_time_failure_falls_back_to_the_whole_list(monkeypatch, shards):
+    calls, messages = [], []
+    monkeypatch.setattr(wpc.logger, "warning", lambda msg, *args: messages.append(msg % args))
+
+    def iterator(files, use_tqdm_on_load, *args, **kwargs):
+        calls.append((list(files), use_tqdm_on_load, args))
+        if len(files) == 1:  # a plain function: this raises when called, before any iteration
+            raise TypeError("unexpected argument")
+        return (item for item in [(os.path.basename(p), torch.zeros(1)) for p in files])
+
+    names = [name for name, _ in wpc.wrap_safetensors_iterator(iterator)(shards, True, None)]
+    assert names == [os.path.basename(p) for p in shards]
+    assert calls[-1] == (shards, True, (None, ))  # original arguments, not the per-shard ones
+    assert sum("falling back to the upstream iterator" in m for m in messages) == 1
+
+
 def test_failure_after_the_first_tensor_is_not_swallowed(shards):
 
     def iterator(files, use_tqdm_on_load, strategy=None, *args, **kwargs):
