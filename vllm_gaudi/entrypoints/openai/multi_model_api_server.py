@@ -20,12 +20,13 @@ from pydantic import BaseModel, Field
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.renderers.chat_utils import load_chat_template
 from vllm.entrypoints.launchers.launcher import serve_http
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.openai.api_server import build_app, setup_server
-from vllm.entrypoints.launchers.cli_args import (make_arg_parser, resolve_default_chat_template_kwargs,
-                                                 validate_parsed_serve_args)
+from vllm.entrypoints.common.cli_args import (make_arg_parser, resolve_default_chat_template_kwargs,
+                                              validate_parsed_serve_args)
+from vllm.entrypoints.common.startup import cli_env_setup
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -33,7 +34,7 @@ from vllm.entrypoints.launchers.utils.server_utils import get_uvicorn_log_config
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.entrypoints.serve.utils.api_utils import cli_env_setup, process_lora_modules
+from vllm.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -41,6 +42,7 @@ from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.system_utils import decorate_logs
+from vllm.v1.engine import CheckpointState, PauseMode
 
 from vllm_gaudi.v1.engine.multi_model_async_llm import MultiModelAsyncLLM
 
@@ -170,6 +172,15 @@ class MultiModelEngineClient(EngineClient):
 
     async def is_sleeping(self) -> bool:
         return await self._engine.is_sleeping()
+
+    async def checkpoint_prepare(self, mode: PauseMode = "wait") -> str | None:
+        return await self._engine.checkpoint_prepare(mode)
+
+    async def checkpoint_restore(self) -> None:
+        await self._engine.checkpoint_restore()
+
+    async def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
+        return await self._engine.checkpoint_state()
 
     async def add_lora(self, lora_request) -> bool:
         return await self._engine.add_lora(lora_request)

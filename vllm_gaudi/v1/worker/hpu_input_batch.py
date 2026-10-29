@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining an input batch
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Optional, cast
 
@@ -23,6 +24,58 @@ from vllm.v1.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessor
 from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
 
 _SAMPLING_EPS = 1e-5
+
+
+class HPUMultiGroupBlockTable(MultiGroupBlockTable):
+    """MultiGroupBlockTable that splits KV-manager blocks into kernel blocks.
+
+    vLLM #57169 dropped virtual block splitting (``kernel_block_sizes``) from
+    the block table. HPU hybrid models still address the KV cache in kernel
+    blocks, so each group's table is built at its kernel block size and every
+    manager block id ``b`` is expanded to ``b * r + [0, r)``, with
+    ``r = block_size // kernel_block_size``.
+    """
+
+    def __init__(
+        self,
+        max_num_reqs: int,
+        max_num_batched_tokens: int,
+        pin_memory: bool,
+        device: torch.device,
+        block_sizes: list[int],
+        kernel_block_sizes: list[int],
+        max_num_blocks: list[int],
+    ) -> None:
+        if len(kernel_block_sizes) != len(block_sizes):
+            raise ValueError(f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
+                             f"must match block_sizes length ({len(block_sizes)})")
+        for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes):
+            if block_size % kernel_block_size != 0:
+                raise ValueError(f"kernel_block_size {kernel_block_size} must divide "
+                                 f"block_size {block_size} evenly")
+        self.blocks_per_kv_block = [b // k for b, k in zip(block_sizes, kernel_block_sizes)]
+        super().__init__(max_num_reqs=max_num_reqs,
+                         max_num_batched_tokens=max_num_batched_tokens,
+                         pin_memory=pin_memory,
+                         device=device,
+                         block_sizes=kernel_block_sizes,
+                         max_num_blocks=[n * r for n, r in zip(max_num_blocks, self.blocks_per_kv_block)])
+
+    def _to_kernel_blocks(self, block_ids: Sequence[list[int]]) -> tuple[list[int], ...]:
+        mapped = []
+        for ids, ratio in zip(block_ids, self.blocks_per_kv_block):
+            if ratio == 1 or not ids:
+                mapped.append(ids)
+            else:
+                kernel_ids = np.asarray(ids).reshape(-1, 1) * ratio + np.arange(ratio)
+                mapped.append(kernel_ids.reshape(-1).tolist())
+        return tuple(mapped)
+
+    def append_row(self, block_ids: Sequence[list[int]], row_idx: int) -> None:
+        super().append_row(self._to_kernel_blocks(block_ids), row_idx)
+
+    def add_row(self, block_ids: Sequence[list[int]], row_idx: int) -> None:
+        super().add_row(self._to_kernel_blocks(block_ids), row_idx)
 
 
 @dataclass
@@ -120,13 +173,13 @@ class InputBatch:
         # use DCP (cp_world_size == 1), so max_num_blocks reduces to
         # cdiv(max_model_len, block_size) per KV cache group.
         max_num_blocks = [cdiv(max_model_len, block_size) for block_size in block_sizes]
-        self.block_table = MultiGroupBlockTable(max_num_reqs=max_num_reqs,
-                                                max_num_batched_tokens=max_num_batched_tokens,
-                                                pin_memory=pin_memory,
-                                                device=device,
-                                                block_sizes=block_sizes,
-                                                kernel_block_sizes=kernel_block_sizes,
-                                                max_num_blocks=max_num_blocks)
+        self.block_table = HPUMultiGroupBlockTable(max_num_reqs=max_num_reqs,
+                                                   max_num_batched_tokens=max_num_batched_tokens,
+                                                   pin_memory=pin_memory,
+                                                   device=device,
+                                                   block_sizes=block_sizes,
+                                                   kernel_block_sizes=kernel_block_sizes,
+                                                   max_num_blocks=max_num_blocks)
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ), dtype=torch.float32, device=device)
@@ -274,10 +327,11 @@ class InputBatch:
         # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
         # In preemption scenario, we want num_prompt_tokens to also include the tokens emitted before preemption,
         # as that is used as basis for recomputing prefill.
-        # This also assumes that preemption is complete and reduces num_computed_tokens to 0 and preempted sequences
-        # don't retain any originally used cache blocks.
-        if request.num_computed_tokens == 0:
-            self.num_prompt_tokens[req_index] = num_prompt_tokens + len(request.output_token_ids)
+        # With prefix caching a resumed request can have num_computed_tokens > 0 (cache hit on its own blocks),
+        # so detect recompute by any gap beyond the last known token rather than num_computed_tokens == 0.
+        num_known_tokens = num_prompt_tokens + len(request.output_token_ids)
+        if request.num_computed_tokens < num_known_tokens - 1:
+            self.num_prompt_tokens[req_index] = num_known_tokens
 
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
@@ -636,18 +690,31 @@ class InputBatch:
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         req_indices: list[int] = [self.req_id_to_index[req_id] for req_id, _ in req_id_output_token_ids]
+        # One asynchronous copy of the indices for every per-request tensor.
+        # Indexing a device tensor with the Python list instead makes each one
+        # a synchronous copy, which stalls the host on every step.
+        idx = async_h2d_copy(req_indices, dtype=torch.long, device=self.device)
         prompt_token_ids = None
         if not skip_copy:
-            async_h2d_update(self.temperature_cpu_tensor, self.temperature, req_indices)
-            async_h2d_update(self.top_p_cpu_tensor, self.top_p, req_indices)
-            async_h2d_update(self.top_k_cpu_tensor, self.top_k, req_indices)
+            async_h2d_update(self.temperature_cpu_tensor, self.temperature, req_indices, indices_device=idx)
+            async_h2d_update(self.top_p_cpu_tensor, self.top_p, req_indices, indices_device=idx)
+            async_h2d_update(self.top_k_cpu_tensor, self.top_k, req_indices, indices_device=idx)
             if not self.no_penalties:
                 # Since syncing these tensors is expensive only copy them
                 # if necessary i.e. if there are requests which require
                 # penalties to be applied during sampling.
-                async_h2d_update(self.frequency_penalties_cpu_tensor, self.frequency_penalties, req_indices)
-                async_h2d_update(self.presence_penalties_cpu_tensor, self.presence_penalties, req_indices)
-                async_h2d_update(self.repetition_penalties_cpu_tensor, self.repetition_penalties, req_indices)
+                async_h2d_update(self.frequency_penalties_cpu_tensor,
+                                 self.frequency_penalties,
+                                 req_indices,
+                                 indices_device=idx)
+                async_h2d_update(self.presence_penalties_cpu_tensor,
+                                 self.presence_penalties,
+                                 req_indices,
+                                 indices_device=idx)
+                async_h2d_update(self.repetition_penalties_cpu_tensor,
+                                 self.repetition_penalties,
+                                 req_indices,
+                                 indices_device=idx)
                 # The prompt tokens are used only for applying penalties during
                 # the sampling process. Hence copy these tensors only when
                 # there are requests which need penalties to be applied.
@@ -679,23 +746,26 @@ class InputBatch:
         if not self.no_allowed_token_ids:
             assert self.allowed_token_ids_mask is not None
             assert self.allowed_token_ids_mask_cpu_tensor is not None
-            async_h2d_update(self.allowed_token_ids_mask_cpu_tensor, self.allowed_token_ids_mask, req_indices)
-            allowed_token_ids_mask = self.allowed_token_ids_mask[req_indices]
+            async_h2d_update(self.allowed_token_ids_mask_cpu_tensor,
+                             self.allowed_token_ids_mask,
+                             req_indices,
+                             indices_device=idx)
+            allowed_token_ids_mask = self.allowed_token_ids_mask.index_select(0, idx)
         return SamplingMetadata(
-            temperature=self.temperature[req_indices],
+            temperature=self.temperature.index_select(0, idx),
             all_greedy=self.all_greedy,
             all_random=self.all_random,
-            top_p=None if self.no_top_p else self.top_p[req_indices],
-            top_k=None if self.no_top_k else self.top_k[req_indices],
+            top_p=None if self.no_top_p else self.top_p.index_select(0, idx),
+            top_k=None if self.no_top_k else self.top_k.index_select(0, idx),
             generators={
                 i: self.generators[req_idx]
                 for i, req_idx in enumerate(req_indices) if self.generators.get(req_idx, None) is not None
             },
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
-            frequency_penalties=self.frequency_penalties[req_indices],
-            presence_penalties=self.presence_penalties[req_indices],
-            repetition_penalties=self.repetition_penalties[req_indices],
+            frequency_penalties=self.frequency_penalties.index_select(0, idx),
+            presence_penalties=self.presence_penalties.index_select(0, idx),
+            repetition_penalties=self.repetition_penalties.index_select(0, idx),
             output_token_ids=cast(list[list[int]], output_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
