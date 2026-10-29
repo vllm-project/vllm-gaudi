@@ -268,6 +268,47 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("skip_copy", [False, True])
+def test_selective_sampling_metadata_takes_the_requested_rows(device: str, skip_copy: bool):
+    """
+    make_selective_sampling_metadata gathers every per-request field in the
+    order of the requests it is given, including the repeats the runner pads
+    a batch with, whether it copies the fields to the device first or not.
+    """
+    batch_size = 8
+    input_batch = InputBatch(
+        max_num_reqs=batch_size,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        pin_memory=is_pin_memory_available(),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        kernel_block_sizes=[1],
+    )
+    reqs = [_construct_cached_request_state(i) for i in range(batch_size)]
+    for req in reqs:
+        input_batch.add_request(req)
+    # Copies every field to the device, which skip_copy relies on.
+    input_batch.refresh_sampling_metadata()
+
+    picked = [reqs[i] for i in (5, 0, 3)] + [reqs[5]] * 2
+    metadata = input_batch.make_selective_sampling_metadata([(r.req_id, r.output_token_ids) for r in picked],
+                                                            skip_copy=skip_copy)
+    rows = [input_batch.req_id_to_index[r.req_id] for r in picked]
+
+    assert torch.equal(metadata.temperature.cpu(), input_batch.temperature_cpu_tensor[rows])
+    if metadata.top_p is not None:
+        assert torch.equal(metadata.top_p.cpu(), input_batch.top_p_cpu_tensor[rows])
+    if metadata.top_k is not None:
+        assert torch.equal(metadata.top_k.cpu(), input_batch.top_k_cpu_tensor[rows])
+    assert torch.equal(metadata.frequency_penalties.cpu(), input_batch.frequency_penalties_cpu_tensor[rows])
+    assert torch.equal(metadata.presence_penalties.cpu(), input_batch.presence_penalties_cpu_tensor[rows])
+    assert torch.equal(metadata.repetition_penalties.cpu(), input_batch.repetition_penalties_cpu_tensor[rows])
+    assert metadata.output_token_ids == [r.output_token_ids for r in picked]
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize("swap_list", [((0, 1), )])
 def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: list):
