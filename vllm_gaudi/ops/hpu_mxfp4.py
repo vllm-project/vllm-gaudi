@@ -153,7 +153,7 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
         # The fused kernel has no SiTU: exact unfused routed experts (see ops/hpu_situ_moe.py).
-        # Bisect: env reads and the SiTU helper only for SiTU layers, other models call the fused op directly.
+        # Env reads and the SiTU helper run only for SiTU layers; every other model calls the fused op directly.
         output = None
         if getattr(layer.activation, "value", layer.activation) == "situ":
             output = maybe_situ_moe(layer, x, topk_ids, topk_weights,
@@ -175,5 +175,3 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
 
 # Monkey-patch: replace CUDA GptOssMxfp4MoEMethod with HPU version
 mxfp4_module.GptOssMxfp4MoEMethod = HPUGptOssMxfp4MoEMethod
-if hasattr(mxfp4_module, "Mxfp4MoEMethod"):
-    mxfp4_module.Mxfp4MoEMethod = HPUGptOssMxfp4MoEMethod

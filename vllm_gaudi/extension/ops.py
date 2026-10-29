@@ -1871,6 +1871,19 @@ class MoeMXFP4Matmul(torch.nn.Module):
         self.bias = b
 
 
+_mxfp4_moe_op_logged = False
+
+
+def _log_mxfp4_moe_op_once(in_graph_call: bool) -> None:
+    """Log once per process whether the Kimi-K3 in-graph call gate is on for the MXFP4 MoE op."""
+    global _mxfp4_moe_op_logged
+    if not _mxfp4_moe_op_logged:
+        _mxfp4_moe_op_logged = True
+        # vLLM installs handlers on the "vllm" logger tree only, so the logger must live under it.
+        logging.getLogger("vllm.gaudi.kimi_patches").info(
+            "VllmMixtureOfExpertsOpMXFP4 built (first layer in this process): in_graph_call=%s", in_graph_call)
+
+
 class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
     """Native MXFP4 MOE op using torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights.
 
@@ -1898,6 +1911,7 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
         self.block_size = block_size
         # Set for Kimi-K3 layers only: inside a compiled region call the op directly (see _get_compiled_forward).
         self.in_graph_call = in_graph_call
+        _log_mxfp4_moe_op_once(in_graph_call)
         # GPT-OSS SwiGLU-OAI: per-expert bias on both projections + alpha/limit.
         # When has_bias is set, the op applies gpt_swiglu (clamp ±limit, alpha-silu)
         # internally and the "activation" string is ignored.
