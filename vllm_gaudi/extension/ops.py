@@ -253,6 +253,12 @@ def flat_pa(query, key_cache, value_cache, block_list, block_mapping, block_bias
         sinks = sinks.reshape(sinks.shape[0], 1)
         sink = sinks.reshape(1, sinks.shape[0], 1, sinks.shape[1])
         sink = sink.expand(query.shape[0], -1, query.shape[-2], -1)
+        # pipelined_pa adds exp(sink) to the partial sum of every block. Give each block
+        # sink - log(n), with n the number of blocks of its sequence, so that the merged
+        # sum holds exactly one exp(sink). Padding blocks map to no sequence and get n = 1.
+        mapping = block_mapping.float()
+        blocks_per_seq = torch.matmul(mapping, mapping.sum(0, keepdim=True).t()).clamp(min=1.0)
+        sink = (sink.float() - torch.log(blocks_per_seq).view(-1, 1, 1, 1)).to(sinks.dtype)
         if kv_heads != q_heads:
             sink = sink.unflatten(1, (kv_heads, -1))
     if kv_heads != q_heads:
