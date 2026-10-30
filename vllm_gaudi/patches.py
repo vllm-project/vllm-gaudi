@@ -1068,16 +1068,18 @@ def _patch_kimi_kda() -> None:
             _amd_kda.GatedDeltaNetAttention.forward = _kda_forward
             _amd_kda.GatedDeltaNetAttention._forward = lambda *args, **kwargs: None
         _kimi_patch_installed("kda_forward")
+
+        # Only where the Kimi-K3 amd kda module exists: without it this is a vLLM without Kimi-K3, and the GDN
+        # attention then belongs to Kimi-Linear, which must keep its own forward.
+        try:
+            import vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn as _gdn_mod
+            _gdn_mod.KimiGatedDeltaNetAttention.forward = _kda_forward
+            _gdn_mod.KimiGatedDeltaNetAttention._forward = lambda *args, **kwargs: None
+            _kimi_patch_installed("kimi_gdn_forward")
+        except Exception:
+            _kimi_patch_failed("kimi_gdn_forward")
     except Exception:
         _kimi_patch_failed("kda_forward")
-
-    try:
-        import vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn as _gdn_mod
-        _gdn_mod.KimiGatedDeltaNetAttention.forward = _kda_forward
-        _gdn_mod.KimiGatedDeltaNetAttention._forward = lambda *args, **kwargs: None
-        _kimi_patch_installed("kimi_gdn_forward")
-    except Exception:
-        _kimi_patch_failed("kimi_gdn_forward")
 
 
 def _patch_mla_prefill_selector() -> None:
