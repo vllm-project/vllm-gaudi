@@ -24,6 +24,17 @@ class _Base:
         self.moe = moe
 
     def maybe_roundup_sizes(self, hidden_size, intermediate_size_per_partition, act_dtype, moe_parallel_config):
+        # FusedMoEMethodBase.maybe_roundup_sizes -> all2all_utils.maybe_roundup_layer_hidden_size (28a5fba06): the
+        # hidden size is rounded only for the DeepEP / NIXL all2all kernels; the intermediate size is returned as is.
+        # The flags are read the way upstream reads them, so a config that lacks one fails here too.
+        flags = [
+            moe_parallel_config.use_deepep_ht_kernels,
+            moe_parallel_config.use_deepep_ll_kernels,
+            moe_parallel_config.use_deepep_v2_kernels,
+            moe_parallel_config.use_nixl_ep_kernels,
+        ]
+        if any(flags):
+            raise AssertionError("all2all rounding is not modelled by this stub")
         return hidden_size, intermediate_size_per_partition
 
 
@@ -105,7 +116,6 @@ def test_kimi_k3_gets_the_hpu_method_without_backend_selection(mxfp4):
     assert isinstance(method, mxfp4.HPUKimiK3Mxfp4MoEMethod)
     assert method.mxfp4_backend is None and method.experts_cls is None and method.moe_kernel is None
     assert method.is_monolithic is False
-    assert method.maybe_roundup_sizes(4096, 2048, None, None) == (4096, 2048)
 
 
 def test_other_models_keep_the_upstream_method(mxfp4):
@@ -183,11 +193,14 @@ def test_kimi_method_rounding_does_not_use_the_backend_keyed_upstream_step(mxfp4
     method = mxfp4.HPUKimiK3Mxfp4MoEMethod(types.SimpleNamespace(max_capture_size=8))
 
     # the stubbed upstream rounding raises; the base-class contract (identity here) is what runs
+    parallel = types.SimpleNamespace(use_deepep_ht_kernels=False,
+                                     use_deepep_ll_kernels=False,
+                                     use_deepep_v2_kernels=False,
+                                     use_nixl_ep_kernels=False)
     rounded = method.maybe_roundup_sizes(hidden_size=4096,
                                          intermediate_size_per_partition=2048,
                                          act_dtype=None,
-                                         moe_parallel_config=types.SimpleNamespace(use_deepep_ht_kernels=False,
-                                                                                   use_deepep_ll_kernels=False))
+                                         moe_parallel_config=parallel)
     assert rounded == (4096, 2048)
 
 
