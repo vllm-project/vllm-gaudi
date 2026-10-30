@@ -781,6 +781,15 @@ class InputBatch:
                              req_indices,
                              indices_device=idx)
             allowed_token_ids_mask = self.allowed_token_ids_mask.index_select(0, idx)
+        # Keyed by row in this selection. A padded selection repeats its first
+        # request, so only the first occurrence of each request gets an entry.
+        bad_words_token_ids: dict[int, list[list[int]]] = {}
+        if self.bad_words_token_ids:
+            seen: set[int] = set()
+            for i, req_idx in enumerate(req_indices):
+                if req_idx not in seen and req_idx in self.bad_words_token_ids:
+                    bad_words_token_ids[i] = self.bad_words_token_ids[req_idx]
+                seen.add(req_idx)
         return SamplingMetadata(
             temperature=self.temperature.index_select(0, idx),
             all_greedy=self.all_greedy,
@@ -799,7 +808,7 @@ class InputBatch:
             output_token_ids=cast(list[list[int]], output_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
-            bad_words_token_ids=self.bad_words_token_ids,
+            bad_words_token_ids=bad_words_token_ids,
             logitsprocs=self.logitsprocs,
         )
 
