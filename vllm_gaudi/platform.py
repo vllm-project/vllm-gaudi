@@ -90,8 +90,10 @@ class HpuPlatform(Platform):
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
-    # VLLM_* variables read by vllm-gaudi itself. Upstream Platform.validate_environ warns about every VLLM_* name
-    # missing from vllm.envs, which would flag these as unknown.
+    # VLLM_* variables read by vllm-gaudi itself. Only used by the fallback below, when the vLLM Platform has no
+    # validate_environ. vLLM calls it in EngineArgs.create_engine_config before any ModelConfig exists, so it cannot
+    # be gated per model: every model takes the upstream check, and a Kimi-K3 run may log 'Unknown vLLM environment
+    # variable' warnings for these names (log only).
     gaudi_env_vars: tuple[str, ...] = (
         "VLLM_BUCKETING_FROM_FILE",
         "VLLM_EXPONENTIAL_BUCKETING",
@@ -108,7 +110,7 @@ class HpuPlatform(Platform):
     @classmethod
     def validate_environ(cls, hard_fail: bool) -> None:
         upstream = getattr(super(), "validate_environ", None)
-        if upstream is not None and not kimi_k3_seen():
+        if upstream is not None:
             return upstream(hard_fail)
         import vllm_gaudi.envs as gaudi_envs
         known = set(envs.environment_variables) | set(gaudi_envs.environment_variables) | set(cls.gaudi_env_vars)

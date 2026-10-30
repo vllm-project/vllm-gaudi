@@ -7,6 +7,10 @@ predicates only read config attributes and import nothing heavy; evaluate them o
 
 # vllm.models.kimi_k3 holds all K3 classes (KimiK3ForConditionalGeneration, KimiLinearForCausalLM, MTP, DSpark);
 # Kimi-VL, Kimi-K2.5 and Kimi-Audio live in vllm.model_executor.models.kimi_* and are not K3.
+import os
+
+SEEN_ENV = "HPU_KIMI_K3_SEEN"
+
 KIMI_K3_ARCHITECTURES = ("KimiK3ForConditionalGeneration", "KimiK3MTPModel", "KimiLinearForCausalLM", "K3DSparkModel")
 
 
@@ -37,7 +41,10 @@ _kimi_k3_seen = False
 def mark_kimi_k3_seen() -> None:
     global _kimi_k3_seen
     _kimi_k3_seen = True
+    # Spawned EngineCore / Ray worker processes inherit the environment, not module globals. No VLLM_ prefix, so
+    # vLLM's unknown-variable check does not flag it.
+    os.environ.setdefault(SEEN_ENV, "1")
 
 
 def kimi_k3_seen() -> bool:
-    return _kimi_k3_seen or current_config_is_kimi_k3()
+    return _kimi_k3_seen or os.environ.get(SEEN_ENV) == "1" or current_config_is_kimi_k3()
