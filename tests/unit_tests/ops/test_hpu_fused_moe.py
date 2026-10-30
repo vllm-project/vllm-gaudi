@@ -158,3 +158,79 @@ def test_swigluoai_moe_dispatch(monkeypatch, enabled: bool, tokens: int, top_k: 
 
     assert result is x
     assert calls == [expected_path]
+
+
+def _routing_layer(num_experts: int = 16, top_k: int = 4, **overrides):
+    attrs = dict(
+        top_k=top_k,
+        use_grouped_topk=False,
+        custom_routing_function=None,
+        scoring_func="softmax",
+        e_score_correction_bias=None,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+        topk_group=None,
+        num_expert_group=None,
+        moe_config=SimpleNamespace(num_logical_experts=num_experts),
+    )
+    attrs.update(overrides)
+    return SimpleNamespace(**attrs)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        (dict(), True),
+        (dict(scoring_func="sigmoid"), False),
+        (dict(e_score_correction_bias=torch.zeros(16)), False),
+        (dict(renormalize=False), False),
+        (dict(use_grouped_topk=True), False),
+        (dict(custom_routing_function=lambda **kwargs: None), False),
+    ],
+)
+def test_is_plain_softmax_topk(overrides, expected: bool):
+    assert hpu_fused_moe.is_plain_softmax_topk(_routing_layer(**overrides)) is expected
+
+
+def test_select_experts_sigmoid_bias_affects_selection_only():
+    num_experts, top_k, tokens = 16, 4, 8
+    router_logits = torch.randn(tokens, num_experts, dtype=torch.bfloat16, device="hpu")
+    # A large bias on the last experts forces their selection regardless of the logits.
+    bias = torch.zeros(num_experts, dtype=torch.float32, device="hpu")
+    bias[-top_k:] = 10.0
+    layer = _routing_layer(num_experts,
+                           top_k,
+                           scoring_func="sigmoid",
+                           e_score_correction_bias=bias,
+                           routed_scaling_factor=2.5)
+    x = torch.empty(tokens, 8, dtype=torch.bfloat16, device="hpu")
+
+    topk_weights, topk_ids = hpu_fused_moe.select_experts_from_routed(layer, x, router_logits)
+
+    assert topk_ids.dtype == torch.int32
+    expected_ids = torch.arange(num_experts - top_k, num_experts).expand(tokens, -1)
+    torch.testing.assert_close(topk_ids.to(torch.int64).sort(dim=-1).values.cpu(), expected_ids)
+    # Weights are the unbiased sigmoid scores, renormalized, then scaled once.
+    scores = router_logits.float().sigmoid().gather(1, topk_ids.to(torch.int64))
+    expected_weights = scores / scores.sum(dim=-1, keepdim=True) * 2.5
+    torch.testing.assert_close(topk_weights, expected_weights)
+
+
+def test_select_experts_softmax_without_renormalize():
+    num_experts, top_k, tokens = 16, 4, 8
+    router_logits = torch.randn(tokens, num_experts, dtype=torch.bfloat16, device="hpu")
+    layer = _routing_layer(num_experts, top_k, renormalize=False)
+    x = torch.empty(tokens, 8, dtype=torch.bfloat16, device="hpu")
+
+    topk_weights, topk_ids = hpu_fused_moe.select_experts_from_routed(layer, x, router_logits)
+
+    ref_weights, ref_ids = torch.topk(torch.softmax(router_logits.float(), dim=-1), top_k, dim=-1)
+    torch.testing.assert_close(topk_ids.to(torch.int64), ref_ids)
+    torch.testing.assert_close(topk_weights, ref_weights)
+
+
+def test_select_experts_rejects_unsupported_scoring_func():
+    layer = _routing_layer(scoring_func="sqrtsoftplus")
+    router_logits = torch.randn(2, 16, device="hpu")
+    with pytest.raises(ValueError, match="sqrtsoftplus"):
+        hpu_fused_moe.select_experts_from_routed(layer, torch.empty(2, 8, device="hpu"), router_logits)
