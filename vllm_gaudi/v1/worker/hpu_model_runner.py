@@ -757,6 +757,27 @@ def ensure_multi_token_decodes_last(b: InputBatch, scheduled_tokens: Mapping[str
             write_pos += 1
 
 
+def sort_prompts_by_context(b: InputBatch, first_prompt: int) -> None:
+    """Sort the prompt rows [first_prompt, num_reqs) by num_computed_tokens, ascending and stable.
+
+    The scheduler caches a request's blocks when it schedules them, so a request
+    scheduled later in the same step can get prefix-cache hits on blocks that
+    another request only computes in this step. Prompts run as separate forwards
+    in row order, so the reader must come after the writer. A reader's hits cover
+    a block the writer has not computed yet, so its num_computed_tokens is always
+    larger than the writer's, and sorting on it puts every writer first.
+    """
+    num_reqs = b.num_reqs
+    if num_reqs - first_prompt < 2:
+        return
+    order = sorted(range(first_prompt, num_reqs), key=lambda i: int(b.num_computed_tokens_cpu[i]))
+    target_req_ids = [b.req_ids[i] for i in order]
+    for i, req_id in enumerate(target_req_ids, start=first_prompt):
+        j = b.req_id_to_index[req_id]
+        if j != i:
+            b.swap_states(i, j)
+
+
 def get_target_layer_suffix_list(model_type) -> list[str]:
     # This sets the suffix for the hidden layer name, which is controlled by
     # VLLM_CONFIG_HIDDEN_LAYERS. The default suffix is "DecoderLayer," which is
@@ -4534,6 +4555,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # preventing bucket overflow and Habana workspace OOM.
         if not self.vllm_config.speculative_config:
             ensure_multi_token_decodes_last(self.input_batch, scheduler_output.num_scheduled_tokens)
+        # Run prompts in order of context length, so that no prompt reads a
+        # prefix-cache hit before the request computing it has written it.
+        if self.use_prefix_caching:
+            sort_prompts_by_context(self.input_batch, self._get_num_decodes(scheduler_output))
         # Prepare prompts/decodes info
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
