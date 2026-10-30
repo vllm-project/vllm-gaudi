@@ -994,6 +994,31 @@ def _optional_runner_absent(exc: BaseException, mod_name: str, cls_name: str) ->
     return (isinstance(exc, ModuleNotFoundError) and exc.name == mod_name) or isinstance(exc, AttributeError)
 
 
+def ensure_kimi_k3_patches(model_config) -> None:
+    """Retry the failed Kimi-K3 patches right before the model is built, and fail loudly if kda_forward is missing.
+
+    The patches are attempted at plugin load, when ``vllm.models`` may still be partially initialised (circular
+    import: "cannot import name 'kimi_k3' from 'vllm.models'"), and ``load_general_plugins`` is wrapped only once
+    per process, so there can be a single deferred attempt. By the time the model runner builds the model the
+    import chain is complete, so a failed patch is retried here. Only failed patches are retried; installed ones
+    are left alone. Without ``kda_forward`` the upstream KDA forward would run on HPU and crash in a worker
+    (``assert isinstance(attn_metadata_raw, dict)``), so that case raises. Non-Kimi-K3 configs are not touched.
+    """
+    if not _is_kimi_k3_config(model_config):
+        return
+    if not _KIMI_PATCHES_FAILED and "kda_forward" in _KIMI_PATCHES_INSTALLED:
+        return
+    import importlib
+    try:
+        importlib.import_module("vllm.models.kimi_k3")
+    except Exception as e:  # reported below through the failed list
+        _kimi_patch_logger().debug("Kimi-K3 package import failed before the patch retry: %s", e)
+    _patch_kimi_k3_arch()
+    if "kda_forward" not in _KIMI_PATCHES_INSTALLED:
+        raise RuntimeError("Kimi-K3 patch 'kda_forward' is not installed, the upstream KDA forward cannot run on HPU "
+                           f"(failed patches: {dict(_KIMI_PATCHES_FAILED)})")
+
+
 def report_kimi_patches(model) -> None:
     """Log the Kimi-K3 patch status once per process, after the model has been built.
 
