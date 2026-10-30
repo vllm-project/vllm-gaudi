@@ -3984,7 +3984,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         token_logprobs = logprobs.gather(-1, token_ids)
         token_ranks = (logprobs >= token_logprobs).sum(-1)
 
-        indices = torch.cat((token_ids, topk_indices), dim=1).to(torch.int32)
+        # Cast to int32 before the cat, as in patches._hpu_gather_logprobs: the
+        # int64 cat -> int32 cast chain can read back wrong ids on HPU.
+        indices = torch.cat((token_ids.to(torch.int32), topk_indices.to(torch.int32)), dim=1)
         combined_logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
 
         return LogprobsTensors(indices, combined_logprobs, token_ranks)
