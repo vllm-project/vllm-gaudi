@@ -502,18 +502,36 @@ def test_compressed_tensors_wna16_moe_method_cpu_first_migration(default_vllm_co
     torch.testing.assert_close(ref_output, out, atol=1e-4, rtol=1e-4)
 
 
-def test_wna16_rebias_uint4b8_to_int4():
-    """uint4b8 codes (value + 8) become the two's-complement nibbles int4_fused_weights reads."""
+@pytest.mark.parametrize("device", ["cpu", "hpu"])
+def test_wna16_rebias_uint4b8_to_int4(device):
+    """uint4b8 codes (value + 8) become the two's-complement nibbles int4_fused_weights reads.
+
+    Runs on both devices the load can rebias on (a CPU-first load does it on the host).
+    """
     values = torch.arange(-8, 8, dtype=torch.int32).repeat(2, 1)  # every int4 value
-    packed = pack_quantized_values_into_int32(values + 8, scalar_types.uint4b8, packed_dim=1)
+    packed = pack_quantized_values_into_int32(values + 8, scalar_types.uint4b8, packed_dim=1).to(device)
     original = packed.clone()
 
     rebias_uint4b8_to_int4_(packed)
-    nibbles = torch.stack([(packed >> (4 * i)) & 0xF for i in range(8)], dim=-1).reshape(values.shape)
+    codes = packed.cpu()
+    nibbles = torch.stack([(codes >> (4 * i)) & 0xF for i in range(8)], dim=-1).reshape(values.shape)
     torch.testing.assert_close(torch.where(nibbles >= 8, nibbles - 16, nibbles), values)
 
     rebias_uint4b8_to_int4_(packed)  # self-inverse
     torch.testing.assert_close(packed, original)
+
+
+def test_int4_moe_schema_miss_is_not_cached(monkeypatch):
+    """A failed int4_fused_weights lookup is retried, so an early probe cannot disable the native path for good."""
+    monkeypatch.setattr(hpu_ext_ops, "_CACHED_INT4_MOE_SCHEMA", None)
+    monkeypatch.setattr(torch.ops.hpu, "mixture_of_experts", SimpleNamespace())  # overload not registered yet
+    assert not hpu_ext_ops.int4_moe_native_available()
+
+    schema = SimpleNamespace(arguments=[SimpleNamespace(name="is_gated")])
+    monkeypatch.setattr(torch.ops.hpu, "mixture_of_experts",
+                        SimpleNamespace(int4_fused_weights=SimpleNamespace(_schema=schema)))
+    assert hpu_ext_ops.int4_moe_native_available()
+    assert hpu_ext_ops.int4_moe_supports_non_gated()
 
 
 @pytest.mark.parametrize("reason", ["g_idx", "w8a16", "no_overload"])
@@ -549,8 +567,8 @@ def test_compressed_tensors_wna16_moe_method_non_gated_matches_dense_reference(d
                                                                                monkeypatch, native_int4):
     """Squared-ReLU (non-gated) experts on the real kernels against y = sum_k p_k * W2 relu(W1 x)^2.
 
-    Both the dequant path and the native int4 kernel are gated-only, so they run
-    the w1 -> w3 mirror; each must match the dense reference.
+    The dequant path and a gated-only int4 kernel run the w1 -> w3 mirror; an int4
+    kernel with is_gated runs non-gated directly. All must match the dense reference.
     """
     if native_int4 and not int4_moe_native_available():
         pytest.skip("this Habana PyTorch bridge has no mixture_of_experts.int4_fused_weights")
@@ -593,6 +611,111 @@ def test_compressed_tensors_wna16_moe_method_non_gated_matches_dense_reference(d
             ref[t] += p * (w2[e] @ torch.relu(w1[e] @ x[t]).square())
     rel_err = ((out - ref).norm() / ref.norm()).item()
     assert rel_err < 2e-2, f"relative error vs the dense reference: {rel_err:.4f}"
+
+
+@pytest.mark.parametrize("bridge_has_is_gated", [True, False], ids=["native_non_gated", "mirrored"])
+def test_compressed_tensors_wna16_moe_method_non_gated(default_vllm_config: None, dist_init, monkeypatch,
+                                                       bridge_has_is_gated):
+    """Non-gated (squared-ReLU) experts on the native int4 WNA16 MoE path.
+
+    With a bridge whose int4_fused_weights takes is_gated, w13 holds only the
+    I-wide up-projection and the kernel gets is_gated=False with the real
+    activation. Without it, w1 is mirrored into a 2I-wide w13 and the gated
+    kernel runs relu, which equals relu2 there. The kernel is replaced by a
+    recorder, so this checks the plumbing and calling convention on any bridge.
+    """
+    monkeypatch.setattr(hpu_ext_ops, "int4_moe_native_available", lambda: True)
+    monkeypatch.setattr(hpu_ct, "int4_moe_supports_non_gated", lambda: bridge_has_is_gated)
+    monkeypatch.setattr(hpu_ct, "get_config", lambda: SimpleNamespace(wna16_native_int4_moe=True))
+    # The assertions below expect one kernel call over all experts. The op fixes
+    # its slicing when process_weights_after_loading builds it, so pin it here
+    # instead of inheriting MAX_EXPERTS_PER_SLICE from the environment.
+    monkeypatch.setattr(hpu_ext_ops, "MAX_EXPERTS_PER_SLICE", -1)
+
+    # Non-gated experts have no up projection; use the checkpoint names nemotron_h passes.
+    oot_op = create_fused_moe(_wna16_moe_quant_config(),
+                              activation="relu2_no_mul",
+                              ckpt_names=("up_proj", "down_proj", None)).to("hpu")
+    experts = oot_op.routed_experts
+    assert isinstance(experts.quant_method, HPUCompressedTensorsWNA16MoEMethod)
+
+    num_experts, intermediate = 128, 256  # create_fused_moe sizes
+    w13_rows = intermediate if bridge_has_is_gated else 2 * intermediate
+    assert experts.w13_weight_packed.shape[1] == w13_rows
+    assert experts.w13_weight_scale.shape[1] == w13_rows
+
+    # Fill only the up-projection, as vLLM's loader does for a non-gated checkpoint.
+    packed_cols = experts.w13_weight_packed.shape[2]
+    experts.w13_weight_packed.data[:, :intermediate].copy_(
+        torch.randint(-2**31, 2**31 - 1, (num_experts, intermediate, packed_cols), dtype=torch.int32))
+    experts.w13_weight_scale.data[:, :intermediate].fill_(0.01)
+    experts.w2_weight_packed.data.zero_()
+    experts.w2_weight_scale.data.fill_(0.01)
+    experts.quant_method.process_weights_after_loading(experts)
+
+    assert experts.moe_op.native_int4
+    assert experts.moe_op.is_gated is not bridge_has_is_gated
+    # Repacked w13 is [experts, hidden, rows / 8].
+    assert experts.w13_weight_packed.shape[2] == w13_rows // 8
+    if not bridge_has_is_gated:
+        half = intermediate // 8
+        torch.testing.assert_close(experts.w13_weight_packed[:, :, half:], experts.w13_weight_packed[:, :, :half])
+
+    calls = []
+
+    class _RecordingMoeOps:
+
+        @staticmethod
+        def int4_fused_weights(**kwargs):
+            calls.append(kwargs)
+            return torch.zeros_like(kwargs["hidden_states"])
+
+    monkeypatch.setattr(torch.ops.hpu, "mixture_of_experts", _RecordingMoeOps)
+    hidden_states = torch.randn(4, 512, dtype=torch.bfloat16, device="hpu")
+    router_logits = torch.randn(4, num_experts, dtype=torch.bfloat16, device="hpu")
+    experts.quant_method.apply_monolithic(experts, hidden_states, router_logits)
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert len(call["w12"]) == len(call["w3"]) == len(call["d_scale_w12"]) == len(call["d_scale_w3"]) == num_experts
+    assert call["w12"][0].shape[1] == w13_rows // 8
+    # Signed nibbles after the load-time rebias, and no zero point for symmetric int4.
+    assert call["is_signed"] is True
+    assert call["zero_point_w12"] is None and call["zero_point_w3"] is None
+    assert call["permuted_weights"] is False
+    assert (call["experts_min"], call["experts_max"]) == (0, num_experts - 1)
+    if bridge_has_is_gated:
+        assert call["is_gated"] is False
+        assert call["activation"] == "relu2"
+    else:
+        # Older bridges reject an unknown is_gated keyword, so it must be absent.
+        assert "is_gated" not in call
+        assert call["activation"] == "relu"
+
+
+@pytest.mark.parametrize("activation", ["silu_no_mul", "gelu_no_mul", "gelu_tanh_no_mul"])
+def test_compressed_tensors_wna16_moe_method_non_gated_unsupported_activation(default_vllm_config: None, dist_init,
+                                                                              monkeypatch, activation):
+    """A non-gated activation the native int4 kernel isn't validated for is refused at load, even with is_gated.
+
+    The layer must not take the native non-gated path (I-wide w13, activation
+    passed to the kernel unchecked) but the mirror layout, whose fix-up raises
+    because the gated kernels cannot express the activation either.
+    """
+    monkeypatch.setattr(hpu_ext_ops, "int4_moe_native_available", lambda: True)
+    monkeypatch.setattr(hpu_ct, "int4_moe_supports_non_gated", lambda: True)
+    monkeypatch.setattr(hpu_ct, "get_config", lambda: SimpleNamespace(wna16_native_int4_moe=True))
+
+    oot_op = create_fused_moe(_wna16_moe_quant_config(),
+                              activation=activation,
+                              ckpt_names=("up_proj", "down_proj", None))
+    experts = oot_op.routed_experts
+    assert isinstance(experts.quant_method, HPUCompressedTensorsWNA16MoEMethod)
+    assert not experts.hpu_wna16_native_non_gated
+    assert experts.w13_weight_packed.shape[1] == 2 * 256  # mirror layout, 2 * create_fused_moe's intermediate size
+
+    with pytest.raises(NotImplementedError, match=f"'{activation}' is not supported"):
+        experts.quant_method.process_weights_after_loading(experts)
 
 
 def test_compressed_tensors_linear_method_w8a8int8_bf16fallback_static_per_channel(default_vllm_config: None,
