@@ -926,6 +926,10 @@ def _kimi_patch_failed(name: str) -> None:
     """
     import sys
     exc = sys.exc_info()[1]
+    # A failed attempt invalidates an earlier "installed": it may have patched a module object that a failed
+    # circular import later dropped from sys.modules, so the summary must not list the patch.
+    if name in _KIMI_PATCHES_INSTALLED:
+        _KIMI_PATCHES_INSTALLED.remove(name)
     _KIMI_PATCHES_FAILED[name] = f"{type(exc).__name__}: {exc}" if exc is not None else "unknown error"
     _kimi_patch_logger().debug("Kimi-K3 patch '%s' failed in this attempt", name, exc_info=True)
 
@@ -994,19 +998,49 @@ def _optional_runner_absent(exc: BaseException, mod_name: str, cls_name: str) ->
     return (isinstance(exc, ModuleNotFoundError) and exc.name == mod_name) or isinstance(exc, AttributeError)
 
 
+def _kimi_patches_live() -> dict[str, bool]:
+    """Whether the patches that matter to a model worker are on the objects the model will really use.
+
+    The bookkeeping lists say what an attempt did, not what is live: an early attempt can patch a module object that
+    a failed circular import later drops from ``sys.modules`` (Jenkins #983 listed ``kda_forward`` as installed and
+    also warned that it was not, and the upstream KDA forward ran). So look the classes up in ``sys.modules``.
+    """
+    import sys
+
+    def attr(mod_name, *names):
+        obj = sys.modules.get(mod_name)
+        for name in names:
+            obj = getattr(obj, name, None)
+        return obj
+
+    pkg = "vllm.models.kimi_k3.amd"
+    try:
+        from vllm_gaudi.ops.hpu_kda_pytorch import attn_res_torch
+    except Exception:
+        attn_res_torch = None
+    kda_cls = attr(f"{pkg}.kda", "KimiK3DeltaAttention")
+    return {
+        "kda_forward": bool(getattr(getattr(kda_cls, "forward", None), "_hpu_kda_forward", False)),
+        "attn_res_op": attn_res_torch is not None and attr(f"{pkg}.ops.attn_res", "attn_res") is attn_res_torch,
+        "attn_res_linear": bool(getattr(attr(f"{pkg}.linear", "_apply_attn_res"), "_hpu_attn_res", False)),
+        "linear_weights": bool(vars(attr(f"{pkg}.linear", "KimiMoE") or object).get("_patched_weights", False)),
+    }
+
+
 def ensure_kimi_k3_patches(model_config) -> None:
-    """Retry the failed Kimi-K3 patches right before the model is built, and fail loudly if kda_forward is missing.
+    """Retry the failed Kimi-K3 patches right before the model is built, and fail loudly if kda_forward is not live.
 
     The patches are attempted at plugin load, when ``vllm.models`` may still be partially initialised (circular
     import: "cannot import name 'kimi_k3' from 'vllm.models'"), and ``load_general_plugins`` is wrapped only once
     per process, so there can be a single deferred attempt. By the time the model runner builds the model the
-    import chain is complete, so a failed patch is retried here. Only failed patches are retried; installed ones
-    are left alone. Without ``kda_forward`` the upstream KDA forward would run on HPU and crash in a worker
-    (``assert isinstance(attn_metadata_raw, dict)``), so that case raises. Non-Kimi-K3 configs are not touched.
+    import chain is complete, so the patches are retried here. The decision uses the live classes (see
+    ``_kimi_patches_live``), not the bookkeeping lists. Without a live ``kda_forward`` the upstream KDA forward would
+    run on HPU and crash in a worker (``assert isinstance(attn_metadata_raw, dict)``), so that case raises.
+    Non-Kimi-K3 configs are not touched.
     """
     if not _is_kimi_k3_config(model_config):
         return
-    if not _KIMI_PATCHES_FAILED and "kda_forward" in _KIMI_PATCHES_INSTALLED:
+    if not _KIMI_PATCHES_FAILED and all(_kimi_patches_live().values()):
         return
     import importlib
     try:
@@ -1014,8 +1048,27 @@ def ensure_kimi_k3_patches(model_config) -> None:
     except Exception as e:  # reported below through the failed list
         _kimi_patch_logger().debug("Kimi-K3 package import failed before the patch retry: %s", e)
     _patch_kimi_k3_arch()
-    if "kda_forward" not in _KIMI_PATCHES_INSTALLED:
-        raise RuntimeError("Kimi-K3 patch 'kda_forward' is not installed, the upstream KDA forward cannot run on HPU "
+    # Idempotent (marked) patches that can have failed in an early attempt. _patch_compressed_tensors_mxfp4 is only
+    # re-run when its class patch failed: re-running it after a success would wrap its own wrappers.
+    _patch_kimi_k3_hybrid_config()
+    _patch_mla_prefill_selector()
+    _patch_latent_moe_runner_forward()
+    if "compressed_tensors_mxfp4" not in _KIMI_PATCHES_INSTALLED:
+        _patch_compressed_tensors_mxfp4()
+
+    live = _kimi_patches_live()
+    for name, ok in live.items():
+        if not ok:
+            if name in _KIMI_PATCHES_INSTALLED:
+                _KIMI_PATCHES_INSTALLED.remove(name)
+            _KIMI_PATCHES_FAILED.setdefault(name, "not live on the vllm.models.kimi_k3 classes after the retry")
+    log = _kimi_patch_logger()
+    log.info("Kimi-K3 patches installed (retry before get_model): %s", ", ".join(_KIMI_PATCHES_INSTALLED))
+    missing = [name for name, ok in live.items() if not ok]
+    if missing:
+        log.warning("Kimi-K3 patches not live after the retry: %s", ", ".join(missing))
+    if not live["kda_forward"]:
+        raise RuntimeError("Kimi-K3 patch 'kda_forward' is not live, the upstream KDA forward cannot run on HPU "
                            f"(failed patches: {dict(_KIMI_PATCHES_FAILED)})")
 
 
@@ -1091,6 +1144,8 @@ def _patch_kimi_kda() -> None:
         from vllm_gaudi.models.kimi_k3_kda import hpu_kda_forward
         return hpu_kda_forward(self, hidden_states, positions)
 
+    _kda_forward._hpu_kda_forward = True  # checked by _kimi_patches_live on the class that the model will use
+
     try:
         import vllm.models.kimi_k3.amd.kda as _amd_kda
         if hasattr(_amd_kda, "KimiK3DeltaAttention"):
@@ -1120,6 +1175,8 @@ def _patch_mla_prefill_selector() -> None:
         import vllm.v1.attention.backends.mla.prefill.selector as sel_mod
         from vllm_gaudi.attention.oot_mla import _DummyPrefillBackend
         orig_fn = getattr(sel_mod, "get_mla_prefill_backend", None)
+        # re-run (retry before get_model): wrap the upstream selector again, not our own wrapper
+        orig_fn = getattr(orig_fn, "_hpu_orig_selector", orig_fn)
 
         def hpu_get_prefill(vllm_config):
             from vllm.platforms import current_platform
@@ -1132,6 +1189,7 @@ def _patch_mla_prefill_selector() -> None:
                 return orig_fn(vllm_config)
             return _DummyPrefillBackend
 
+        hpu_get_prefill._hpu_orig_selector = orig_fn
         sel_mod.get_mla_prefill_backend = hpu_get_prefill
         try:
             import vllm.model_executor.layers.attention.mla_attention as mla_mod
@@ -1267,7 +1325,9 @@ def _patch_latent_moe_runner_forward() -> None:
         from vllm_gaudi.ops.hpu_fused_moe import _MOE_COMPILE, patched_latent_moe_fused_forward
     except Exception as exc:
         logger.warning_once("Kimi-K3 latent MoE runner patch skipped, import failed: %r", exc)
+        _kimi_patch_failed("latent_moe_runner_forward")
         return
+    _kimi_patch_ok("latent_moe_runner_forward")
     if not _MOE_COMPILE:
         logger.warning_once("Kimi-K3 latent MoE runner patch skipped because HPU_FUSED_MOE=0")
         return
@@ -1398,6 +1458,7 @@ def _patch_kimi_attn_res() -> None:
                     0.0 if output_norm is None else output_norm.variance_epsilon,
                 )
 
+            _apply_attn_res_torch._hpu_attn_res = True
             _linear_mod._apply_attn_res = _apply_attn_res_torch
             _kimi_patch_installed("attn_res_linear")
         except Exception:
