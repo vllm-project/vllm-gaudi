@@ -277,8 +277,8 @@ def test_k3_arch_patch_does_not_replace_the_rocm_module(kda_modules):
     assert not hasattr(kda_modules, "_patch_triton_for_hpu")
 
 
-def test_apply_and_plugin_loader_wrapper_leave_rocm_module_and_triton_flag_alone(kda_modules, monkeypatch):
-    rocm = kda_modules.test_rocm
+def _prepare_apply(kda_modules, monkeypatch):
+    """Stubs everything apply() touches except the Kimi-K3 patches; returns (plugins, importing) stub modules."""
     importing = types.ModuleType("vllm.triton_utils.importing")
     importing.HAS_TRITON = True
     monkeypatch.setitem(sys.modules, "vllm.triton_utils.importing", importing)
@@ -296,6 +296,13 @@ def test_apply_and_plugin_loader_wrapper_leave_rocm_module_and_triton_flag_alone
     for name in [n for n in vars(kda_modules) if n.startswith("_patch_") and not any(k in n for k in kimi_related)]:
         monkeypatch.setattr(kda_modules, name, lambda *args, **kwargs: None)
 
+    return plugins, importing
+
+
+def test_apply_and_plugin_loader_wrapper_leave_rocm_module_and_triton_flag_alone(kda_modules, monkeypatch):
+    rocm = kda_modules.test_rocm
+    plugins, importing = _prepare_apply(kda_modules, monkeypatch)
+
     kda_modules.apply()
     plugins.load_general_plugins()
 
@@ -304,12 +311,56 @@ def test_apply_and_plugin_loader_wrapper_leave_rocm_module_and_triton_flag_alone
     assert importing.HAS_TRITON is True
 
 
-def test_mxfp4_moe_method_alias_is_not_installed():
-    import pathlib
-    src = (pathlib.Path(__file__).resolve().parents[2] / "vllm_gaudi" / "ops" / "hpu_mxfp4.py").read_text()
+def test_apply_twice_wraps_load_general_plugins_once(kda_modules, monkeypatch):
+    plugins, _ = _prepare_apply(kda_modules, monkeypatch)
+    original_calls = []
+    plugins.load_general_plugins = lambda: original_calls.append(1)
+    deferred_calls = []
+    monkeypatch.setattr(kda_modules, "_patch_cleanup_dist_env_and_memory", lambda: deferred_calls.append(1))
 
-    assert "mxfp4_module.GptOssMxfp4MoEMethod = HPUGptOssMxfp4MoEMethod" in src
-    assert "mxfp4_module.Mxfp4MoEMethod" not in src
+    kda_modules.apply()
+    wrapper = plugins.load_general_plugins
+    kda_modules.apply()
+
+    assert plugins.load_general_plugins is wrapper
+    plugins.load_general_plugins()
+    assert original_calls == [1]  # not nested: the vllm loader ran once
+    assert deferred_calls == [1]  # and the deferred patches ran once per call
+
+
+def test_kda_patch_import_failure_of_one_module_does_not_skip_the_others(kda_modules, monkeypatch):
+    # the chunk ops module cannot be imported; the rest must still be patched
+    monkeypatch.setitem(sys.modules, "vllm.models.kimi_k3.amd.ops.kda_chunk", None)
+    monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_INSTALLED", [])
+    monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_FAILED", {})
+
+    kda_modules._patch_kimi_kda()
+
+    mods = kda_modules.test_kda_modules
+    assert mods["ops.kda_decode"].is_fused_kda_decode_supported() is False
+    assert mods["kda"].is_fused_kda_chunk_supported() is False
+    assert mods["kda"].is_fused_kda_decode_supported() is False
+    assert "kda_forward" in kda_modules._KIMI_PATCHES_INSTALLED
+    assert "kda_fused_checks" not in kda_modules._KIMI_PATCHES_INSTALLED
+    # kimi_gdn_forward is also missing: the gdn module is not stubbed here
+    assert set(kda_modules._KIMI_PATCHES_FAILED) == {"kda_fused_checks[ops.kda_chunk]", "kimi_gdn_forward"}
+
+
+def test_kda_patch_failure_is_logged_through_the_vllm_logger_tree(kda_modules, monkeypatch, caplog):
+    import logging
+    monkeypatch.setitem(sys.modules, "vllm.models.kimi_k3.amd.kda", None)
+    monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_FAILED", {})
+
+    with caplog.at_level(logging.DEBUG, logger="vllm"):
+        kda_modules._patch_kimi_kda()
+
+    records = [r for r in caplog.records if "'kda_forward' failed" in r.getMessage()]
+    assert records and records[0].name.startswith("vllm.")
+    assert "kda_forward" in kda_modules._KIMI_PATCHES_FAILED
+
+
+# The "only the gpt-oss alias is installed upstream" check is behavioural and lives in test_kimi_mxfp4_routing.py
+# (test_hpu_gpt_oss_alias_is_still_the_only_upstream_replacement).
 
 
 # --- vLLM 28a5fba06 compatibility of the Kimi-K3 patches (step argument, attn_res quant_key, fused MLA gate) ---
@@ -529,3 +580,82 @@ def test_hpu_mla_wrapper_detects_the_fused_gate_by_class_not_by_name(oot_mla):
     assert oot_mla._KimiK3MergedQKVGateLinear is _KimiK3MergedQKVGateLinear
     assert isinstance(MergedQKVGate(8, 8), oot_mla._KimiK3MergedQKVGateLinear)
     assert not isinstance(torch.nn.Linear(8, 8), oot_mla._KimiK3MergedQKVGateLinear)
+
+
+def _wrapper_ctor_args(fused_proj, **modules):
+    mla_modules = types.SimpleNamespace(
+        fused_qkv_a_proj=fused_proj,
+        kv_a_proj_with_mqa=None,
+        q_a_layernorm=None,
+        q_b_proj=types.SimpleNamespace(),
+        q_proj=None,
+        kv_a_layernorm=None,
+        kv_b_proj=None,
+        rotary_emb=None,
+        o_proj=None,
+        indexer=None,
+        indexer_rotary_emb=None,
+        is_sparse=False,
+        g_proj=None,
+        topk_indices_buffer=None,
+    )
+    for key, value in modules.items():
+        setattr(mla_modules, key, value)
+    return dict(hidden_size=8,
+                num_heads=2,
+                scale=1.0,
+                qk_nope_head_dim=5,
+                qk_rope_head_dim=2,
+                v_head_dim=3,
+                q_lora_rank=4,
+                kv_lora_rank=6,
+                mla_modules=mla_modules,
+                prefix="layers.0.self_attn")
+
+
+@pytest.fixture
+def ctor(oot_mla, monkeypatch):
+    """Builds an HPU MLA wrapper with the vllm config / HPUMLAAttention stubbed; records info_once calls."""
+    logged = []
+    monkeypatch.setattr(oot_mla, "logger", types.SimpleNamespace(info_once=lambda *a, **k: logged.append(a)))
+    monkeypatch.setattr(
+        oot_mla, "get_current_vllm_config", lambda: types.SimpleNamespace(
+            compilation_config=types.SimpleNamespace(static_forward_context={})))
+    monkeypatch.setattr(oot_mla, "HPUMLAAttention", lambda **kwargs: object())
+
+    def build(fused_proj, **modules):
+        return oot_mla.HPUMultiHeadLatentAttentionWrapper(**_wrapper_ctor_args(fused_proj, **modules))
+
+    build.logged = logged
+    return build
+
+
+def test_fused_gate_wrapper_logs_once_the_kimi_path_is_taken(ctor):
+    wrapper = ctor(MergedQKVGate(8, 8))
+
+    assert wrapper._qkv_gate_fused is True
+    assert len(ctor.logged) == 1 and "fused QKV-gate" in ctor.logged[0][0]
+
+
+def test_wrapper_without_fused_gate_logs_nothing(ctor):
+    wrapper = ctor(torch.nn.Linear(8, 8))
+
+    assert wrapper._qkv_gate_fused is False
+    assert ctor.logged == []
+
+
+@pytest.mark.parametrize(("modules", "message"), [
+    ({"g_proj": object()}, "mutually exclusive"),
+    ({"indexer": types.SimpleNamespace(topk_tokens=1)}, "Sparse MLA"),
+    ({"is_sparse": True}, "Sparse MLA"),
+    ({"skip_o_proj": True}, "skip_o_proj"),
+])
+def test_fused_gate_wrapper_rejects_unsupported_combinations_with_value_error(ctor, modules, message):
+    with pytest.raises(ValueError, match=message):
+        ctor(MergedQKVGate(8, 8), **modules)
+    assert ctor.logged == []
+
+
+def test_fused_gate_wrapper_rejects_dcp_query_replication(ctor):
+    with pytest.raises(ValueError, match="DCP"):
+        ctor(MergedQKVGate(8, 8), q_b_proj=types.SimpleNamespace(qrep_active=True))

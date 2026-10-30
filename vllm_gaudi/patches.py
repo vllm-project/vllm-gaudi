@@ -1028,25 +1028,39 @@ def _report_kimi_config_patches(model_config) -> None:
 
 
 def _patch_kimi_kda() -> None:
-    """Pure PyTorch fallback for KDA on HPU (disabling GPU Triton kernels and dict metadata assertion)."""
+    """Pure PyTorch fallback for KDA on HPU (disabling GPU Triton kernels and dict metadata assertion).
+
+    Each target module is imported and patched on its own, so one that fails to import does not skip the others
+    (every failure is recorded under its own name and logged through the ``vllm.*`` kimi_patches logger).
+    """
+    import importlib
+
+    # The fused KDA checks query vllm.platforms.rocm (amdsmi), which fails on HPU. They are the only users of
+    # that module in kimi_k3/amd, so answer False where they are defined and where amd.kda imported them by name.
+    all_fused_ok = True
+    chunk, decode = "is_fused_kda_chunk_supported", "is_fused_kda_decode_supported"
+    targets = {"ops.kda_chunk": [chunk], "ops.kda_decode": [decode], "kda": [chunk, decode]}
+    for short, attrs in targets.items():
+        name = f"kda_fused_checks[{short}]"
+        try:
+            mod = importlib.import_module(f"vllm.models.kimi_k3.amd.{short}")
+            for attr in attrs:
+                setattr(mod, attr, lambda *args, **kwargs: False)
+            _kimi_patch_ok(name)
+        except Exception:
+            all_fused_ok = False
+            _kimi_patch_failed(name)
+    if all_fused_ok:
+        _kimi_patch_installed("kda_fused_checks")
+
+    def _kda_forward(self, hidden_states, positions=None):
+        # Imported on first use: importing vllm_gaudi.models here (plugin-apply time) hits a circular
+        # import with vllm.distributed in processes where it is still being initialised.
+        from vllm_gaudi.models.kimi_k3_kda import hpu_kda_forward
+        return hpu_kda_forward(self, hidden_states, positions)
+
     try:
         import vllm.models.kimi_k3.amd.kda as _amd_kda
-        import vllm.models.kimi_k3.amd.ops.kda_chunk as _kda_chunk
-        import vllm.models.kimi_k3.amd.ops.kda_decode as _kda_decode
-
-        # The fused KDA checks query vllm.platforms.rocm (amdsmi), which fails on HPU. They are the only users of
-        # that module in kimi_k3/amd, so answer False where they are defined and where amd.kda imported them by name.
-        _kda_chunk.is_fused_kda_chunk_supported = lambda *args, **kwargs: False
-        _kda_decode.is_fused_kda_decode_supported = lambda *args, **kwargs: False
-        _amd_kda.is_fused_kda_chunk_supported = lambda *args, **kwargs: False
-        _amd_kda.is_fused_kda_decode_supported = lambda *args, **kwargs: False
-
-        def _kda_forward(self, hidden_states, positions=None):
-            # Imported on first use: importing vllm_gaudi.models here (plugin-apply time) hits a circular
-            # import with vllm.distributed in processes where it is still being initialised.
-            from vllm_gaudi.models.kimi_k3_kda import hpu_kda_forward
-            return hpu_kda_forward(self, hidden_states, positions)
-
         if hasattr(_amd_kda, "KimiK3DeltaAttention"):
             _amd_kda.KimiK3DeltaAttention.forward = _kda_forward
             _amd_kda.KimiK3DeltaAttention._forward = lambda *args, **kwargs: None
@@ -1054,16 +1068,16 @@ def _patch_kimi_kda() -> None:
             _amd_kda.GatedDeltaNetAttention.forward = _kda_forward
             _amd_kda.GatedDeltaNetAttention._forward = lambda *args, **kwargs: None
         _kimi_patch_installed("kda_forward")
-
-        try:
-            import vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn as _gdn_mod
-            _gdn_mod.KimiGatedDeltaNetAttention.forward = _kda_forward
-            _gdn_mod.KimiGatedDeltaNetAttention._forward = lambda *args, **kwargs: None
-            _kimi_patch_installed("kimi_gdn_forward")
-        except Exception:
-            _kimi_patch_failed("kimi_gdn_forward")
     except Exception:
         _kimi_patch_failed("kda_forward")
+
+    try:
+        import vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn as _gdn_mod
+        _gdn_mod.KimiGatedDeltaNetAttention.forward = _kda_forward
+        _gdn_mod.KimiGatedDeltaNetAttention._forward = lambda *args, **kwargs: None
+        _kimi_patch_installed("kimi_gdn_forward")
+    except Exception:
+        _kimi_patch_failed("kimi_gdn_forward")
 
 
 def _patch_mla_prefill_selector() -> None:
@@ -1722,6 +1736,10 @@ def apply() -> None:
     # EngineCore subprocess) after the platform is ready.
     import vllm.plugins as _plugins_mod
 
+    if getattr(_plugins_mod.load_general_plugins, "_hpu_patches_wrapper", False):
+        # apply() ran before in this process: wrapping again would run every deferred patch twice per call
+        return
+
     _original_load_general = _plugins_mod.load_general_plugins
 
     def _load_general_with_hpu_patches():
@@ -1746,6 +1764,7 @@ def apply() -> None:
         _patch_kimi_k3_arch()
         _patch_compressed_tensors_mxfp4()
 
+    _load_general_with_hpu_patches._hpu_patches_wrapper = True  # type: ignore[attr-defined]
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
 

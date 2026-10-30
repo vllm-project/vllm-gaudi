@@ -372,12 +372,17 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self._qkv_gate_fused = _KimiK3MergedQKVGateLinear is not None and isinstance(
             self.fused_qkv_a_proj, _KimiK3MergedQKVGateLinear)
         if self._qkv_gate_fused:
-            # The fused-gate forward below covers the plain Kimi-K3 MLA only.
-            assert self.g_proj is None, "KimiK3MergedQKVGateLinear and g_proj are mutually exclusive"
-            assert self.indexer is None and not self.is_sparse, "sparse MLA is unsupported with the fused gate"
-            assert not self.dcp_q_replicate, "DCP query replication is not supported on HPU with the fused gate"
-            assert not getattr(mla_modules, "skip_o_proj", False), "skip_o_proj is not supported with the fused gate"
-        logger.info_once("HPU MLA wrapper forward: %s", "fused QKV-gate" if self._qkv_gate_fused else "base MLA")
+            # The fused-gate forward below covers the plain Kimi-K3 MLA only. Explicit errors, not asserts: these
+            # must hold under ``python -O`` too.
+            if self.g_proj is not None:
+                raise ValueError("KimiK3MergedQKVGateLinear and g_proj are mutually exclusive, but the MLA has both")
+            if self.indexer is not None or self.is_sparse:
+                raise ValueError("Sparse MLA (indexer/is_sparse) is unsupported with the fused QKV-gate on HPU")
+            if self.dcp_q_replicate:
+                raise ValueError("DCP query replication is not supported on HPU with the fused QKV-gate")
+            if getattr(mla_modules, "skip_o_proj", False):
+                raise ValueError("skip_o_proj is not supported on HPU with the fused QKV-gate")
+            logger.info_once("HPU MLA wrapper forward: fused QKV-gate (Kimi-K3)")
 
     def get_input_quant_key(self):
         # The quantized-activation fusion (QuantizedActivation) is a ROCm/CUDA optimization; HPU always gets
