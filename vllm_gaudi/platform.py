@@ -11,6 +11,18 @@ from vllm import envs
 from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.logger import logger as init_logger
+from vllm_gaudi.kimi_k3_gate import is_kimi_k3_vllm_config, kimi_k3_seen, mark_kimi_k3_seen
+
+
+class _KimiK3OnlyList:
+    """Class attribute that reads as ``values`` once a Kimi-K3 config exists in this process and as ``[]`` before."""
+
+    def __init__(self, values):
+        self._values = list(values)
+
+    def __get__(self, obj, owner=None):
+        return list(self._values) if kimi_k3_seen() else []
+
 
 if not hasattr(Platform, "is_hpu"):
     Platform.is_hpu = lambda self: getattr(self, "device_type", None) == "hpu"
@@ -66,10 +78,12 @@ class HpuPlatform(Platform):
     dispatch_key: str = "HPU"
     ray_device_key: str = "HPU"
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
-    ray_noset_device_env_vars: list[str] = [
+    # Kimi-K3 only (TP16 Ray: every worker must see the node's HABANA_VISIBLE_MODULES); empty, i.e. the upstream
+    # Platform default, for every other model.
+    ray_noset_device_env_vars = _KimiK3OnlyList([
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
         "RAY_EXPERIMENTAL_NOSET_HABANA_VISIBLE_MODULES",
-    ]
+    ])
     supported_quantization: list[str] = [
         "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu", "modelopt", "gpt_oss_mxfp4", "mxfp4"
     ]
@@ -93,6 +107,9 @@ class HpuPlatform(Platform):
 
     @classmethod
     def validate_environ(cls, hard_fail: bool) -> None:
+        upstream = getattr(super(), "validate_environ", None)
+        if upstream is not None and not kimi_k3_seen():
+            return upstream(hard_fail)
         import vllm_gaudi.envs as gaudi_envs
         known = set(envs.environment_variables) | set(gaudi_envs.environment_variables) | set(cls.gaudi_env_vars)
         for env in os.environ:
@@ -182,6 +199,8 @@ class HpuPlatform(Platform):
         # a lazy-mode subprocess (GAUDISW-248809) and always respect values the
         # user set explicitly (GAUDISW-249135).
         cls.set_compile_env_defaults()
+        if is_kimi_k3_vllm_config(vllm_config):
+            mark_kimi_k3_seen()
         cls._maybe_disable_synapse_input_reuse(vllm_config)
         parallel_config = vllm_config.parallel_config
 

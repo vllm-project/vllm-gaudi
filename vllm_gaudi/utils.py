@@ -16,9 +16,7 @@ T = TypeVar("T")
 U = TypeVar("U")
 
 
-# Called from compiled code (attention bias / block mapping): not functools.cache, because dynamo warns about
-# cache-wrapped functions; assume_constant_result evaluates it once at trace time without a graph break.
-@torch.compiler.assume_constant_result
+@cache
 def is_fake_hpu() -> bool:
     return os.environ.get("VLLM_USE_FAKE_HPU", "0") != "0"
 

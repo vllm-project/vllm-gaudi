@@ -24,6 +24,7 @@ from vllm_gaudi.attention.ops.hpu_paged_attn import (HPUPagedAttention, HPUPaged
                                                      HPUPagedAttentionMetadataBuilder)
 
 from vllm_gaudi.extension.logger import logger as init_logger
+from vllm_gaudi.kimi_k3_gate import current_config_is_kimi_k3
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.v1.attention.backends.registry import (register_backend, AttentionBackendEnum)
 from vllm._aiter_ops import rocm_aiter_ops
@@ -193,6 +194,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
     ) -> None:
         torch.nn.Module.__init__(self)
 
+        # Kimi-K3 only: id-based fetch of the prefix blocks (see _set_fetch_by_id); other models keep upstream.
+        self.fetch_by_id_toggle = current_config_is_kimi_k3()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -280,7 +283,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                 k_cache = k_cache[0]  # Use only key_cache for MLA
             # Prefix blocks are raw scattered ids, so the
             # contiguous-PA fetch must gather by id (cache[:n] would read wrong rows).
-            _set_fetch_by_id(self.latent_cache_k, True)
+            if self.fetch_by_id_toggle:
+                _set_fetch_by_id(self.latent_cache_k, True)
             past = self.latent_cache_k.fetch_from_cache(k_cache.unflatten(0, (-1, attn_metadata.block_size)),
                                                         attn_metadata.block_list)
             past = past.view(-1, past.shape[-1])
@@ -348,7 +352,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         value_cache = None
         # Decode block_list is the contiguous-identity layout under contiguous PA:
         # keep the zero-copy slice fetch instead of an index_select gather.
-        _set_fetch_by_id(self.latent_cache_k, False)
+        if self.fetch_by_id_toggle:
+            _set_fetch_by_id(self.latent_cache_k, False)
         output = HPUPagedAttention.forward_decode(query=query,
                                                   key_cache=key_cache,
                                                   value_cache=value_cache,
