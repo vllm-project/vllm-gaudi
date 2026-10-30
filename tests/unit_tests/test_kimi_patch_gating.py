@@ -232,6 +232,31 @@ def test_hybrid_config_patch_does_not_wrap_post_init_twice(config_patches):
     assert config_patches.test_model_config.__post_init__ is wrapped
 
 
+def _stub_gdn_module(monkeypatch):
+    """Stub of the Kimi-Linear GDN attention module, never the real one (whether or not vllm is installed).
+
+    ``import a.b.c as m`` reads attribute ``c`` of the parent package before ``sys.modules``, so a real, already
+    imported module would win: the whole parent chain is stubbed and linked by attribute as well.
+    """
+
+    class KimiGatedDeltaNetAttention:
+
+        def forward(self):
+            return "original"
+
+    names = ("vllm", "vllm.model_executor", "vllm.model_executor.layers", "vllm.model_executor.layers.mamba",
+             "vllm.model_executor.layers.mamba.gdn", "vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn")
+    parent = None
+    for name in names:
+        mod = types.ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, mod)
+        if parent is not None:
+            monkeypatch.setattr(parent, name.rsplit(".", 1)[1], mod, raising=False)
+        parent = mod
+    mod.KimiGatedDeltaNetAttention = KimiGatedDeltaNetAttention
+    return KimiGatedDeltaNetAttention, KimiGatedDeltaNetAttention.forward
+
+
 @pytest.fixture
 def kda_modules(config_patches, monkeypatch):
     """Stubbed vllm.models.kimi_k3.amd KDA modules whose fused checks would query vllm.platforms.rocm."""
@@ -255,6 +280,7 @@ def kda_modules(config_patches, monkeypatch):
         mods[name] = mod
     config_patches.test_kda_modules = mods
     config_patches.test_rocm = real_rocm
+    config_patches.test_gdn_cls, config_patches.test_gdn_original = _stub_gdn_module(monkeypatch)
     return config_patches
 
 
@@ -328,28 +354,9 @@ def test_apply_twice_wraps_load_general_plugins_once(kda_modules, monkeypatch):
     assert deferred_calls == [1]  # and the deferred patches ran once per call
 
 
-def _stub_gdn_module(monkeypatch):
-    """Stub of the Kimi-Linear GDN attention module (never the real one, whether or not vllm is installed)."""
-
-    class KimiGatedDeltaNetAttention:
-
-        def forward(self):
-            return "original"
-
-    original = KimiGatedDeltaNetAttention.forward
-    name = "vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn"
-    for parent in ("vllm", "vllm.model_executor", "vllm.model_executor.layers", "vllm.model_executor.layers.mamba",
-                   "vllm.model_executor.layers.mamba.gdn"):
-        monkeypatch.setitem(sys.modules, parent, sys.modules.get(parent) or types.ModuleType(parent))
-    mod = types.ModuleType(name)
-    mod.KimiGatedDeltaNetAttention = KimiGatedDeltaNetAttention
-    monkeypatch.setitem(sys.modules, name, mod)
-    return KimiGatedDeltaNetAttention, original
-
-
 def test_kda_patch_import_failure_of_one_module_does_not_skip_the_others(kda_modules, monkeypatch):
     # the chunk ops module cannot be imported; the rest must still be patched
-    gdn_cls, gdn_original = _stub_gdn_module(monkeypatch)
+    gdn_cls, gdn_original = kda_modules.test_gdn_cls, kda_modules.test_gdn_original
     monkeypatch.setitem(sys.modules, "vllm.models.kimi_k3.amd.ops.kda_chunk", None)
     monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_INSTALLED", [])
     monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_FAILED", {})
@@ -368,7 +375,7 @@ def test_kda_patch_import_failure_of_one_module_does_not_skip_the_others(kda_mod
 
 
 def test_kimi_gdn_forward_is_patched_only_where_the_k3_amd_kda_module_exists(kda_modules, monkeypatch):
-    gdn_cls, original = _stub_gdn_module(monkeypatch)
+    gdn_cls, original = kda_modules.test_gdn_cls, kda_modules.test_gdn_original
     monkeypatch.setitem(sys.modules, "vllm.models.kimi_k3.amd.kda", None)
     monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_INSTALLED", [])
     monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_FAILED", {})
