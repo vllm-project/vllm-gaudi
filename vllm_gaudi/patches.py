@@ -98,6 +98,9 @@ import inspect
 import os
 from typing import Callable, Optional
 
+from vllm_gaudi.kimi_k3_gate import (KIMI_K3_ARCHITECTURES, current_config_is_kimi_k3, is_kimi_k3_model_config,
+                                     kimi_k3_seen, mark_kimi_k3_seen)
+
 import torch
 
 from vllm import envs
@@ -446,14 +449,19 @@ def _patch_mamba_bind_kv_cache() -> None:
     MambaBase.bind_kv_cache = _hpu_mamba_bind_kv_cache
 
 
+_UPSTREAM_MLA_BIND_KV_CACHE = None
+
+
 def _hpu_mla_bind_kv_cache(self, kv_cache) -> None:
-    """Store the HPU per-layer KV-cache tuple unchanged.
+    """Store the HPU per-layer KV-cache tuple unchanged (Kimi-K3 only; other models use the upstream method).
 
     Upstream MLAAttention.bind_kv_cache executes `self.kv_cache = kv_cache.squeeze(1)`,
     assuming a single 4D CUDA tensor [B, 1, N, C]. On HPU, kv_cache is allocated as a
     tuple (key_cache, value_cache, key_scales, value_scales), which raises
     `AttributeError: 'tuple' object has no attribute 'squeeze'`.
     """
+    if _UPSTREAM_MLA_BIND_KV_CACHE is not None and not kimi_k3_seen():
+        return _UPSTREAM_MLA_BIND_KV_CACHE(self, kv_cache)
     if isinstance(kv_cache, (tuple, list)):
         self.kv_cache = tuple(kv_cache)
     else:
@@ -471,6 +479,8 @@ def _patch_mla_bind_kv_cache() -> None:
     if upstream is None or upstream is _hpu_mla_bind_kv_cache:
         return
 
+    global _UPSTREAM_MLA_BIND_KV_CACHE
+    _UPSTREAM_MLA_BIND_KV_CACHE = upstream
     MLAAttention.bind_kv_cache = _hpu_mla_bind_kv_cache
     MLAAttention._patched_hpu_bind = True
 
@@ -527,8 +537,10 @@ def _hpu_get_num_layers_by_block_type(self, parallel_config, block_type="attenti
                 return sum(t == block_type for t in layer_types_value[start:end])
 
         # Hybrid model Kimi-K3 / Kimi Linear
-        linear_attn_config = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(
-            self.hf_config, "linear_attn_config", None)
+        linear_attn_config = None
+        if is_kimi_k3_model_config(self):
+            linear_attn_config = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(
+                self.hf_config, "linear_attn_config", None)
         if linear_attn_config is not None:
             if isinstance(linear_attn_config, dict):
                 full_attn = set(linear_attn_config.get("full_attn_layers", []))
@@ -955,7 +967,7 @@ _KIMI_PATCHES_WARNED: set[str] = set()
 # vllm.models.kimi_k3 holds all K3 classes (KimiK3ForConditionalGeneration, KimiLinearForCausalLM, MTP, DSpark);
 # Kimi-VL, Kimi-K2.5 and Kimi-Audio live in vllm.model_executor.models.kimi_* and are not K3.
 _KIMI_K3_MODULE = "vllm.models.kimi_k3"
-_KIMI_K3_ARCHITECTURES = ("KimiK3ForConditionalGeneration", "KimiK3MTPModel", "KimiLinearForCausalLM", "K3DSparkModel")
+_KIMI_K3_ARCHITECTURES = KIMI_K3_ARCHITECTURES
 # Patches that act in the process which builds the config (APIServer, EngineCore), not only in model workers.
 _KIMI_CONFIG_PATCHES = ("hybrid_config", "k3_arch")
 
@@ -965,19 +977,12 @@ def _is_kimi_k3_model(model) -> bool:
 
 
 def _is_kimi_k3_config(model_config) -> bool:
-    archs = getattr(model_config, "architectures", None) or getattr(getattr(model_config, "hf_config", None),
-                                                                    "architectures", None) or ()
-    return any(a in _KIMI_K3_ARCHITECTURES for a in archs)
+    return is_kimi_k3_model_config(model_config)
 
 
 def _current_config_is_kimi_k3() -> bool:
     """True when the vllm config being built/used right now is for a Kimi-K3 model (False when there is none)."""
-    try:
-        from vllm.config import get_current_vllm_config_or_none
-        vllm_config = get_current_vllm_config_or_none()
-    except ImportError:
-        return False
-    return vllm_config is not None and _is_kimi_k3_config(getattr(vllm_config, "model_config", None))
+    return current_config_is_kimi_k3()
 
 
 def _optional_runner_absent(exc: BaseException, mod_name: str, cls_name: str) -> bool:
@@ -1122,13 +1127,17 @@ def _patch_kimi_k3_hybrid_config() -> None:
             def _hpu_post_init(self, *args, **kwargs):
                 orig_post_init(self, *args, **kwargs)
                 _report_kimi_config_patches(self)
+                if _is_kimi_k3_config(self):
+                    mark_kimi_k3_seen()
                 # Ensure KimiMoE does not pad moe_intermediate_size from 3072 to 4096 under EP (saves ~30 GB memory per card)
                 if _is_kimi_k3_config(self):
                     for cfg_obj in (getattr(self, "hf_text_config", None), getattr(self, "hf_config", None)):
                         if cfg_obj is not None:
                             setattr(cfg_obj, "min_moe_intermediate_per_partition", 1)
-                lac = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(
-                    self.hf_config, "linear_attn_config", None)
+                lac = None
+                if _is_kimi_k3_config(self):
+                    lac = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(
+                        self.hf_config, "linear_attn_config", None)
                 if lac is not None and not getattr(self.hf_text_config, "layer_types", None):
                     full_set = set(
                         lac.get("full_attn_layers", []) if isinstance(lac, dict
@@ -1692,7 +1701,7 @@ class _RemoteTokenizerNoticeFilter:
     _PREFIX = "Calling super().encode with"
 
     def filter(self, record) -> bool:
-        if record.name.startswith("transformers_modules"):
+        if record.name.startswith("transformers_modules") and kimi_k3_seen():
             return not str(record.getMessage()).startswith(self._PREFIX)
         return True
 

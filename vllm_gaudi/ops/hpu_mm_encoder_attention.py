@@ -2,10 +2,9 @@ import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 
+from vllm_gaudi.kimi_k3_gate import current_config_is_kimi_k3
 
-# The per-sequence loop needs the sequence boundaries on the host: traced, the .tolist() is a graph break and the
-# resume frame specializes on the boundary values (one recompile per image layout), so it runs eagerly.
-@torch.compiler.disable
+
 def _varlen_fsdpa(fsdpa_op, query, key, value, cu_seqlens, scale):
     cu_seqlens_list = cu_seqlens.to("cpu").tolist()
     outputs = []
@@ -36,8 +35,18 @@ def _varlen_fsdpa(fsdpa_op, query, key, value, cu_seqlens, scale):
     return out.transpose(1, 2)
 
 
+# Kimi-K3 only: the per-sequence loop needs the sequence boundaries on the host. Traced, the .tolist() is a graph
+# break and the resume frame specializes on the boundary values (one recompile per image layout), so it runs
+# eagerly. Other models call the plain function, i.e. the loop is inlined exactly as before.
+_varlen_fsdpa_eager = torch.compiler.disable(_varlen_fsdpa)
+
+
 @MMEncoderAttention.register_oot()
 class HpuMMEncoderAttention(MMEncoderAttention):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._varlen_fsdpa = _varlen_fsdpa_eager if current_config_is_kimi_k3() else _varlen_fsdpa
 
     def _forward_sdpa(
         self,
@@ -86,7 +95,7 @@ class HpuMMEncoderAttention(MMEncoderAttention):
                                recompute_mode=True,
                                valid_sequence_lengths=None)
             else:
-                return _varlen_fsdpa(fsdpa_op, query, key, value, cu_seqlens, self.scale)
+                return self._varlen_fsdpa(fsdpa_op, query, key, value, cu_seqlens, self.scale)
         else:
             out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
 

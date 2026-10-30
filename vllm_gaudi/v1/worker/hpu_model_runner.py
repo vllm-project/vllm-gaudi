@@ -29,6 +29,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import vllm_gaudi.envs as gaudi_envs
 import vllm_gaudi.extension.environment as environment
+from vllm_gaudi.kimi_k3_gate import is_kimi_k3_model_config
 from vllm_gaudi.patches import report_kimi_patches, report_kimi_patches_on_load_failure
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.ops.hpu_kda_pytorch import attn_res_layer_variants, tag_kda_cache_groups
@@ -1344,6 +1345,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         finalize_config()
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        # Kimi-K3 only behaviour is gated on this flag (computed once); every other model takes the upstream path.
+        self.is_kimi_k3 = is_kimi_k3_model_config(self.model_config)
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
@@ -2136,31 +2139,48 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
-        # Encode only the items the scheduler placed in this step. Encoding every
-        # item of the request that is missing from the encoder cache would
-        # re-encode items already consumed by earlier prefill chunks (the scheduler
-        # frees their cache entries) and would change the number of items per
-        # encoder call from step to step.
-        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-        for req_id in req_ids:
-            encoder_input_ids = scheduled_encoder_inputs.get(req_id)
-            if not encoder_input_ids:
-                continue
-            req_state = self.requests[req_id]
+        if self.is_kimi_k3:
+            # Encode only the items the scheduler placed in this step. Encoding every
+            # item of the request that is missing from the encoder cache would
+            # re-encode items already consumed by earlier prefill chunks (the scheduler
+            # frees their cache entries) and would change the number of items per
+            # encoder call from step to step.
+            scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+            for req_id in req_ids:
+                encoder_input_ids = scheduled_encoder_inputs.get(req_id)
+                if not encoder_input_ids:
+                    continue
+                req_state = self.requests[req_id]
 
-            for mm_input_id in encoder_input_ids:
-                mm_feature = req_state.mm_features[mm_input_id]
-                mm_hash = mm_feature.identifier
-                if mm_feature.data is None or mm_hash in self.encoder_cache:
-                    continue
-                # A span fully covered by computed (e.g. prefix-cached) tokens is
-                # never gathered, and the scheduler strips its pixel payload
-                # (strip_covered_mm_data), so there is nothing to encode.
-                pos_info = mm_feature.mm_position
-                if mm_feature.data is None or pos_info.offset + pos_info.length <= req_state.num_computed_tokens:
-                    continue
-                mm_kwargs.append((mm_feature.modality, mm_feature.data))
-                mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
+                for mm_input_id in encoder_input_ids:
+                    mm_feature = req_state.mm_features[mm_input_id]
+                    mm_hash = mm_feature.identifier
+                    if mm_feature.data is None or mm_hash in self.encoder_cache:
+                        continue
+                    # A span fully covered by computed (e.g. prefix-cached) tokens is
+                    # never gathered, and the scheduler strips its pixel payload
+                    # (strip_covered_mm_data), so there is nothing to encode.
+                    pos_info = mm_feature.mm_position
+                    if pos_info.offset + pos_info.length <= req_state.num_computed_tokens:
+                        continue
+                    mm_kwargs.append((mm_feature.modality, mm_feature.data))
+                    mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
+        else:
+            for req_id in req_ids:
+                req_state = self.requests[req_id]
+
+                for mm_feature in req_state.mm_features:
+                    mm_hash = mm_feature.identifier
+                    if mm_hash in self.encoder_cache:
+                        continue
+                    # A span fully covered by computed (e.g. prefix-cached) tokens is
+                    # never gathered, and the scheduler strips its pixel payload
+                    # (strip_covered_mm_data), so there is nothing to encode.
+                    pos_info = mm_feature.mm_position
+                    if mm_feature.data is None or pos_info.offset + pos_info.length <= req_state.num_computed_tokens:
+                        continue
+                    mm_kwargs.append((mm_feature.modality, mm_feature.data))
+                    mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
         if not mm_kwargs:
             return
@@ -2383,7 +2403,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # This may require moving multimodal input preps into _prepare_inputs,        # noqa
             # to avoid padding issues.
             htorch.core.mark_step()
-            if token_ids.ndim == 2 and token_ids.shape[0] == 1:
+            if (self.is_kimi_k3 or self.attn_backend_name == 'HPUAttentionBackendV1') and \
+                token_ids.ndim == 2 and token_ids.shape[0] == 1:
                 token_ids = token_ids.squeeze(0)
             inputs_embeds = self.model.embed_input_ids(
                 token_ids,
@@ -6373,7 +6394,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                               or self.interleaved_sliding_window)
             # Hybrids run contiguous PA without the defragmenter (see
             # OnlineDefragmenter), so any decode batch may reach the pool size.
-            self.bucketing_manager.decode_full_block_range = (self.use_contiguous_pa and self.num_mamba_like_layers > 0)
+            self.bucketing_manager.decode_full_block_range = (self.is_kimi_k3 and self.use_contiguous_pa
+                                                               and self.num_mamba_like_layers > 0)
             if self.attn_block_size != self.block_size:
                 self.bucketing_manager.block_size = self.attn_block_size
             try:
@@ -6412,7 +6434,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not self.is_pooling_model:
             self.defragmenter = OnlineDefragmenter(self.kv_caches,
                                                    self.block_size,
-                                                   hybrid=self.num_mamba_like_layers > 0)
+                                                   hybrid=self.is_kimi_k3 and self.num_mamba_like_layers > 0)
         # Profiling
         prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
         if prompt_profile_cfg or decode_profile_cfg:
@@ -6422,7 +6444,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         if not htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager:
             multiplier = 5 if self.compile_config.regional_compilation else 1
-            if self.compile_config.regional_compilation:
+            if self.compile_config.regional_compilation and self.is_kimi_k3:
                 # all decoder layers share one code object; per-layer python ints (Kimi-K3 attn_res) are guarded
                 multiplier *= attn_res_layer_variants(self.model.modules())
             dsa_variants = sum(
@@ -6541,7 +6563,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not self.is_pooling_model:
             self.defragmenter = OnlineDefragmenter(self.kv_caches,
                                                    self.block_size,
-                                                   hybrid=self.num_mamba_like_layers > 0)
+                                                   hybrid=self.is_kimi_k3 and self.num_mamba_like_layers > 0)
 
     def shutdown_inc(self, suppress=suppress, finalize_calibration=finalize_calibration):
         global shutdown_inc_called
@@ -6769,7 +6791,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if self.enable_bucketing:
                     self.bucketing_manager.block_size = self.block_size
             maybe_set_mamba_kv_cache_groups_ids(self.model, self.kv_cache_config)
-            maybe_tag_kda_cache_groups(self.model, self.kv_cache_config)
+            if self.is_kimi_k3:
+                maybe_tag_kda_cache_groups(self.model, self.kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
 
         # Reinitialize the input batch with the correct block sizes for all
@@ -6932,7 +6955,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             attn_kernel_block_size, blocks_per_kv_block, num_kernel_blocks, kv_cache_shape)
                         # here attn does not share kv cache tensor, so we create separate tensors
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
-                        vc = None if self.model_config.use_mla else torch.zeros(
+                        # Kimi-K3 MLA keeps no value cache; other models allocate it as upstream.
+                        vc = None if (self.is_kimi_k3 and self.model_config.use_mla) else torch.zeros(
                             kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
@@ -7008,7 +7032,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                               kv_cache_spec.head_size)
                         # here attn does not share kv cache tensor, so we create separate tensors
                         kc = torch.zeros(kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
-                        vc = None if self.model_config.use_mla else torch.zeros(
+                        # Kimi-K3 MLA keeps no value cache; other models allocate it as upstream.
+                        vc = None if (self.is_kimi_k3 and self.model_config.use_mla) else torch.zeros(
                             kv_cache_shape, dtype=kv_cache_spec.dtype, device=self.device)
                         kv_caches[layer_name] = (kc, vc, None, None)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
@@ -7123,8 +7148,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # id num_blocks is a real kernel block (the first one of scheduler block
         # num_blocks / blocks_per_kv_block), so padding tokens must target the
         # trailing pad row instead, or they overwrite a live request's KV.
-        num_attn_blocks, self._PAD_BLOCK_ID, self._PAD_SLOT_ID = attn_pad_ids(num_blocks, num_attn_kernel_blocks,
-                                                                              self.attn_block_size)
+        num_attn_blocks, self._PAD_BLOCK_ID, self._PAD_SLOT_ID = attn_pad_ids(
+            num_blocks, num_attn_kernel_blocks if self.is_kimi_k3 else None, self.attn_block_size)
         self._num_attn_blocks = num_attn_blocks
         if self.enable_bucketing:
             # Contiguous PA buckets by the highest kernel block id + 1.

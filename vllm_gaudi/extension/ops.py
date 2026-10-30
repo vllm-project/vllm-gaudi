@@ -1911,7 +1911,8 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
         self.block_size = block_size
         # Set for Kimi-K3 layers only: inside a compiled region call the op directly (see _get_compiled_forward).
         self.in_graph_call = in_graph_call
-        _log_mxfp4_moe_op_once(in_graph_call)
+        if in_graph_call:
+            _log_mxfp4_moe_op_once(in_graph_call)
         # GPT-OSS SwiGLU-OAI: per-expert bias on both projections + alpha/limit.
         # When has_bias is set, the op applies gpt_swiglu (clamp ±limit, alpha-silu)
         # internally and the "activation" string is ignored.
