@@ -49,7 +49,10 @@ class CacheSwapUtils(torch.nn.Module):
 class OnlineDefragmenter:
     """ Keeps track of assigned block_ids and remaps them if necessary """
 
-    def __init__(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int):
+    def __init__(self,
+                 kv_caches: tuple[tuple[torch.tensor, torch.tensor]],
+                 block_size: int,
+                 attn_ids: Optional[list[int]] = None):
         config = get_config()
         self.threshold = with_default(config.VLLM_DEFRAG_THRESHOLD, 32)
         self.to_swap_pad_thresholds = [8, 16, 32, 64, 128, 256, 512]
@@ -63,6 +66,7 @@ class OnlineDefragmenter:
         self.kv_caches = tuple(kv_caches)
         self.is_mla = all([cache[1] is None for cache in self.kv_caches])
         self.block_size = block_size
+        self.attn_ids = attn_ids
         self.cache_utils = CacheSwapUtils(block_size, kv_caches[0][0].device)
         if self.graphed:
             config = get_config()
@@ -198,17 +202,18 @@ class OnlineDefragmenter:
 
     def _swap(self, to_swap, threshold):
         """ Swap block_ids between srcs and dsts"""
-        assert self.cache_utils is not None
         srcs, dsts = zip(*to_swap)
         srcs = pad_list(list(srcs), threshold, itertools.repeat(-1))
         dsts = pad_list(list(dsts), threshold, itertools.repeat(-1))
         srcs = torch.tensor(srcs, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
         dsts = torch.tensor(dsts, dtype=torch.long, device='cpu').to('hpu', non_blocking=True)
-        key_caches = [cache[0] for cache in self.kv_caches]
-        self.cache_utils(srcs, dsts, key_caches, self.block_size)
+        caches_to_swap = [cache for idx, cache in enumerate(self.kv_caches)
+                          if idx in self.attn_ids] if self.attn_ids else self.kv_caches
+        key_caches = [cache[0] for cache in caches_to_swap]
+        self(srcs, dsts, key_caches)
         if not self.is_mla:
-            value_caches = [cache[1] for cache in self.kv_caches]
-            self.cache_utils(srcs, dsts, value_caches, self.block_size)
+            value_caches = [cache[1] for cache in caches_to_swap]
+            self(srcs, dsts, value_caches)
 
     def warmup(self):
         """Warm up defragmentation swap graphs for different thresholds.
