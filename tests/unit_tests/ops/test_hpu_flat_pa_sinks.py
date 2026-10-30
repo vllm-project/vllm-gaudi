@@ -11,6 +11,7 @@ import habana_frameworks.torch as htorch  # noqa: F401
 
 import vllm_gaudi.extension.ops as ops
 import vllm_gaudi.extension.utils as ext_utils
+from vllm_gaudi.extension.kernels import block_softmax_adjustment
 
 Q_HEADS, KV_HEADS, HEAD_SIZE, BLOCK_SIZE = 8, 2, 64, 16
 SEQ_BLOCKS = [1, 3, 9]
@@ -27,10 +28,13 @@ def reference(query, keys, values, sinks, scale):
     return torch.einsum("hl,hld->hd", probs, values)
 
 
+@pytest.mark.parametrize("fused_adjustment", [False, True])
 @pytest.mark.parametrize("fp32_softmax", [False, True])
-def test_flat_pa_sink_counted_once(monkeypatch, fp32_softmax):
+def test_flat_pa_sink_counted_once(monkeypatch, fp32_softmax, fused_adjustment):
+    if fused_adjustment and block_softmax_adjustment() is None:
+        pytest.skip("block_softmax_adjustment kernel is not available")
     config = SimpleNamespace(fused_block_softmax=False,
-                             fused_block_softmax_adjustment=False,
+                             fused_block_softmax_adjustment=fused_adjustment,
                              fp32_softmax=fp32_softmax,
                              per_token_kv_scaling_support=False)
     monkeypatch.setattr(ops, "get_config", lambda: config)
@@ -58,12 +62,13 @@ def test_flat_pa_sink_counted_once(monkeypatch, fp32_softmax):
         block_groups += [seq] * num_blocks
         block_usage += [BLOCK_SIZE] * (num_blocks - 1) + [BLOCK_SIZE // 2 + seq]
     block_list += [pad_block_id] * PAD_BLOCKS
-    block_groups += [batch_size] * PAD_BLOCKS
+    # Padding blocks belong to no sequence: group -1, as the model runner pads them on HPU
+    block_groups += [-1] * PAD_BLOCKS
     block_usage += [1] * PAD_BLOCKS
 
     block_mapping = torch.zeros(len(block_groups), batch_size)
     for idx, seq in enumerate(block_groups):
-        if seq < batch_size:
+        if seq >= 0:
             block_mapping[idx, seq] = 1.0
     unused_slots = torch.arange(BLOCK_SIZE).view(1, -1) >= torch.tensor(block_usage).view(-1, 1)
     block_bias = torch.zeros(len(block_usage), BLOCK_SIZE).masked_fill_(unused_slots, float("-inf"))
