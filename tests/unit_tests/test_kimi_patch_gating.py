@@ -310,3 +310,213 @@ def test_mxfp4_moe_method_alias_is_not_installed():
 
     assert "mxfp4_module.GptOssMxfp4MoEMethod = HPUGptOssMxfp4MoEMethod" in src
     assert "mxfp4_module.Mxfp4MoEMethod" not in src
+
+
+# --- vLLM 28a5fba06 compatibility of the Kimi-K3 patches (step argument, attn_res quant_key, fused MLA gate) ---
+
+
+@pytest.fixture
+def arch_modules(kda_modules, monkeypatch):
+    """Stubbed amd.linear / amd.ops.attn_res for the attn_res and KimiLinearModel.forward patches."""
+    calls = []
+
+    class KimiLinearModel:
+
+        def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, step=None):
+            calls.append({"input_ids": input_ids, "positions": positions, "step": step})
+            return "hidden"
+
+    def module(name, **attrs):
+        mod = types.ModuleType(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, mod)
+        return mod
+
+    linear = module("vllm.models.kimi_k3.amd.linear",
+                    KimiLinearModel=KimiLinearModel,
+                    KimiLinearForCausalLM=object,
+                    KimiK3MultiHeadLatentAttentionWrapper=object)
+    module("vllm.models.kimi_k3.amd.mla", KimiK3MultiHeadLatentAttentionWrapper=object)
+    module("vllm.models.kimi_k3.amd.model", KimiK3ForConditionalGeneration=object)
+    module("vllm.models.kimi_k3.amd.mtp", KimiK3MTP=object)
+    registry = types.SimpleNamespace(register_model=lambda *args: None)
+    module("vllm.model_executor.models")
+    module("vllm.model_executor.models.registry", ModelRegistry=registry)
+    sys.modules["vllm_gaudi.attention.oot_mla"].HPUMultiHeadLatentAttentionWrapper = object
+    module("vllm.models.kimi_k3.amd.ops.attn_res", attn_res=None)
+    deferred = types.ModuleType("vllm_gaudi.models.kimi_k3_kda")
+    deferred.run_with_deferred_kda_state = lambda model, forward, *args, **kwargs: forward(*args, **kwargs)
+    monkeypatch.setitem(sys.modules, "vllm_gaudi.models.kimi_k3_kda", deferred)
+    kda_modules.test_linear = linear
+    kda_modules.test_calls = calls
+    return kda_modules
+
+
+def _forward_wrapper(arch_modules):
+    """Runs _patch_kimi_k3_arch; its patches that need real vllm are skipped by their own try blocks."""
+    arch_modules._patch_kimi_k3_arch()
+    assert "linear_model_tokens_1d" in arch_modules._KIMI_PATCHES_INSTALLED
+    return arch_modules.test_linear.KimiLinearModel
+
+
+def test_linear_model_forward_wrapper_passes_the_fifth_positional_step_on(arch_modules):
+    model_cls = _forward_wrapper(arch_modules)
+    ids = torch.arange(4).view(2, 2)
+    positions = torch.arange(4)
+
+    # vLLM 28a5fba06: KimiLinearForCausalLM.forward calls self.model(input_ids, positions, it, embeds, step)
+    assert model_cls().forward(ids, positions, None, None, "plan") == "hidden"
+    assert arch_modules.test_calls[-1]["step"] == "plan"
+    assert arch_modules.test_calls[-1]["input_ids"].dim() == 1
+
+
+def test_linear_model_forward_wrapper_works_without_step(arch_modules):
+    # vLLM ac7f3e11e: the original forward has no step parameter, so nothing may be passed on
+    class NoStep:
+
+        def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None):
+            return "hidden"
+
+    arch_modules.test_linear.KimiLinearModel = NoStep
+    arch_modules._patch_kimi_k3_arch()
+
+    assert NoStep().forward(torch.arange(2), torch.arange(2)) == "hidden"
+
+
+def test_apply_attn_res_replacement_accepts_quant_key_none_and_rejects_a_quant_key(arch_modules):
+    arch_modules._patch_kimi_attn_res()
+    apply_attn_res = arch_modules.test_linear._apply_attn_res
+    dim = 8
+    prefix = torch.randn(3, dim)
+    blocks = torch.randn(3, 2, dim)
+    proj = types.SimpleNamespace(weight=torch.randn(1, dim))
+    norm = types.SimpleNamespace(weight=torch.ones(dim), variance_epsilon=1e-6)
+    args = (prefix, blocks, proj, norm, 2)
+
+    baseline = apply_attn_res(*args)
+    assert apply_attn_res(*args, quant_key=None).shape == baseline.shape
+    with pytest.raises(NotImplementedError, match="quant_key"):
+        apply_attn_res(*args, quant_key="fp8_dynamic_token_sym")
+
+
+@pytest.fixture
+def oot_mla(monkeypatch):
+    """vllm_gaudi.attention.oot_mla imported against stubbed vllm / Habana modules."""
+
+    class _Anything(torch.nn.Module):
+
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
+    class PluggableLayer:
+
+        @classmethod
+        def register_oot(cls, name=None):
+            return lambda klass: klass
+
+    class MultiHeadLatentAttentionWrapper(torch.nn.Module):
+
+        def forward(self, positions, hidden_states, llama_4_scaling=None):
+            return "base_forward"
+
+    class _Stub(types.ModuleType):
+
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return _Anything
+
+    def stub(name, **attrs):
+        mod = _Stub(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, mod)
+        return mod
+
+    stub("vllm", )
+    stub("vllm.config", get_current_vllm_config=lambda: None)
+    stub("vllm.model_executor")
+    stub("vllm.model_executor.custom_op", PluggableLayer=PluggableLayer)
+    stub("vllm.model_executor.layers")
+    stub("vllm.model_executor.layers.attention")
+    stub("vllm.model_executor.layers.mla", MultiHeadLatentAttentionWrapper=MultiHeadLatentAttentionWrapper)
+    stub("vllm.model_executor.utils")
+    stub("vllm.forward_context")
+    stub("vllm_gaudi.extension")
+    stub("vllm_gaudi.extension.utils")
+    stub("vllm_gaudi.extension.kernels")
+    stub("vllm_gaudi.attention")
+    stub("vllm_gaudi.attention.backends")
+    stub("vllm_gaudi.attention.backends.hpu_attn")
+    monkeypatch.delitem(sys.modules, "vllm_gaudi.attention.oot_mla", raising=False)
+    import pathlib
+    spec = importlib.util.spec_from_file_location(
+        "vllm_gaudi_oot_mla_under_test",
+        pathlib.Path(__file__).resolve().parents[2] / "vllm_gaudi" / "attention" / "oot_mla.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class MergedQKVGate(torch.nn.Module):
+    """Named like vllm...linear.KimiK3MergedQKVGateLinear (the wrapper looks the class up by name)."""
+
+    def __init__(self, hidden, out):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(out, hidden))
+
+    def forward(self, x):
+        return torch.nn.functional.linear(x, self.weight), None
+
+
+MergedQKVGate.__name__ = "KimiK3MergedQKVGateLinear"
+
+
+def _bare_wrapper(oot_mla, fused):
+    hidden, q_lora, kv_lora, rope, heads, v_dim, nope = 8, 4, 6, 2, 2, 3, 5
+    w = object.__new__(oot_mla.HPUMultiHeadLatentAttentionWrapper)
+    torch.nn.Module.__init__(w)
+    w.q_lora_rank, w.kv_lora_rank, w.qk_rope_head_dim = q_lora, kv_lora, rope
+    w.num_heads, w.v_head_dim, w.qk_nope_head_dim = heads, v_dim, nope
+    w.qk_head_dim = nope + rope
+    out = q_lora + kv_lora + rope + (heads * v_dim if fused else 0)
+    w.fused_qkv_a_proj = MergedQKVGate(hidden, out) if fused else torch.nn.Linear(hidden, out)
+    w._qkv_gate_fused = fused
+    w.q_a_layernorm = torch.nn.Identity()
+    w.kv_a_layernorm = torch.nn.Identity()
+    w.q_b_proj = lambda x: (torch.ones(x.shape[0], heads * (nope + rope)), None)
+    w.rotary_emb = None
+    seen = {}
+
+    def mla_attn(q, kv_c, k_pe, output_shape):
+        seen["output_shape"] = output_shape
+        seen["k_pe_shape"] = tuple(k_pe.shape)
+        return torch.ones(output_shape)
+
+    w.mla_attn = mla_attn
+    w.o_proj = lambda x: (x, None)
+    return w, seen
+
+
+def test_hpu_mla_wrapper_fused_gate_forward_applies_the_sigmoid_gate(oot_mla):
+    wrapper, seen = _bare_wrapper(oot_mla, fused=True)
+    hidden_states = torch.randn(5, 8)
+
+    out = wrapper.forward(torch.arange(5), hidden_states)
+
+    gate = wrapper.fused_qkv_a_proj(hidden_states)[0][:, -6:]
+    assert seen["output_shape"] == (5, 6)
+    assert seen["k_pe_shape"] == (5, 1, 2)
+    torch.testing.assert_close(out, gate.sigmoid())
+
+
+def test_hpu_mla_wrapper_without_fused_gate_uses_the_base_forward(oot_mla):
+    wrapper, _ = _bare_wrapper(oot_mla, fused=False)
+
+    assert wrapper.forward(torch.arange(2), torch.randn(2, 8)) == "base_forward"
+
+
+def test_hpu_mla_wrapper_provides_the_28a5_model_hooks(oot_mla):
+    wrapper, _ = _bare_wrapper(oot_mla, fused=True)
+
+    assert wrapper.get_input_quant_key() is None
+    assert wrapper.process_weights_after_loading() is None

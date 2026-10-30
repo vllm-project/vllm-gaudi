@@ -358,3 +358,56 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             topk_indices_buffer=mla_modules.topk_indices_buffer,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
+        # vLLM 28a5fba06+ (Kimi-K3) fuses the output-gate projection into fused_qkv_a_proj
+        # (KimiK3MergedQKVGateLinear, per-rank layout [q_a | kv_a | gate]) and passes no g_proj. The class does not
+        # exist in ac7f3e11e, hence the lookup by name.
+        self._qkv_gate_fused = type(self.fused_qkv_a_proj).__name__ == "KimiK3MergedQKVGateLinear"
+
+    def get_input_quant_key(self):
+        # The quantized-activation fusion (QuantizedActivation) is a ROCm/CUDA optimization; HPU always gets
+        # plain tensors.
+        return None
+
+    def process_weights_after_loading(self) -> None:
+        # Called by KimiLinearForCausalLM.process_weights_after_loading() for every MLA wrapper (28a5fba06+).
+        # The upstream Kimi wrapper builds an AITER weight fold there; HPU has none.
+        pass
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not self._qkv_gate_fused:
+            return super().forward(positions, hidden_states, llama_4_scaling)
+
+        # Same math as amd/mla.py of 28a5fba06 without the AITER paths: split the gate off the fused A projection.
+        assert self.q_lora_rank is not None and self.q_a_layernorm is not None and self.q_b_proj is not None
+        qkv_lora, gate = self.fused_qkv_a_proj(hidden_states)[0].split(
+            [
+                self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+                self.num_heads * self.v_head_dim,
+            ],
+            dim=-1,
+        )
+        q_c, kv_lora = qkv_lora.split([self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1)
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        q_c = self.q_a_layernorm(q_c)
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+        k_pe = k_pe.unsqueeze(1)
+
+        q = self.q_b_proj(q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
+        if self.rotary_emb is not None:
+            q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(positions, q[..., self.qk_nope_head_dim:], k_pe)
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
+
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+        )
+        attn_out = attn_out * gate.sigmoid()
+        return self.o_proj(attn_out)[0]

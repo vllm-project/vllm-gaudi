@@ -1319,18 +1319,34 @@ def _patch_kimi_attn_res() -> None:
         try:
             import vllm.models.kimi_k3.amd.linear as _linear_mod
             _linear_mod.attn_res = _torch_attn_res
-            _linear_mod._apply_attn_res = lambda prefix_sum, block_residual, proj, norm, num_valid_blocks, delta=None, output_norm=None, block_write_idx=-1: _torch_attn_res(
-                prefix_sum,
-                delta,
-                block_residual,
-                norm.weight,
-                proj.weight.squeeze(0),
-                None if output_norm is None else output_norm.weight,
-                num_valid_blocks,
-                block_write_idx,
-                norm.variance_epsilon,
-                0.0 if output_norm is None else output_norm.variance_epsilon,
-            )
+
+            def _apply_attn_res_torch(prefix_sum,
+                                      block_residual,
+                                      proj,
+                                      norm,
+                                      num_valid_blocks,
+                                      delta=None,
+                                      output_norm=None,
+                                      block_write_idx=-1,
+                                      quant_key=None):
+                # vLLM 28a5fba06+ passes quant_key to fuse an fp8 activation quant into attn_res. The HPU decoder
+                # layer never asks for it (get_input_quant_key() is None), so a value here is a wiring bug.
+                if quant_key is not None:
+                    raise NotImplementedError(f"Kimi-K3 attn_res on HPU does not support quant_key={quant_key}")
+                return _torch_attn_res(
+                    prefix_sum,
+                    delta,
+                    block_residual,
+                    norm.weight,
+                    proj.weight.squeeze(0),
+                    None if output_norm is None else output_norm.weight,
+                    num_valid_blocks,
+                    block_write_idx,
+                    norm.variance_epsilon,
+                    0.0 if output_norm is None else output_norm.variance_epsilon,
+                )
+
+            _linear_mod._apply_attn_res = _apply_attn_res_torch
             _kimi_patch_installed("attn_res_linear")
         except Exception:
             _kimi_patch_failed("attn_res_linear")
@@ -1379,6 +1395,7 @@ def _patch_kimi_k3_arch() -> None:
                 positions=None,
                 intermediate_tensors=None,
                 inputs_embeds=None,
+                step=None,
                 **kwargs,
             ):
                 if input_ids is not None and input_ids.dim() == 2:
@@ -1390,6 +1407,10 @@ def _patch_kimi_k3_arch() -> None:
 
                 # imported on first use (circular import with vllm.distributed at plugin-apply time)
                 from vllm_gaudi.models.kimi_k3_kda import run_with_deferred_kda_state
+                if step is not None:
+                    # vLLM 28a5fba06+ passes `step` (5th positional argument) and reads step.layer(idx) per layer;
+                    # ac7f3e11e has no such parameter, so it is forwarded only when given.
+                    kwargs["step"] = step
                 return run_with_deferred_kda_state(
                     self,
                     orig_linear_model_forward,
