@@ -187,6 +187,9 @@ class HPUKimiK3Mxfp4MoEMethod(Mxfp4MoEMethod):
     """
 
     MXFP4_BLOCK_SIZE = HPUGptOssMxfp4MoEMethod.MXFP4_BLOCK_SIZE
+    # The upstream class sets this to True (loader hands over pre-processed weights); the HPU path loads the raw
+    # checkpoint tensors and repacks them in process_weights_after_loading.
+    supports_pre_processed_weights = False
 
     def __init__(self, moe, activation_key=None):
         super(Mxfp4MoEMethod, self).__init__(moe)
@@ -210,6 +213,11 @@ class HPUKimiK3Mxfp4MoEMethod(Mxfp4MoEMethod):
         return False
 
     @property
+    def supports_eplb(self) -> bool:
+        # vLLM EPLB is not wired into the HPU runner
+        return False
+
+    @property
     def skip_forward_padding(self) -> bool:
         return False
 
@@ -218,8 +226,14 @@ class HPUKimiK3Mxfp4MoEMethod(Mxfp4MoEMethod):
         return False
 
     def maybe_roundup_sizes(self, hidden_size, intermediate_size_per_partition, act_dtype, moe_parallel_config):
-        # the CUDA rounding is keyed on the backend, which HPU does not have
-        return hidden_size, intermediate_size_per_partition
+        # Skip Mxfp4MoEMethod's own step: its rounding is keyed on ``mxfp4_backend``, which HPU does not have. The
+        # FusedMoEMethodBase contract (the next class in the MRO) still applies.
+        return super(Mxfp4MoEMethod, self).maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
 
     def process_weights_after_loading(self, layer) -> None:
         HPUGptOssMxfp4MoEMethod.process_weights_after_loading(self, layer)
