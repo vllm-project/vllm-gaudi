@@ -95,7 +95,11 @@ Currently:
 import functools
 import gc
 import inspect
+import os
 from typing import Callable, Optional
+
+from vllm_gaudi.kimi_k3_gate import (KIMI_K3_ARCHITECTURES, current_config_is_kimi_k3, is_kimi_k3_model_config,
+                                     kimi_k3_seen, mark_kimi_k3_seen)
 
 import torch
 
@@ -445,6 +449,44 @@ def _patch_mamba_bind_kv_cache() -> None:
     MambaBase.bind_kv_cache = _hpu_mamba_bind_kv_cache
 
 
+_UPSTREAM_MLA_BIND_KV_CACHE = None
+
+
+def _hpu_mla_bind_kv_cache(self, kv_cache) -> None:
+    """Store the HPU per-layer KV-cache tuple unchanged; tensors go through the upstream method.
+
+    Gated by data type, not by model: workers call this without a config context.
+
+    Upstream MLAAttention.bind_kv_cache executes `self.kv_cache = kv_cache.squeeze(1)`,
+    assuming a single 4D CUDA tensor [B, 1, N, C]. On HPU, kv_cache is allocated as a
+    tuple (key_cache, value_cache, key_scales, value_scales), which raises
+    `AttributeError: 'tuple' object has no attribute 'squeeze'`.
+    """
+    if isinstance(kv_cache, (tuple, list)):
+        self.kv_cache = tuple(kv_cache)
+    elif _UPSTREAM_MLA_BIND_KV_CACHE is not None:
+        _UPSTREAM_MLA_BIND_KV_CACHE(self, kv_cache)
+    else:
+        self.kv_cache = kv_cache.squeeze(1)
+
+
+def _patch_mla_bind_kv_cache() -> None:
+    """Install the HPU-safe ``MLAAttention.bind_kv_cache`` replacement."""
+    try:
+        from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    except ImportError:
+        return
+
+    upstream = getattr(MLAAttention, "bind_kv_cache", None)
+    if upstream is None or upstream is _hpu_mla_bind_kv_cache:
+        return
+
+    global _UPSTREAM_MLA_BIND_KV_CACHE
+    _UPSTREAM_MLA_BIND_KV_CACHE = upstream
+    MLAAttention.bind_kv_cache = _hpu_mla_bind_kv_cache
+    MLAAttention._patched_hpu_bind = True
+
+
 def _hpu_get_num_layers_by_block_type(self, parallel_config, block_type="attention"):
     """HPU-safe replacement for ``ModelConfig.get_num_layers_by_block_type``.
 
@@ -496,7 +538,26 @@ def _hpu_get_num_layers_by_block_type(self, parallel_config, block_type="attenti
             else:
                 return sum(t == block_type for t in layer_types_value[start:end])
 
-        if layers_block_type_value is None and attn_type_list is None and layer_types_value is None:
+        # Hybrid model Kimi-K3 / Kimi Linear
+        linear_attn_config = None
+        if is_kimi_k3_model_config(self):
+            linear_attn_config = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(
+                self.hf_config, "linear_attn_config", None)
+        if linear_attn_config is not None:
+            if isinstance(linear_attn_config, dict):
+                full_attn = set(linear_attn_config.get("full_attn_layers", []))
+                kda = set(linear_attn_config.get("kda_layers", []))
+            else:
+                full_attn = set(getattr(linear_attn_config, "full_attn_layers", []))
+                kda = set(getattr(linear_attn_config, "kda_layers", []))
+            if block_type == "attention":
+                return sum((idx + 1) in full_attn for idx in range(start, end))
+            elif block_type == "linear_attention":
+                return sum((idx + 1) in kda for idx in range(start, end))
+            else:
+                return 0
+
+        if layers_block_type_value is None and attn_type_list is None and layer_types_value is None and linear_attn_config is None:
             raise ValueError("The model is an hybrid without a layers_block_type or an "
                              "attn_type_list, or a layer_types in the hf_config, "
                              f"cannot determine the num of {block_type} layers")
@@ -520,8 +581,9 @@ def _patch_get_num_layers_by_block_type() -> None:
 
     if "get_num_layers_by_block_type" not in source or "layers_block_type" not in source:
         return  # Method shape changed — do not risk an incompatible override.
-    if "_GRANITE_LEGACY_LAYER_ALIASES" in source or "normalized_block_type" in source:
-        return  # Already normalizes (e.g. PR #47634 merged).
+    if "linear_attn_config" in source and ("_GRANITE_LEGACY_LAYER_ALIASES" in source
+                                           or "normalized_block_type" in source):
+        return  # Already normalizes and supports linear_attn_config.
 
     ModelConfig.get_num_layers_by_block_type = _hpu_get_num_layers_by_block_type
 
@@ -845,6 +907,827 @@ def _patch_sdpa_attention_forward() -> None:
     _ensure_fsdpa_cached()
 
 
+_KIMI_PATCHES_INSTALLED: list[str] = []
+_KIMI_PATCHES_FAILED: dict[str, str] = {}
+
+
+def _kimi_patch_logger():
+    """Logger under the 'vllm.' namespace (loggers outside it are silent), created lazily."""
+    import logging
+    return logging.getLogger("vllm.gaudi.kimi_patches")
+
+
+def _kimi_patch_failed(name: str) -> None:
+    """Call from an ``except`` block: remember the failed Kimi-K3 patch.
+
+    The patches are installed in several attempts (plugin apply, then ``load_general_plugins``) and early attempts
+    legitimately hit partially initialised vllm modules, so a failure is only logged at DEBUG (with traceback).
+    ``_kimi_patches_log_failed`` warns about the patches that are still missing after the final attempt.
+    """
+    import sys
+    exc = sys.exc_info()[1]
+    # A failed attempt invalidates an earlier "installed": it may have patched a module object that a failed
+    # circular import later dropped from sys.modules, so the summary must not list the patch.
+    if name in _KIMI_PATCHES_INSTALLED:
+        _KIMI_PATCHES_INSTALLED.remove(name)
+    _KIMI_PATCHES_FAILED[name] = f"{type(exc).__name__}: {exc}" if exc is not None else "unknown error"
+    _kimi_patch_logger().debug("Kimi-K3 patch '%s' failed in this attempt", name, exc_info=True)
+
+
+def _kimi_patch_ok(name: str) -> None:
+    """Clear an earlier failure of a patch that is not listed in the 'installed' summary."""
+    _KIMI_PATCHES_FAILED.pop(name, None)
+
+
+def _kimi_patch_installed(name: str) -> None:
+    _kimi_patch_ok(name)
+    if name not in _KIMI_PATCHES_INSTALLED:
+        _KIMI_PATCHES_INSTALLED.append(name)
+
+
+def _kimi_patch_not_applicable(name: str) -> None:
+    """The patch targets something this vllm build does not have: neither installed nor missing."""
+    _KIMI_PATCHES_FAILED.pop(name, None)
+    _kimi_patch_logger().debug("Kimi-K3 patch '%s' is not applicable here", name, exc_info=True)
+
+
+def _kimi_patches_log_installed() -> None:
+    _kimi_patch_logger().info("Kimi-K3 patches installed: %s", ", ".join(_KIMI_PATCHES_INSTALLED))
+
+
+def _kimi_patches_log_failed(only=None) -> None:
+    """One WARNING (no traceback) per patch that is still missing and was not reported yet.
+
+    ``only`` restricts the report to the patches that matter to the calling process.
+    """
+    for name, reason in list(_KIMI_PATCHES_FAILED.items()):
+        if name in _KIMI_PATCHES_WARNED or (only is not None and name not in only):
+            continue
+        _KIMI_PATCHES_WARNED.add(name)
+        _kimi_patch_logger().warning("Kimi-K3 patch '%s' was not installed (%s)", name, reason)
+
+
+_KIMI_PATCHES_REPORTED = False
+_KIMI_CONFIG_REPORTED = False
+_KIMI_PATCHES_WARNED: set[str] = set()
+# vllm.models.kimi_k3 holds all K3 classes (KimiK3ForConditionalGeneration, KimiLinearForCausalLM, MTP, DSpark);
+# Kimi-VL, Kimi-K2.5 and Kimi-Audio live in vllm.model_executor.models.kimi_* and are not K3.
+_KIMI_K3_MODULE = "vllm.models.kimi_k3"
+_KIMI_K3_ARCHITECTURES = KIMI_K3_ARCHITECTURES
+# Patches that act in the process which builds the config (APIServer, EngineCore), not only in model workers.
+_KIMI_CONFIG_PATCHES = ("hybrid_config", "k3_arch")
+
+
+def _is_kimi_k3_model(model) -> bool:
+    return any(c.__module__.startswith(_KIMI_K3_MODULE) for c in type(model).__mro__)
+
+
+def _is_kimi_k3_config(model_config) -> bool:
+    return is_kimi_k3_model_config(model_config)
+
+
+def _current_config_is_kimi_k3() -> bool:
+    """True when the vllm config being built/used right now is for a Kimi-K3 model (False when there is none)."""
+    return current_config_is_kimi_k3()
+
+
+def _optional_runner_absent(exc: BaseException, mod_name: str, cls_name: str) -> bool:
+    """True when the ROCm-only latent MoE runner does not exist in this vllm build (not a failure on HPU)."""
+    if cls_name != "ROCmLatentMoERunner":
+        return False
+    return (isinstance(exc, ModuleNotFoundError) and exc.name == mod_name) or isinstance(exc, AttributeError)
+
+
+def _kimi_patches_live() -> dict[str, bool]:
+    """Whether the patches that matter to a model worker are on the objects the model will really use.
+
+    The bookkeeping lists say what an attempt did, not what is live: an early attempt can patch a module object that
+    a failed circular import later drops from ``sys.modules`` (Jenkins #983 listed ``kda_forward`` as installed and
+    also warned that it was not, and the upstream KDA forward ran). So look the classes up in ``sys.modules``.
+    """
+    import sys
+
+    def attr(mod_name, *names):
+        obj = sys.modules.get(mod_name)
+        for name in names:
+            obj = getattr(obj, name, None)
+        return obj
+
+    pkg = "vllm.models.kimi_k3.amd"
+    try:
+        from vllm_gaudi.ops.hpu_kda_pytorch import attn_res_torch
+    except Exception:
+        attn_res_torch = None
+    kda_cls = attr(f"{pkg}.kda", "KimiK3DeltaAttention")
+    return {
+        "kda_forward": bool(getattr(getattr(kda_cls, "forward", None), "_hpu_kda_forward", False)),
+        "attn_res_op": attn_res_torch is not None and attr(f"{pkg}.ops.attn_res", "attn_res") is attn_res_torch,
+        "attn_res_linear": bool(getattr(attr(f"{pkg}.linear", "_apply_attn_res"), "_hpu_attn_res", False)),
+        "linear_weights": bool(vars(attr(f"{pkg}.linear", "KimiMoE") or object).get("_patched_weights", False)),
+    }
+
+
+def ensure_kimi_k3_patches(model_config) -> None:
+    """Retry the failed Kimi-K3 patches right before the model is built, and fail loudly if kda_forward is not live.
+
+    The patches are attempted at plugin load, when ``vllm.models`` may still be partially initialised (circular
+    import: "cannot import name 'kimi_k3' from 'vllm.models'"), and ``load_general_plugins`` is wrapped only once
+    per process, so there can be a single deferred attempt. By the time the model runner builds the model the
+    import chain is complete, so the patches are retried here. The decision uses the live classes (see
+    ``_kimi_patches_live``), not the bookkeeping lists. Without a live ``kda_forward`` the upstream KDA forward would
+    run on HPU and crash in a worker (``assert isinstance(attn_metadata_raw, dict)``), so that case raises.
+    Non-Kimi-K3 configs are not touched.
+    """
+    if not _is_kimi_k3_config(model_config):
+        return
+    if not _KIMI_PATCHES_FAILED and all(_kimi_patches_live().values()):
+        return
+    import importlib
+    try:
+        importlib.import_module("vllm.models.kimi_k3")
+    except Exception as e:  # reported below through the failed list
+        _kimi_patch_logger().debug("Kimi-K3 package import failed before the patch retry: %s", e)
+    _patch_kimi_k3_arch()
+    # Idempotent (marked) patches that can have failed in an early attempt. _patch_compressed_tensors_mxfp4 is only
+    # re-run when its class patch failed: re-running it after a success would wrap its own wrappers.
+    _patch_kimi_k3_hybrid_config()
+    _patch_mla_prefill_selector()
+    _patch_latent_moe_runner_forward()
+    if "compressed_tensors_mxfp4" not in _KIMI_PATCHES_INSTALLED:
+        _patch_compressed_tensors_mxfp4()
+
+    live = _kimi_patches_live()
+    for name, ok in live.items():
+        if not ok:
+            if name in _KIMI_PATCHES_INSTALLED:
+                _KIMI_PATCHES_INSTALLED.remove(name)
+            _KIMI_PATCHES_FAILED.setdefault(name, "not live on the vllm.models.kimi_k3 classes after the retry")
+    log = _kimi_patch_logger()
+    log.info("Kimi-K3 patches installed (retry before get_model): %s", ", ".join(_KIMI_PATCHES_INSTALLED))
+    missing = [name for name, ok in live.items() if not ok]
+    if missing:
+        log.warning("Kimi-K3 patches not live after the retry: %s", ", ".join(missing))
+    if not live["kda_forward"]:
+        raise RuntimeError("Kimi-K3 patch 'kda_forward' is not live, the upstream KDA forward cannot run on HPU "
+                           f"(failed patches: {dict(_KIMI_PATCHES_FAILED)})")
+
+
+def report_kimi_patches(model) -> None:
+    """Log the Kimi-K3 patch status once per process, after the model has been built.
+
+    The patches are installed in several attempts, in every process (APIServer, EngineCore, workers), and an
+    attempt cannot tell whether it is the last one, so nothing above DEBUG is logged while installing. The model
+    runner calls this right after ``get_model``: only a process that really built a Kimi-K3 model reports, once,
+    with the INFO summary and one WARNING per patch that is still missing.
+    """
+    global _KIMI_PATCHES_REPORTED
+    if _KIMI_PATCHES_REPORTED or not _is_kimi_k3_model(model):
+        return
+    _KIMI_PATCHES_REPORTED = True
+    _kimi_patches_log_installed()
+    _kimi_patches_log_failed()
+
+
+def report_kimi_patches_on_load_failure(model_config) -> None:
+    """``get_model`` raised: no model exists, so say which patches are missing (the likely cause) before re-raising."""
+    global _KIMI_PATCHES_REPORTED
+    if _KIMI_PATCHES_REPORTED or not _is_kimi_k3_config(model_config):
+        return
+    _KIMI_PATCHES_REPORTED = True
+    _kimi_patches_log_failed()
+
+
+def _report_kimi_config_patches(model_config) -> None:
+    """Warn once per process about missing config-side patches, right after a Kimi-K3 ModelConfig was built.
+
+    APIServer and EngineCore never build the model, but they build the config, which needs ``k3_arch`` (architecture
+    resolution) and ``hybrid_config`` (this hook). The patched ``ModelConfig.__post_init__`` is a definite late
+    point: the patches are installed by then, so a name still in the failed list is really missing. Patches that
+    only matter to model workers (kda_forward, attn_res_*, ...) are left to ``report_kimi_patches``.
+    """
+    global _KIMI_CONFIG_REPORTED
+    if _KIMI_CONFIG_REPORTED or not _is_kimi_k3_config(model_config):
+        return
+    _KIMI_CONFIG_REPORTED = True
+    _kimi_patches_log_failed(only=_KIMI_CONFIG_PATCHES)
+
+
+def _patch_kimi_kda() -> None:
+    """Pure PyTorch fallback for KDA on HPU (disabling GPU Triton kernels and dict metadata assertion).
+
+    Each target module is imported and patched on its own, so one that fails to import does not skip the others
+    (every failure is recorded under its own name and logged through the ``vllm.*`` kimi_patches logger).
+    """
+    import importlib
+
+    # The fused KDA checks query vllm.platforms.rocm (amdsmi), which fails on HPU. They are the only users of
+    # that module in kimi_k3/amd, so answer False where they are defined and where amd.kda imported them by name.
+    all_fused_ok = True
+    chunk, decode = "is_fused_kda_chunk_supported", "is_fused_kda_decode_supported"
+    targets = {"ops.kda_chunk": [chunk], "ops.kda_decode": [decode], "kda": [chunk, decode]}
+    for short, attrs in targets.items():
+        name = f"kda_fused_checks[{short}]"
+        try:
+            mod = importlib.import_module(f"vllm.models.kimi_k3.amd.{short}")
+            for attr in attrs:
+                setattr(mod, attr, lambda *args, **kwargs: False)
+            _kimi_patch_ok(name)
+        except Exception:
+            all_fused_ok = False
+            _kimi_patch_failed(name)
+    if all_fused_ok:
+        _kimi_patch_installed("kda_fused_checks")
+
+    def _kda_forward(self, hidden_states, positions=None):
+        # Imported on first use: importing vllm_gaudi.models here (plugin-apply time) hits a circular
+        # import with vllm.distributed in processes where it is still being initialised.
+        from vllm_gaudi.models.kimi_k3_kda import hpu_kda_forward
+        return hpu_kda_forward(self, hidden_states, positions)
+
+    _kda_forward._hpu_kda_forward = True  # checked by _kimi_patches_live on the class that the model will use
+
+    try:
+        import vllm.models.kimi_k3.amd.kda as _amd_kda
+        if hasattr(_amd_kda, "KimiK3DeltaAttention"):
+            _amd_kda.KimiK3DeltaAttention.forward = _kda_forward
+            _amd_kda.KimiK3DeltaAttention._forward = lambda *args, **kwargs: None
+        if hasattr(_amd_kda, "GatedDeltaNetAttention"):
+            _amd_kda.GatedDeltaNetAttention.forward = _kda_forward
+            _amd_kda.GatedDeltaNetAttention._forward = lambda *args, **kwargs: None
+        _kimi_patch_installed("kda_forward")
+
+        # Only where the Kimi-K3 amd kda module exists: without it this is a vLLM without Kimi-K3, and the GDN
+        # attention then belongs to Kimi-Linear, which must keep its own forward.
+        try:
+            import vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn as _gdn_mod
+            _gdn_mod.KimiGatedDeltaNetAttention.forward = _kda_forward
+            _gdn_mod.KimiGatedDeltaNetAttention._forward = lambda *args, **kwargs: None
+            _kimi_patch_installed("kimi_gdn_forward")
+        except Exception:
+            _kimi_patch_failed("kimi_gdn_forward")
+    except Exception:
+        _kimi_patch_failed("kda_forward")
+
+
+def _patch_mla_prefill_selector() -> None:
+    """Return _DummyPrefillBackend for MLA prefill on HPU for Kimi-K3 configs; others keep the original selector."""
+    try:
+        import vllm.v1.attention.backends.mla.prefill.selector as sel_mod
+        from vllm_gaudi.attention.oot_mla import _DummyPrefillBackend
+        orig_fn = getattr(sel_mod, "get_mla_prefill_backend", None)
+        # re-run (retry before get_model): wrap the upstream selector again, not our own wrapper
+        orig_fn = getattr(orig_fn, "_hpu_orig_selector", orig_fn)
+
+        def hpu_get_prefill(vllm_config):
+            from vllm.platforms import current_platform
+            if orig_fn and not _is_kimi_k3_config(getattr(vllm_config, "model_config", None)):
+                return orig_fn(vllm_config)
+            if getattr(current_platform, "device_type", None) == "hpu" or getattr(current_platform, "device_name",
+                                                                                  None) == "hpu":
+                return _DummyPrefillBackend
+            if orig_fn:
+                return orig_fn(vllm_config)
+            return _DummyPrefillBackend
+
+        hpu_get_prefill._hpu_orig_selector = orig_fn
+        sel_mod.get_mla_prefill_backend = hpu_get_prefill
+        try:
+            import vllm.model_executor.layers.attention.mla_attention as mla_mod
+            mla_mod.get_mla_prefill_backend = hpu_get_prefill
+            _kimi_patch_ok("mla_prefill_selector_attention_module")
+        except Exception:
+            _kimi_patch_failed("mla_prefill_selector_attention_module")
+        _kimi_patch_installed("mla_prefill_selector")
+    except Exception:
+        _kimi_patch_failed("mla_prefill_selector")
+
+
+def _patch_kimi_k3_hybrid_config() -> None:
+    """Populate layer_types from linear_attn_config for hybrid models like Kimi-K3 and disable expert intermediate padding on EP."""
+    try:
+        from vllm.config import ModelConfig
+        orig_post_init = getattr(ModelConfig, "__post_init__", None)
+        if orig_post_init is not None and not getattr(orig_post_init, "_hpu_kimi_post_init", False):
+
+            def _hpu_post_init(self, *args, **kwargs):
+                orig_post_init(self, *args, **kwargs)
+                _report_kimi_config_patches(self)
+                if _is_kimi_k3_config(self):
+                    mark_kimi_k3_seen()
+                # Ensure KimiMoE does not pad moe_intermediate_size from 3072 to 4096 under EP (saves ~30 GB memory per card)
+                if _is_kimi_k3_config(self):
+                    for cfg_obj in (getattr(self, "hf_text_config", None), getattr(self, "hf_config", None)):
+                        if cfg_obj is not None:
+                            setattr(cfg_obj, "min_moe_intermediate_per_partition", 1)
+                lac = None
+                if _is_kimi_k3_config(self):
+                    lac = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(
+                        self.hf_config, "linear_attn_config", None)
+                if lac is not None and not getattr(self.hf_text_config, "layer_types", None):
+                    full_set = set(
+                        lac.get("full_attn_layers", []) if isinstance(lac, dict
+                                                                      ) else getattr(lac, "full_attn_layers", []))
+                    num_layers = getattr(self.hf_text_config, "num_hidden_layers", 93)
+                    l_types = [
+                        "full_attention" if (i + 1) in full_set else "linear_attention" for i in range(num_layers)
+                    ]
+                    self.hf_text_config.layer_types = l_types
+                    if hasattr(self.hf_config, "text_config"):
+                        self.hf_config.text_config.layer_types = l_types
+
+            _hpu_post_init._hpu_kimi_post_init = True
+            ModelConfig.__post_init__ = _hpu_post_init
+        _kimi_patch_ok("hybrid_config")
+    except Exception:
+        _kimi_patch_failed("hybrid_config")
+
+
+def _patch_moe_runner_delegation() -> None:
+    """Delegate missing attribute lookups on MoERunner to routed_experts, for Kimi-K3 runners only.
+
+    The patch is installed on the classes for every model (load_general_plugins runs before any ModelConfig exists),
+    so the decision is made per runner: ``hasattr(runner, name)`` must stay False for the attributes only
+    ``routed_experts`` has, or any other model's ``register_parameter`` on the runner raises
+    ``KeyError: attribute '...' already exists``. The flag is set when the runner is built, where the current vllm
+    config is that of the model being built; runner classes defined in vllm.models.kimi_k3 always delegate.
+    """
+    for mod_name, cls_name in [
+        ("vllm.model_executor.layers.fused_moe.runner.moe_runner", "MoERunner"),
+        ("vllm.models.kimi_k3.amd.latent_moe_runner", "ROCmLatentMoERunner"),
+    ]:
+        try:
+            mod = __import__(mod_name, fromlist=[cls_name])
+            cls = getattr(mod, cls_name)
+            if getattr(cls, "_patched_delegation", False):
+                # Already patched, on this class or (ROCmLatentMoERunner subclasses MoERunner) on a base class that
+                # the lookup reaches by inheritance: covered. Record it so that it clears an earlier failed attempt.
+                _kimi_patch_installed(f"moe_runner_delegation[{cls_name}]")
+                if "_patched_delegation" not in vars(cls):
+                    _kimi_patch_logger().debug("Kimi-K3 patch 'moe_runner_delegation[%s]' is covered by a base class",
+                                               cls_name)
+                continue
+            orig_getattr = getattr(cls, "__getattr__", None)
+            orig_init = cls.__init__
+
+            def _make_init(og_init):
+
+                @functools.wraps(og_init)
+                def _init(self, *args, **kwargs):
+                    og_init(self, *args, **kwargs)
+                    self.__dict__["_kimi_k3_delegation"] = _current_config_is_kimi_k3() or any(
+                        c.__module__.startswith(_KIMI_K3_MODULE) for c in type(self).__mro__)
+
+                return _init
+
+            def _make_getattr(og_get, target_cls):
+
+                def _getattr(self, name: str):
+                    try:
+                        if og_get:
+                            return og_get(self, name)
+                        return super(target_cls, self).__getattr__(name)
+                    except AttributeError:
+                        # __dict__ lookup: no recursion into __getattr__ while the runner is still being built
+                        if not self.__dict__.get("_kimi_k3_delegation", False):
+                            raise
+                        routed = getattr(self, "routed_experts", None)
+                        if routed is not None and hasattr(routed, name):
+                            return getattr(routed, name)
+                        raise
+
+                return _getattr
+
+            cls.__init__ = _make_init(orig_init)
+            cls.__getattr__ = _make_getattr(orig_getattr, cls)
+            cls._patched_delegation = True
+            _kimi_patch_installed(f"moe_runner_delegation[{cls_name}]")
+        except Exception as exc:
+            name = f"moe_runner_delegation[{cls_name}]"
+            # The ROCm runner is optional: a vllm build without it is not a failure.
+            if _optional_runner_absent(exc, mod_name, cls_name):
+                _kimi_patch_not_applicable(name)
+            else:
+                _kimi_patch_failed(name)
+
+
+def _patch_latent_moe_runner_forward() -> None:
+    """Run the Kimi-K3 latent-MoE runner through the inline HPU MoE path (no opaque custom op).
+
+    ``ROCmLatentMoERunner._fused_forward`` calls ``torch.ops.vllm.moe_forward_shared`` which the HPU compile
+    backend executes eagerly ("Fallback required"), breaking the graph at every MoE layer. Replace it with the
+    dp_size==1 inline implementation used for the other MoE models. Disable with HPU_FUSED_MOE=0.
+    """
+    from vllm_gaudi.extension.logger import logger as init_logger
+
+    logger = init_logger()
+    try:
+        from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
+        from vllm_gaudi.ops.hpu_fused_moe import _MOE_COMPILE, patched_latent_moe_fused_forward
+    except Exception as exc:
+        logger.warning_once("Kimi-K3 latent MoE runner patch skipped, import failed: %r", exc)
+        _kimi_patch_failed("latent_moe_runner_forward")
+        return
+    _kimi_patch_ok("latent_moe_runner_forward")
+    if not _MOE_COMPILE:
+        logger.warning_once("Kimi-K3 latent MoE runner patch skipped because HPU_FUSED_MOE=0")
+        return
+    if getattr(ROCmLatentMoERunner, "_patched_hpu_fused_forward", False):
+        return
+
+    upstream_fused_forward = ROCmLatentMoERunner._fused_forward
+
+    def _hpu_fused_forward(self, hidden_states, router_logits, input_ids, shared_experts_input):
+        if self.moe_config.dp_size != 1 or getattr(self.moe_config, "pcp_size", 1) > 1:
+            return upstream_fused_forward(self, hidden_states, router_logits, input_ids, shared_experts_input)
+        return patched_latent_moe_fused_forward(self, hidden_states, router_logits, input_ids, shared_experts_input)
+
+    ROCmLatentMoERunner._fused_forward = _hpu_fused_forward
+    ROCmLatentMoERunner._patched_hpu_fused_forward = True
+    logger.debug("Patched %s._fused_forward with the inline HPU MoE path, pid %d", ROCmLatentMoERunner.__name__,
+                 os.getpid())
+
+
+def _configure_situ_aliases() -> str:
+    """Validate HPU_KIMI_SITU_IMPL and return the effective implementation (debug note for "silu").
+
+    SiTU (Kimi-K3 routed experts): the fused Habana op only knows silu/gelu. "exact" (default) computes the
+    experts unfused (ops/hpu_situ_moe.py); "silu" maps "situ" to silu in the activation normalizers
+    (situ_fused_alias, evaluated at use time: no module is imported here because the plugin load is circular). An
+    invalid value is logged as an error and treated as "exact"; this runs outside of the broad try/except of
+    the other Kimi patches so that it can neither be skipped by nor skip them.
+    """
+    import vllm_gaudi.envs as gaudi_envs
+    from vllm_gaudi.extension.logger import logger as _ext_logger
+    from vllm_gaudi.ops.hpu_situ_moe import situ_impl_or_exact
+
+    situ_impl = situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL, _ext_logger().error)
+    if situ_impl == "silu":
+        _ext_logger().debug("HPU_KIMI_SITU_IMPL=silu: the Kimi-K3 routed experts use silu instead of SiTU "
+                            "(beta*tanh(gate/beta)*sigmoid(gate)*up); model outputs are APPROXIMATE")
+    return situ_impl
+
+
+def _patch_kimi_linear_weights() -> None:
+    """Ensure KimiMoE safely accesses w13_weight and w2_weight without evaluating bool(Tensor)."""
+    _configure_situ_aliases()
+    try:
+        import vllm.models.kimi_k3.amd.linear as k3_linear
+
+        orig_moe_init = getattr(k3_linear.KimiMoE, "__init__", None)
+        if orig_moe_init is not None and not getattr(k3_linear.KimiMoE, "_patched_weights", False):
+
+            def _safe_moe_init(self, *args, **kwargs):
+                try:
+                    orig_moe_init(self, *args, **kwargs)
+                except AttributeError as e:
+                    if "w13_weight_packed" in str(e) or "w2_weight_packed" in str(e):
+                        target = getattr(self.experts, "routed_experts", self.experts)
+                        w13_candidates = (
+                            getattr(target, "w13_weight", None),
+                            getattr(target, "w13_weight_packed", None),
+                            getattr(self.experts, "w13_weight", None),
+                            getattr(self.experts, "w13_weight_packed", None),
+                        )
+                        w13_w = next((w for w in w13_candidates if w is not None), None)
+                        w2_candidates = (
+                            getattr(target, "w2_weight", None),
+                            getattr(target, "w2_weight_packed", None),
+                            getattr(self.experts, "w2_weight", None),
+                            getattr(self.experts, "w2_weight_packed", None),
+                        )
+                        w2_w = next((w for w in w2_candidates if w is not None), None)
+                        if w13_w is not None and hasattr(w13_w, "data"):
+                            w13_w.data.zero_()
+                        if w2_w is not None and hasattr(w2_w, "data"):
+                            w2_w.data.zero_()
+                        moe_cfg = getattr(self.experts, "moe_config", None) or getattr(target, "moe_config", None)
+                        if moe_cfg is not None and hasattr(self, "padded_moe_intermediate_size"):
+                            moe_intermediate_size = getattr(moe_cfg, "intermediate_size_per_partition", None)
+                            if moe_intermediate_size:
+                                moe_cfg.intermediate_size_per_partition_unpadded = (moe_intermediate_size //
+                                                                                    self.tp_size)
+                    else:
+                        raise
+
+            k3_linear.KimiMoE.__init__ = _safe_moe_init
+            k3_linear.KimiMoE._patched_weights = True
+
+        _kimi_patch_installed("linear_weights")
+    except Exception:
+        _kimi_patch_failed("linear_weights")
+
+
+def _patch_kimi_attn_res() -> None:
+    """Pure PyTorch fallback for Kimi-K3 attn_res when Triton is disabled on HPU."""
+    try:
+        from vllm_gaudi.ops.hpu_kda_pytorch import attn_res_torch as _torch_attn_res
+
+        try:
+            import vllm.models.kimi_k3.amd.ops.attn_res as _attn_res_mod
+            _attn_res_mod.attn_res = _torch_attn_res
+            _kimi_patch_installed("attn_res_op")
+        except Exception:
+            _kimi_patch_failed("attn_res_op")
+        try:
+            import vllm.models.kimi_k3.amd.linear as _linear_mod
+            _linear_mod.attn_res = _torch_attn_res
+
+            def _apply_attn_res_torch(prefix_sum,
+                                      block_residual,
+                                      proj,
+                                      norm,
+                                      num_valid_blocks,
+                                      delta=None,
+                                      output_norm=None,
+                                      block_write_idx=-1,
+                                      quant_key=None):
+                # vLLM 28a5fba06+ passes quant_key to fuse an fp8 activation quant into attn_res. The HPU decoder
+                # layer never asks for it (get_input_quant_key() is None), so a value here is a wiring bug.
+                if quant_key is not None:
+                    raise NotImplementedError(f"Kimi-K3 attn_res on HPU does not support quant_key={quant_key}")
+                return _torch_attn_res(
+                    prefix_sum,
+                    delta,
+                    block_residual,
+                    norm.weight,
+                    proj.weight.squeeze(0),
+                    None if output_norm is None else output_norm.weight,
+                    num_valid_blocks,
+                    block_write_idx,
+                    norm.variance_epsilon,
+                    0.0 if output_norm is None else output_norm.variance_epsilon,
+                )
+
+            _apply_attn_res_torch._hpu_attn_res = True
+            _linear_mod._apply_attn_res = _apply_attn_res_torch
+            _kimi_patch_installed("attn_res_linear")
+        except Exception:
+            _kimi_patch_failed("attn_res_linear")
+        _kimi_patch_ok("attn_res")
+    except Exception:
+        _kimi_patch_failed("attn_res")
+
+
+def _patch_kimi_k3_arch() -> None:
+    """Route Kimi-K3 models to the platform-independent AMD implementation on HPU."""
+    try:
+        _patch_kimi_kda()
+        _patch_moe_runner_delegation()
+        _patch_kimi_attn_res()
+        _patch_kimi_linear_weights()
+        _patch_mla_bind_kv_cache()
+        import vllm.models.kimi_k3 as k3_pkg
+        import vllm.models.kimi_k3.amd.linear as _amd_linear
+        import vllm.models.kimi_k3.amd.mla as _amd_mla
+        import vllm.models.kimi_k3.amd.model as _amd_model
+        import vllm.models.kimi_k3.amd.mtp as _amd_mtp
+        from vllm_gaudi.attention.oot_mla import HPUMultiHeadLatentAttentionWrapper
+
+        _amd_linear.KimiK3MultiHeadLatentAttentionWrapper = HPUMultiHeadLatentAttentionWrapper
+        _amd_mla.KimiK3MultiHeadLatentAttentionWrapper = HPUMultiHeadLatentAttentionWrapper
+
+        k3_pkg.KimiLinearForCausalLM = _amd_linear.KimiLinearForCausalLM
+        k3_pkg.KimiK3ForConditionalGeneration = _amd_model.KimiK3ForConditionalGeneration
+        k3_pkg.KimiK3MTP = _amd_mtp.KimiK3MTP
+
+        from vllm.model_executor.models.registry import ModelRegistry
+        ModelRegistry.register_model("KimiLinearForCausalLM", _amd_linear.KimiLinearForCausalLM)
+        ModelRegistry.register_model("KimiK3ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
+        ModelRegistry.register_model("KimiK3MTP", _amd_mtp.KimiK3MTP)
+        _kimi_patch_installed("model_registration")
+
+        # Monkey-patch KimiLinearModel.forward to ensure tokens/positions are 1D/2D
+        # so block_residual is allocated with shape [num_tokens, attn_res_block_num, hidden_size].
+        orig_linear_model_forward = getattr(_amd_linear.KimiLinearModel, "forward", None)
+        if orig_linear_model_forward is not None and not getattr(_amd_linear.KimiLinearModel, "_patched_hpu_tokens",
+                                                                 False):
+
+            def _safe_kimi_linear_model_forward(
+                self,
+                input_ids=None,
+                positions=None,
+                intermediate_tensors=None,
+                inputs_embeds=None,
+                step=None,
+                **kwargs,
+            ):
+                if input_ids is not None and input_ids.dim() == 2:
+                    input_ids = input_ids.view(-1)
+                if inputs_embeds is not None and inputs_embeds.dim() == 3:
+                    inputs_embeds = inputs_embeds.view(-1, inputs_embeds.size(-1))
+                if positions is not None and positions.dim() == 2:
+                    positions = positions.view(-1)
+
+                # imported on first use (circular import with vllm.distributed at plugin-apply time)
+                from vllm_gaudi.models.kimi_k3_kda import run_with_deferred_kda_state
+                if step is not None:
+                    # vLLM 28a5fba06+ passes `step` (5th positional argument) and reads step.layer(idx) per layer;
+                    # ac7f3e11e has no such parameter, so it is forwarded only when given.
+                    kwargs["step"] = step
+                return run_with_deferred_kda_state(
+                    self,
+                    orig_linear_model_forward,
+                    self,
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **kwargs,
+                )
+
+            _amd_linear.KimiLinearModel.forward = _safe_kimi_linear_model_forward
+            _amd_linear.KimiLinearModel._patched_hpu_tokens = True
+        _kimi_patch_installed("linear_model_tokens_1d")
+
+        # out-of-place attn_res on the decoder layer (2D inputs, bank shape check): the in-place updates of the
+        # upstream version do not survive the per-layer graph boundaries of torch.compile mode
+        from vllm_gaudi.extension.logger import logger as _ext_logger
+        from vllm_gaudi.ops.hpu_kda_pytorch import KIMI_DECODER_LAYER_CLASSES, install_functional_attn_res
+        if install_functional_attn_res(_amd_linear) is None:
+            _ext_logger().warning(
+                "Kimi-K3: none of %s with forward_attn_residual in %s, the in-place upstream "
+                "attn_res stays active", KIMI_DECODER_LAYER_CLASSES, _amd_linear.__name__)
+        else:
+            _kimi_patch_installed("functional_attn_res")
+
+        # Monkey-patch KimiMoE.forward to ensure inputs are safely 2D
+        orig_moe_forward = getattr(_amd_linear.KimiMoE, "forward", None)
+        if orig_moe_forward is not None and not getattr(_amd_linear.KimiMoE, "_patched_moe_2d", False):
+
+            def _safe_moe_forward(self, hidden_states):
+                if hidden_states.dim() == 3:
+                    hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+                return orig_moe_forward(self, hidden_states)
+
+            _amd_linear.KimiMoE.forward = _safe_moe_forward
+            _amd_linear.KimiMoE._patched_moe_2d = True
+        _kimi_patch_installed("kimi_moe_2d")
+        _kimi_patch_ok("k3_arch")
+    except Exception:
+        _kimi_patch_failed("k3_arch")
+
+
+def _hpu_mxfp4_routed_apply(layer, x, topk_weights, topk_ids, group_size):
+    """Run the routed experts of an MXFP4 MoE layer on HPU (exact SiTU when needed, else the fused MXFP4 op)."""
+    # imported at call time: these modules are not importable yet while the patches are applied
+    import vllm_gaudi.envs as gaudi_envs
+    from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
+    from vllm_gaudi.ops.hpu_situ_moe import maybe_situ_moe, situ_impl_or_exact
+
+    input_shape = x.shape
+    x = x.view(-1, x.shape[-1])
+
+    if topk_ids.dtype != torch.int32:
+        topk_ids = topk_ids.to(torch.int32)
+    topk_weights = topk_weights.to(x.dtype)
+
+    if layer.moe_config.dp_size > 1:
+        from vllm_gaudi.v1.worker.hpu_dp_utils import get_hpu_dp_metadata, dispatch_tensor
+        dp_metadata = get_hpu_dp_metadata()
+        hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
+        x = dispatch_tensor(x, hidden_states_across_dp, layer.moe_config.is_sequence_parallel)
+
+        topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
+        topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.moe_config.is_sequence_parallel)
+
+        topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
+        topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.moe_config.is_sequence_parallel)
+
+    topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
+    topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
+
+    # no SiTU in the fused kernel: exact unfused experts over the same packed MXFP4 tensors
+    output = maybe_situ_moe(layer, x, topk_ids, topk_weights, situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL),
+                            group_size, gaudi_envs.VLLM_MINIMAX_M3_MOE_TOKEN_TILE)
+    if output is None:
+        # the layer's own activation (was hard-coded "silu"); a name the fused op does not know fails
+        # loudly. "situ" only gets here with HPU_KIMI_SITU_IMPL=silu, where the alias maps it to silu.
+        output = layer.moe_op(
+            x,
+            topk_ids,
+            topk_weights,
+            permuted_weights=True,
+            activation=_normalize_moe_activation(layer.activation),
+        )
+
+    if layer.moe_config.dp_size > 1:
+        return output.view(*(output.size(0), *input_shape[1:]))
+    else:
+        return output.view(*input_shape)
+
+
+def _patch_compressed_tensors_mxfp4() -> None:
+    """Enable Gaudi native TPC kernel (VllmMixtureOfExpertsOpMXFP4) for CompressedTensorsW4A4Mxfp4MoEMethod."""
+    try:
+        import vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 as mod
+        from vllm.platforms import current_platform
+        cls = mod.CompressedTensorsW4A4Mxfp4MoEMethod
+
+        orig_init = cls.__init__
+
+        def hpu_init(self, moe):
+            orig_init(self, moe)
+            if getattr(current_platform, "device_type", None) == "hpu":
+                self.mxfp4_backend = None
+                self.experts_cls = None
+                self.use_cutlass_mxfp4 = False
+                self.moe_quant_config = object()
+
+        orig_process = getattr(cls, "process_weights_after_loading", None)
+
+        def hpu_process_weights(self, layer):
+            if getattr(current_platform, "device_type", None) != "hpu":
+                if orig_process:
+                    return orig_process(self, layer)
+                return
+
+            if hasattr(layer, "w13_weight_packed"):
+                layer.w13_weight = torch.nn.Parameter(layer.w13_weight_packed.data, requires_grad=False)
+                delattr(layer, "w13_weight_packed")
+            if hasattr(layer, "w2_weight_packed"):
+                layer.w2_weight = torch.nn.Parameter(layer.w2_weight_packed.data, requires_grad=False)
+                delattr(layer, "w2_weight_packed")
+
+            num_experts = layer.local_num_experts
+            ep_shift = layer.moe_config.ep_rank * num_experts
+            experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
+
+            try:
+                from vllm_gaudi.extension.runtime import get_config
+                use_dispatch_fn = get_config().use_dispatch_fn
+            except Exception:
+                use_dispatch_fn = False
+
+            if layer.moe_config.dp_size > 1 and use_dispatch_fn:
+                from functools import partial
+                from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states
+                dispatch_fn = partial(
+                    dispatch_hidden_states,
+                    is_sequence_parallel=layer.moe_config.is_sequence_parallel,
+                )
+            else:
+                dispatch_fn = None
+
+            has_bias = hasattr(layer, "w13_bias") and hasattr(layer, "w2_bias")
+
+            from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpMXFP4
+            layer.moe_op = VllmMixtureOfExpertsOpMXFP4(
+                layer.global_num_experts,
+                num_experts,
+                experts_min,
+                experts_max,
+                block_size=self.group_size,
+                has_bias=has_bias,
+                dispatch_fn=dispatch_fn,
+                in_graph_call=_current_config_is_kimi_k3(),
+            )
+
+            for expert_id in range(num_experts):
+                layer.moe_op.w13_list[expert_id].set_weight(layer.w13_weight.data[expert_id])
+                layer.moe_op.w13_list[expert_id].set_scale(layer.w13_weight_scale.data[expert_id])
+                layer.moe_op.w2_list[expert_id].set_weight(layer.w2_weight.data[expert_id])
+                layer.moe_op.w2_list[expert_id].set_scale(layer.w2_weight_scale.data[expert_id])
+                if has_bias:
+                    layer.moe_op.w13_list[expert_id].set_bias(layer.w13_bias.data[expert_id])
+                    layer.moe_op.w2_list[expert_id].set_bias(layer.w2_bias.data[expert_id])
+
+            layer.moe_op._cache_weight_lists()
+            self.moe_quant_config = object()
+
+        orig_apply = getattr(cls, "apply", None)
+
+        def hpu_apply(self, layer, x, topk_weights, topk_ids, shared_experts=None, shared_experts_input=None):
+            if getattr(current_platform, "device_type", None) != "hpu":
+                if orig_apply:
+                    return orig_apply(self, layer, x, topk_weights, topk_ids, shared_experts, shared_experts_input)
+                raise RuntimeError("Non-HPU platform without orig_apply")
+
+            return _hpu_mxfp4_routed_apply(layer, x, topk_weights, topk_ids, self.group_size)
+
+        cls.__init__ = hpu_init
+        cls.process_weights_after_loading = hpu_process_weights
+        cls.apply = hpu_apply
+
+        try:
+            import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as oracle_mod
+            orig_oracle = getattr(oracle_mod, "select_deepseek_v4_mxfp4_moe_backend", None)
+
+            def hpu_select_backend(*args, **kwargs):
+                if getattr(current_platform, "device_type", None) == "hpu":
+                    return (None, None)
+                if orig_oracle:
+                    return orig_oracle(*args, **kwargs)
+                return (None, None)
+
+            oracle_mod.select_deepseek_v4_mxfp4_moe_backend = hpu_select_backend
+            _kimi_patch_ok("compressed_tensors_mxfp4_oracle")
+        except Exception:
+            _kimi_patch_failed("compressed_tensors_mxfp4_oracle")
+        _kimi_patch_installed("compressed_tensors_mxfp4")
+    except Exception:
+        _kimi_patch_failed("compressed_tensors_mxfp4")
+
+
 def _patch_inc_quantization_config() -> None:
     """Register the HPU ``_FakeINCConfig`` as the resolver for ``inc``.
 
@@ -896,8 +1779,31 @@ def _patch_engine_core_sleep_host_guard() -> None:
     EngineCore.sleep = _hpu_sleep
 
 
+class _RemoteTokenizerNoticeFilter:
+    """Drop the 'Calling super().encode with ...' notice of the Kimi remote tokenizer (tokenization_kimi.py).
+
+    The remote module logs through a ``transformers_modules.*`` logger that has no handler, so the record reaches
+    ``logging.lastResort`` (stderr) once per tokenization. Only this message of that namespace is dropped.
+    """
+
+    _PREFIX = "Calling super().encode with"
+
+    def filter(self, record) -> bool:
+        if record.name.startswith("transformers_modules") and kimi_k3_seen():
+            return not str(record.getMessage()).startswith(self._PREFIX)
+        return True
+
+
+def _silence_remote_tokenizer_notice() -> None:
+    import logging
+    handler = logging.lastResort
+    if handler is not None and not any(isinstance(f, _RemoteTokenizerNoticeFilter) for f in handler.filters):
+        handler.addFilter(_RemoteTokenizerNoticeFilter())
+
+
 def apply() -> None:
     """Install all HPU runtime monkey-patches."""
+    _silence_remote_tokenizer_notice()
     # --- torch.accelerator.empty_cache ---
     torch.accelerator.empty_cache = _hpu_accelerator_empty_cache
 
@@ -910,6 +1816,12 @@ def apply() -> None:
         torch._C._host_emptyCache = lambda: None
 
     _patch_hf3fs_mock_client_for_cpu_only()
+    _patch_kimi_kda()
+    _patch_kimi_attn_res()
+    _patch_mla_prefill_selector()
+    _patch_moe_runner_delegation()
+    _patch_kimi_k3_hybrid_config()
+    _patch_kimi_k3_arch()
 
     # --- Deferred patches (cleanup_dist_env_and_memory + sampler) ---
     # We cannot import ``vllm.distributed.parallel_state`` or the sampler
@@ -923,6 +1835,10 @@ def apply() -> None:
     # EngineCore subprocess) after the platform is ready.
     import vllm.plugins as _plugins_mod
 
+    if getattr(_plugins_mod.load_general_plugins, "_hpu_patches_wrapper", False):
+        # apply() ran before in this process: wrapping again would run every deferred patch twice per call
+        return
+
     _original_load_general = _plugins_mod.load_general_plugins
 
     def _load_general_with_hpu_patches():
@@ -935,11 +1851,19 @@ def apply() -> None:
         _patch_use_sequence_parallel_moe()
         _patch_check_shm_free_space()
         _patch_mamba_bind_kv_cache()
+        _patch_mla_bind_kv_cache()
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
         _patch_inc_quantization_config()
         _patch_engine_core_sleep_host_guard()
+        _patch_mla_prefill_selector()
+        _patch_moe_runner_delegation()
+        _patch_latent_moe_runner_forward()
+        _patch_kimi_k3_hybrid_config()
+        _patch_kimi_k3_arch()
+        _patch_compressed_tensors_mxfp4()
 
+    _load_general_with_hpu_patches._hpu_patches_wrapper = True  # type: ignore[attr-defined]
     _plugins_mod.load_general_plugins = _load_general_with_hpu_patches
 
 

@@ -11,13 +11,15 @@ from functools import partial
 
 import torch
 import torch.nn.functional as F
+import vllm_gaudi.envs as gaudi_envs
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization import mxfp4 as mxfp4_module
-from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
+from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod, Mxfp4MoEMethod
 
 from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpMXFP4
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.ops.hpu_situ_moe import MXFP4_BLOCK, maybe_situ_moe, situ_impl_or_exact
 from vllm_gaudi.ops.hpu_fused_moe import (
     _normalize_moe_activation,
     select_experts_from_routed,
@@ -83,6 +85,7 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         # carries w13_bias/w2_bias, route through bias_mxfp4_fused_weights.
         has_bias = hasattr(layer, "w13_bias") and hasattr(layer, "w2_bias")
 
+        from vllm_gaudi.patches import _current_config_is_kimi_k3
         layer.moe_op = VllmMixtureOfExpertsOpMXFP4(
             layer.global_num_experts,
             num_experts,
@@ -91,6 +94,7 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
             block_size=self.MXFP4_BLOCK_SIZE,
             has_bias=has_bias,
             dispatch_fn=dispatch_fn,
+            in_graph_call=_current_config_is_kimi_k3(),
         )
 
         for expert_id in range(num_experts):
@@ -148,13 +152,21 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
         topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
 
-        output = layer.moe_op(
-            x,
-            topk_ids,
-            topk_weights,
-            permuted_weights=True,
-            activation=_normalize_moe_activation(layer.activation),
-        )
+        # The fused kernel has no SiTU: exact unfused routed experts (see ops/hpu_situ_moe.py).
+        # Env reads and the SiTU helper run only for SiTU layers; every other model calls the fused op directly.
+        output = None
+        if getattr(layer.activation, "value", layer.activation) == "situ":
+            output = maybe_situ_moe(layer, x, topk_ids, topk_weights,
+                                    situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL), MXFP4_BLOCK,
+                                    gaudi_envs.VLLM_MINIMAX_M3_MOE_TOKEN_TILE)
+        if output is None:
+            output = layer.moe_op(
+                x,
+                topk_ids,
+                topk_weights,
+                permuted_weights=True,
+                activation=_normalize_moe_activation(layer.activation),
+            )
         if layer.moe_config.dp_size > 1:
             return output.view(*(output.size(0), *input_shape[1:]))
         else:
@@ -163,3 +175,99 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
 
 # Monkey-patch: replace CUDA GptOssMxfp4MoEMethod with HPU version
 mxfp4_module.GptOssMxfp4MoEMethod = HPUGptOssMxfp4MoEMethod
+
+
+class HPUKimiK3Mxfp4MoEMethod(Mxfp4MoEMethod):
+    """HPU method for the routed experts of a Kimi-K3 checkpoint that vLLM maps to ``Mxfp4Config``.
+
+    The base ``Mxfp4MoEMethod`` selects a CUDA/ROCm backend in ``__init__`` (``select_deepseek_v4_mxfp4_moe_backend``
+    raises on HPU) and builds a kernel after loading. This keeps the upstream ``create_weights`` (uint8 ``w13_weight``,
+    ``w2_weight`` and their ``*_scale``) and runs the same HPU MXFP4 op and exact SiTU path as the compressed-tensors
+    Kimi-K3 method, through the routed ``apply`` (not monolithic).
+    """
+
+    MXFP4_BLOCK_SIZE = HPUGptOssMxfp4MoEMethod.MXFP4_BLOCK_SIZE
+    # The upstream class sets this to True (loader hands over pre-processed weights); the HPU path loads the raw
+    # checkpoint tensors and repacks them in process_weights_after_loading.
+    supports_pre_processed_weights = False
+
+    def __init__(self, moe, activation_key=None):
+        super(Mxfp4MoEMethod, self).__init__(moe)
+        self.weight_dtype = "mxfp4"
+        self.activation_key = activation_key
+        self.is_k3_situ_aiter = False
+        self.is_k3_situ_int4_gfx942 = False
+        self.mxfp4_backend = None
+        self.experts_cls = None
+        self.moe_kernel = None
+        self.group_size = self.MXFP4_BLOCK_SIZE
+        self.max_capture_size = moe.max_capture_size
+        self._cache_permute_indices = {}
+        self.w13_precision_config = None
+        self.w2_precision_config = None
+        self.moe_quant_config = object()
+        self.use_dispatch_fn = get_config().use_dispatch_fn
+
+    @property
+    def is_monolithic(self) -> bool:
+        return False
+
+    @property
+    def supports_eplb(self) -> bool:
+        # vLLM EPLB is not wired into the HPU runner
+        return False
+
+    @property
+    def skip_forward_padding(self) -> bool:
+        return False
+
+    @property
+    def has_unpadded_output(self) -> bool:
+        return False
+
+    def maybe_roundup_sizes(self, hidden_size, intermediate_size_per_partition, act_dtype, moe_parallel_config):
+        # Skip Mxfp4MoEMethod's own step: its rounding is keyed on ``mxfp4_backend``, which HPU does not have. The
+        # FusedMoEMethodBase contract (the next class in the MRO) still applies.
+        return super(Mxfp4MoEMethod, self).maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+
+    def process_weights_after_loading(self, layer) -> None:
+        HPUGptOssMxfp4MoEMethod.process_weights_after_loading(self, layer)
+        self.moe_quant_config = object()
+
+    def get_fused_moe_quant_config(self, layer):
+        return None
+
+    def apply(self, layer, x, topk_weights, topk_ids, shared_experts=None, shared_experts_input=None):
+        from vllm_gaudi.patches import _hpu_mxfp4_routed_apply
+        return _hpu_mxfp4_routed_apply(layer, x, topk_weights, topk_ids, self.group_size)
+
+
+def _route_kimi_k3_moe_method() -> None:
+    """Make ``Mxfp4Config`` build the HPU method for Kimi-K3 (and only Kimi-K3).
+
+    ``Mxfp4Config._make_moe_method`` returns ``Mxfp4MoEMethod``, whose ``__init__`` fails on HPU. The wrapper is
+    active from the moment this module is imported, i.e. before any model is built, so it does not depend on the
+    Kimi-K3 patches having been installed. Other models, and ``GptOssMxfp4Config`` (which overrides the method),
+    keep the upstream behaviour.
+    """
+    from vllm_gaudi.patches import _current_config_is_kimi_k3
+    config_cls = mxfp4_module.Mxfp4Config
+    if getattr(config_cls, "_hpu_kimi_k3_routed", False):
+        return
+    orig = config_cls._make_moe_method
+
+    def _make_moe_method(self, moe):
+        if _current_config_is_kimi_k3():
+            return HPUKimiK3Mxfp4MoEMethod(moe)
+        return orig(self, moe)
+
+    config_cls._make_moe_method = _make_moe_method
+    config_cls._hpu_kimi_k3_routed = True
+
+
+_route_kimi_k3_moe_method()

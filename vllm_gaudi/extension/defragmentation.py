@@ -49,7 +49,7 @@ class CacheSwapUtils(torch.nn.Module):
 class OnlineDefragmenter:
     """ Keeps track of assigned block_ids and remaps them if necessary """
 
-    def __init__(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int):
+    def __init__(self, kv_caches: tuple[tuple[torch.tensor, torch.tensor]], block_size: int, hybrid: bool = False):
         config = get_config()
         self.threshold = with_default(config.VLLM_DEFRAG_THRESHOLD, 32)
         self.to_swap_pad_thresholds = [8, 16, 32, 64, 128, 256, 512]
@@ -58,6 +58,12 @@ class OnlineDefragmenter:
         self.fwd_mapping_table = []
         self.bwd_mapping_table = []
         self.enabled = config.defrag
+        if self.enabled and hybrid:
+            # Hybrid (mamba/GDN/KDA) caches: swaps would also hit the state tensors, and the
+            # tracked scheduler block ids differ from the attention kernel block ids under
+            # virtual block splitting. Contiguous PA still works, just without compaction.
+            logger.warning("KV cache defragmentation is not supported for hybrid models, disabling it")
+            self.enabled = False
         self.graphed = with_default(config.VLLM_DEFRAG_WITH_GRAPHS, config.bridge_mode == 'eager')
         self.debug = init_debug_logger('defrag')
         self.kv_caches = tuple(kv_caches)

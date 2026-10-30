@@ -15,6 +15,14 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFuse
 from vllm_gaudi.attention.backends.hpu_attn import HPUMLAMetadata
 import vllm_gaudi.extension.kernels as kernels
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
+
+try:
+    from vllm.model_executor.layers.linear import KimiK3MergedQKVGateLinear as _KimiK3MergedQKVGateLinear
+except ImportError:  # vLLM before the Kimi-K3 fused gate (e.g. ac7f3e11e)
+    _KimiK3MergedQKVGateLinear = None
+
+logger = init_logger("vllm.gaudi.oot_mla")
 
 
 class _DummyPrefillBackend:
@@ -312,21 +320,21 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
         # vllm#50000 (Kimi K3) added `self.g_proj = mla_modules.g_proj`, which
-        # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
-        # we do not override forward) reads to gate the attention output. Because
-        # we bypass super().__init__(), replicate the assignment. It defaults to
-        # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
+        # the base MultiHeadLatentAttentionWrapper.forward (reached through
+        # super().forward() for non-fused models) reads to gate the attention output.
+        # Because we bypass super().__init__(), replicate the assignment. It defaults
+        # to None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
         self.g_proj = mla_modules.g_proj
         self.skip_topk = skip_topk
         # vllm#53906 added `self.fuse_qkv_rmsnorm`, which the base
-        # MultiHeadLatentAttentionWrapper.forward (inherited here, since we do not
-        # override forward) reads to pick the fused RMSNorm path. Because we bypass
+        # MultiHeadLatentAttentionWrapper.forward (reached through super().forward()
+        # for non-fused models) reads to pick the fused RMSNorm path. Because we bypass
         # super().__init__(), replicate the assignment - pinned False because the
         # fused kernel is Triton/CUDA-only.
         self.fuse_qkv_rmsnorm = False
         # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
-        # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
-        # we do not override forward) reads and forwards to mla_attn. Because we
+        # the base MultiHeadLatentAttentionWrapper.forward (reached through
+        # super().forward() for non-fused models) reads and forwards to mla_attn. Because we
         # bypass super().__init__(), replicate the upstream assignment. DCP is
         # not enabled on HPU, so `qrep_active` is absent and this stays False.
         q_proj_layer = self.q_b_proj if self.q_lora_rank is not None else self.q_proj
@@ -358,3 +366,69 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             topk_indices_buffer=mla_modules.topk_indices_buffer,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
+        # vLLM 28a5fba06+ (Kimi-K3) fuses the output-gate projection into fused_qkv_a_proj
+        # (KimiK3MergedQKVGateLinear, per-rank layout [q_a | kv_a | gate]) and passes no g_proj. The class does not
+        # exist in ac7f3e11e, so the import is guarded.
+        self._qkv_gate_fused = _KimiK3MergedQKVGateLinear is not None and isinstance(
+            self.fused_qkv_a_proj, _KimiK3MergedQKVGateLinear)
+        if self._qkv_gate_fused:
+            # The fused-gate forward below covers the plain Kimi-K3 MLA only. Explicit errors, not asserts: these
+            # must hold under ``python -O`` too.
+            if self.g_proj is not None:
+                raise ValueError("KimiK3MergedQKVGateLinear and g_proj are mutually exclusive, but the MLA has both")
+            if self.indexer is not None or self.is_sparse:
+                raise ValueError("Sparse MLA (indexer/is_sparse) is unsupported with the fused QKV-gate on HPU")
+            if self.dcp_q_replicate:
+                raise ValueError("DCP query replication is not supported on HPU with the fused QKV-gate")
+            if getattr(mla_modules, "skip_o_proj", False):
+                raise ValueError("skip_o_proj is not supported on HPU with the fused QKV-gate")
+            logger.info_once("HPU MLA wrapper forward: fused QKV-gate (Kimi-K3)")
+
+    def get_input_quant_key(self):
+        # The quantized-activation fusion (QuantizedActivation) is a ROCm/CUDA optimization; HPU always gets
+        # plain tensors.
+        return None
+
+    def process_weights_after_loading(self) -> None:
+        # Called by KimiLinearForCausalLM.process_weights_after_loading() for every MLA wrapper (28a5fba06+).
+        # The upstream Kimi wrapper builds an AITER weight fold there; HPU has none.
+        pass
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not self._qkv_gate_fused:
+            return super().forward(positions, hidden_states, llama_4_scaling)
+
+        # Same math as amd/mla.py of 28a5fba06 without the AITER paths: split the gate off the fused A projection.
+        assert self.q_lora_rank is not None and self.q_a_layernorm is not None and self.q_b_proj is not None
+        qkv_lora, gate = self.fused_qkv_a_proj(hidden_states)[0].split(
+            [
+                self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+                self.num_heads * self.v_head_dim,
+            ],
+            dim=-1,
+        )
+        q_c, kv_lora = qkv_lora.split([self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1)
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        q_c = self.q_a_layernorm(q_c)
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+        k_pe = k_pe.unsqueeze(1)
+
+        q = self.q_b_proj(q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
+        if self.rotary_emb is not None:
+            q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(positions, q[..., self.qk_nope_head_dim:], k_pe)
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
+
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+        )
+        attn_out = attn_out * gate.sigmoid()
+        return self.o_proj(attn_out)[0]
