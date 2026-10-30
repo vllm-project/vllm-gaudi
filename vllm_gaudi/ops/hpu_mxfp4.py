@@ -15,7 +15,7 @@ import vllm_gaudi.envs as gaudi_envs
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization import mxfp4 as mxfp4_module
-from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
+from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod, Mxfp4MoEMethod
 
 from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpMXFP4
 from vllm_gaudi.extension.runtime import get_config
@@ -175,3 +175,85 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
 
 # Monkey-patch: replace CUDA GptOssMxfp4MoEMethod with HPU version
 mxfp4_module.GptOssMxfp4MoEMethod = HPUGptOssMxfp4MoEMethod
+
+
+class HPUKimiK3Mxfp4MoEMethod(Mxfp4MoEMethod):
+    """HPU method for the routed experts of a Kimi-K3 checkpoint that vLLM maps to ``Mxfp4Config``.
+
+    The base ``Mxfp4MoEMethod`` selects a CUDA/ROCm backend in ``__init__`` (``select_deepseek_v4_mxfp4_moe_backend``
+    raises on HPU) and builds a kernel after loading. This keeps the upstream ``create_weights`` (uint8 ``w13_weight``,
+    ``w2_weight`` and their ``*_scale``) and runs the same HPU MXFP4 op and exact SiTU path as the compressed-tensors
+    Kimi-K3 method, through the routed ``apply`` (not monolithic).
+    """
+
+    MXFP4_BLOCK_SIZE = HPUGptOssMxfp4MoEMethod.MXFP4_BLOCK_SIZE
+
+    def __init__(self, moe, activation_key=None):
+        super(Mxfp4MoEMethod, self).__init__(moe)
+        self.weight_dtype = "mxfp4"
+        self.activation_key = activation_key
+        self.is_k3_situ_aiter = False
+        self.is_k3_situ_int4_gfx942 = False
+        self.mxfp4_backend = None
+        self.experts_cls = None
+        self.moe_kernel = None
+        self.group_size = self.MXFP4_BLOCK_SIZE
+        self.max_capture_size = moe.max_capture_size
+        self._cache_permute_indices = {}
+        self.w13_precision_config = None
+        self.w2_precision_config = None
+        self.moe_quant_config = object()
+        self.use_dispatch_fn = get_config().use_dispatch_fn
+
+    @property
+    def is_monolithic(self) -> bool:
+        return False
+
+    @property
+    def skip_forward_padding(self) -> bool:
+        return False
+
+    @property
+    def has_unpadded_output(self) -> bool:
+        return False
+
+    def maybe_roundup_sizes(self, hidden_size, intermediate_size_per_partition, act_dtype, moe_parallel_config):
+        # the CUDA rounding is keyed on the backend, which HPU does not have
+        return hidden_size, intermediate_size_per_partition
+
+    def process_weights_after_loading(self, layer) -> None:
+        HPUGptOssMxfp4MoEMethod.process_weights_after_loading(self, layer)
+        self.moe_quant_config = object()
+
+    def get_fused_moe_quant_config(self, layer):
+        return None
+
+    def apply(self, layer, x, topk_weights, topk_ids, shared_experts=None, shared_experts_input=None):
+        from vllm_gaudi.patches import _hpu_mxfp4_routed_apply
+        return _hpu_mxfp4_routed_apply(layer, x, topk_weights, topk_ids, self.group_size)
+
+
+def _route_kimi_k3_moe_method() -> None:
+    """Make ``Mxfp4Config`` build the HPU method for Kimi-K3 (and only Kimi-K3).
+
+    ``Mxfp4Config._make_moe_method`` returns ``Mxfp4MoEMethod``, whose ``__init__`` fails on HPU. The wrapper is
+    active from the moment this module is imported, i.e. before any model is built, so it does not depend on the
+    Kimi-K3 patches having been installed. Other models, and ``GptOssMxfp4Config`` (which overrides the method),
+    keep the upstream behaviour.
+    """
+    from vllm_gaudi.patches import _current_config_is_kimi_k3
+    config_cls = mxfp4_module.Mxfp4Config
+    if getattr(config_cls, "_hpu_kimi_k3_routed", False):
+        return
+    orig = config_cls._make_moe_method
+
+    def _make_moe_method(self, moe):
+        if _current_config_is_kimi_k3():
+            return HPUKimiK3Mxfp4MoEMethod(moe)
+        return orig(self, moe)
+
+    config_cls._make_moe_method = _make_moe_method
+    config_cls._hpu_kimi_k3_routed = True
+
+
+_route_kimi_k3_moe_method()

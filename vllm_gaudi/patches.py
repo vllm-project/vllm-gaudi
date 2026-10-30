@@ -1454,6 +1454,55 @@ def _patch_kimi_k3_arch() -> None:
         _kimi_patch_failed("k3_arch")
 
 
+def _hpu_mxfp4_routed_apply(layer, x, topk_weights, topk_ids, group_size):
+    """Run the routed experts of an MXFP4 MoE layer on HPU (exact SiTU when needed, else the fused MXFP4 op)."""
+    # imported at call time: these modules are not importable yet while the patches are applied
+    import vllm_gaudi.envs as gaudi_envs
+    from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
+    from vllm_gaudi.ops.hpu_situ_moe import maybe_situ_moe, situ_impl_or_exact
+
+    input_shape = x.shape
+    x = x.view(-1, x.shape[-1])
+
+    if topk_ids.dtype != torch.int32:
+        topk_ids = topk_ids.to(torch.int32)
+    topk_weights = topk_weights.to(x.dtype)
+
+    if layer.moe_config.dp_size > 1:
+        from vllm_gaudi.v1.worker.hpu_dp_utils import get_hpu_dp_metadata, dispatch_tensor
+        dp_metadata = get_hpu_dp_metadata()
+        hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
+        x = dispatch_tensor(x, hidden_states_across_dp, layer.moe_config.is_sequence_parallel)
+
+        topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
+        topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.moe_config.is_sequence_parallel)
+
+        topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
+        topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp, layer.moe_config.is_sequence_parallel)
+
+    topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
+    topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
+
+    # no SiTU in the fused kernel: exact unfused experts over the same packed MXFP4 tensors
+    output = maybe_situ_moe(layer, x, topk_ids, topk_weights, situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL),
+                            group_size, gaudi_envs.VLLM_MINIMAX_M3_MOE_TOKEN_TILE)
+    if output is None:
+        # the layer's own activation (was hard-coded "silu"); a name the fused op does not know fails
+        # loudly. "situ" only gets here with HPU_KIMI_SITU_IMPL=silu, where the alias maps it to silu.
+        output = layer.moe_op(
+            x,
+            topk_ids,
+            topk_weights,
+            permuted_weights=True,
+            activation=_normalize_moe_activation(layer.activation),
+        )
+
+    if layer.moe_config.dp_size > 1:
+        return output.view(*(output.size(0), *input_shape[1:]))
+    else:
+        return output.view(*input_shape)
+
+
 def _patch_compressed_tensors_mxfp4() -> None:
     """Enable Gaudi native TPC kernel (VllmMixtureOfExpertsOpMXFP4) for CompressedTensorsW4A4Mxfp4MoEMethod."""
     try:
@@ -1540,52 +1589,7 @@ def _patch_compressed_tensors_mxfp4() -> None:
                     return orig_apply(self, layer, x, topk_weights, topk_ids, shared_experts, shared_experts_input)
                 raise RuntimeError("Non-HPU platform without orig_apply")
 
-            # imported at call time: these modules are not importable yet while the patches are applied
-            import vllm_gaudi.envs as gaudi_envs
-            from vllm_gaudi.ops.hpu_fused_moe import _normalize_moe_activation
-            from vllm_gaudi.ops.hpu_situ_moe import maybe_situ_moe, situ_impl_or_exact
-
-            input_shape = x.shape
-            x = x.view(-1, x.shape[-1])
-
-            if topk_ids.dtype != torch.int32:
-                topk_ids = topk_ids.to(torch.int32)
-            topk_weights = topk_weights.to(x.dtype)
-
-            if layer.moe_config.dp_size > 1:
-                from vllm_gaudi.v1.worker.hpu_dp_utils import get_hpu_dp_metadata, dispatch_tensor
-                dp_metadata = get_hpu_dp_metadata()
-                hidden_states_across_dp = dp_metadata.hidden_states_across_dp if dp_metadata is not None else None
-                x = dispatch_tensor(x, hidden_states_across_dp, layer.moe_config.is_sequence_parallel)
-
-                topk_ids_across_dp = dp_metadata.topk_ids_across_dp if dp_metadata is not None else None
-                topk_ids = dispatch_tensor(topk_ids, topk_ids_across_dp, layer.moe_config.is_sequence_parallel)
-
-                topk_weights_across_dp = dp_metadata.topk_weights_across_dp if dp_metadata is not None else None
-                topk_weights = dispatch_tensor(topk_weights, topk_weights_across_dp,
-                                               layer.moe_config.is_sequence_parallel)
-
-            topk_ids = topk_ids.view(-1, topk_ids.shape[-1])
-            topk_weights = topk_weights.view(-1, topk_weights.shape[-1])
-
-            # no SiTU in the fused kernel: exact unfused experts over the same packed MXFP4 tensors
-            output = maybe_situ_moe(layer, x, topk_ids, topk_weights, situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL),
-                                    self.group_size, gaudi_envs.VLLM_MINIMAX_M3_MOE_TOKEN_TILE)
-            if output is None:
-                # the layer's own activation (was hard-coded "silu"); a name the fused op does not know fails
-                # loudly. "situ" only gets here with HPU_KIMI_SITU_IMPL=silu, where the alias maps it to silu.
-                output = layer.moe_op(
-                    x,
-                    topk_ids,
-                    topk_weights,
-                    permuted_weights=True,
-                    activation=_normalize_moe_activation(layer.activation),
-                )
-
-            if layer.moe_config.dp_size > 1:
-                return output.view(*(output.size(0), *input_shape[1:]))
-            else:
-                return output.view(*input_shape)
+            return _hpu_mxfp4_routed_apply(layer, x, topk_weights, topk_ids, self.group_size)
 
         cls.__init__ = hpu_init
         cls.process_weights_after_loading = hpu_process_weights
