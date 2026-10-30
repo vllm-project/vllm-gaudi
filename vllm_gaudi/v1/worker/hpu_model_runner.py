@@ -3495,6 +3495,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # when DP also enabled, some DP ranks will exeucte dummy run with empty
         # SchedulerOutput, in this case we need skip the prepare_input_ids
         if self.use_async_scheduling and scheduler_output is not None:
+            # _prepare_input_ids only writes the rows of requests that were in
+            # the previous step, so seed the decode rows with the host-side
+            # input ids first. Otherwise a decode request that was not in the
+            # previous step reads a stale token from input_ids_hpu.
+            if num_tokens == 1:
+                self.input_ids_hpu[:num_decodes].copy_(token_ids_device[:num_decodes].view(-1))
+            else:
+                self.input_ids_hpu[:total_num_scheduled_tokens].copy_(
+                    async_h2d_copy(self.input_ids_cpu[:total_num_scheduled_tokens], device=self.device))
             self._prepare_input_ids(scheduler_output)
             if num_tokens == 1:
                 token_ids_device[:num_decodes] = self.input_ids_hpu[:num_decodes].view(-1, 1)
