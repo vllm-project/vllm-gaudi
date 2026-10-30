@@ -399,6 +399,10 @@ def test_apply_attn_res_replacement_accepts_quant_key_none_and_rejects_a_quant_k
         apply_attn_res(*args, quant_key="fp8_dynamic_token_sym")
 
 
+class _KimiK3MergedQKVGateLinear(torch.nn.Module):
+    """Stands for vllm.model_executor.layers.linear.KimiK3MergedQKVGateLinear (28a5fba06+)."""
+
+
 @pytest.fixture
 def oot_mla(monkeypatch):
     """vllm_gaudi.attention.oot_mla imported against stubbed vllm / Habana modules."""
@@ -441,6 +445,8 @@ def oot_mla(monkeypatch):
     stub("vllm.model_executor.layers.mla", MultiHeadLatentAttentionWrapper=MultiHeadLatentAttentionWrapper)
     stub("vllm.model_executor.utils")
     stub("vllm.forward_context")
+    stub("vllm.logger", init_logger=lambda name: types.SimpleNamespace(info_once=lambda *a, **k: None))
+    stub("vllm.model_executor.layers.linear", KimiK3MergedQKVGateLinear=_KimiK3MergedQKVGateLinear)
     stub("vllm_gaudi.extension")
     stub("vllm_gaudi.extension.utils")
     stub("vllm_gaudi.extension.kernels")
@@ -457,8 +463,8 @@ def oot_mla(monkeypatch):
     return mod
 
 
-class MergedQKVGate(torch.nn.Module):
-    """Named like vllm...linear.KimiK3MergedQKVGateLinear (the wrapper looks the class up by name)."""
+class MergedQKVGate(_KimiK3MergedQKVGateLinear):
+    """A KimiK3MergedQKVGateLinear (the wrapper detects the fused gate with isinstance)."""
 
     def __init__(self, hidden, out):
         super().__init__()
@@ -466,9 +472,6 @@ class MergedQKVGate(torch.nn.Module):
 
     def forward(self, x):
         return torch.nn.functional.linear(x, self.weight), None
-
-
-MergedQKVGate.__name__ = "KimiK3MergedQKVGateLinear"
 
 
 def _bare_wrapper(oot_mla, fused):
@@ -520,3 +523,9 @@ def test_hpu_mla_wrapper_provides_the_28a5_model_hooks(oot_mla):
 
     assert wrapper.get_input_quant_key() is None
     assert wrapper.process_weights_after_loading() is None
+
+
+def test_hpu_mla_wrapper_detects_the_fused_gate_by_class_not_by_name(oot_mla):
+    assert oot_mla._KimiK3MergedQKVGateLinear is _KimiK3MergedQKVGateLinear
+    assert isinstance(MergedQKVGate(8, 8), oot_mla._KimiK3MergedQKVGateLinear)
+    assert not isinstance(torch.nn.Linear(8, 8), oot_mla._KimiK3MergedQKVGateLinear)

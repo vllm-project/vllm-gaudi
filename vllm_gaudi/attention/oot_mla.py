@@ -15,6 +15,14 @@ from vllm_gaudi.extension.utils import (FP8Matmul, Matmul, B2BMatmul, ModuleFuse
 from vllm_gaudi.attention.backends.hpu_attn import HPUMLAMetadata
 import vllm_gaudi.extension.kernels as kernels
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
+
+try:
+    from vllm.model_executor.layers.linear import KimiK3MergedQKVGateLinear as _KimiK3MergedQKVGateLinear
+except ImportError:  # vLLM before the Kimi-K3 fused gate (e.g. ac7f3e11e)
+    _KimiK3MergedQKVGateLinear = None
+
+logger = init_logger("vllm.gaudi.oot_mla")
 
 
 class _DummyPrefillBackend:
@@ -312,21 +320,21 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
         # vllm#50000 (Kimi K3) added `self.g_proj = mla_modules.g_proj`, which
-        # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
-        # we do not override forward) reads to gate the attention output. Because
-        # we bypass super().__init__(), replicate the assignment. It defaults to
-        # None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
+        # the base MultiHeadLatentAttentionWrapper.forward (reached through
+        # super().forward() for non-fused models) reads to gate the attention output.
+        # Because we bypass super().__init__(), replicate the assignment. It defaults
+        # to None for DeepSeek-V2/R1 (no gate proj), leaving the HPU path unchanged.
         self.g_proj = mla_modules.g_proj
         self.skip_topk = skip_topk
         # vllm#53906 added `self.fuse_qkv_rmsnorm`, which the base
-        # MultiHeadLatentAttentionWrapper.forward (inherited here, since we do not
-        # override forward) reads to pick the fused RMSNorm path. Because we bypass
+        # MultiHeadLatentAttentionWrapper.forward (reached through super().forward()
+        # for non-fused models) reads to pick the fused RMSNorm path. Because we bypass
         # super().__init__(), replicate the assignment - pinned False because the
         # fused kernel is Triton/CUDA-only.
         self.fuse_qkv_rmsnorm = False
         # vllm#45964 (DCP query replication) added `self.dcp_q_replicate`, which
-        # the base MultiHeadLatentAttentionWrapper.forward (inherited here, since
-        # we do not override forward) reads and forwards to mla_attn. Because we
+        # the base MultiHeadLatentAttentionWrapper.forward (reached through
+        # super().forward() for non-fused models) reads and forwards to mla_attn. Because we
         # bypass super().__init__(), replicate the upstream assignment. DCP is
         # not enabled on HPU, so `qrep_active` is absent and this stays False.
         q_proj_layer = self.q_b_proj if self.q_lora_rank is not None else self.q_proj
@@ -360,8 +368,16 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         )
         # vLLM 28a5fba06+ (Kimi-K3) fuses the output-gate projection into fused_qkv_a_proj
         # (KimiK3MergedQKVGateLinear, per-rank layout [q_a | kv_a | gate]) and passes no g_proj. The class does not
-        # exist in ac7f3e11e, hence the lookup by name.
-        self._qkv_gate_fused = type(self.fused_qkv_a_proj).__name__ == "KimiK3MergedQKVGateLinear"
+        # exist in ac7f3e11e, so the import is guarded.
+        self._qkv_gate_fused = _KimiK3MergedQKVGateLinear is not None and isinstance(
+            self.fused_qkv_a_proj, _KimiK3MergedQKVGateLinear)
+        if self._qkv_gate_fused:
+            # The fused-gate forward below covers the plain Kimi-K3 MLA only.
+            assert self.g_proj is None, "KimiK3MergedQKVGateLinear and g_proj are mutually exclusive"
+            assert self.indexer is None and not self.is_sparse, "sparse MLA is unsupported with the fused gate"
+            assert not self.dcp_q_replicate, "DCP query replication is not supported on HPU with the fused gate"
+            assert not getattr(mla_modules, "skip_o_proj", False), "skip_o_proj is not supported with the fused gate"
+        logger.info_once("HPU MLA wrapper forward: %s", "fused QKV-gate" if self._qkv_gate_fused else "base MLA")
 
     def get_input_quant_key(self):
         # The quantized-activation fusion (QuantizedActivation) is a ROCm/CUDA optimization; HPU always gets
