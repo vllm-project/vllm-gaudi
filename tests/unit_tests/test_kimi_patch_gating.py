@@ -328,8 +328,28 @@ def test_apply_twice_wraps_load_general_plugins_once(kda_modules, monkeypatch):
     assert deferred_calls == [1]  # and the deferred patches ran once per call
 
 
+def _stub_gdn_module(monkeypatch):
+    """Stub of the Kimi-Linear GDN attention module (never the real one, whether or not vllm is installed)."""
+
+    class KimiGatedDeltaNetAttention:
+
+        def forward(self):
+            return "original"
+
+    original = KimiGatedDeltaNetAttention.forward
+    name = "vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn"
+    for parent in ("vllm", "vllm.model_executor", "vllm.model_executor.layers", "vllm.model_executor.layers.mamba",
+                   "vllm.model_executor.layers.mamba.gdn"):
+        monkeypatch.setitem(sys.modules, parent, sys.modules.get(parent) or types.ModuleType(parent))
+    mod = types.ModuleType(name)
+    mod.KimiGatedDeltaNetAttention = KimiGatedDeltaNetAttention
+    monkeypatch.setitem(sys.modules, name, mod)
+    return KimiGatedDeltaNetAttention, original
+
+
 def test_kda_patch_import_failure_of_one_module_does_not_skip_the_others(kda_modules, monkeypatch):
     # the chunk ops module cannot be imported; the rest must still be patched
+    gdn_cls, gdn_original = _stub_gdn_module(monkeypatch)
     monkeypatch.setitem(sys.modules, "vllm.models.kimi_k3.amd.ops.kda_chunk", None)
     monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_INSTALLED", [])
     monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_FAILED", {})
@@ -342,8 +362,22 @@ def test_kda_patch_import_failure_of_one_module_does_not_skip_the_others(kda_mod
     assert mods["kda"].is_fused_kda_decode_supported() is False
     assert "kda_forward" in kda_modules._KIMI_PATCHES_INSTALLED
     assert "kda_fused_checks" not in kda_modules._KIMI_PATCHES_INSTALLED
-    # kimi_gdn_forward is also missing: the gdn module is not stubbed here
-    assert set(kda_modules._KIMI_PATCHES_FAILED) == {"kda_fused_checks[ops.kda_chunk]", "kimi_gdn_forward"}
+    assert "kimi_gdn_forward" in kda_modules._KIMI_PATCHES_INSTALLED
+    assert list(kda_modules._KIMI_PATCHES_FAILED) == ["kda_fused_checks[ops.kda_chunk]"]
+    assert gdn_cls.forward is not gdn_original
+
+
+def test_kimi_gdn_forward_is_patched_only_where_the_k3_amd_kda_module_exists(kda_modules, monkeypatch):
+    gdn_cls, original = _stub_gdn_module(monkeypatch)
+    monkeypatch.setitem(sys.modules, "vllm.models.kimi_k3.amd.kda", None)
+    monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_INSTALLED", [])
+    monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_FAILED", {})
+
+    kda_modules._patch_kimi_kda()
+
+    assert gdn_cls.forward is original  # Kimi-Linear keeps its own forward
+    assert "kimi_gdn_forward" not in kda_modules._KIMI_PATCHES_INSTALLED
+    assert "kda_forward" in kda_modules._KIMI_PATCHES_FAILED
 
 
 def test_kda_patch_failure_is_logged_through_the_vllm_logger_tree(kda_modules, monkeypatch, caplog):
@@ -619,8 +653,8 @@ def ctor(oot_mla, monkeypatch):
     logged = []
     monkeypatch.setattr(oot_mla, "logger", types.SimpleNamespace(info_once=lambda *a, **k: logged.append(a)))
     monkeypatch.setattr(
-        oot_mla, "get_current_vllm_config", lambda: types.SimpleNamespace(
-            compilation_config=types.SimpleNamespace(static_forward_context={})))
+        oot_mla, "get_current_vllm_config",
+        lambda: types.SimpleNamespace(compilation_config=types.SimpleNamespace(static_forward_context={})))
     monkeypatch.setattr(oot_mla, "HPUMLAAttention", lambda **kwargs: object())
 
     def build(fused_proj, **modules):

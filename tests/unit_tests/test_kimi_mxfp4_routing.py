@@ -186,7 +186,8 @@ def test_kimi_method_rounding_does_not_use_the_backend_keyed_upstream_step(mxfp4
     rounded = method.maybe_roundup_sizes(hidden_size=4096,
                                          intermediate_size_per_partition=2048,
                                          act_dtype=None,
-                                         moe_parallel_config=None)
+                                         moe_parallel_config=types.SimpleNamespace(use_deepep_ht_kernels=False,
+                                                                                   use_deepep_ll_kernels=False))
     assert rounded == (4096, 2048)
 
 
