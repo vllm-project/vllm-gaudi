@@ -453,17 +453,19 @@ _UPSTREAM_MLA_BIND_KV_CACHE = None
 
 
 def _hpu_mla_bind_kv_cache(self, kv_cache) -> None:
-    """Store the HPU per-layer KV-cache tuple unchanged (Kimi-K3 only; other models use the upstream method).
+    """Store the HPU per-layer KV-cache tuple unchanged; tensors go through the upstream method.
+
+    Gated by data type, not by model: workers call this without a config context.
 
     Upstream MLAAttention.bind_kv_cache executes `self.kv_cache = kv_cache.squeeze(1)`,
     assuming a single 4D CUDA tensor [B, 1, N, C]. On HPU, kv_cache is allocated as a
     tuple (key_cache, value_cache, key_scales, value_scales), which raises
     `AttributeError: 'tuple' object has no attribute 'squeeze'`.
     """
-    if _UPSTREAM_MLA_BIND_KV_CACHE is not None and not kimi_k3_seen():
-        return _UPSTREAM_MLA_BIND_KV_CACHE(self, kv_cache)
     if isinstance(kv_cache, (tuple, list)):
         self.kv_cache = tuple(kv_cache)
+    elif _UPSTREAM_MLA_BIND_KV_CACHE is not None:
+        _UPSTREAM_MLA_BIND_KV_CACHE(self, kv_cache)
     else:
         self.kv_cache = kv_cache.squeeze(1)
 

@@ -24,6 +24,12 @@ def _load(name, rel):
     return mod
 
 
+@pytest.fixture(autouse=True)
+def _clean_seen_env(monkeypatch):
+    monkeypatch.delenv("HPU_KIMI_K3_SEEN", raising=False)
+    monkeypatch.setattr("vllm_gaudi.kimi_k3_gate._kimi_k3_seen", False, raising=False)
+
+
 @pytest.fixture
 def gate():
     return _load("kimi_k3_gate_under_test", "kimi_k3_gate.py")
@@ -67,20 +73,56 @@ def test_without_vllm_config_module_predicate_is_false(gate, monkeypatch):
     assert not gate.current_config_is_kimi_k3()
 
 
-def test_vision_buckets_only_k3_key(monkeypatch):
-    vllm = types.ModuleType("vllm")
+@pytest.mark.parametrize("model_type,expected_key", [
+    ("kimi_k3", "kimi_k3"),
+    ("kimi_k25", "kimi_k25"),
+    ("kimi_k2", None),
+    ("kimi_vl", None),
+])
+def test_vision_bucket_lookup_by_model_type(monkeypatch, model_type, expected_key):
     vlog = types.ModuleType("vllm.logger")
     vlog.init_logger = logging.getLogger
-    monkeypatch.setitem(sys.modules, "vllm", vllm)
+    monkeypatch.setitem(sys.modules, "vllm", types.ModuleType("vllm"))
     monkeypatch.setitem(sys.modules, "vllm.logger", vlog)
     vision = _load("vision_under_test", "extension/bucketing/vision.py")
     cfg = vision.MULTIMODAL_CONFIG
-    assert "kimi" not in cfg
-    norm = lambda n: n.lower().replace("-", "").replace(".", "")  # noqa: E731
-    k3_keys = [k for k in cfg if k.replace("-", "").replace(".", "") in norm("moonshotai/Kimi-K3")]
-    assert "kimik3" in k3_keys
-    for name in ("moonshotai/Kimi-K2.5", "moonshotai/Kimi-K2.6", "moonshotai/Kimi-VL-A3B"):
-        assert not [k for k in cfg if k.replace("-", "").replace(".", "") in norm(name)]
+    assert "kimi" not in cfg and "kimik3" not in cfg
+    found = vision.HPUVisionBucketManager._get_multimodal_config(object(), model_type)
+    if expected_key is None:  # upstream default
+        assert found == {'is_batch_based': True, 'buckets': [1, 2, 4, 8]}
+    else:
+        assert found is cfg[expected_key]
+
+
+def test_seen_env_var_survives_a_fresh_process_state(gate, monkeypatch):
+    monkeypatch.setitem(sys.modules, "vllm.config", None)  # no config context either
+    assert not gate.kimi_k3_seen()
+    monkeypatch.setenv("HPU_KIMI_K3_SEEN", "1")
+    assert gate.kimi_k3_seen()  # e.g. spawned EngineCore / Ray worker inheriting the environment
+
+
+def test_mark_seen_exports_env_var(gate, monkeypatch):
+    monkeypatch.setenv("HPU_KIMI_K3_SEEN", "x")  # registers the undo; setdefault must keep the existing value
+    monkeypatch.delenv("HPU_KIMI_K3_SEEN")
+    gate.mark_kimi_k3_seen()
+    assert gate.os.environ["HPU_KIMI_K3_SEEN"] == "1"
+    monkeypatch.delenv("HPU_KIMI_K3_SEEN")
+
+
+def test_ray_noset_descriptor_empty_for_non_k3_and_list_for_k3(gate, monkeypatch):
+    import ast
+    src = (ROOT / "platform.py").read_text()
+    node = next(n for n in ast.parse(src).body if isinstance(n, ast.ClassDef) and n.name == "_KimiK3OnlyList")
+    ns = {"kimi_k3_seen": gate.kimi_k3_seen}
+    exec(compile(ast.Module([node], []), "platform_descriptor", "exec"), ns)
+
+    class P:
+        ray_noset_device_env_vars = ns["_KimiK3OnlyList"](["A", "B"])
+
+    monkeypatch.setitem(sys.modules, "vllm.config", None)
+    assert P.ray_noset_device_env_vars == [] and P().ray_noset_device_env_vars == []
+    monkeypatch.setenv("HPU_KIMI_K3_SEEN", "1")
+    assert P.ray_noset_device_env_vars == ["A", "B"]
 
 
 @pytest.fixture
@@ -128,7 +170,7 @@ def test_hybrid_config_layer_types_only_for_k3(patches, archs, filled):
         assert cfg.hf_text_config.layer_types is None
 
 
-def test_mla_bind_kv_cache_upstream_for_non_k3(patches, monkeypatch):
+def test_mla_bind_kv_cache_gated_by_data_type(patches, monkeypatch):
     calls = []
 
     class MLAAttention:
@@ -142,20 +184,18 @@ def test_mla_bind_kv_cache_upstream_for_non_k3(patches, monkeypatch):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     monkeypatch.setitem(sys.modules, "vllm.model_executor.layers.attention.mla_attention", mod)
     monkeypatch.setattr(patches, "_UPSTREAM_MLA_BIND_KV_CACHE", None)
-    monkeypatch.setattr("vllm_gaudi.kimi_k3_gate._kimi_k3_seen", False)
     patches._patch_mla_bind_kv_cache()
     layer = MLAAttention()
-    layer.bind_kv_cache("cache")
-    assert calls == ["cache"]  # upstream method, not the tuple-preserving HPU one
-    patches.test_current["config"] = _cfg(K3)
+    # no config context, no seen flag: a tuple still takes the HPU path, a tensor the upstream method
     layer.bind_kv_cache(("k", "v"))
-    assert layer.kv_cache == ("k", "v")
+    assert layer.kv_cache == ("k", "v") and calls == []
+    layer.bind_kv_cache("tensor")
+    assert calls == ["tensor"]
 
 
 def test_remote_tokenizer_filter_only_after_k3(patches, monkeypatch):
     f = patches._RemoteTokenizerNoticeFilter()
     rec = logging.LogRecord("transformers_modules.x", logging.INFO, "", 0, "Calling super().encode with x", (), None)
-    monkeypatch.setattr("vllm_gaudi.kimi_k3_gate._kimi_k3_seen", False)
     assert f.filter(rec)
     patches.test_current["config"] = _cfg(K3)
     assert not f.filter(rec)
