@@ -118,10 +118,16 @@ class VLLMFP8KVCache(VLLMKVCache):
                 output_cache[i] = self.dequant_output(output_cache[i])
             return output_cache
         output_cache = super().fetch_from_cache(quant_cache, blocks)
+        # Decode hands the cache to FP8Matmul as is: with scale 1.0 dequant + requant is an exact no-op.
+        if getattr(self, "_fetch_fp8", False) and self.output_scale == 1.0:
+            return output_cache
         return self.dequant_output(output_cache)
 
 
 class FP8Matmul(torch.nn.Module):
+    # Callers pass trans_a/trans_b instead of a transposed view: a transpose between cast_to_fp8 and the
+    # gemm runs as a separate MME transpose instead of being folded into the gemm.
+    supports_transpose = True
 
     def __init__(
         self,
@@ -133,14 +139,16 @@ class FP8Matmul(torch.nn.Module):
         self.scale_other = scale_other
 
     def quant_input(self, x, scale):
+        if x.dtype == torch.float8_e4m3fn and scale == 1.0:
+            return x
         return torch.ops.hpu.cast_to_fp8_v2(x, scale, False, False, torch.float8_e4m3fn)[0]
 
-    def matmul_fp8(self, x, other, out_dtype, scale_input_inv=None, scale_other_inv=None):
+    def matmul_fp8(self, x, other, out_dtype, scale_input_inv=None, scale_other_inv=None, trans_a=False, trans_b=False):
         return torch.ops.hpu.fp8_gemm_v2(
             A=x,
-            trans_A=False,
+            trans_A=trans_a,
             B=other,
-            trans_B=False,
+            trans_B=trans_b,
             D=None,
             out_dtype=out_dtype,
             A_scale_inv=scale_input_inv,
@@ -149,7 +157,7 @@ class FP8Matmul(torch.nn.Module):
             accumulate=False,
         )
 
-    def forward(self, input, other, **kwargs):
+    def forward(self, input, other, trans_a=False, trans_b=False, **kwargs):
         qinput = self.quant_input(input, self.scale_input)
         qother = self.quant_input(other, self.scale_other)
         output = self.matmul_fp8(
@@ -158,6 +166,8 @@ class FP8Matmul(torch.nn.Module):
             out_dtype=torch.bfloat16,
             scale_input_inv=1.0 / self.scale_input,
             scale_other_inv=1.0 / self.scale_other,
+            trans_a=trans_a,
+            trans_b=trans_b,
         )
         return output
 
