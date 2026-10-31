@@ -33,7 +33,7 @@ from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
 from vllm_gaudi.extension.profiler import (HabanaHighLevelProfiler, HabanaMemoryProfiler, HabanaProfilerCounterHelper,
                                            format_bytes, setup_profiler)
-from vllm_gaudi.extension.runtime import clear_config, finalize_config, get_config
+from vllm_gaudi.extension.runtime import clear_config, eager_deferred_sampling_warning, finalize_config, get_config
 from vllm_gaudi.extension.utils import align_and_pad, pad_list, with_default
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.v1.worker.hpu_dp_utils import set_hpu_dp_metadata
@@ -7081,6 +7081,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         #     self._update_hybrid_attention_mamba_layout(kv_caches)
 
         htorch.hpu.synchronize()
+
+        self._warn_deferred_sampling_ask()
+
+    def _warn_deferred_sampling_ask(self) -> None:
+        """Boot-time advisory for the eager deferred-sampling OOM class (#1846).
+
+        Near-cap requests deterministically exhaust device memory at their
+        first sampling pass under the eager bridge with the 'exp' bucketing
+        tree. The warning is purely informational: it is scoped to that
+        posture ('pad' dissolves the deferred ask into its bucket ladder,
+        lazy mode never authors it) and never blocks a boot.
+        """
+        config = get_config()
+        if config.bridge_mode != 'eager' or config.bucketing_strategy != 'exp':
+            return
+        warning = eager_deferred_sampling_warning(self.model_config.max_model_len,
+                                                  HabanaMemoryProfiler.current_free_device_memory())
+        if warning:
+            logger.warning(warning)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
