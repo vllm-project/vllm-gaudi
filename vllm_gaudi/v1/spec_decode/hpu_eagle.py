@@ -210,7 +210,10 @@ class HpuEagleProposer(EagleProposer):
 
         # Calculate the slot mapping and fill with padding
         slot_mapping = block_ids * block_size + clamped_positions % block_size
-        dummy_slots = itertools.cycle(range(model_runner._PAD_SLOT_ID, model_runner._PAD_SLOT_ID + block_size))
+        # The pad block is one attention kernel block, which is smaller than a
+        # KV-manager block when the hybrid cache splits them.
+        dummy_slots = itertools.cycle(
+            range(model_runner._PAD_SLOT_ID, model_runner._PAD_SLOT_ID + model_runner.attn_block_size))
         slot_mapping[num_seq:].apply_(lambda _, ds=dummy_slots: next(ds))
         # Slot mapping needs to be int64 (long) type
         slot_mapping = slot_mapping.to(torch.int64)
