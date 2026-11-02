@@ -99,7 +99,7 @@ import os
 from typing import Callable, Optional
 
 from vllm_gaudi.kimi_k3_gate import (KIMI_K3_ARCHITECTURES, current_config_is_kimi_k3, is_kimi_k3_model_config,
-                                     kimi_k3_seen, mark_kimi_k3_seen)
+                                     kimi_k3_build_context, kimi_k3_seen, mark_kimi_k3_seen)
 
 import torch
 
@@ -1274,8 +1274,10 @@ def _patch_moe_runner_delegation() -> None:
 
     The patch is installed for every model (load_general_plugins runs before any ModelConfig exists), so it only
     wraps ``MoERunner.__init__`` (``ROCmLatentMoERunner`` reaches it through ``super().__init__``). There the runner
-    is swapped to a Kimi-K3-only subclass if the current vllm config is a Kimi-K3 one or the runner class comes from
-    vllm.models.kimi_k3. Any other runner keeps exactly the upstream type, and ``MoERunner`` gets no ``__getattr__``,
+    is swapped to a Kimi-K3-only subclass while a Kimi-K3 model is being built (including its Kimi-Linear language
+    model, which sees a submodel config without the K3 architecture) or when the current vllm config is a Kimi-K3 one.
+    A standalone Kimi-Linear model is not swapped even if its runner class lives in vllm.models.kimi_k3.
+    Any other runner keeps exactly the upstream type, and ``MoERunner`` gets no ``__getattr__``,
     so ``hasattr(runner, "w13_weight_packed")`` stays False for other models (their ``register_parameter`` on the
     runner would raise ``KeyError: attribute '...' already exists``) and attribute reads pay no extra cost.
     """
@@ -1294,7 +1296,7 @@ def _patch_moe_runner_delegation() -> None:
             if cls.__dict__.get("_hpu_kimi_k3_runner") or any(
                     getattr(c, "_hpu_kimi_k3_runner", False) for c in cls.__mro__):
                 return  # already a Kimi-K3 runner: no double swap
-            if _current_config_is_kimi_k3() or any(c.__module__.startswith(_KIMI_K3_MODULE) for c in cls.__mro__):
+            if _current_config_is_kimi_k3():
                 self.__class__ = _kimi_k3_runner_class(cls)
 
         MoERunner.__init__ = _init
@@ -1371,6 +1373,9 @@ def _patch_kimi_linear_weights() -> None:
         if orig_moe_init is not None and not getattr(k3_linear.KimiMoE, "_patched_weights", False):
 
             def _safe_moe_init(self, *args, **kwargs):
+                if not current_config_is_kimi_k3():  # standalone Kimi-Linear: upstream constructor as is
+                    orig_moe_init(self, *args, **kwargs)
+                    return
                 try:
                     orig_moe_init(self, *args, **kwargs)
                 except AttributeError as e:
@@ -1462,6 +1467,28 @@ def _patch_kimi_attn_res() -> None:
         _kimi_patch_failed("attn_res")
 
 
+def _mark_kimi_k3_construction(model_cls: type, shared_layer_classes: tuple[type, ...]) -> None:
+    """Build ``model_cls`` inside the Kimi-K3 build context and tag its instances of ``shared_layer_classes``.
+
+    The tag (``_hpu_kimi_k3``) lets the patched forward of those classes fall through to upstream for a standalone
+    Kimi-Linear model, which is built outside the context and stays untagged.
+    """
+    if "_hpu_kimi_k3_init" in vars(model_cls):
+        return
+    orig_init = model_cls.__init__  # type: ignore[misc]
+
+    @functools.wraps(orig_init)
+    def __init__(self, *args, **kwargs):
+        with kimi_k3_build_context():
+            orig_init(self, *args, **kwargs)
+        for module in self.modules():
+            if isinstance(module, shared_layer_classes):
+                module._hpu_kimi_k3 = True  # type: ignore[attr-defined]
+
+    model_cls.__init__ = __init__  # type: ignore[misc]
+    model_cls._hpu_kimi_k3_init = True  # type: ignore[attr-defined]
+
+
 def _patch_kimi_k3_arch() -> None:
     """Route Kimi-K3 models to the platform-independent AMD implementation on HPU."""
     try:
@@ -1490,6 +1517,11 @@ def _patch_kimi_k3_arch() -> None:
         ModelRegistry.register_model("KimiK3MTP", _amd_mtp.KimiK3MTP)
         _kimi_patch_installed("model_registration")
 
+        # The K3 models build their language model under a submodel config that looks like a standalone Kimi-Linear
+        # one: mark the construction and the Kimi-K3 instances of the classes shared with Kimi-Linear.
+        for k3_cls in (_amd_model.KimiK3ForConditionalGeneration, _amd_mtp.KimiK3MTP):
+            _mark_kimi_k3_construction(k3_cls, (_amd_linear.KimiLinearModel, _amd_linear.KimiMoE))
+
         # Monkey-patch KimiLinearModel.forward to ensure tokens/positions are 1D/2D
         # so block_residual is allocated with shape [num_tokens, attn_res_block_num, hidden_size].
         orig_linear_model_forward = getattr(_amd_linear.KimiLinearModel, "forward", None)
@@ -1505,6 +1537,17 @@ def _patch_kimi_k3_arch() -> None:
                 step=None,
                 **kwargs,
             ):
+                if not getattr(self, "_hpu_kimi_k3", False):  # standalone Kimi-Linear: upstream forward
+                    if step is not None:
+                        kwargs["step"] = step
+                    return orig_linear_model_forward(
+                        self,
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds,
+                        **kwargs,
+                    )
                 if input_ids is not None and input_ids.dim() == 2:
                     input_ids = input_ids.view(-1)
                 if inputs_embeds is not None and inputs_embeds.dim() == 3:
@@ -1549,7 +1592,7 @@ def _patch_kimi_k3_arch() -> None:
         if orig_moe_forward is not None and not getattr(_amd_linear.KimiMoE, "_patched_moe_2d", False):
 
             def _safe_moe_forward(self, hidden_states):
-                if hidden_states.dim() == 3:
+                if getattr(self, "_hpu_kimi_k3", False) and hidden_states.dim() == 3:
                     hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
                 return orig_moe_forward(self, hidden_states)
 

@@ -108,8 +108,26 @@ def test_k3_runners_share_one_cached_subclass(patches):
     assert "__getattr__" not in vars(base)
 
 
+def test_runner_built_during_k3_construction_is_swapped_under_the_nested_kimi_linear_config(patches):
+    from vllm_gaudi.kimi_k3_gate import kimi_k3_build_context
+    patches.test_current["config"] = _Config(["KimiLinearForCausalLM"])  # submodel config of the K3 language model
+
+    with kimi_k3_build_context():
+        inside = patches.test_classes[0](_experts_with_packed_weights())
+    outside = patches.test_classes[0](_experts_with_packed_weights())
+
+    assert type(inside) is patches._kimi_k3_runner_class(patches.test_classes[0])
+    assert type(outside) is patches.test_classes[0]
+
+
+def test_k3_module_runner_class_alone_does_not_make_a_standalone_kimi_linear_runner_k3(patches):
+    runner = _build(patches, 1, ["KimiLinearForCausalLM"])  # latent runner class lives in vllm.models.kimi_k3
+
+    assert type(runner) is patches.test_classes[1]
+
+
 def test_k3_latent_runner_is_swapped_to_a_subclass_of_its_own_class(patches):
-    runner = _build(patches, 1, ["GptOssForCausalLM"])
+    runner = _build(patches, 1, ["KimiK3ForConditionalGeneration"])
     latent = patches.test_classes[1]
 
     assert type(runner) is not latent
@@ -196,8 +214,8 @@ def test_k3_runner_still_delegates_to_routed_experts(patches, architectures):
         runner.no_such_attribute  # noqa: B018
 
 
-def test_k3_latent_runner_delegates_whatever_the_current_config(patches):
-    runner = _build(patches, 1, ["GptOssForCausalLM"])
+def test_k3_latent_runner_delegates(patches):
+    runner = _build(patches, 1, ["KimiK3ForConditionalGeneration"])
 
     assert runner.w13_weight_packed is runner.routed_experts.w13_weight_packed
 
@@ -485,11 +503,26 @@ def arch_modules(kda_modules, monkeypatch):
     """Stubbed amd.linear / amd.ops.attn_res for the attn_res and KimiLinearModel.forward patches."""
     calls = []
 
-    class KimiLinearModel:
+    class KimiLinearModel(torch.nn.Module):
 
         def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, step=None):
             calls.append({"input_ids": input_ids, "positions": positions, "step": step})
             return "hidden"
+
+    class KimiMoE(torch.nn.Module):
+
+        def forward(self, hidden_states):
+            return hidden_states
+
+    class KimiK3ForConditionalGeneration(torch.nn.Module):
+
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            self.model = KimiLinearModel()
+            self.moe = KimiMoE()
+
+    class KimiK3MTP(KimiK3ForConditionalGeneration):
+        pass
 
     def module(name, **attrs):
         mod = types.ModuleType(name)
@@ -499,11 +532,12 @@ def arch_modules(kda_modules, monkeypatch):
 
     linear = module("vllm.models.kimi_k3.amd.linear",
                     KimiLinearModel=KimiLinearModel,
+                    KimiMoE=KimiMoE,
                     KimiLinearForCausalLM=object,
                     KimiK3MultiHeadLatentAttentionWrapper=object)
     module("vllm.models.kimi_k3.amd.mla", KimiK3MultiHeadLatentAttentionWrapper=object)
-    module("vllm.models.kimi_k3.amd.model", KimiK3ForConditionalGeneration=object)
-    module("vllm.models.kimi_k3.amd.mtp", KimiK3MTP=object)
+    module("vllm.models.kimi_k3.amd.model", KimiK3ForConditionalGeneration=KimiK3ForConditionalGeneration)
+    module("vllm.models.kimi_k3.amd.mtp", KimiK3MTP=KimiK3MTP)
     registry = types.SimpleNamespace(register_model=lambda *args: None)
     module("vllm.model_executor.models")
     module("vllm.model_executor.models.registry", ModelRegistry=registry)
@@ -513,6 +547,7 @@ def arch_modules(kda_modules, monkeypatch):
     deferred.run_with_deferred_kda_state = lambda model, forward, *args, **kwargs: forward(*args, **kwargs)
     monkeypatch.setitem(sys.modules, "vllm_gaudi.models.kimi_k3_kda", deferred)
     kda_modules.test_linear = linear
+    kda_modules.test_k3_model = KimiK3ForConditionalGeneration
     kda_modules.test_calls = calls
     return kda_modules
 
@@ -525,14 +560,55 @@ def _forward_wrapper(arch_modules):
 
 
 def test_linear_model_forward_wrapper_passes_the_fifth_positional_step_on(arch_modules):
-    model_cls = _forward_wrapper(arch_modules)
+    _forward_wrapper(arch_modules)
     ids = torch.arange(4).view(2, 2)
     positions = torch.arange(4)
 
     # vLLM 28a5fba06: KimiLinearForCausalLM.forward calls self.model(input_ids, positions, it, embeds, step)
-    assert model_cls().forward(ids, positions, None, None, "plan") == "hidden"
+    k3_model = arch_modules.test_k3_model().model
+    assert k3_model.forward(ids, positions, None, None, "plan") == "hidden"
     assert arch_modules.test_calls[-1]["step"] == "plan"
     assert arch_modules.test_calls[-1]["input_ids"].dim() == 1
+
+
+def test_standalone_kimi_linear_model_keeps_the_upstream_forward_path(arch_modules):
+    model_cls = _forward_wrapper(arch_modules)
+    ids = torch.arange(4).view(2, 2)
+
+    assert model_cls().forward(ids, torch.arange(4), None, None, "plan") == "hidden"
+    assert arch_modules.test_calls[-1]["step"] == "plan"
+    assert arch_modules.test_calls[-1]["input_ids"].dim() == 2  # not flattened: the K3 wrapper did not run
+
+
+def test_k3_construction_tags_shared_layers_and_runs_in_the_build_context(arch_modules):
+    from vllm_gaudi.kimi_k3_gate import building_kimi_k3
+    seen = []
+    k3_cls = arch_modules.test_k3_model
+    orig = k3_cls.__init__
+
+    def init(self, *args, **kwargs):
+        orig(self, *args, **kwargs)
+        seen.append(building_kimi_k3())
+
+    k3_cls.__init__ = init
+    _forward_wrapper(arch_modules)
+    wrapped = k3_cls.__init__
+    arch_modules._patch_kimi_k3_arch()  # retry: no second wrapping
+
+    model = k3_cls()
+
+    assert k3_cls.__init__ is wrapped
+    assert seen == [True] and not building_kimi_k3()
+    assert model.model._hpu_kimi_k3 and model.moe._hpu_kimi_k3
+    assert not hasattr(arch_modules.test_linear.KimiMoE(), "_hpu_kimi_k3")
+
+
+def test_kimi_moe_forward_flattens_only_for_k3_layers(arch_modules):
+    _forward_wrapper(arch_modules)
+    x = torch.zeros(2, 3, 4)
+
+    assert arch_modules.test_k3_model().moe(x).dim() == 2
+    assert arch_modules.test_linear.KimiMoE()(x).dim() == 3
 
 
 def test_linear_model_forward_wrapper_works_without_step(arch_modules):
@@ -545,7 +621,9 @@ def test_linear_model_forward_wrapper_works_without_step(arch_modules):
     arch_modules.test_linear.KimiLinearModel = NoStep
     arch_modules._patch_kimi_k3_arch()
 
-    assert NoStep().forward(torch.arange(2), torch.arange(2)) == "hidden"
+    model = NoStep()
+    model._hpu_kimi_k3 = True
+    assert model.forward(torch.arange(2), torch.arange(2)) == "hidden"
 
 
 def test_apply_attn_res_replacement_accepts_quant_key_none_and_rejects_a_quant_key(arch_modules):

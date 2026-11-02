@@ -282,3 +282,34 @@ def test_kimi_method_process_weights_in_graph_call_only_for_kimi_configs(mxfp4):
     method.process_weights_after_loading(_layer(local=1, global_=1, ep_rank=0))
 
     assert created[0].kwargs["in_graph_call"] is False
+
+
+def test_moe_layers_under_the_nested_submodel_config_get_the_hpu_method(mxfp4, monkeypatch):
+    """K3 builds its language model under a Kimi-Linear submodel config; only the K3 build context tells them apart."""
+    gate_source = _SOURCE.parents[1] / "kimi_k3_gate.py"
+    spec = importlib.util.spec_from_file_location("kimi_k3_gate_for_routing", gate_source)
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    nested = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(architectures=["KimiLinearForCausalLM"], is_submodel_config=True))
+    config_mod = types.ModuleType("vllm.config")
+    config_mod.get_current_vllm_config_or_none = lambda: nested
+    monkeypatch.setitem(sys.modules, "vllm.config", config_mod)
+
+    # the routing wrapper reads the predicate through the stubbed vllm_gaudi.patches: use the real one
+    monkeypatch.setattr(sys.modules["vllm_gaudi.patches"], "_current_config_is_kimi_k3", gate.current_config_is_kimi_k3)
+    monkeypatch.setattr(mxfp4.upstream.Mxfp4Config, "_make_moe_method", _original_make(mxfp4), raising=True)
+    mxfp4.upstream.Mxfp4Config._hpu_kimi_k3_routed = False
+    mxfp4._route_kimi_k3_moe_method()
+
+    with gate.kimi_k3_build_context():
+        method = mxfp4.upstream.Mxfp4Config()._make_moe_method(_moe())
+    assert isinstance(method, mxfp4.HPUKimiK3Mxfp4MoEMethod)
+
+    with pytest.raises(NotImplementedError):  # standalone Kimi-Linear: same config, no build context
+        mxfp4.upstream.Mxfp4Config()._make_moe_method(_moe())
+
+
+def _original_make(mxfp4):
+    # upstream stub behaviour: the unwrapped method builds the (raising) upstream Mxfp4MoEMethod
+    return lambda self, moe: mxfp4.orig_mxfp4_method(moe)

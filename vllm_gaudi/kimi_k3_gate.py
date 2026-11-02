@@ -6,7 +6,9 @@ predicates only read config attributes and import nothing heavy; evaluate them o
 """
 
 # Kimi-VL, Kimi-K2.5, Kimi-Audio and the standalone Kimi-Linear model are not K3.
+import contextlib
 import os
+import threading
 
 SEEN_ENV = "HPU_KIMI_K3_SEEN"
 
@@ -25,8 +27,31 @@ def is_kimi_k3_vllm_config(vllm_config) -> bool:
     return vllm_config is not None and is_kimi_k3_model_config(getattr(vllm_config, "model_config", None))
 
 
+# Construction of a Kimi-K3 model is in progress in this thread. KimiK3ForConditionalGeneration builds its language
+# model through init_vllm_registered_model(..., architectures=['KimiLinearForCausalLM']), i.e. under a deep-copied
+# submodel config whose architectures are those of a standalone Kimi-Linear model, so the current vllm config alone
+# cannot tell a K3 layer from a Kimi-Linear one. The wrapper around the K3 model __init__ marks the span instead.
+_build_state = threading.local()
+
+
+@contextlib.contextmanager
+def kimi_k3_build_context():
+    """Mark the construction of a Kimi-K3 model (re-entrant); layers built inside it are Kimi-K3 layers."""
+    _build_state.depth = getattr(_build_state, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _build_state.depth -= 1
+
+
+def building_kimi_k3() -> bool:
+    return getattr(_build_state, "depth", 0) > 0
+
+
 def current_config_is_kimi_k3() -> bool:
-    """True when the vllm config being built/used right now is for a Kimi-K3 model (False when there is none)."""
+    """True when a Kimi-K3 model is being built here or the current vllm config is a Kimi-K3 one."""
+    if building_kimi_k3():
+        return True
     try:
         from vllm.config import get_current_vllm_config_or_none
     except ImportError:

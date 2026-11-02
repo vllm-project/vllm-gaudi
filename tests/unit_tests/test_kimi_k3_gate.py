@@ -215,3 +215,49 @@ def test_remote_tokenizer_filter_only_after_k3(patches, monkeypatch):
 def test_pad_ids_without_virtual_split_equal_scheduler_blocks():
     kv = _load("kv_block_layout_under_test", "v1/worker/kv_block_layout.py")
     assert kv.attn_pad_ids(10, None, 128) == (10, 10, 1280)
+
+
+def _nested_k3_text_config():
+    """Language-model config of K3: deep-copied submodel config of a standalone Kimi-Linear model."""
+    return types.SimpleNamespace(
+        model_config=types.SimpleNamespace(architectures=["KimiLinearForCausalLM"], is_submodel_config=True))
+
+
+def test_nested_submodel_config_alone_is_not_k3(gate, monkeypatch):
+    current = {"c": _nested_k3_text_config()}
+    mod = types.ModuleType("vllm.config")
+    mod.get_current_vllm_config_or_none = lambda: current["c"]
+    monkeypatch.setitem(sys.modules, "vllm", types.ModuleType("vllm"))
+    monkeypatch.setitem(sys.modules, "vllm.config", mod)
+
+    # indistinguishable from standalone Kimi-Linear by config alone
+    assert not gate.current_config_is_kimi_k3()
+
+
+def test_build_context_makes_nested_submodel_config_k3(gate, monkeypatch):
+    current = {"c": _nested_k3_text_config()}
+    mod = types.ModuleType("vllm.config")
+    mod.get_current_vllm_config_or_none = lambda: current["c"]
+    monkeypatch.setitem(sys.modules, "vllm", types.ModuleType("vllm"))
+    monkeypatch.setitem(sys.modules, "vllm.config", mod)
+
+    with gate.kimi_k3_build_context():
+        assert gate.building_kimi_k3() and gate.current_config_is_kimi_k3()
+        with gate.kimi_k3_build_context():  # re-entrant
+            pass
+        assert gate.current_config_is_kimi_k3()
+    assert not gate.building_kimi_k3() and not gate.current_config_is_kimi_k3()
+
+
+def test_build_context_resets_after_an_exception_and_is_thread_local(gate):
+    import threading
+    with pytest.raises(RuntimeError), gate.kimi_k3_build_context():
+        raise RuntimeError("boom")
+    assert not gate.building_kimi_k3()
+
+    seen = []
+    with gate.kimi_k3_build_context():
+        t = threading.Thread(target=lambda: seen.append(gate.building_kimi_k3()))
+        t.start()
+        t.join()
+    assert seen == [False]
