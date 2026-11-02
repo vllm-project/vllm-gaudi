@@ -1667,7 +1667,9 @@ def _patch_compressed_tensors_mxfp4() -> None:
 
         def hpu_init(self, moe):
             orig_init(self, moe)
-            if getattr(current_platform, "device_type", None) == "hpu":
+            # only Kimi-K3 takes the HPU kernel; other compressed-tensors MXFP4 models (e.g. Kimi-K2.6) keep upstream
+            self._hpu_kimi_k3 = current_config_is_kimi_k3()
+            if self._hpu_kimi_k3 and getattr(current_platform, "device_type", None) == "hpu":
                 self.mxfp4_backend = None
                 self.experts_cls = None
                 self.use_cutlass_mxfp4 = False
@@ -1676,7 +1678,7 @@ def _patch_compressed_tensors_mxfp4() -> None:
         orig_process = getattr(cls, "process_weights_after_loading", None)
 
         def hpu_process_weights(self, layer):
-            if getattr(current_platform, "device_type", None) != "hpu":
+            if not getattr(self, "_hpu_kimi_k3", False) or getattr(current_platform, "device_type", None) != "hpu":
                 if orig_process:
                     return orig_process(self, layer)
                 return
@@ -1737,7 +1739,7 @@ def _patch_compressed_tensors_mxfp4() -> None:
         orig_apply = getattr(cls, "apply", None)
 
         def hpu_apply(self, layer, x, topk_weights, topk_ids, shared_experts=None, shared_experts_input=None):
-            if getattr(current_platform, "device_type", None) != "hpu":
+            if not getattr(self, "_hpu_kimi_k3", False) or getattr(current_platform, "device_type", None) != "hpu":
                 if orig_apply:
                     return orig_apply(self, layer, x, topk_weights, topk_ids, shared_experts, shared_experts_input)
                 raise RuntimeError("Non-HPU platform without orig_apply")
@@ -1753,7 +1755,7 @@ def _patch_compressed_tensors_mxfp4() -> None:
             orig_oracle = getattr(oracle_mod, "select_deepseek_v4_mxfp4_moe_backend", None)
 
             def hpu_select_backend(*args, **kwargs):
-                if getattr(current_platform, "device_type", None) == "hpu":
+                if current_config_is_kimi_k3() and getattr(current_platform, "device_type", None) == "hpu":
                     return (None, None)
                 if orig_oracle:
                     return orig_oracle(*args, **kwargs)

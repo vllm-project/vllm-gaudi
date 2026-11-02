@@ -261,3 +261,83 @@ def test_build_context_resets_after_an_exception_and_is_thread_local(gate):
         t.start()
         t.join()
     assert seen == [False]
+
+
+@pytest.fixture
+def ct_patch(patches, monkeypatch):
+    """_patch_compressed_tensors_mxfp4 applied to a stubbed upstream class on a (stubbed) HPU platform."""
+    log = {"oracle": 0, "init": 0, "process": 0, "apply": 0}
+
+    class Method:
+        group_size = 32
+
+        def __init__(self, moe):
+            log["init"] += 1
+            self.mxfp4_backend = "upstream"
+            self.experts_cls = "upstream"
+            self.use_cutlass_mxfp4 = True
+            self.moe_quant_config = "upstream"
+
+        def process_weights_after_loading(self, layer):
+            log["process"] += 1
+
+        def apply(self, layer, x, topk_weights, topk_ids, shared_experts=None, shared_experts_input=None):
+            log["apply"] += 1
+            return "upstream"
+
+    def oracle(*args, **kwargs):
+        log["oracle"] += 1
+        return ("backend", "cls")
+
+    def module(name, **attrs):
+        mod = types.ModuleType(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, mod)
+        return mod
+
+    ct = "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe"
+    for name in ("vllm.model_executor", "vllm.model_executor.layers", "vllm.model_executor.layers.quantization",
+                 "vllm.model_executor.layers.quantization.compressed_tensors", "vllm.model_executor.layers.fused_moe"):
+        module(name)
+    module(ct)
+    module(ct + ".compressed_tensors_moe_w4a4_mxfp4", CompressedTensorsW4A4Mxfp4MoEMethod=Method)
+    module("vllm.model_executor.layers.fused_moe.oracle")
+    module("vllm.model_executor.layers.fused_moe.oracle.mxfp4", select_deepseek_v4_mxfp4_moe_backend=oracle)
+    module("vllm.platforms", current_platform=types.SimpleNamespace(device_type="hpu"))
+    patches._patch_compressed_tensors_mxfp4()
+    patches.test_method = Method
+    patches.test_log = log
+    patches.test_oracle_module = sys.modules["vllm.model_executor.layers.fused_moe.oracle.mxfp4"]
+    return patches
+
+
+def test_compressed_tensors_patch_is_inert_outside_k3(ct_patch):
+    ct_patch.test_current["config"] = _cfg(["KimiLinearForCausalLM"])
+    method = ct_patch.test_method(object())
+
+    assert (method.mxfp4_backend, method.experts_cls, method.use_cutlass_mxfp4) == ("upstream", "upstream", True)
+    method.process_weights_after_loading(object())
+    assert method.apply(object(), 1, 2, 3) == "upstream"
+    assert ct_patch.test_oracle_module.select_deepseek_v4_mxfp4_moe_backend() == ("backend", "cls")
+    assert ct_patch.test_log == {"oracle": 1, "init": 1, "process": 1, "apply": 1}
+
+
+def test_compressed_tensors_patch_applies_to_k3(ct_patch):
+    ct_patch.test_current["config"] = _cfg(K3)
+
+    assert ct_patch.test_oracle_module.select_deepseek_v4_mxfp4_moe_backend() == (None, None)
+    method = ct_patch.test_method(object())
+
+    assert method.mxfp4_backend is None and method.experts_cls is None and method.use_cutlass_mxfp4 is False
+    assert ct_patch.test_log["oracle"] == 0
+
+
+def test_compressed_tensors_patch_applies_to_nested_k3_build(ct_patch):
+    ct_patch.test_current["config"] = _nested_k3_text_config()
+
+    with ct_patch.kimi_k3_build_context():
+        method = ct_patch.test_method(object())
+    assert method.mxfp4_backend is None
+
+    other = ct_patch.test_method(object())  # same config, built outside a K3 build: standalone Kimi-Linear
+    assert other.mxfp4_backend == "upstream"
