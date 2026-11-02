@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 import torch
 import yaml
+from vllm.v1.engine import CheckpointState
 
 from vllm_gaudi.v1.engine.multi_model_async_llm import MultiModelAsyncLLM
 from vllm_gaudi.entrypoints.openai import multi_model_api_server as api_server
@@ -281,6 +282,23 @@ async def test_initialize_invalid_model_raises():
 
     with pytest.raises(ValueError, match="not found"):
         await manager.initialize("qwen")
+
+
+@pytest.mark.asyncio
+async def test_multi_model_engine_client_delegates_checkpoint_methods():
+    engine = Mock()
+    engine.checkpoint_prepare = AsyncMock(return_value=None)
+    engine.checkpoint_restore = AsyncMock()
+    engine.checkpoint_state = AsyncMock(return_value=(CheckpointState.RUNNING, None))
+    client = api_server.MultiModelEngineClient(SimpleNamespace(engine=engine))
+
+    assert await client.checkpoint_prepare("wait") is None
+    await client.checkpoint_restore()
+    assert await client.checkpoint_state() == (CheckpointState.RUNNING, None)
+
+    engine.checkpoint_prepare.assert_awaited_once_with("wait")
+    engine.checkpoint_restore.assert_awaited_once_with()
+    engine.checkpoint_state.assert_awaited_once_with()
 
 
 def test_deserialize_reconfigure_config_requires_insecure_serialization(monkeypatch):

@@ -1,15 +1,15 @@
 # Dependencies for HPU code
 pandas>=2.3.3
-numba>=0.67.0
+numba>=0.68.0
 numpy>=1.26.0
-kaldi-native-fbank >= 1.22.3
+kaldi-native-fbank >= 1.22.4
 tblib==3.2.2
 # Cap FastAPI below 0.137: that release made include_router() build a route
 # tree (_IncludedRouter nodes in app.routes) instead of a flat APIRoute list,
 # which prometheus-fastapi-instrumentator (<=8.0.0) chokes on while resolving
 # route.path -> 500 on every request. Upstream bug:
 # trallnag/prometheus-fastapi-instrumentator#370. Remove once it ships a fix.
-fastapi<0.143
+fastapi<0.163
 # Cap transformers below 5.17: huggingface/transformers#48105 removed
 # position_ids_in_meshgrid and renamed PixtralRotaryEmbedding to
 # PixtralVisionRotaryEmbedding, both imported at the top of upstream vLLM's
@@ -17,4 +17,4 @@ fastapi<0.143
 # PixtralForConditionalGeneration cannot be inspected and every Mistral-Small-3.1
 # run dies in ModelConfig validation. vLLM's own CI pins transformers==5.16.1, so
 # it does not see this. Remove once vLLM adopts the new transformers API.
-transformers<5.20
+transformers<5.21
