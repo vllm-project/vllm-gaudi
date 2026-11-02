@@ -991,19 +991,12 @@ def _current_config_is_kimi_k3() -> bool:
     return current_config_is_kimi_k3()
 
 
-def _optional_runner_absent(exc: BaseException, mod_name: str, cls_name: str) -> bool:
-    """True when the ROCm-only latent MoE runner does not exist in this vllm build (not a failure on HPU)."""
-    if cls_name != "ROCmLatentMoERunner":
-        return False
-    return (isinstance(exc, ModuleNotFoundError) and exc.name == mod_name) or isinstance(exc, AttributeError)
-
-
 def _kimi_patches_live() -> dict[str, bool]:
     """Whether the patches that matter to a model worker are on the objects the model will really use.
 
     The bookkeeping lists say what an attempt did, not what is live: an early attempt can patch a module object that
-    a failed circular import later drops from ``sys.modules`` (Jenkins #983 listed ``kda_forward`` as installed and
-    also warned that it was not, and the upstream KDA forward ran). So look the classes up in ``sys.modules``.
+    a failed circular import later drops from ``sys.modules`` (``kda_forward`` was then listed as installed and also
+    warned about as not installed, and the upstream KDA forward ran). So look the classes up in ``sys.modules``.
     """
     import sys
 
@@ -1232,72 +1225,80 @@ def _patch_kimi_k3_hybrid_config() -> None:
         _kimi_patch_failed("hybrid_config")
 
 
-def _patch_moe_runner_delegation() -> None:
-    """Delegate missing attribute lookups on MoERunner to routed_experts, for Kimi-K3 runners only.
+_K3_RUNNER_CLASSES: dict[type, type] = {}
 
-    The patch is installed on the classes for every model (load_general_plugins runs before any ModelConfig exists),
-    so the decision is made per runner: ``hasattr(runner, name)`` must stay False for the attributes only
-    ``routed_experts`` has, or any other model's ``register_parameter`` on the runner raises
-    ``KeyError: attribute '...' already exists``. The flag is set when the runner is built, where the current vllm
-    config is that of the model being built; runner classes defined in vllm.models.kimi_k3 always delegate.
+
+def _kimi_k3_runner_class(base: type) -> type:
+    """The Kimi-K3 subclass of a MoE runner class: unknown attributes fall through to ``routed_experts``.
+
+    One subclass per base class (cached), so runners of the same class share a type. The subclass is the only
+    place that has the delegating ``__getattr__``; the upstream runner classes stay untouched.
     """
-    for mod_name, cls_name in [
-        ("vllm.model_executor.layers.fused_moe.runner.moe_runner", "MoERunner"),
-        ("vllm.models.kimi_k3.amd.latent_moe_runner", "ROCmLatentMoERunner"),
-    ]:
+    cls = _K3_RUNNER_CLASSES.get(base)
+    if cls is not None:
+        return cls
+
+    def __getattr__(self, name: str):
+        # nn.Module.__getattr__ first: parameters, buffers and submodules of the runner itself win
         try:
-            mod = __import__(mod_name, fromlist=[cls_name])
-            cls = getattr(mod, cls_name)
-            if getattr(cls, "_patched_delegation", False):
-                # Already patched, on this class or (ROCmLatentMoERunner subclasses MoERunner) on a base class that
-                # the lookup reaches by inheritance: covered. Record it so that it clears an earlier failed attempt.
-                _kimi_patch_installed(f"moe_runner_delegation[{cls_name}]")
-                if "_patched_delegation" not in vars(cls):
-                    _kimi_patch_logger().debug("Kimi-K3 patch 'moe_runner_delegation[%s]' is covered by a base class",
-                                               cls_name)
-                continue
-            orig_getattr = getattr(cls, "__getattr__", None)
-            orig_init = cls.__init__
+            return base.__getattr__(self, name)
+        except AttributeError:
+            # __dict__ lookup (a submodule lives in _modules): no recursion into __getattr__ while the runner is built
+            routed = self.__dict__.get("_modules", {}).get("routed_experts", self.__dict__.get("routed_experts"))
+            if routed is not None and hasattr(routed, name):
+                return getattr(routed, name)
+            raise
 
-            def _make_init(og_init):
+    def __reduce__(self):
+        # The subclass is created at runtime and cannot be found by name, so pickle/deepcopy rebuild it from the base.
+        return _rebuild_kimi_k3_runner, (base, ), self.__dict__
 
-                @functools.wraps(og_init)
-                def _init(self, *args, **kwargs):
-                    og_init(self, *args, **kwargs)
-                    self.__dict__["_kimi_k3_delegation"] = _current_config_is_kimi_k3() or any(
-                        c.__module__.startswith(_KIMI_K3_MODULE) for c in type(self).__mro__)
+    cls = type(base.__name__, (base, ), {
+        "__getattr__": __getattr__,
+        "__reduce__": __reduce__,
+        "__module__": base.__module__,
+        "_hpu_kimi_k3_runner": True,
+    })
+    _K3_RUNNER_CLASSES[base] = cls
+    return cls
 
-                return _init
 
-            def _make_getattr(og_get, target_cls):
+def _rebuild_kimi_k3_runner(base: type):
+    return _kimi_k3_runner_class(base).__new__(_kimi_k3_runner_class(base))
 
-                def _getattr(self, name: str):
-                    try:
-                        if og_get:
-                            return og_get(self, name)
-                        return super(target_cls, self).__getattr__(name)
-                    except AttributeError:
-                        # __dict__ lookup: no recursion into __getattr__ while the runner is still being built
-                        if not self.__dict__.get("_kimi_k3_delegation", False):
-                            raise
-                        routed = getattr(self, "routed_experts", None)
-                        if routed is not None and hasattr(routed, name):
-                            return getattr(routed, name)
-                        raise
 
-                return _getattr
+def _patch_moe_runner_delegation() -> None:
+    """Delegate missing attribute lookups of Kimi-K3 MoE runners to ``routed_experts``, without touching other models.
 
-            cls.__init__ = _make_init(orig_init)
-            cls.__getattr__ = _make_getattr(orig_getattr, cls)
-            cls._patched_delegation = True
-            _kimi_patch_installed(f"moe_runner_delegation[{cls_name}]")
-        except Exception as exc:
-            name = f"moe_runner_delegation[{cls_name}]"
-            # The ROCm runner is optional: a vllm build without it is not a failure.
-            if _optional_runner_absent(exc, mod_name, cls_name):
-                _kimi_patch_not_applicable(name)
-            else:
-                _kimi_patch_failed(name)
+    The patch is installed for every model (load_general_plugins runs before any ModelConfig exists), so it only
+    wraps ``MoERunner.__init__`` (``ROCmLatentMoERunner`` reaches it through ``super().__init__``). There the runner
+    is swapped to a Kimi-K3-only subclass if the current vllm config is a Kimi-K3 one or the runner class comes from
+    vllm.models.kimi_k3. Any other runner keeps exactly the upstream type, and ``MoERunner`` gets no ``__getattr__``,
+    so ``hasattr(runner, "w13_weight_packed")`` stays False for other models (their ``register_parameter`` on the
+    runner would raise ``KeyError: attribute '...' already exists``) and attribute reads pay no extra cost.
+    """
+    name = "moe_runner_delegation"
+    try:
+        from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+        if "_patched_delegation" in vars(MoERunner):
+            _kimi_patch_installed(name)
+            return
+        orig_init = MoERunner.__init__
+
+        @functools.wraps(orig_init)
+        def _init(self, *args, **kwargs):
+            orig_init(self, *args, **kwargs)
+            cls = type(self)
+            if cls.__dict__.get("_hpu_kimi_k3_runner") or any(getattr(c, "_hpu_kimi_k3_runner", False) for c in cls.__mro__):
+                return  # already a Kimi-K3 runner: no double swap
+            if _current_config_is_kimi_k3() or any(c.__module__.startswith(_KIMI_K3_MODULE) for c in cls.__mro__):
+                self.__class__ = _kimi_k3_runner_class(cls)
+
+        MoERunner.__init__ = _init
+        MoERunner._patched_delegation = True
+        _kimi_patch_installed(name)
+    except Exception:
+        _kimi_patch_failed(name)
 
 
 def _patch_latent_moe_runner_forward() -> None:

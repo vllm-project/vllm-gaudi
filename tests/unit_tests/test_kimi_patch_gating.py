@@ -74,12 +74,96 @@ def _build(patches, runner_cls_index, architectures):
     return patches.test_classes[runner_cls_index](_experts_with_packed_weights())
 
 
-def test_delegation_patch_installs_on_both_runner_classes(patches):
-    assert patches._KIMI_PATCHES_INSTALLED == [
-        "moe_runner_delegation[MoERunner]",
-        "moe_runner_delegation[ROCmLatentMoERunner]",
-    ]
+def test_delegation_patch_is_recorded_as_installed(patches):
+    assert patches._KIMI_PATCHES_INSTALLED == ["moe_runner_delegation"]
     assert not patches._KIMI_PATCHES_FAILED
+
+
+def test_upstream_runner_classes_get_no_getattr(patches):
+    base, latent = patches.test_classes
+
+    assert "__getattr__" not in vars(base)
+    assert "__getattr__" not in vars(latent)
+    # nn.Module's own lookup is what a MoERunner uses
+    assert base.__getattr__ is torch.nn.Module.__getattr__
+
+
+@pytest.mark.parametrize("architectures",
+                         [["Kimi_K25ForConditionalGeneration"], ["GptOssForCausalLM"], ["KimiLinearForCausalLM"], []])
+def test_non_k3_runner_has_exactly_the_upstream_type(patches, architectures):
+    runner = _build(patches, 0, architectures)
+
+    assert type(runner) is patches.test_classes[0]
+
+
+def test_k3_runners_share_one_cached_subclass(patches):
+    first = _build(patches, 0, ["KimiK3ForConditionalGeneration"])
+    second = _build(patches, 0, ["KimiK3MTPModel"])
+    base = patches.test_classes[0]
+
+    assert type(first) is type(second)
+    assert type(first) is not base
+    assert issubclass(type(first), base)
+    assert type(first) is patches._kimi_k3_runner_class(base)
+    assert "__getattr__" not in vars(base)
+
+
+def test_k3_latent_runner_is_swapped_to_a_subclass_of_its_own_class(patches):
+    runner = _build(patches, 1, ["GptOssForCausalLM"])
+    latent = patches.test_classes[1]
+
+    assert type(runner) is not latent
+    assert issubclass(type(runner), latent)
+    assert type(runner) is not type(_build(patches, 0, ["KimiK3ForConditionalGeneration"]))
+
+
+def test_k3_runner_is_not_swapped_twice(patches):
+    runner = _build(patches, 0, ["KimiK3ForConditionalGeneration"])
+    k3_cls = type(runner)
+    base_init = patches.test_classes[0].__init__
+
+    base_init(runner, runner.routed_experts)  # a second construction pass over the same instance
+
+    assert type(runner) is k3_cls
+    assert k3_cls.__mro__.count(k3_cls) == 1
+    assert not any(c.__dict__.get("_hpu_kimi_k3_runner") for c in k3_cls.__mro__[1:])
+
+
+def test_patching_twice_wraps_init_once(patches):
+    base = patches.test_classes[0]
+    init = base.__init__
+
+    patches._patch_moe_runner_delegation()
+
+    assert base.__init__ is init
+
+
+def test_k3_runner_survives_deepcopy(patches):
+    import copy
+    runner = _build(patches, 0, ["KimiK3ForConditionalGeneration"])
+
+    clone = copy.deepcopy(runner)
+
+    assert type(clone) is type(runner)
+    assert clone.routed_experts is not runner.routed_experts
+    assert clone.w13_weight_packed is clone.routed_experts.w13_weight_packed
+
+
+def test_k3_runner_survives_pickle(patches):
+    import pickle
+    runner = _build(patches, 0, ["KimiK3ForConditionalGeneration"])
+    # the stub class lives in a fixture, so make it findable the way a real module-level class is
+    base = patches.test_classes[0]
+    base.__qualname__ = "_PickleMoERunner"
+    monkey_module = sys.modules[base.__module__]
+    monkey_module._PickleMoERunner = base
+    try:
+        clone = pickle.loads(pickle.dumps(runner))
+    finally:
+        del monkey_module._PickleMoERunner
+
+    assert type(clone) is type(runner)
+    assert clone.w13_weight_packed is clone.routed_experts.w13_weight_packed
 
 
 @pytest.mark.parametrize(
