@@ -8,7 +8,7 @@ from transformers import PretrainedConfig
 
 from vllm import LLM
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
+from vllm.v1.core.kv_cache_planning import get_global_kv_cache_groups, get_kv_cache_configs
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from .registry import HF_EXAMPLE_MODELS
@@ -55,10 +55,12 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
 
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
         scheduler_kv_cache_config = get_kv_cache_configs(
             vllm_config,
             kv_cache_specs,
             [10 * GiB_bytes],
+            global_kv_cache_groups,
         )[0]
 
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config

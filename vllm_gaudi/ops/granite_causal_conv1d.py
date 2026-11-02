@@ -106,8 +106,11 @@ def granite_causal_conv1d_fn(
         # Scatter all updates at once
         conv_states[blocks_caching_range, -state_len:, :] = new_states.transpose(-1, -2)
     else:
-        end = qsl[-1]
-        idx = torch.arange(state_len, device=x_work.device) + end
+        # int32 on purpose, not the int64 qsl: when the conv and SSM parts of
+        # the prefill compile into one HPU graph (Granite 4.0-H sizes), the
+        # int64 index gathers zeros and the cached conv state is all zero.
+        end = query_start_loc.to(torch.int32)[-1]
+        idx = torch.arange(state_len, device=x_work.device, dtype=torch.int32) + end
         new_state = seq_input.index_select(dim=1, index=idx)
         conv_states[store_cache_indices, -state_len:, :] = new_state.transpose(-1, -2)
 
