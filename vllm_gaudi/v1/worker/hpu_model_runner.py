@@ -4782,8 +4782,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Apply structured output bitmasks if present
             if grammar_output:
                 self.apply_grammar_bitmask(scheduler_output, grammar_output, logits)
+            # Rows are decodes first, so the per-request sampling params must be too.
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
-                                                                    pd_info.prompt_req_ids + pd_info.decode_req_ids,
+                                                                    pd_info.decode_req_ids + pd_info.prompt_req_ids,
                                                                     logits.shape[0])
             # Deal with the case of incomplete prompt
             for i in range(logits.shape[0] - num_decodes):
@@ -7966,3 +7967,27 @@ def _apply_inc_patch():
                             f"Fixed supported_dynamic_ops: {fixed_dynamic_ops}")
     except (ImportError, AttributeError):
         pass
+    _register_gate_linear_with_inc()
+
+
+def _register_gate_linear_with_inc():
+    """Make INC quantize ``GateLinear`` MoE routers like ``ReplicatedLinear`` ones.
+
+    INC picks the modules it patches by class name. vllm PR #58234 moved the MoE
+    routers of models such as Granite MoE, Mixtral, Qwen3-MoE and Llama 4 from
+    ``ReplicatedLinear`` to ``GateLinear``, a subclass INC does not know, so FP8
+    runs left those routers unquantized even when the calibration measured them.
+    Calibrations without router measurements need the router in the INC
+    blocklist, as the DeepSeek configs already have.
+    """
+    try:
+        import neural_compressor.torch.algorithms.fp8_quant._core.patching_common  # noqa: F401
+        from neural_compressor.torch.algorithms.fp8_quant.model_configs import get_patched_module_table
+    except ImportError:
+        return
+
+    table = get_patched_module_table()
+    if "GateLinear" in table or "ReplicatedLinear" not in table:
+        return
+    table["GateLinear"] = table["ReplicatedLinear"]
+    logger.info("Registered GateLinear with INC as ReplicatedLinear.")
