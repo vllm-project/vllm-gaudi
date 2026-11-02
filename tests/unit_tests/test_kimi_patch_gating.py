@@ -369,22 +369,10 @@ def test_kda_patch_import_failure_of_one_module_does_not_skip_the_others(kda_mod
     assert mods["kda"].is_fused_kda_decode_supported() is False
     assert "kda_forward" in kda_modules._KIMI_PATCHES_INSTALLED
     assert "kda_fused_checks" not in kda_modules._KIMI_PATCHES_INSTALLED
-    assert "kimi_gdn_forward" in kda_modules._KIMI_PATCHES_INSTALLED
-    assert list(kda_modules._KIMI_PATCHES_FAILED) == ["kda_fused_checks[ops.kda_chunk]"]
-    assert gdn_cls.forward is not gdn_original
-
-
-def test_kimi_gdn_forward_is_patched_only_where_the_k3_amd_kda_module_exists(kda_modules, monkeypatch):
-    gdn_cls, original = kda_modules.test_gdn_cls, kda_modules.test_gdn_original
-    monkeypatch.setitem(sys.modules, "vllm.models.kimi_k3.amd.kda", None)
-    monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_INSTALLED", [])
-    monkeypatch.setattr(kda_modules, "_KIMI_PATCHES_FAILED", {})
-
-    kda_modules._patch_kimi_kda()
-
-    assert gdn_cls.forward is original  # Kimi-Linear keeps its own forward
     assert "kimi_gdn_forward" not in kda_modules._KIMI_PATCHES_INSTALLED
-    assert "kda_forward" in kda_modules._KIMI_PATCHES_FAILED
+    assert list(kda_modules._KIMI_PATCHES_FAILED) == ["kda_fused_checks[ops.kda_chunk]"]
+    # the shared Kimi-Linear GDN layer keeps its own forward (its low-rank gate layout is not the K3 one)
+    assert gdn_cls.forward is gdn_original
 
 
 def test_kda_patch_failure_is_logged_through_the_vllm_logger_tree(kda_modules, monkeypatch, caplog):
