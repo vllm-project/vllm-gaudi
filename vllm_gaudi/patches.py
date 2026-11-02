@@ -557,7 +557,8 @@ def _hpu_get_num_layers_by_block_type(self, parallel_config, block_type="attenti
             else:
                 return 0
 
-        if layers_block_type_value is None and attn_type_list is None and layer_types_value is None and linear_attn_config is None:
+        if (layers_block_type_value is None and attn_type_list is None and layer_types_value is None
+                and linear_attn_config is None):
             raise ValueError("The model is an hybrid without a layers_block_type or an "
                              "attn_type_list, or a layer_types in the hf_config, "
                              f"cannot determine the num of {block_type} layers")
@@ -1010,7 +1011,7 @@ def _kimi_patches_live() -> dict[str, bool]:
     try:
         from vllm_gaudi.ops.hpu_kda_pytorch import attn_res_torch
     except Exception:
-        attn_res_torch = None
+        attn_res_torch = None  # type: ignore[assignment]
     kda_cls = attr(f"{pkg}.kda", "KimiK3DeltaAttention")
     return {
         "kda_forward": bool(getattr(getattr(kda_cls, "forward", None), "_hpu_kda_forward", False)),
@@ -1137,7 +1138,7 @@ def _patch_kimi_kda() -> None:
         from vllm_gaudi.models.kimi_k3_kda import hpu_kda_forward
         return hpu_kda_forward(self, hidden_states, positions)
 
-    _kda_forward._hpu_kda_forward = True  # checked by _kimi_patches_live on the class that the model will use
+    _kda_forward._hpu_kda_forward = True  # type: ignore[attr-defined]  # checked by _kimi_patches_live on the class that the model will use
 
     try:
         import vllm.models.kimi_k3.amd.kda as _amd_kda
@@ -1172,7 +1173,7 @@ def _patch_mla_prefill_selector() -> None:
                 return orig_fn(vllm_config)
             return _DummyPrefillBackend
 
-        hpu_get_prefill._hpu_orig_selector = orig_fn
+        hpu_get_prefill._hpu_orig_selector = orig_fn  # type: ignore[attr-defined]
         sel_mod.get_mla_prefill_backend = hpu_get_prefill
         try:
             import vllm.model_executor.layers.attention.mla_attention as mla_mod
@@ -1186,7 +1187,10 @@ def _patch_mla_prefill_selector() -> None:
 
 
 def _patch_kimi_k3_hybrid_config() -> None:
-    """Populate layer_types from linear_attn_config for hybrid models like Kimi-K3 and disable expert intermediate padding on EP."""
+    """Populate layer_types from linear_attn_config for hybrid models like Kimi-K3.
+
+    Also disables expert intermediate padding on EP.
+    """
     try:
         from vllm.config import ModelConfig
         orig_post_init = getattr(ModelConfig, "__post_init__", None)
@@ -1197,11 +1201,12 @@ def _patch_kimi_k3_hybrid_config() -> None:
                 _report_kimi_config_patches(self)
                 if _is_kimi_k3_config(self):
                     mark_kimi_k3_seen()
-                # Ensure KimiMoE does not pad moe_intermediate_size from 3072 to 4096 under EP (saves ~30 GB memory per card)
+                # Ensure KimiMoE does not pad moe_intermediate_size from 3072 to 4096 under EP
+                # (saves ~30 GB memory per card)
                 if _is_kimi_k3_config(self):
                     for cfg_obj in (getattr(self, "hf_text_config", None), getattr(self, "hf_config", None)):
                         if cfg_obj is not None:
-                            setattr(cfg_obj, "min_moe_intermediate_per_partition", 1)
+                            cfg_obj.min_moe_intermediate_per_partition = 1
                 lac = None
                 if _is_kimi_k3_config(self):
                     lac = getattr(self.hf_text_config, "linear_attn_config", None) or getattr(
@@ -1218,7 +1223,7 @@ def _patch_kimi_k3_hybrid_config() -> None:
                     if hasattr(self.hf_config, "text_config"):
                         self.hf_config.text_config.layer_types = l_types
 
-            _hpu_post_init._hpu_kimi_post_init = True
+            _hpu_post_init._hpu_kimi_post_init = True  # type: ignore[attr-defined]
             ModelConfig.__post_init__ = _hpu_post_init
         _kimi_patch_ok("hybrid_config")
     except Exception:
@@ -1241,7 +1246,7 @@ def _kimi_k3_runner_class(base: type) -> type:
     def __getattr__(self, name: str):
         # nn.Module.__getattr__ first: parameters, buffers and submodules of the runner itself win
         try:
-            return base.__getattr__(self, name)
+            return base.__getattr__(self, name)  # type: ignore[attr-defined]
         except AttributeError:
             # __dict__ lookup (a submodule lives in _modules): no recursion into __getattr__ while the runner is built
             routed = self.__dict__.get("_modules", {}).get("routed_experts", self.__dict__.get("routed_experts"))
@@ -1264,7 +1269,7 @@ def _kimi_k3_runner_class(base: type) -> type:
 
 
 def _rebuild_kimi_k3_runner(base: type):
-    return _kimi_k3_runner_class(base).__new__(_kimi_k3_runner_class(base))
+    return object.__new__(_kimi_k3_runner_class(base))
 
 
 def _patch_moe_runner_delegation() -> None:
@@ -1289,7 +1294,8 @@ def _patch_moe_runner_delegation() -> None:
         def _init(self, *args, **kwargs):
             orig_init(self, *args, **kwargs)
             cls = type(self)
-            if cls.__dict__.get("_hpu_kimi_k3_runner") or any(getattr(c, "_hpu_kimi_k3_runner", False) for c in cls.__mro__):
+            if cls.__dict__.get("_hpu_kimi_k3_runner") or any(
+                    getattr(c, "_hpu_kimi_k3_runner", False) for c in cls.__mro__):
                 return  # already a Kimi-K3 runner: no double swap
             if _current_config_is_kimi_k3() or any(c.__module__.startswith(_KIMI_K3_MODULE) for c in cls.__mro__):
                 self.__class__ = _kimi_k3_runner_class(cls)
@@ -1449,7 +1455,7 @@ def _patch_kimi_attn_res() -> None:
                     0.0 if output_norm is None else output_norm.variance_epsilon,
                 )
 
-            _apply_attn_res_torch._hpu_attn_res = True
+            _apply_attn_res_torch._hpu_attn_res = True  # type: ignore[attr-defined]
             _linear_mod._apply_attn_res = _apply_attn_res_torch
             _kimi_patch_installed("attn_res_linear")
         except Exception:
@@ -1610,7 +1616,10 @@ def _hpu_mxfp4_routed_apply(layer, x, topk_weights, topk_ids, group_size):
 def _patch_compressed_tensors_mxfp4() -> None:
     """Enable Gaudi native TPC kernel (VllmMixtureOfExpertsOpMXFP4) for CompressedTensorsW4A4Mxfp4MoEMethod."""
     try:
-        import vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 as mod
+        import importlib
+        mod = importlib.import_module(
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe."
+            "compressed_tensors_moe_w4a4_mxfp4")
         from vllm.platforms import current_platform
         cls = mod.CompressedTensorsW4A4Mxfp4MoEMethod
 
@@ -1669,7 +1678,7 @@ def _patch_compressed_tensors_mxfp4() -> None:
                 experts_max,
                 block_size=self.group_size,
                 has_bias=has_bias,
-                dispatch_fn=dispatch_fn,
+                dispatch_fn=dispatch_fn,  # type: ignore[arg-type]
                 in_graph_call=_current_config_is_kimi_k3(),
             )
 

@@ -158,7 +158,9 @@ def test_drop_file_page_cache_calls_fadvise_dontneed(monkeypatch, tmp_path):
     path = tmp_path / "shard.safetensors"
     path.write_bytes(b"x")
     calls = []
-    monkeypatch.setattr(os, "posix_fadvise", lambda fd, offset, length, advice: calls.append((offset, length, advice)),
+    monkeypatch.setattr(os,
+                        "posix_fadvise",
+                        lambda fd, offset, length, advice: calls.append((offset, length, advice)),
                         raising=False)
     monkeypatch.setattr(os, "POSIX_FADV_DONTNEED", 4, raising=False)
 

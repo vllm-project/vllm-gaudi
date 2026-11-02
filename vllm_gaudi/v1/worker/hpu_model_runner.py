@@ -6399,7 +6399,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Hybrids run contiguous PA without the defragmenter (see
             # OnlineDefragmenter), so any decode batch may reach the pool size.
             self.bucketing_manager.decode_full_block_range = (self.is_kimi_k3 and self.use_contiguous_pa
-                                                               and self.num_mamba_like_layers > 0)
+                                                              and self.num_mamba_like_layers > 0)
             if self.attn_block_size != self.block_size:
                 self.bucketing_manager.block_size = self.attn_block_size
             try:

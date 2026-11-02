@@ -27,6 +27,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable, Generator, Iterator
+from typing import Any
 
 import torch
 
@@ -251,7 +252,7 @@ def wrap_safetensors_iterator(original: Callable[..., Iterator[tuple[str, torch.
                 if not yielded:
                     try:  # the call itself may fail too (signature mismatch), not only the iteration
                         shard = original([st_file], False, safetensors_load_strategy, *args, **kwargs)
-                        first = next(shard, _EXHAUSTED)
+                        first: Any = next(shard, _EXHAUSTED)
                     except Exception as exc:
                         # Nothing reached the loader yet, so the upstream iterator can still take over everything.
                         logger.warning(

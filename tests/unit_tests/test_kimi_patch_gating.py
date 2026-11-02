@@ -354,8 +354,8 @@ def kda_modules(config_patches, monkeypatch):
     for name in ("vllm.models", "vllm.models.kimi_k3", "vllm.models.kimi_k3.amd", "vllm.models.kimi_k3.amd.ops"):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     for name, attrs in (("kda", ("is_fused_kda_chunk_supported", "is_fused_kda_decode_supported")),
-                        ("ops.kda_chunk", ("is_fused_kda_chunk_supported", )),
-                        ("ops.kda_decode", ("is_fused_kda_decode_supported", ))):
+                        ("ops.kda_chunk", ("is_fused_kda_chunk_supported", )), ("ops.kda_decode",
+                                                                                ("is_fused_kda_decode_supported", ))):
         full = f"vllm.models.kimi_k3.amd.{name}"
         mod = types.ModuleType(full)
         for attr in attrs:
@@ -398,7 +398,9 @@ def _prepare_apply(kda_modules, monkeypatch):
     monkeypatch.setattr(torch.accelerator, "empty_cache", torch.accelerator.empty_cache)
     if hasattr(torch.accelerator, "empty_host_cache"):
         monkeypatch.setattr(torch.accelerator, "empty_host_cache", torch.accelerator.empty_host_cache)
-    monkeypatch.setattr(torch._C, "_host_emptyCache", getattr(torch._C, "_host_emptyCache", lambda: None),
+    monkeypatch.setattr(torch._C,
+                        "_host_emptyCache",
+                        getattr(torch._C, "_host_emptyCache", lambda: None),
                         raising=False)
 
     # the non-Kimi patches import real vllm; keep only the ones that belong to the Kimi-K3 support
@@ -474,7 +476,6 @@ def test_kda_patch_failure_is_logged_through_the_vllm_logger_tree(kda_modules, m
 
 # The "only the gpt-oss alias is installed upstream" check is behavioural and lives in test_kimi_mxfp4_routing.py
 # (test_hpu_gpt_oss_alias_is_still_the_only_upstream_replacement).
-
 
 # --- vLLM 28a5fba06 compatibility of the Kimi-K3 patches (step argument, attn_res quant_key, fused MLA gate) ---
 
@@ -758,10 +759,18 @@ def test_wrapper_without_fused_gate_logs_nothing(ctor):
 
 
 @pytest.mark.parametrize(("modules", "message"), [
-    ({"g_proj": object()}, "mutually exclusive"),
-    ({"indexer": types.SimpleNamespace(topk_tokens=1)}, "Sparse MLA"),
-    ({"is_sparse": True}, "Sparse MLA"),
-    ({"skip_o_proj": True}, "skip_o_proj"),
+    ({
+        "g_proj": object()
+    }, "mutually exclusive"),
+    ({
+        "indexer": types.SimpleNamespace(topk_tokens=1)
+    }, "Sparse MLA"),
+    ({
+        "is_sparse": True
+    }, "Sparse MLA"),
+    ({
+        "skip_o_proj": True
+    }, "skip_o_proj"),
 ])
 def test_fused_gate_wrapper_rejects_unsupported_combinations_with_value_error(ctor, modules, message):
     with pytest.raises(ValueError, match=message):

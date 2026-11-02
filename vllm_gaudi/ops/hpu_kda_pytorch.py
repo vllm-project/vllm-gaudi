@@ -27,7 +27,7 @@ under torch.compile.
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 
@@ -534,8 +534,8 @@ def tag_kda_cache_groups(named_modules, kv_cache_groups, is_mamba_group: Callabl
         if not hasattr(module, "in_proj_qkvgfab"):
             continue
         prefix = getattr(module, "prefix", None) or module_name
-        group_id = layer_to_group.get(prefix, layer_to_group.get(module_name))
-        if group_id is None:
+        group_id = layer_to_group.get(prefix, layer_to_group.get(module_name, -1))
+        if group_id < 0:
             untagged.append(prefix)
             continue
         module.cache_group_idx = make_index(group_id)
@@ -697,7 +697,7 @@ def install_functional_attn_res(linear_mod) -> type | None:
     Returns the patched class (idempotent), or None when ``linear_mod`` has no such class; the caller must report
     that loudly: without the patch the in-place upstream version runs inside the per-layer compiled graphs.
     """
-    cls = kimi_decoder_layer_class(linear_mod)
+    cls: Any = kimi_decoder_layer_class(linear_mod)
     if cls is None or getattr(cls.forward_attn_residual, "_hpu_functional_attn_res", False):
         return cls
 
@@ -716,7 +716,7 @@ def install_functional_attn_res(linear_mod) -> type | None:
                                f"the hidden states {tuple(hidden_states.shape)}")
         return forward_attn_residual_functional(self, positions, hidden_states, block_residual, prefix_delta)
 
-    forward_attn_residual._hpu_functional_attn_res = True
+    forward_attn_residual._hpu_functional_attn_res = True  # type: ignore[attr-defined]
     cls.forward_attn_residual = forward_attn_residual
     return cls
 

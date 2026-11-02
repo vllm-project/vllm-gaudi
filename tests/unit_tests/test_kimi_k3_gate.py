@@ -14,7 +14,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2] / "vllm_gaudi"
 K3 = ["KimiK3ForConditionalGeneration"]
-NON_K3 = [["Kimi_K25ForConditionalGeneration"], ["KimiVLForConditionalGeneration"], ["KimiLinearForCausalLM"], ["GptOssForCausalLM"], []]
+NON_K3 = [["Kimi_K25ForConditionalGeneration"], ["KimiVLForConditionalGeneration"], ["KimiLinearForCausalLM"],
+          ["GptOssForCausalLM"], []]
 
 
 def _load(name, rel):

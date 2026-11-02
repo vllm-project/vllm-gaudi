@@ -4,7 +4,8 @@
 The patches are first attempted at plugin load, when ``import vllm.models.kimi_k3`` can still raise
 ``ImportError: cannot import name 'kimi_k3' from 'vllm.models'`` (circular import). A failed import can also drop the
 module object that an earlier attempt patched (a circular import of ``vllm.models.kimi_k3`` during plugin load leaves
-the patch uninstalled: ``kda_forward`` listed as installed and as not installed, upstream ``_forward`` ran). ``ensure_kimi_k3_patches`` therefore decides on the live classes in ``sys.modules``.
+the patch uninstalled: ``kda_forward`` listed as installed and as not installed, upstream ``_forward`` ran).
+``ensure_kimi_k3_patches`` therefore decides on the live classes in ``sys.modules``.
 
 Runs without vllm: ``_patch_kimi_k3_arch`` is replaced by a stub that mimics the attempts.
 """

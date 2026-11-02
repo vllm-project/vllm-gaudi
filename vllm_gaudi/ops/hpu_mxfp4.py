@@ -156,9 +156,8 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
         # Env reads and the SiTU helper run only for SiTU layers; every other model calls the fused op directly.
         output = None
         if getattr(layer.activation, "value", layer.activation) == "situ":
-            output = maybe_situ_moe(layer, x, topk_ids, topk_weights,
-                                    situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL), MXFP4_BLOCK,
-                                    gaudi_envs.VLLM_MINIMAX_M3_MOE_TOKEN_TILE)
+            output = maybe_situ_moe(layer, x, topk_ids, topk_weights, situ_impl_or_exact(gaudi_envs.HPU_KIMI_SITU_IMPL),
+                                    MXFP4_BLOCK, gaudi_envs.VLLM_MINIMAX_M3_MOE_TOKEN_TILE)
         if output is None:
             output = layer.moe_op(
                 x,
