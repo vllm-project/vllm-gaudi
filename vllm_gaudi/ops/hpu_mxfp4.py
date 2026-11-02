@@ -192,6 +192,8 @@ class HPUKimiK3Mxfp4MoEMethod(Mxfp4MoEMethod):
     supports_pre_processed_weights = False
 
     def __init__(self, moe, activation_key=None):
+        # Deliberately skips Mxfp4MoEMethod.__init__ (calls the next class in the MRO): that __init__ selects a
+        # CUDA/ROCm MXFP4 backend and raises on HPU. This class sets the attributes the rest of the code needs below.
         super(Mxfp4MoEMethod, self).__init__(moe)
         self.weight_dtype = "mxfp4"
         self.activation_key = activation_key
