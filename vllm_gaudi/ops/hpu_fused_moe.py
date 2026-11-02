@@ -762,44 +762,7 @@ def patched_fused_moe_forward(
         shared_experts_input, hidden_states))
 
     if self.moe_config.dp_size == 1:
-        # Kept inline (not _hpu_apply_moe_dp1): the extra call level slowed decode of non-Kimi FP8 MoE models
-        # (granite-4.0-h-small) ~2.8x; _hpu_apply_moe_dp1 stays for the Kimi-K3 entries below.
-        # Bypass _forward_impl entirely for dp_size==1 to eliminate
-        # graph breaks from _sequence_parallel_context() (which calls
-        # get_forward_context()), skip the no-op _maybe_dispatch(), and
-        # avoid double gate / stream-sync calls that _forward_impl
-        # would redundantly repeat.
-        if self.moe_config.pcp_size > 1:
-            raise RuntimeError("dp_size==1 fast path does not support pcp_size > 1")
-        # Mirror MoERunner._forward_impl's pre-dispatch setup: the quant config
-        # is initialized on routed_experts (which the runner holds directly), so
-        # unlike the old FusedMoE-layer-based init we do NOT need the layer here.
-        self.routed_experts._ensure_moe_quant_config_init()
-        # Start the shared-expert aux stream before routed dispatch, mirroring
-        # upstream MoERunner._forward_impl. Version-tolerant: see
-        # _launch_shared_experts_overlap.
-        shared_experts_overlapping = _launch_shared_experts_overlap(self, shared_experts_input)
-        # Apply the gate if the runner holds it (mirrors _forward_impl).
-        if self.gate is not None:
-            if self._fse_fuse_gate:
-                self._maybe_fuse_gate_weights()
-                router_logits = torch.nn.functional.linear(hidden_states, self._combined_gate_weight)
-            else:
-                router_logits, _ = self.gate(hidden_states)
-        # Core MoERunner._apply_quant_method takes no layer argument — it reads
-        # everything it needs off the runner (self.routed_experts / self.router).
-        # Call it exactly as upstream _forward_impl does. Only pass
-        # shared_experts_overlapping when an async launch actually happened: that
-        # is the only case in which the kwarg is guaranteed to exist upstream.
-        extra_quant_kwargs = {"shared_experts_overlapping": True} if shared_experts_overlapping else {}
-        shared_output, fused_hidden = self._apply_quant_method(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            shared_experts_input=shared_experts_input,
-            input_ids=input_ids,
-            **extra_quant_kwargs,
-        )
-        result = self._maybe_combine(shared_output, fused_hidden)
+        result = _hpu_apply_moe_dp1(self, hidden_states, router_logits, shared_experts_input, input_ids)
     else:
         # Upstream PR #41184 dropped MoERunner._trtllm_mxfp4_unpadded_dim(); the
         # TRT-LLM MXFP4 unpadded hidden dim now comes from moe_config and is only
