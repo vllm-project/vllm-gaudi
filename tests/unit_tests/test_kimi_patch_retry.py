@@ -107,7 +107,7 @@ def test_live_and_clean_patches_are_not_retried(patches, monkeypatch):
     assert len(calls) == 1
 
 
-def test_stale_module_state_of_983(patches, monkeypatch):
+def test_stale_module_state_after_failed_circular_import(patches, monkeypatch):
     """kda_forward in INSTALLED and FAILED, the module object in sys.modules is not the patched one."""
     _kda_module(patches, patched=False)
     patches._KIMI_PATCHES_INSTALLED.append("kda_forward")
@@ -160,3 +160,34 @@ def test_non_k3_config_is_untouched(patches, monkeypatch):
     monkeypatch.setattr(patches, "_patch_kimi_k3_arch", attempt)
     patches.ensure_kimi_k3_patches(types.SimpleNamespace(architectures=["LlamaForCausalLM"]))
     assert not calls
+
+
+def test_kda_patch_only_touches_kimi_k3_class(patches):
+    """The shared GDN base class keeps its upstream forward; only KimiK3DeltaAttention gets the HPU forward."""
+
+    def upstream_forward(self, *args, **kwargs):
+        pass
+
+    def upstream_inner(self, *args, **kwargs):
+        pass
+
+    base = type("GatedDeltaNetAttention", (), {"forward": upstream_forward, "_forward": upstream_inner})
+    k3 = type("KimiK3DeltaAttention", (base, ), {"forward": upstream_forward, "_forward": upstream_inner})
+    # `import a.b.c as m` walks the attributes of the parents, so the stubs must be linked to each other
+    chain = ["vllm", "vllm.models", "vllm.models.kimi_k3", "vllm.models.kimi_k3.amd", "vllm.models.kimi_k3.amd.ops"]
+    mods = {name: sys.modules.get(name) or patches.module(name) for name in chain}
+    mods["vllm"] = patches.module("vllm", envs=sys.modules["vllm.envs"])
+    for parent, child in zip(chain, chain[1:]):
+        setattr(mods[parent], child.rsplit(".", 1)[1], mods[child])
+    kda = patches.module(KDA, GatedDeltaNetAttention=base, KimiK3DeltaAttention=k3)
+    mods["vllm.models.kimi_k3.amd"].kda = kda
+    for name in ("kda_chunk", "kda_decode"):
+        setattr(mods["vllm.models.kimi_k3.amd.ops"], name, patches.module(f"vllm.models.kimi_k3.amd.ops.{name}"))
+
+    patches._patch_kimi_kda()
+    assert "kda_forward" not in patches._KIMI_PATCHES_FAILED, patches._KIMI_PATCHES_FAILED
+
+    assert base.__dict__["forward"] is upstream_forward
+    assert base.__dict__["_forward"] is upstream_inner
+    assert getattr(k3.__dict__["forward"], "_hpu_kda_forward", False)
+    assert k3.__dict__["_forward"] is not upstream_inner

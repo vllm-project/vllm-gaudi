@@ -1145,9 +1145,6 @@ def _patch_kimi_kda() -> None:
         if hasattr(_amd_kda, "KimiK3DeltaAttention"):
             _amd_kda.KimiK3DeltaAttention.forward = _kda_forward
             _amd_kda.KimiK3DeltaAttention._forward = lambda *args, **kwargs: None
-        if hasattr(_amd_kda, "GatedDeltaNetAttention"):
-            _amd_kda.GatedDeltaNetAttention.forward = _kda_forward
-            _amd_kda.GatedDeltaNetAttention._forward = lambda *args, **kwargs: None
         _kimi_patch_installed("kda_forward")
     except Exception:
         _kimi_patch_failed("kda_forward")
