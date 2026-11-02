@@ -966,7 +966,7 @@ def apply_model_specific_patches(model_runner):
     is_qwen_moe = model_type in ("qwen3_moe", "qwen3_5", "qwen3_5_text", "qwen3_5_moe")
     is_gemma4 = model_type in ("gemma4", )
     # Kimi-K3 mixes dense/MoE feed-forward layers and MLA/KDA attention layers.
-    is_kimi_k3 = model_type in ("kimi_k3", )
+    is_kimi_k3 = is_kimi_k3_model_config(model_runner.vllm_config.model_config)
 
     model_runner._has_heterogeneous_layers = is_llama4 or is_qwen_moe or is_gemma4 or is_kimi_k3
     if is_llama4:

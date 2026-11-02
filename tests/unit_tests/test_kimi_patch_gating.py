@@ -103,7 +103,7 @@ def test_non_k3_runner_without_current_config_does_not_delegate(patches):
     assert not hasattr(runner, "w13_weight_packed")
 
 
-@pytest.mark.parametrize("architectures", [["KimiK3ForConditionalGeneration"], ["KimiLinearForCausalLM"]])
+@pytest.mark.parametrize("architectures", [["KimiK3ForConditionalGeneration"], ["KimiK3MTPModel"]])
 def test_k3_runner_still_delegates_to_routed_experts(patches, architectures):
     runner = _build(patches, 0, architectures)
 
@@ -205,7 +205,7 @@ def test_non_k3_config_keeps_moe_padding_attribute_unset(config_patches, archite
     assert not hasattr(cfg.hf_config, "min_moe_intermediate_per_partition")
 
 
-@pytest.mark.parametrize("architectures", [["KimiK3ForConditionalGeneration"], ["KimiLinearForCausalLM"]])
+@pytest.mark.parametrize("architectures", [["KimiK3ForConditionalGeneration"], ["KimiK3MTPModel"]])
 def test_k3_config_disables_moe_padding(config_patches, architectures):
     cfg = config_patches.test_model_config(architectures)
 

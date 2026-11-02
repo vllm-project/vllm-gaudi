@@ -14,7 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2] / "vllm_gaudi"
 K3 = ["KimiK3ForConditionalGeneration"]
-NON_K3 = [["Kimi_K25ForConditionalGeneration"], ["KimiVLForConditionalGeneration"], ["GptOssForCausalLM"], []]
+NON_K3 = [["Kimi_K25ForConditionalGeneration"], ["KimiVLForConditionalGeneration"], ["KimiLinearForCausalLM"], ["GptOssForCausalLM"], []]
 
 
 def _load(name, rel):
@@ -43,6 +43,16 @@ def _cfg(archs):
 def test_predicate_false_for_non_k3(gate, archs):
     assert not gate.is_kimi_k3_model_config(_cfg(archs).model_config)
     assert not gate.is_kimi_k3_vllm_config(_cfg(archs))
+
+
+def test_standalone_kimi_linear_config_is_not_k3(gate):
+    # architecture name shared with the K3 text model, but without a K3 architecture it is plain Kimi-Linear
+    model_config = types.SimpleNamespace(architectures=None,
+                                         hf_config=types.SimpleNamespace(architectures=["KimiLinearForCausalLM"],
+                                                                         model_type="kimi_linear"))
+    assert "KimiLinearForCausalLM" not in gate.KIMI_K3_ARCHITECTURES
+    assert not gate.is_kimi_k3_model_config(model_config)
+    assert not gate.is_kimi_k3_vllm_config(types.SimpleNamespace(model_config=model_config))
 
 
 def test_predicate_true_for_k3_and_none_safe(gate):
@@ -159,7 +169,7 @@ def _model_config(archs):
     return types.SimpleNamespace(architectures=archs, hf_text_config=text, hf_config=types.SimpleNamespace())
 
 
-@pytest.mark.parametrize("archs,filled", [(K3, True), (["KimiLinearForCausalLM"], True), (["Other"], False)])
+@pytest.mark.parametrize("archs,filled", [(K3, True), (["KimiLinearForCausalLM"], False), (["Other"], False)])
 def test_hybrid_config_layer_types_only_for_k3(patches, archs, filled):
     patches._patch_kimi_k3_hybrid_config()
     cfg = _model_config(archs)

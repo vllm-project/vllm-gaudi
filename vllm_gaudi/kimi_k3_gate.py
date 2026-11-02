@@ -5,13 +5,14 @@ Behaviour that only Kimi-K3 needs is gated on these, so that every other model t
 predicates only read config attributes and import nothing heavy; evaluate them once at init and store the bool.
 """
 
-# vllm.models.kimi_k3 holds all K3 classes (KimiK3ForConditionalGeneration, KimiLinearForCausalLM, MTP, DSpark);
-# Kimi-VL, Kimi-K2.5 and Kimi-Audio live in vllm.model_executor.models.kimi_* and are not K3.
+# Kimi-VL, Kimi-K2.5, Kimi-Audio and the standalone Kimi-Linear model are not K3.
 import os
 
 SEEN_ENV = "HPU_KIMI_K3_SEEN"
 
-KIMI_K3_ARCHITECTURES = ("KimiK3ForConditionalGeneration", "KimiK3MTPModel", "KimiLinearForCausalLM", "K3DSparkModel")
+# KimiLinearForCausalLM is deliberately absent: a standalone Kimi-Linear model also uses that architecture name
+# and must keep the upstream paths. K3 checkpoints are recognised by the K3 architectures above.
+KIMI_K3_ARCHITECTURES = ("KimiK3ForConditionalGeneration", "KimiK3MTPModel", "K3DSparkModel")
 
 
 def is_kimi_k3_model_config(model_config) -> bool:
