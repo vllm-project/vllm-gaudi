@@ -1199,7 +1199,7 @@ def _patch_kimi_k3_hybrid_config() -> None:
                 if _is_kimi_k3_config(self):
                     mark_kimi_k3_seen()
                 # Ensure KimiMoE does not pad moe_intermediate_size from 3072 to 4096 under EP
-                # (saves ~30 GB memory per card)
+                # (saves device memory on every card)
                 if _is_kimi_k3_config(self):
                     for cfg_obj in (getattr(self, "hf_text_config", None), getattr(self, "hf_config", None)):
                         if cfg_obj is not None:
@@ -1255,7 +1255,7 @@ def _kimi_k3_runner_class(base: type) -> type:
         # The subclass is created at runtime and cannot be found by name, so pickle/deepcopy rebuild it from the base.
         return _rebuild_kimi_k3_runner, (base, ), self.__dict__
 
-    cls = type(base.__name__, (base, ), {
+    cls = type(base.__name__ + "KimiK3", (base, ), {
         "__getattr__": __getattr__,
         "__reduce__": __reduce__,
         "__module__": base.__module__,

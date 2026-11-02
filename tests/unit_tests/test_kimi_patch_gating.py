@@ -108,6 +108,12 @@ def test_k3_runners_share_one_cached_subclass(patches):
     assert "__getattr__" not in vars(base)
 
 
+def test_k3_runner_subclass_has_a_distinguishable_name(patches):
+    runner = _build(patches, 0, ["KimiK3ForConditionalGeneration"])
+
+    assert type(runner).__name__ == patches.test_classes[0].__name__ + "KimiK3"
+
+
 def test_runner_built_during_k3_construction_is_swapped_under_the_nested_kimi_linear_config(patches):
     from vllm_gaudi.kimi_k3_gate import kimi_k3_build_context
     patches.test_current["config"] = _Config(["KimiLinearForCausalLM"])  # submodel config of the K3 language model
