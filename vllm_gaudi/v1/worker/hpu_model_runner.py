@@ -3407,7 +3407,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
         slot_mapping = slot_mapping[:padded_batch_size]
-        dummy_slots = pad_slot_cycle(self._PAD_BLOCK_ID * decode_block_size, decode_block_size)
+        # decode_block_size is attn_block_size, so the pad row (kernel-block units, see attn_pad_ids) is exactly
+        # decode_block_size slots starting at _PAD_SLOT_ID: cycling over it keeps padding tokens in the pad row.
+        dummy_slots = pad_slot_cycle(self._PAD_SLOT_ID, decode_block_size)
         slot_mapping[num_decodes:].apply_(lambda _, ds=dummy_slots: next(ds))
 
         #####################################
