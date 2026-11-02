@@ -78,7 +78,12 @@ def _files_size_bytes(files: list[str]) -> int:
 
 
 def drop_file_page_cache(path: str) -> bool:
-    """Ask the kernel to forget the cached, unmapped pages of a file. Pages still mapped elsewhere stay."""
+    """Ask the kernel to forget the cached, unmapped pages of a file. Pages still mapped elsewhere stay.
+
+    Does nothing (returns False) where os.posix_fadvise does not exist.
+    """
+    if not hasattr(os, "posix_fadvise"):
+        return False
     try:
         fd = os.open(path, os.O_RDONLY)
     except OSError as exc:

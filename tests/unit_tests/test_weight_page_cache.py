@@ -144,3 +144,23 @@ def test_broken_drop_scheduling_does_not_raise(monkeypatch, shards):
     monkeypatch.setattr(wpc._dropper, "submit", lambda path, batch: 1 / 0)
     calls = []
     assert len(list(wpc.wrap_safetensors_iterator(_fake_iterator(calls))(shards, False, None))) == 2
+
+
+def test_drop_file_page_cache_is_a_noop_without_posix_fadvise(monkeypatch, tmp_path):
+    path = tmp_path / "shard.safetensors"
+    path.write_bytes(b"x")
+    monkeypatch.delattr(os, "posix_fadvise", raising=False)
+
+    assert wpc.drop_file_page_cache(str(path)) is False
+
+
+def test_drop_file_page_cache_calls_fadvise_dontneed(monkeypatch, tmp_path):
+    path = tmp_path / "shard.safetensors"
+    path.write_bytes(b"x")
+    calls = []
+    monkeypatch.setattr(os, "posix_fadvise", lambda fd, offset, length, advice: calls.append((offset, length, advice)),
+                        raising=False)
+    monkeypatch.setattr(os, "POSIX_FADV_DONTNEED", 4, raising=False)
+
+    assert wpc.drop_file_page_cache(str(path)) is True
+    assert calls == [(0, 0, 4)]
