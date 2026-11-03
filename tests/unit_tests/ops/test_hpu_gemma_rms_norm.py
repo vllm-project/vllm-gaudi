@@ -12,6 +12,7 @@ from vllm_gaudi.ops.hpu_layernorm import HPUGemmaRMSNorm
 
 
 class _ReferenceHPUKernel:
+
     @staticmethod
     def apply(x, weight, epsilon):
         # Model the fused kernels accumulation and output dtype on CPU.
@@ -21,6 +22,7 @@ class _ReferenceHPUKernel:
 
 
 class TestHPUGemmaRMSNorm(unittest.TestCase):
+
     def test_matches_upstream_precision(self):
         with patch.object(kernels, "rms_norm", return_value=_ReferenceHPUKernel):
             for dtype in (torch.bfloat16, torch.float16, torch.float32):
