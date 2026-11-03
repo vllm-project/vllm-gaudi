@@ -5859,7 +5859,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             total_num_scheduled_tokens=sum(scheduled_tokens.values()),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=0,
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
         )
@@ -5870,7 +5869,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=0,
             finished_req_ids=set(req.req_id for req in requests),
             free_encoder_mm_hashes=[],
         )
