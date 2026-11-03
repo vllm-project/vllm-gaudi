@@ -108,16 +108,6 @@ def get_features():
         Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
-        # Compile each mamba layer's prefill as two graphs, conv and SSM, split
-        # by a graph break at the initial-state branch, instead of one merged
-        # graph. On for Granite 4.0-H, whose accuracy baselines were set with
-        # the split graphs: the merged graph is equally correct, but its
-        # different bf16 rounding moves Granite's greedy-decoding results. Off
-        # under fullgraph compilation, which rejects graph breaks, and in lazy
-        # mode: there is no torch.compile to split there, and HPU graphs hash
-        # tensors by metadata only, so with a tensor a prefill graph captured
-        # for one branch could replay for the other. See
-        # mamba_prep_initial_states in hpu_model_runner.py.
         Value('mamba_split_prefill_graph',
               All(ModelType('granitemoehybrid'), Disabled('fullgraph_compilation'), Not(Lazy()))),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
