@@ -7,7 +7,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import vllm_gaudi.extension.kernels as kernels
@@ -127,7 +127,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     block_size: int
-    prep_initial_states: bool
+    prep_initial_states: Union[bool, torch.Tensor]
     slot_mapping: torch.Tensor
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
