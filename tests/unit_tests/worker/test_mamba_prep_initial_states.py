@@ -16,6 +16,7 @@ from vllm_gaudi.v1.worker.hpu_model_runner import mamba_prep_initial_states
 
 
 def _split_prefill_graph(**values):
+    values.setdefault("bridge_mode", "eager")
     feature_values, feature_flags = get_features()
     return Config(feature_values, feature_flags, **values).get('mamba_split_prefill_graph')
 
@@ -27,6 +28,10 @@ def test_split_prefill_graph_default(model_type, split):
 
 def test_split_prefill_graph_off_under_fullgraph():
     assert _split_prefill_graph(model_type="granitemoehybrid", VLLM_T_COMPILE_FULLGRAPH=True) is False
+
+
+def test_split_prefill_graph_off_in_lazy_mode():
+    assert _split_prefill_graph(model_type="granitemoehybrid", bridge_mode="lazy") is False
 
 
 @pytest.mark.parametrize("model_type, override", [("granitemoehybrid", False), ("nemotron_h", True)])
@@ -56,7 +61,10 @@ def _mixer_prefill(x, prep_initial_states):
 @pytest.mark.parametrize("split_prefill_graph, graphs", [(False, 1), (True, 2)])
 def test_graph_break_only_when_split(split_prefill_graph, graphs):
     prep_initial_states = mamba_prep_initial_states(torch.tensor([False, True]), split_prefill_graph)
-    torch._dynamo.reset()
-    explanation = torch._dynamo.explain(_mixer_prefill)(torch.ones(4), prep_initial_states)
+    # The platform disables Dynamo in lazy mode; this check runs on the CPU
+    # and needs it either way.
+    with torch._dynamo.config.patch(disable=False):
+        torch._dynamo.reset()
+        explanation = torch._dynamo.explain(_mixer_prefill)(torch.ones(4), prep_initial_states)
     assert explanation.graph_count == graphs
     assert explanation.graph_break_count == graphs - 1

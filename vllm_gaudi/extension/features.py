@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Eq, Disabled, Enabled, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
+from vllm_gaudi.extension.config import Not, Hardware, Lazy, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Eq, Disabled, Enabled, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
 from vllm_gaudi.extension.kernels import fsdpa, block_softmax_adjustment
 from vllm_gaudi.extension.validation import for_all, choice
 
@@ -113,9 +113,13 @@ def get_features():
         # graph. On for Granite 4.0-H, whose accuracy baselines were set with
         # the split graphs: the merged graph is equally correct, but its
         # different bf16 rounding moves Granite's greedy-decoding results. Off
-        # under fullgraph compilation, which rejects graph breaks. See
+        # under fullgraph compilation, which rejects graph breaks, and in lazy
+        # mode: there is no torch.compile to split there, and HPU graphs hash
+        # tensors by metadata only, so with a tensor a prefill graph captured
+        # for one branch could replay for the other. See
         # mamba_prep_initial_states in hpu_model_runner.py.
-        Value('mamba_split_prefill_graph', All(ModelType('granitemoehybrid'), Disabled('fullgraph_compilation'))),
+        Value('mamba_split_prefill_graph',
+              All(ModelType('granitemoehybrid'), Disabled('fullgraph_compilation'), Not(Lazy()))),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
         Value(
             'flatten_input',
