@@ -59,6 +59,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     # create a new request differing only on the last token
     runner.new_request(token_ids=[0] * (offloaded_block_size * 6 - 1) + [1])
     runner.run(decoded_tokens=[0])
+    runner.manager.touch.assert_not_called()
 
     # terminate request
     runner.run(
