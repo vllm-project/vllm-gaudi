@@ -187,8 +187,9 @@ def mamba_prep_initial_states(has_initial_states: torch.Tensor, split_prefill_gr
     conv and SSM parts of each mamba layer's prefill compile into one graph.
     With split_prefill_graph (the mamba_split_prefill_graph feature) it stays
     a 0-dim tensor, and the `if` becomes a data-dependent graph break that
-    compiles the two parts as separate graphs. The value is computed on the
-    host, so neither form needs a device sync."""
+    compiles the two parts as separate graphs. has_initial_states is
+    expected on the host (the runner passes has_initial_states_cpu), so
+    neither form needs a device sync."""
     prep_initial_states = torch.any(has_initial_states)
     return prep_initial_states if split_prefill_graph else bool(prep_initial_states)
 
