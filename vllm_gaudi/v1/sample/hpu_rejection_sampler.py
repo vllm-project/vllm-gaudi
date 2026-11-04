@@ -3,8 +3,12 @@
 from vllm.v1.sample import rejection_sampler
 import torch
 from typing import Callable, Optional
+from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 PLACEHOLDER_TOKEN_ID = rejection_sampler.PLACEHOLDER_TOKEN_ID
 # Requests with a temperature below this are greedy, as in vllm.v1.sample.sampler.
@@ -189,6 +193,93 @@ def rejection_sample(
                                    sampling_metadata.temperature < _SAMPLING_EPS, uniform_probs, inv_q)
 
 
+def _draft_row_histories(output_token_ids: list[list[int]], spec_token_ids: Optional[list[list[int]]],
+                         rows_per_request: int) -> list[list[int]]:
+    """The output token history of every draft row, request by request.
+
+    Row j of a request verifies its draft j, so it sees the request's outputs
+    followed by its drafts before j. Rows after a request's own drafts are
+    padding and get all of them.
+    """
+    histories = []
+    for i, outputs in enumerate(output_token_ids):
+        histories.append(outputs)
+        drafts = spec_token_ids[i] if spec_token_ids else []
+        histories.extend([*outputs, *drafts[:j]] for j in range(1, rows_per_request))
+    return histories
+
+
+def apply_logits_processors(
+    self: rejection_sampler.RejectionSampler,
+    # [batch_size * max_num_draft_tokens, vocab_size]
+    logits: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    metadata: SpecDecodeMetadata,
+) -> torch.Tensor:
+    """Penalties, allowed token ids, bad words and min tokens for the draft rows.
+
+    Upstream's RejectionSampler.apply_logits_processors, for the HPU layout:
+    every request has max_num_draft_tokens rows, so the shapes stay static, and
+    the rows after its own drafts are padding. Upstream expects one row per
+    draft instead, sum(num_draft_tokens) in all, so a request with fewer drafts
+    (any padded one) shifted the rows of the next ones, and penalties failed on
+    the shape mismatch. Here request i owns rows i * max_num_draft_tokens on.
+    """
+    num_seqs = len(metadata.num_draft_tokens)
+    rows_per_request = logits.shape[0] // num_seqs
+    rows_per_seq = [rows_per_request] * num_seqs
+    has_penalties = not sampling_metadata.no_penalties
+    bad_words_token_ids = sampling_metadata.bad_words_token_ids
+    output_token_ids = sampling_metadata.output_token_ids
+    if has_penalties or bad_words_token_ids:
+        output_token_ids = _draft_row_histories(output_token_ids, sampling_metadata.spec_token_ids, rows_per_request)
+
+    if has_penalties or sampling_metadata.allowed_token_ids_mask is not None:
+        repeat_indices = torch.arange(num_seqs, device=logits.device).repeat_interleave(rows_per_request)
+        if has_penalties:
+            logits = self.apply_penalties(logits, sampling_metadata, metadata, repeat_indices, output_token_ids)
+        if sampling_metadata.allowed_token_ids_mask is not None:
+            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask[repeat_indices], float("-inf"))
+
+    if bad_words_token_ids:
+        apply_bad_words_with_drafts(logits, bad_words_token_ids, output_token_ids, rows_per_seq)
+
+    for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
+        if isinstance(processor, MinTokensLogitsProcessor):
+            logits = processor.apply_with_spec_decode(logits, rows_per_seq)
+    return logits
+
+
+def _get_logprobs_tensors(
+    self: rejection_sampler.RejectionSampler,
+    max_num_logprobs: int,
+    metadata: SpecDecodeMetadata,
+    # [batch_size * (max_num_draft_tokens + 1), vocab_size]
+    logits: torch.Tensor,
+    target_logits: torch.Tensor,
+    bonus_logits: torch.Tensor,
+    # [batch_size, max_num_draft_tokens + 1]
+    sampled_token_ids: torch.Tensor,
+) -> LogprobsTensors:
+    """Logprobs of every output position, one row per position.
+
+    Upstream's RejectionSampler._get_logprobs_tensors for the HPU layout, where
+    request i's logits rows start at i * (max_num_draft_tokens + 1). Upstream
+    starts them after the rows of the requests before it, which is the same
+    only while all of those have max_num_draft_tokens drafts. Rows at rejected
+    positions get token 0; parse_output and the runner drop them.
+    """
+    num_seqs, width = sampled_token_ids.shape
+    assert logits.shape[0] == num_seqs * width, "Speculative decoding needs max_num_draft_tokens + 1 rows per request."
+    final_logits = torch.zeros_like(logits, dtype=torch.float32)
+    final_logits[metadata.target_logits_indices] = target_logits.to(torch.float32)
+    final_logits[metadata.bonus_logits_indices] = bonus_logits.to(torch.float32)
+    token_ids = sampled_token_ids.flatten().to(torch.int64)
+    token_ids = torch.where(token_ids == PLACEHOLDER_TOKEN_ID, 0, token_ids)
+    logprobs = final_logits if self.is_logits_logprobs_mode else self.sampler.compute_logprobs(final_logits)
+    return self.sampler.gather_logprobs(logprobs, max_num_logprobs, token_ids)
+
+
 def apply_sampling_constraints(
     # [num_tokens, vocab_size]
     logits: torch.Tensor,
@@ -238,3 +329,5 @@ def warmup_sampling_constraints(logits: torch.Tensor, sampling_metadata: Samplin
 
 rejection_sampler.rejection_sample = rejection_sample
 rejection_sampler.apply_sampling_constraints = apply_sampling_constraints
+rejection_sampler.RejectionSampler.apply_logits_processors = apply_logits_processors
+rejection_sampler.RejectionSampler._get_logprobs_tensors = _get_logprobs_tensors
