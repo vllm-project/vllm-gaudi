@@ -17,6 +17,13 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.plugins import load_general_plugins
+from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.penalties import apply_all_penalties
+from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm_gaudi.v1.sample.hpu_rejection_sampler import (PLACEHOLDER_TOKEN_ID, apply_sampling_constraints,
                                                         rejection_sample, rejection_sample_greedy,
                                                         rejection_sample_random)
@@ -192,3 +199,136 @@ def test_constraints_apply_each_requests_top_p_to_its_rows():
     assert torch.isfinite(out[:2]).all()
     # Top-p 0.5 keeps the two most likely tokens (0.4 + 0.3).
     assert torch.isinf(out[2:, :2]).all() and torch.isfinite(out[2:, 2:]).all()
+
+
+# Draft-row logits processors. Request i owns rows i * width to (i + 1) * width; its first
+# num_draft_tokens[i] rows verify its drafts, the rest are padding and are not checked.
+DRAFT_ROWS_VOCAB = 16
+
+
+def _draft_rows_metadata(output_token_ids,
+                         spec_token_ids,
+                         repetition=None,
+                         presence=None,
+                         frequency=None,
+                         prompt_token_ids=None,
+                         bad_words=None,
+                         allowed_mask=None):
+    n = len(output_token_ids)
+    no_penalties = repetition is None and presence is None and frequency is None
+
+    def per_request(values, default):
+        return torch.tensor([default] * n if values is None else values, dtype=torch.float32, device=DEVICE)
+
+    return SamplingMetadata(
+        temperature=None,
+        all_greedy=True,
+        all_random=False,
+        top_p=None,
+        top_k=None,
+        generators={},
+        max_num_logprobs=None,
+        no_penalties=no_penalties,
+        prompt_token_ids=None if no_penalties else torch.tensor(prompt_token_ids, device=DEVICE),
+        frequency_penalties=per_request(frequency, 0.0),
+        presence_penalties=per_request(presence, 0.0),
+        repetition_penalties=per_request(repetition, 1.0),
+        output_token_ids=output_token_ids,
+        allowed_token_ids_mask=None if allowed_mask is None else torch.tensor(allowed_mask, device=DEVICE),
+        bad_words_token_ids=bad_words or {},
+        logitsprocs=LogitsProcessors(),
+        spec_token_ids=spec_token_ids)
+
+
+def _apply_draft_rows(logits, metadata, num_draft_tokens):
+    spec_metadata = SpecDecodeMetadata.make_dummy([[0] * n for n in num_draft_tokens], device=torch.device(DEVICE))
+    sampler = RejectionSampler.__new__(RejectionSampler)
+    return sampler.apply_logits_processors(logits.clone().to(DEVICE), metadata, spec_metadata).cpu()
+
+
+def _penalized_row(row, prompt, history, repetition=1.0, presence=0.0, frequency=0.0):
+    """Upstream's penalties for one row with its own history: the reference, free of any row layout."""
+    one = lambda v: torch.tensor([v], dtype=torch.float32)
+    return apply_all_penalties(row.clone().view(1, -1), torch.tensor([prompt]), one(presence), one(frequency),
+                               one(repetition), [history])[0]
+
+
+@pytest.mark.parametrize("width", [1, 2])
+def test_draft_row_penalties_use_each_requests_own_rows_and_history(width):
+    # Request 1 has no drafts (a padded request, for instance): its rows must not shift those of request 2.
+    num_draft_tokens = [width, 0, 1]
+    outputs, drafts = [[1, 2], [3], [4, 4]], [[5, 6][:width], [], [7]]
+    prompts = [[8, 9], [10, 11], [12, 13]]
+    repetition = [1.5, 1.2, 2.0]
+    logits = torch.randn(3 * width, DRAFT_ROWS_VOCAB).abs() + 0.1
+    metadata = _draft_rows_metadata(outputs, drafts, repetition=repetition, prompt_token_ids=prompts)
+    out = _apply_draft_rows(logits, metadata, num_draft_tokens)
+    for i, n in enumerate(num_draft_tokens):
+        for j in range(n):
+            row = i * width + j
+            expected = _penalized_row(logits[row], prompts[i], outputs[i] + drafts[i][:j], repetition=repetition[i])
+            torch.testing.assert_close(out[row], expected)
+
+
+def test_draft_row_penalties_with_a_padded_batch_of_single_drafts():
+    # Two decodes padded to a batch of 4: upstream's row count (2) did not match the logits (4).
+    logits = torch.randn(4, DRAFT_ROWS_VOCAB).abs() + 0.1
+    outputs = [[1, 2], [3], [1, 2], [1, 2]]
+    metadata = _draft_rows_metadata(outputs, [[5], [6], [], []],
+                                    presence=[1.0, 0.5, 1.0, 1.0],
+                                    prompt_token_ids=[[8, 9]] * 4)
+    out = _apply_draft_rows(logits, metadata, [1, 1, 0, 0])
+    for i, presence in enumerate([1.0, 0.5]):
+        torch.testing.assert_close(out[i], _penalized_row(logits[i], [8, 9], outputs[i], presence=presence))
+
+
+def test_draft_row_bad_words_see_the_drafts_before_the_row():
+    # Two rows per request; request 0 has one draft, so its second row is padding.
+    # Bad word [5, 9] of request 1: its second row follows its draft 5, so 9 is banned there only.
+    logits = torch.zeros(4, DRAFT_ROWS_VOCAB)
+    metadata = _draft_rows_metadata([[1], [2]], [[3], [5, 6]], bad_words={0: [[11]], 1: [[5, 9]]})
+    out = _apply_draft_rows(logits, metadata, [1, 2])
+    assert out[2, 9] == 0 and out[3, 9] == float("-inf")
+    # Request 0's single-token bad word applies to its own row, not to request 1's.
+    assert out[0, 11] == float("-inf") and out[2, 11] == 0 and out[3, 11] == 0
+
+
+def test_draft_row_allowed_token_ids_follow_each_request():
+    logits = torch.zeros(4, DRAFT_ROWS_VOCAB)
+    mask = [[False] * DRAFT_ROWS_VOCAB, [False] * DRAFT_ROWS_VOCAB]
+    mask[1][3] = True  # request 1 may not produce token 3
+    metadata = _draft_rows_metadata([[1], [2]], [[5, 6], [7]], allowed_mask=mask)
+    out = _apply_draft_rows(logits, metadata, [2, 1])
+    assert torch.isfinite(out[:2]).all()
+    assert out[2, 3] == float("-inf") and out[3, 3] == float("-inf")
+
+
+def test_logprobs_come_from_each_requests_own_rows():
+    # The plugin's sampler patches come with vLLM's general plugins, as in the engine: Gaudi cannot compile
+    # the dynamic-shape count in upstream's gather_logprobs.
+    load_general_plugins()
+    # Two rows per request (one draft + the bonus). Request 0 has no draft: its row 1 is padding, so
+    # request 1's rows start at 2, not right after request 0's single row.
+    torch.manual_seed(0)
+    logits = torch.randn(4, DRAFT_ROWS_VOCAB)
+    target_logits_indices = torch.tensor([-1, 2], device=DEVICE)
+    bonus_logits_indices = torch.tensor([0, 3], device=DEVICE)
+    metadata = SpecDecodeMetadata(draft_token_ids=torch.tensor([0, 5], device=DEVICE),
+                                  num_draft_tokens=[0, 1],
+                                  cu_num_draft_tokens=torch.tensor([0, 1], device=DEVICE),
+                                  cu_num_sampled_tokens=torch.tensor([1, 3], device=DEVICE),
+                                  target_logits_indices=target_logits_indices,
+                                  bonus_logits_indices=bonus_logits_indices,
+                                  logits_indices=torch.arange(4))
+    sampled = torch.tensor([[7, PLACEHOLDER_TOKEN_ID], [5, 9]], device=DEVICE)
+    sampler = RejectionSampler(Sampler())
+    logits = logits.to(DEVICE)
+    out = sampler._get_logprobs_tensors(1, metadata, logits, logits[target_logits_indices],
+                                        logits[bonus_logits_indices], sampled)
+    expected = logits.cpu().log_softmax(dim=-1)
+    got = out.logprobs.cpu()
+    # Column 0 is the sampled token's logprob: request 0 at row 0, request 1 at rows 2 and 3.
+    torch.testing.assert_close(got[0, 0], expected[0, 7])
+    torch.testing.assert_close(got[2, 0], expected[2, 5])
+    torch.testing.assert_close(got[3, 0], expected[3, 9])
+    assert out.logprob_token_ids[:, 0].cpu().tolist() == [7, 0, 5, 9]

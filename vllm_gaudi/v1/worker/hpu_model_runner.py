@@ -12,7 +12,7 @@ import os
 import time
 from contextlib import suppress
 from tqdm import tqdm
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypeAlias, Union, cast)
 if os.getenv("QUANT_CONFIG", None) is not None:
     from neural_compressor.torch.quantization import finalize_calibration
@@ -4527,10 +4527,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return LogprobsTensors(indices, combined_logprobs, token_ranks)
 
+    @staticmethod
+    def _spec_token_ids(spec_decode_metadata: SpecDecodeMetadata) -> list[list[int]]:
+        """Every request's drafts of this step, one list per row of the decode batch.
+
+        Read from the device: with async scheduling the scheduler output only
+        has placeholders for them. The copy syncs the host, so this is for
+        batches with penalties or bad words only.
+        """
+        num_draft_tokens = spec_decode_metadata.num_draft_tokens
+        drafts = spec_decode_metadata.draft_token_ids.view(len(num_draft_tokens), -1).tolist()
+        return [row[:n] for row, n in zip(drafts, num_draft_tokens)]
+
     def _build_logprobs_output(
         self,
         logprobs_segments: list[tuple[list[str], LogprobsTensors | None]],
         num_output_rows: int,
+        spec_logprobs: Optional[tuple[list[str], LogprobsTensors, torch.Tensor]] = None,
     ) -> LogprobsLists | None:
         """Build a combined LogprobsLists from logprobs collected across
         multiple sampler calls (e.g. separate prefill/decode sampling).
@@ -4541,13 +4554,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 logprobs_tensors may be None if no logprobs were computed.
             num_output_rows: total number of rows in the output array
                 (typically max_req_index + 1).
+            spec_logprobs: speculative decoding's (req_ids, logprobs_tensors,
+                sampled_token_ids): max_num_draft_tokens + 1 rows per request,
+                and its sampled ids, PLACEHOLDER_TOKEN_ID after the valid ones.
 
         Returns:
             Combined LogprobsLists or None if no logprobs were requested.
+            With spec_logprobs, one row per generated token, request by request
+            (cu_num_generated_tokens), as the scheduler slices them.
         """
         # Collect only segments that have logprobs data
         active_segments: list[tuple[list[str], LogprobsTensors]] = [(req_ids, lp) for req_ids, lp in logprobs_segments
                                                                     if lp is not None]
+        if spec_logprobs is not None:
+            return self._build_spec_logprobs_output(active_segments, num_output_rows, *spec_logprobs)
         if not active_segments:
             return None
 
@@ -4570,6 +4590,46 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 combined_ranks[idx] = lp_lists.sampled_token_ranks[i]
 
         return LogprobsLists(combined_token_ids, combined_logprobs, combined_ranks)
+
+    def _build_spec_logprobs_output(
+        self,
+        segments: list[tuple[list[str], LogprobsTensors]],
+        num_output_rows: int,
+        spec_req_ids: list[str],
+        spec_logprobs_tensors: LogprobsTensors,
+        spec_sampled_token_ids: torch.Tensor,
+    ) -> LogprobsLists:
+        """LogprobsLists with a step of speculative decoding in it.
+
+        A request of the other segments generates one token, a decode request
+        of the speculative step its accepted drafts plus one: the valid
+        positions of its row of spec_sampled_token_ids, whose logprobs are its
+        first rows of spec_logprobs_tensors. Request indices without a token
+        get no rows. Counting the valid positions syncs the host.
+        """
+        width = spec_sampled_token_ids.shape[1]
+        num_valid = (spec_sampled_token_ids != PLACEHOLDER_TOKEN_ID).sum(dim=1).tolist()
+        # Request index -> (start, count, lists) of its rows.
+        rows: dict[int, tuple[int, int, LogprobsLists]] = {}
+        for req_ids, lp_tensors in segments:
+            lp_lists = lp_tensors.tolists()
+            for i, req_id in enumerate(req_ids):
+                rows[self.input_batch.req_id_to_index[req_id]] = (i, 1, lp_lists)
+        spec_lists = spec_logprobs_tensors.tolists()
+        for i, req_id in enumerate(spec_req_ids):
+            rows[self.input_batch.req_id_to_index[req_id]] = (i * width, num_valid[i], spec_lists)
+
+        ordered = [rows[idx] for idx in range(num_output_rows) if idx in rows]
+        cu_num_generated_tokens = [0]
+        for idx in range(num_output_rows):
+            cu_num_generated_tokens.append(cu_num_generated_tokens[-1] + (rows[idx][1] if idx in rows else 0))
+
+        def gather(name: str) -> np.ndarray:
+            return np.concatenate([getattr(lists, name)[start:start + n]
+                                   for start, n, lists in ordered] + [getattr(spec_lists, name)[:0]])
+
+        return LogprobsLists(gather("logprob_token_ids"), gather("logprobs"), gather("sampled_token_ranks"),
+                             cu_num_generated_tokens)
 
     def _is_quant_with_inc(self):
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
@@ -5097,6 +5157,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Logprobs tracking: collect (req_ids, logprobs_tensors) segments
         # from each sampling call to combine at the end.
         logprobs_segments: list[tuple[list[str], LogprobsTensors | None]] = []
+        # Speculative decoding: (decode req_ids, logprobs, sampled token ids),
+        # max_num_draft_tokens + 1 positions per request.
+        spec_logprobs: Optional[tuple[list[str], LogprobsTensors, torch.Tensor]] = None
         #if not has_kv_transfer_group():
         #    assert not (num_prefills > 0 and num_decodes > 0)
         # skip kv_connector if dummy run
@@ -5265,6 +5328,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         self.input_batch.update_async_output_token_ids()
                         sampling_metadata = self._prepare_sampling(batch_changed, pd_info.decode_req_ids,
                                                                    len(spec_decode_metadata.bonus_logits_indices))
+                        if not sampling_metadata.no_penalties or sampling_metadata.bad_words_token_ids:
+                            # Penalties and bad words count the drafts before a
+                            # row, and all of them before the bonus token.
+                            sampling_metadata = replace(sampling_metadata,
+                                                        spec_token_ids=self._spec_token_ids(spec_decode_metadata))
                         # Handling spec decode sampling.
                         sampler_output = self.rejection_sampler(
                             spec_decode_metadata,
@@ -5273,6 +5341,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             sampling_metadata,
                         )
                         sampled_token_ids = sampler_output.sampled_token_ids
+                        if sampler_output.logprobs_tensors is not None:
+                            spec_logprobs = (list(pd_info.decode_req_ids), sampler_output.logprobs_tensors,
+                                             sampled_token_ids)
                         if self.use_async_spec_decode:
                             # [padded_batch, K + 1], -1 after the valid tokens.
                             # Stays on the device: the next step reads it there
@@ -5504,7 +5575,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         # Build combined logprobs from all sampling calls.
         max_req_index = max(self.input_batch.req_id_to_index.values())
-        logprobs = self._build_logprobs_output(logprobs_segments, max_req_index + 1)
+        logprobs = self._build_logprobs_output(logprobs_segments, max_req_index + 1, spec_logprobs)
 
         if not warmup_mode:
             self.maybe_wait_for_kv_save()
