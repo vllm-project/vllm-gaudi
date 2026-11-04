@@ -30,7 +30,7 @@ HPU tests consist of the following tests:
 - Feature tests
 - E2E tests
 
-All of the these tests are mandatory and operate in fast fail mode, meaning if one test fails, next tests will not be triggered.
+All of these tests are mandatory. The unit tests run first; if they fail, the HPU tests that depend on them are not started. The pre-commit check runs in parallel with the HPU tests; if it fails, the whole HPU test run is cancelled. The required check turns green as soon as all HPU tests have passed.
 
 ### HPU Intel® Gaudi® Tests
 
