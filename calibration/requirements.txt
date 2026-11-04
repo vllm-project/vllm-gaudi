@@ -1,3 +1,7 @@
+# Dependencies of vllm-gaudi-calibrate on top of an installed vllm and vllm-gaudi.
+# Do not use lm_eval[vllm]: it pulls vllm from PyPI over the HPU build.
+lm_eval>=0.4.12
 datasets
-transformers
-numpy
+Pillow
+# lm-eval's multimodal vLLM model imports ray; --multi-node runs on it.
+ray
