@@ -175,7 +175,8 @@ class HPUMLAAttention(MLAAttention):
             output = self._v_up_proj(output)
             return output
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
+    def process_weights_after_loading(self) -> None:
+        act_dtype = self.act_dtype
         # HPU-specific: when VLLM_HPU_FORCE_CHANNEL_FP8=True (default), block-quantized
         # FP8 weights (e.g. kv_b_proj in DeepSeek-R1) are converted to channel-wise FP8.
         # After this conversion, weight_scale_inv becomes 1D [N_out] (per-channel) but
@@ -231,7 +232,7 @@ class HPUMLAAttention(MLAAttention):
                 set_default_quant_scales(self, register_buffer=False)
         else:
             # Non-FP8 kv_b_proj: use upstream logic as before.
-            MLAAttention.process_weights_after_loading(self, act_dtype)
+            MLAAttention.process_weights_after_loading(self)
             # Since vllm#48251 base registers W_UV/W_UK_T as nn.Parameter (via
             # replace_parameter), so a plain tensor reassignment raises
             # TypeError. Route the contiguous() update through replace_parameter
