@@ -1456,6 +1456,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ## universal buffer for input_ids and positions ##
         ## necessary being used by spec decode by following GPU impl ##
         self._draft_token_ids: Optional[Union[list[list[int]], torch.Tensor]] = None
+        # The requests of _draft_token_ids' rows, in the batch order they were proposed in.
+        self._draft_token_req_ids: Optional[list[str]] = None
         self.input_ids_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int32,
                                          device="cpu",
@@ -2053,6 +2055,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._async_spec_prev_num_valid = None
         self._async_spec_prev_num_drafts = None
         self._draft_token_ids = None
+        self._draft_token_req_ids = None
 
     def _scatter_async_spec_input_ids(self, token_ids: torch.Tensor, req_ids: list[str], num_tokens: int,
                                       num_tokens_per_req: list[int]) -> None:
@@ -4539,6 +4542,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         drafts = spec_decode_metadata.draft_token_ids.view(len(num_draft_tokens), -1).tolist()
         return [row[:n] for row, n in zip(drafts, num_draft_tokens)]
 
+    @staticmethod
+    def _spec_decode_logits_rows(req_ids: list[str],
+                                 spec_decode_metadata: SpecDecodeMetadata) -> dict[str, tuple[int, int]]:
+        """Each decode request's first logits row and its number of positions.
+
+        Every request has max_num_draft_tokens + 1 logits rows; the positions
+        it samples are its drafts and then the bonus token.
+        """
+        num_draft_tokens = spec_decode_metadata.num_draft_tokens
+        width = len(spec_decode_metadata.logits_indices) // len(num_draft_tokens)
+        return {req_id: (i * width, num_draft_tokens[i] + 1) for i, req_id in enumerate(req_ids)}
+
     def _build_logprobs_output(
         self,
         logprobs_segments: list[tuple[list[str], LogprobsTensors | None]],
@@ -4635,90 +4650,61 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
         return (self.model_config.quantization == "inc" or quant_config)
 
-    # Copied from vllm/v1/worker/gpu_model_runner.py
-    def apply_grammar_bitmask(
-        self,
-        scheduler_output: "SchedulerOutput",
-        grammar_output: GrammarOutput,
-        logits: torch.Tensor,
-    ):
+    @staticmethod
+    def _sorted_grammar_bitmask(grammar_output: GrammarOutput, num_logits_rows: int,
+                                rows: dict[str, tuple[int, int]]) -> tuple[np.ndarray, list[int]]:
+        """The scheduler's grammar bitmask laid out on the rows of a logits tensor.
 
+        The scheduler gives every structured output request a block of the same
+        number of rows, in structured_output_request_ids order: one for each
+        position the step samples, its drafts and then the bonus token. rows
+        maps a request to its first logits row and its number of positions;
+        requests without logits rows here (prefill chunks that sample nothing)
+        are skipped. Rows of other requests allow every token.
+
+        Returns:
+            The [num_logits_rows, bitmask width] bitmask and the masked rows.
+        """
         grammar_bitmask = grammar_output.grammar_bitmask
-
-        # We receive the structured output bitmask from the scheduler,
-        # compacted to contain bitmasks only for structured output requests.
-        # The order of the requests in the bitmask is not guaranteed to be the
-        # same as the order of the requests in the gpu runner's batch. We need
-        # to sort the bitmask to match the order of the requests used here.
-
-        # Get the batch indices of the structured output requests.
-        # Keep track of the number of speculative tokens scheduled for every
-        # request in the batch, as the logit indices are offset by this amount.
-        struct_out_req_batch_indices: dict[str, int] = {}
-        cumulative_offset = 0
-        seq = sorted(self.input_batch.req_id_to_index.items(), key=lambda x: x[1])
-        for req_id, batch_index in seq:
-            logit_index = batch_index + cumulative_offset
-            cumulative_offset += len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
-            if req_id in grammar_output.structured_output_request_ids:
-                struct_out_req_batch_indices[req_id] = logit_index
-
-        out_indices = []
-
-        # Reorder the bitmask to match the order of the requests in the batch.
-        sorted_bitmask = np.full(shape=(logits.shape[0], grammar_bitmask.shape[1]),
+        req_ids = grammar_output.structured_output_request_ids
+        stride = grammar_bitmask.shape[0] // len(req_ids)
+        sorted_bitmask = np.full(shape=(num_logits_rows, grammar_bitmask.shape[1]),
                                  fill_value=-1,
                                  dtype=grammar_bitmask.dtype)
-        cumulative_index = 0
+        out_indices: list[int] = []
+        for i, req_id in enumerate(req_ids):
+            if req_id not in rows:
+                continue
+            first, num_positions = rows[req_id]
+            sorted_bitmask[first:first + num_positions] = grammar_bitmask[i * stride:i * stride + num_positions]
+            out_indices.extend(range(first, first + num_positions))
+        return sorted_bitmask, out_indices
 
-        for req_id in grammar_output.structured_output_request_ids:
-            logit_index = struct_out_req_batch_indices[req_id]
-            num_spec_tokens = len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
-            for i in range(1 + num_spec_tokens):
-                sorted_bitmask[logit_index + i] = \
-                    grammar_bitmask[cumulative_index + i]
-                out_indices.append(logit_index + i)
-            cumulative_index += 1 + num_spec_tokens
+    def apply_grammar_bitmask(
+        self,
+        grammar_output: GrammarOutput,
+        logits: torch.Tensor,
+        rows: dict[str, tuple[int, int]],
+    ):
+        """Mask the tokens the grammars do not allow, in place.
 
-        # Copy async to device as tensor.
-        grammar_bitmask = torch.from_numpy(sorted_bitmask).to(logits.device, non_blocking=True)
-
-        # If the grammar bitmask and the logits have the same shape
-        # we don't need to pass indices to the kernel,
-        # since the bitmask is already aligned with the logits.
-        skip_out_indices = len(out_indices) == logits.shape[0]
-
-        index_tensor = None
-        if not skip_out_indices:
-            # xgrammar expects a python list of indices but it will actually work with
-            # a tensor. If we copy the tensor ourselves here we can do it in a non_blocking
-            # manner and there should be no cpu sync within xgrammar.
-            index_tensor = torch.tensor(out_indices, dtype=torch.int32, device="cpu", pin_memory=True)
-            index_tensor = index_tensor.to(logits.device, non_blocking=True)
-
-        # Serialization of np.ndarray is much more efficient than a tensor,
-        # so we receive it in that format.
-        #grammar_bitmask = torch.from_numpy(grammar_bitmask).contiguous()
+        rows maps each request with logits rows here to its first row and its
+        number of positions (see _sorted_grammar_bitmask).
+        """
+        sorted_bitmask, out_indices = self._sorted_grammar_bitmask(grammar_output, logits.shape[0], rows)
+        # xgrammar's CPU kernel (see below) takes the bitmask and the row
+        # indices on the host. All rows masked: no indices needed.
+        grammar_bitmask = torch.from_numpy(sorted_bitmask)
+        indices = None if len(out_indices) == logits.shape[0] else out_indices
 
         # Force use of the torch.compile implementation from xgrammar to work
         # around issues with the Triton kernel in concurrent structured output
         # scenarios. See PR #19565 and issues #19493, #18376 for details.
 
-        # xgr_torch_compile.apply_token_bitmask_inplace_torch_compile(
-        #     logits,
-        #     grammar_bitmask.to(self.device, non_blocking=True),
-        #     indices=out_indices if not skip_out_indices else None,
-        # )
-
         # NOTE(tianmu-li): xgr_torch_compile uses torch.inductor by default.
         # Have to use the CPU backend, which has its overhead.
         logits_cpu = logits.cpu().to(torch.float32)
-        '''xgr_cpu.apply_token_bitmask_inplace_cpu(
-            logits_cpu,
-            grammar_bitmask.to("cpu"),
-            indices=out_indices if not skip_out_indices else None,
-        )'''
-        xgr_cpu.apply_token_bitmask_inplace_cpu(logits_cpu, grammar_bitmask.to("cpu"), indices=index_tensor)
+        xgr_cpu.apply_token_bitmask_inplace_cpu(logits_cpu, grammar_bitmask, indices=indices)
         logits.copy_(logits_cpu.to(self.device, non_blocking=True).to(logits.dtype))
 
     def _configure_lora(self, input, requests, req_ids, is_prompt):
@@ -5188,6 +5174,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if grammar_output is not None:
             logits_prompt = []
             logits_decode = []
+            # Decodes sampled with the prefills below, in this order.
+            structured_decode_req_ids: list[str] = []
             self.use_structured_output = True
 
         ######################### PREFILLS #########################
@@ -5307,9 +5295,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
-            if self.use_structured_output:
+            if self.use_structured_output and decode_data.spec_decode_metadata is None:
                 logits_decode.append(logits_device[:num_decodes])
                 decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
+                structured_decode_req_ids = list(self.input_batch.req_ids[:num_decodes])
             else:
                 with self.profiler.record_event('internal', "sampler"):
                     ##### Sampling Start #####
@@ -5333,6 +5322,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             # row, and all of them before the bonus token.
                             sampling_metadata = replace(sampling_metadata,
                                                         spec_token_ids=self._spec_token_ids(spec_decode_metadata))
+                        if grammar_output is not None:
+                            # Each draft row and the bonus row get the mask of
+                            # their position, so the verification and the
+                            # tokens it keeps follow the grammar.
+                            self.apply_grammar_bitmask(
+                                grammar_output, logits_device,
+                                self._spec_decode_logits_rows(pd_info.decode_req_ids, spec_decode_metadata))
                         # Handling spec decode sampling.
                         sampler_output = self.rejection_sampler(
                             spec_decode_metadata,
@@ -5397,27 +5393,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                        warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
-        if self.use_structured_output:
-            # Scheduler places cached before prompt
-            logits_combined = logits_decode + logits_prompt
-            logits = torch.cat(logits_combined, dim=0)
-            # Apply structured output bitmasks if present
-            if grammar_output:
-                self.apply_grammar_bitmask(scheduler_output, grammar_output, logits)
-            # Rows are decodes first, so the per-request sampling params must be too.
-            sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
-                                                                    pd_info.decode_req_ids + pd_info.prompt_req_ids,
-                                                                    logits.shape[0])
+        if self.use_structured_output and (logits_decode or logits_prompt):
+            # Scheduler places cached before prompt: the decode rows (without
+            # speculative decoding; with it, decodes were masked and sampled
+            # above), then the rows of the prefill requests that sample.
+            logits = torch.cat(logits_decode + logits_prompt, dim=0)
+            row_req_ids = structured_decode_req_ids + list(prefill_sampled_requests)
+            self.apply_grammar_bitmask(grammar_output, logits, {req_id: (i, 1) for i, req_id in enumerate(row_req_ids)})
+            # Sampling metadata in the same row order.
+            sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits, row_req_ids, logits.shape[0])
+            num_structured_decodes = len(structured_decode_req_ids)
             # Deal with the case of incomplete prompt
-            for i in range(logits.shape[0] - num_decodes):
-                prefill_sampled_token_ids.append(sampler_output.sampled_token_ids[num_decodes + i].flatten())
-            decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_decodes].flatten())
-            # Logprobs: rows match logits order (decodes first, then
-            # prefills), so build req_ids in same order.
-            struct_logprobs_req_ids = (list(pd_info.decode_req_ids) + list(pd_info.prompt_req_ids))
-            logprobs_segments.append((struct_logprobs_req_ids, sampler_output.logprobs_tensors))
+            for i in range(num_structured_decodes, logits.shape[0]):
+                prefill_sampled_token_ids.append(sampler_output.sampled_token_ids[i].flatten())
+            if num_structured_decodes:
+                decode_sampled_token_ids.append(sampler_output.sampled_token_ids[:num_structured_decodes].flatten())
+            logprobs_segments.append((row_req_ids, sampler_output.logprobs_tensors))
 
-        if self.use_async_scheduling or self.use_structured_output:
+        if self.use_async_scheduling:
             # For async scheduling: keep tokens on HPU and avoid CPU sync
             # Concatenate decode and prefill tokens on HPU
             if self.use_async_spec_decode:
@@ -5566,6 +5559,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 decode_sampled_token_ids_device, non_flattened_hidden_states_prefills, sample_hidden_states_prefills,
                 aux_hidden_states_prefills, num_decodes, prefill_data if num_prefills > 0 else None,
                 decode_data if num_decodes > 0 else None)
+            self._draft_token_req_ids = list(self.input_batch.req_ids)
         ################## Spec Decode end ##################
 
         # Create output.
@@ -8011,12 +8005,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
             return None
-        req_ids = self.input_batch.req_ids
+        # The rows follow the batch of the step that proposed them. With async
+        # scheduling the engine takes them for a structured output step only
+        # after the next step's execute_model, whose batch can differ.
+        req_ids = self._draft_token_req_ids if self._draft_token_req_ids is not None else self.input_batch.req_ids
         if isinstance(self._draft_token_ids, torch.Tensor):
             draft_token_ids = self._draft_token_ids.tolist()
         else:
             draft_token_ids = self._draft_token_ids
         self._draft_token_ids = None
+        self._draft_token_req_ids = None
         return DraftTokenIds(req_ids, draft_token_ids)
 
     def propose_draft_token_ids(
