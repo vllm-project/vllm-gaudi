@@ -230,15 +230,14 @@ def test_async_spec_decode_explicit_env_overrides_default():
         assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="nemotron_h")) is False
 
 
-def test_async_spec_decode_off_with_prefix_caching_on_hybrid_models():
+def test_async_spec_decode_stays_on_with_prefix_caching_on_hybrid_models():
+    # The runner decides the mamba state blocks on the device (see
+    # HPUModelRunner._copy_mamba_spec_boundary_states_async).
     cfg = _fake_vllm_config(model_type="nemotron_h", prefix_caching=True, is_hybrid=True)
     with _runtime_flags():
+        assert HpuPlatform._async_spec_decode_enabled(cfg) is True
+    with _runtime_flags(async_spec_decode=False):
         assert HpuPlatform._async_spec_decode_enabled(cfg) is False
-    with _runtime_flags(async_spec_decode=True):  # an explicit request is ignored
-        assert HpuPlatform._async_spec_decode_enabled(cfg) is False
-    with _runtime_flags(async_spec_decode=True):  # models without mamba layers keep it
-        assert HpuPlatform._async_spec_decode_enabled(_fake_vllm_config(model_type="llama",
-                                                                        prefix_caching=True)) is True
 
 
 @pytest.mark.parametrize("change", [

@@ -160,3 +160,107 @@ def test_boundary_states_are_copied_to_their_columns(mamba_states):
     torch.testing.assert_close(hpu_conv.cpu(), expected_conv)
     # "b" resumes from the first slot, which now holds its state.
     assert runner._mamba_num_accepted == {"a": 1, "b": 1, "c": 2}
+
+
+def _sync_boundary_decision(num_running, num_valid, src, block_size):
+    """The decisions of _copy_mamba_spec_boundary_states for one row: (copy, bias, dest, resume)."""
+    aligned = (num_running + num_valid - 1) // block_size * block_size
+    if aligned < num_running:
+        return False, 0, None, num_valid
+    bias, dest = aligned - num_running, aligned // block_size - 1
+    if dest == src:
+        return bias != 0, bias, dest, 1
+    return True, bias, dest, num_valid
+
+
+def test_boundary_plan_matches_the_synchronous_decisions():
+    rng = np.random.default_rng(0)
+    num_running = rng.integers(1, 6 * BLOCK_SIZE, 400)
+    num_valid = rng.integers(1, NUM_SPEC + 2, 400)
+    # The slots start at the column of the step's last query token, give or take the async shift.
+    src = (num_running + NUM_SPEC - 1) // BLOCK_SIZE + rng.integers(-1, 1, 400)
+    do_copy, bias, dest, resume = HPUModelRunner._mamba_spec_boundary_plan(torch.tensor(num_running),
+                                                                           torch.tensor(num_valid), torch.tensor(src),
+                                                                           BLOCK_SIZE)
+    for i in range(400):
+        copy, ref_bias, ref_dest, ref_resume = _sync_boundary_decision(int(num_running[i]), int(num_valid[i]),
+                                                                       int(src[i]), BLOCK_SIZE)
+        assert bool(do_copy[i]) == copy and int(resume[i]) == ref_resume
+        if copy:
+            assert int(bias[i]) == ref_bias and int(dest[i]) == ref_dest
+
+
+ASYNC_PAD_BLOCK_ID = 11  # a spare block: the async copies write the rows without a copy there
+
+
+def _async_copy(conv_state, ssm_state, rows, num_computed, state_cols, delta, num_valid):
+    runner = _make_runner_stub(rows, num_computed=num_computed)
+    runner._mamba_state_col.update(state_cols)
+    runner._MAMBA_PAD_BLOCK_ID = ASYNC_PAD_BLOCK_ID
+    runner.speculative_config = types.SimpleNamespace(num_speculative_tokens=NUM_SPEC)
+    hpu_conv, hpu_ssm = conv_state.to("hpu"), ssm_state.to("hpu")
+    runner.vllm_config = types.SimpleNamespace(compilation_config=types.SimpleNamespace(
+        static_forward_context={"mixer": _FakeMixer(hpu_conv, hpu_ssm)}))
+    runner._async_spec_delta = torch.tensor(delta, dtype=torch.int32, device="hpu")
+    runner._mamba_spec_boundary_plan = HPUModelRunner._mamba_spec_boundary_plan
+    num_scheduled = {req_id: 1 + NUM_SPEC for req_id in rows}
+    drafts = {req_id: [1] * NUM_SPEC for req_id in rows}
+    scheduler_output = types.SimpleNamespace(num_scheduled_tokens=num_scheduled, scheduled_spec_decode_tokens=drafts)
+    resume = HPUModelRunner._copy_mamba_spec_boundary_states_async(
+        runner, scheduler_output, len(rows), torch.tensor(num_valid, dtype=torch.int32, device="hpu"))
+    real = [b for b in range(conv_state.shape[0]) if b != ASYNC_PAD_BLOCK_ID]
+    return hpu_conv.cpu()[real], hpu_ssm.cpu()[real], resume.cpu().tolist(), real
+
+
+def test_async_boundary_copies_match_the_synchronous_ones(mamba_states):
+    """test_boundary_states_are_copied_to_their_columns with the accepted tokens on the device."""
+    conv_state, ssm_state = mamba_states
+    conv, ssm, resume, real = _async_copy(conv_state, ssm_state, {
+        "a": [0, 4, 5, 6],
+        "b": [0, 7, 8],
+        "c": [0, 9, 10]
+    }, [31, 30, 20], {
+        "a": 2,
+        "b": 1,
+        "c": 1
+    }, [0, 0, 0], [1, 2, 2])
+    expected_conv, expected_ssm = conv_state.clone(), ssm_state.clone()
+    expected_ssm[4] = ssm_state[5]
+    expected_conv[4, :STATE_LEN] = conv_state[5, :STATE_LEN]
+    expected_ssm[7] = ssm_state[8]
+    expected_conv[7, :STATE_LEN] = conv_state[7, 1:1 + STATE_LEN]
+    torch.testing.assert_close(ssm, expected_ssm[real])
+    torch.testing.assert_close(conv, expected_conv[real])
+    assert resume == [1, 1, 2]
+
+
+def test_async_boundary_copies_use_the_counts_the_host_is_ahead_by(mamba_states):
+    """"b" rejected the draft of its previous step, which the host counted as accepted: it has 30
+    tokens, not 31, so this step ran its tokens 31-32 in the slots the host chose for 32-33 (columns
+    2-3). Both are accepted: the state after 32 tokens, in the second slot, belongs in column 1."""
+    conv_state, ssm_state = mamba_states
+    conv, ssm, resume, real = _async_copy(conv_state, ssm_state, {
+        "b": [0, 7, 8, 3],
+        "c": [0, 9, 10]
+    }, [31, 20], {
+        "b": 2,
+        "c": 1
+    }, [1, 0], [2, 2])
+    expected_conv, expected_ssm = conv_state.clone(), ssm_state.clone()
+    expected_ssm[7] = ssm_state[3]
+    expected_conv[7, :STATE_LEN] = conv_state[8, 1:1 + STATE_LEN]
+    torch.testing.assert_close(ssm, expected_ssm[real])
+    torch.testing.assert_close(conv, expected_conv[real])
+    # The boundary column is not the first slot, so "b" resumes after its last accepted token.
+    assert resume == [2, 2]
+
+
+def test_async_loads_resume_from_the_previous_steps_slots():
+    """test_decode_slots_move_along_the_block_table with the accepted counts on the device."""
+    runner = _make_runner_stub({"a": [0, 0, 7, 8, 9], "b": [0, 5, 6]}, num_computed=[47, 20])
+    runner.speculative_config = types.SimpleNamespace(num_speculative_tokens=NUM_SPEC)
+    # The previous slots start at columns 2 ("a") and 1 ("b", its prefill's last column); the third row is padding.
+    num_valid = torch.tensor([2, 1, 1], dtype=torch.int32, device="hpu")
+    load, conv_offsets = HPUModelRunner._async_mamba_spec_load_idxs(runner, [0, 1], 3, num_valid, [2, 1])
+    assert load[1].cpu().tolist() == [8, 5, PAD_BLOCK_ID]
+    assert conv_offsets.cpu().tolist() == [1, 0, 0]

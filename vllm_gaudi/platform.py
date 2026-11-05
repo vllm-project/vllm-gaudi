@@ -282,9 +282,8 @@ class HpuPlatform(Platform):
         # NOTE: vLLM enables async scheduling by default, also with speculative
         # decoding. The HPU runner supports the two together only for one draft
         # token of an EAGLE-style drafter (EAGLE, EAGLE3, MTP), by default only
-        # on Nemotron-H, and not with prefix caching on hybrid models (see
-        # _async_spec_decode_enabled); otherwise speculative decoding runs with
-        # synchronous scheduling.
+        # on Nemotron-H (see _async_spec_decode_enabled); otherwise speculative
+        # decoding runs with synchronous scheduling.
         spec_config = vllm_config.speculative_config
         if spec_config is not None and vllm_config.scheduler_config.async_scheduling and not (
                 cls._async_spec_decode_enabled(vllm_config) and spec_config.use_eagle()
@@ -317,17 +316,13 @@ class HpuPlatform(Platform):
         once it knows the model type; the runtime config does not know it yet
         at engine-construction time. On by default for Nemotron-H unless
         contiguous PA is on. An explicitly set VLLM_HPU_ASYNC_SPEC_DECODE takes
-        precedence, except with prefix caching on a hybrid model: there the
-        mamba state blocks of a step follow the tokens the previous step
-        accepted, which async scheduling only knows on the device.
+        precedence. With prefix caching on a hybrid model, the mamba state
+        blocks of a step follow the tokens the previous step accepted, so the
+        runner decides them on the device (see
+        HPUModelRunner._copy_mamba_spec_boundary_states_async).
         """
         explicit = get_config().VLLM_HPU_ASYNC_SPEC_DECODE
         model_config = getattr(vllm_config, 'model_config', None)
-        if vllm_config.cache_config.enable_prefix_caching and getattr(model_config, 'is_hybrid', False):
-            if explicit:
-                logger.warning_once("VLLM_HPU_ASYNC_SPEC_DECODE is ignored: speculative decoding with prefix caching "
-                                    "on a hybrid model runs with synchronous scheduling.")
-            return False
         if explicit is not None:
             return explicit
         return (model_config is not None and getattr(model_config.hf_config, 'model_type', None) == 'nemotron_h'
