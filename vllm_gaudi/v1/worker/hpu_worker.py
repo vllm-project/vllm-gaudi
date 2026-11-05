@@ -644,16 +644,17 @@ class HPUWorker(WorkerBase):
             graph_reserved_mem = 0.0 if self.model_config.enforce_eager else 0.1
             logger.warning("Invalid VLLM_GRAPH_RESERVED_MEM value, using default %s", graph_reserved_mem)
         graph_headroom = 1 - graph_reserved_mem
-        available_hpu_memory = free_hpu_memory * \
-            self.cache_config.gpu_memory_utilization
-        hpu_memory_margin = free_hpu_memory * (1 - self.cache_config.gpu_memory_utilization)
+        # gpu_memory_utilization defaults to None upstream; the resolved value applies the default.
+        gpu_memory_utilization = self.cache_config.resolved_gpu_memory_utilization
+        available_hpu_memory = free_hpu_memory * gpu_memory_utilization
+        hpu_memory_margin = free_hpu_memory * (1 - gpu_memory_utilization)
         self.model_runner.mem_margin = hpu_memory_margin  # type: ignore[union-attr]
         cache_size_bytes = available_hpu_memory * graph_headroom
         graph_headroom_bytes = available_hpu_memory * (1 - graph_headroom)
         dummy_block_headroom = single_kv_block_size_bytes
         msg = (f"Free device memory: {format_bytes(free_hpu_memory)}, "
                f"{format_bytes(available_hpu_memory)} usable "
-               f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
+               f"(gpu_memory_utilization={gpu_memory_utilization}),"
                f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
                f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
                f"{format_bytes(dummy_block_headroom)} reserved for KV cache dummy "
