@@ -181,12 +181,33 @@ def test_shift_counts_rejected_drafts_of_the_previous_step_only():
                                    }),
                                    _async_spec_prev_num_drafts=np.array([1, 1, 0], dtype=np.int32),
                                    _async_spec_prev_num_valid=torch.tensor([2, 1, 1], dtype=torch.int32, device=DEVICE),
+                                   _async_spec_prev_resume_valid=None,
                                    _mamba_num_accepted={"c": 2})
     # a accepted its draft, b rejected it, p finished its prefill, c skipped
     # the previous step (exact counts, accepted tokens from the host).
-    delta, num_valid = HPUModelRunner._async_spec_shift(runner, ["a", "b", "p", "c"], 5)
+    delta, num_valid, resume_valid = HPUModelRunner._async_spec_shift(runner, ["a", "b", "p", "c"], 5)
     assert delta.cpu().tolist() == [0, 1, 0, 0, 0]
     assert num_valid.cpu().tolist() == [2, 1, 1, 2, 1]
+    assert resume_valid.cpu().tolist() == [2, 1, 1, 2, 1]
+
+
+def test_shift_resumes_where_the_previous_step_moved_its_boundary_state():
+    # Prefix caching: a accepted its draft, but its boundary state went to its
+    # first slot, so it resumes from there (1), while its positions still move
+    # by its valid tokens.
+    runner = types.SimpleNamespace(device=DEVICE,
+                                   input_batch=types.SimpleNamespace(prev_req_id_to_index={
+                                       "a": 0,
+                                       "b": 1
+                                   }),
+                                   _async_spec_prev_num_drafts=np.array([1, 1], dtype=np.int32),
+                                   _async_spec_prev_num_valid=torch.tensor([2, 2], dtype=torch.int32, device=DEVICE),
+                                   _async_spec_prev_resume_valid=torch.tensor([1, 2], dtype=torch.int32, device=DEVICE),
+                                   _mamba_num_accepted={"c": 1})
+    delta, num_valid, resume_valid = HPUModelRunner._async_spec_shift(runner, ["a", "b", "c"], 3)
+    assert delta.cpu().tolist() == [0, 0, 0]
+    assert num_valid.cpu().tolist() == [2, 2, 1]
+    assert resume_valid.cpu().tolist() == [1, 2, 1]
 
 
 def test_input_ids_take_the_last_valid_token_and_the_drafts():

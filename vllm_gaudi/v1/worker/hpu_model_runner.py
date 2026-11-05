@@ -585,12 +585,16 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         sampled_token_ids: torch.Tensor,
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.hpu.Stream,
-        on_output: Optional[Callable[[list[list[int]]], None]] = None,
+        on_output: Optional[Callable[[list[list[int]], Optional[list[int]]], None]] = None,
+        resume_valid: Optional[torch.Tensor] = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
-        # Called by get_output with the valid token ids of every row.
+        # Called by get_output with the valid token ids of every row, and per
+        # row the accepted count its mamba state resumes with, if given (prefix
+        # caching, see HPUModelRunner._mamba_spec_boundary_plan).
         self._on_output = on_output
+        self._resume_valid = resume_valid
 
         # Keep a reference to the device tensor to avoid it being
         # deallocated until we finish copying it to the host.
@@ -601,6 +605,7 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
         with torch.hpu.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
             self._sampled_token_ids_cpu = self._sampled_token_ids.to('cpu', non_blocking=True)
+            self._resume_valid_cpu = None if resume_valid is None else resume_valid.to('cpu', non_blocking=True)
             self._async_copy_ready_event.record()
 
     def get_output(self) -> ModelRunnerOutput:
@@ -622,7 +627,9 @@ class AsyncHPUModelRunnerOutput(AsyncModelRunnerOutput):
             if i < len(valid_sampled_token_ids):
                 valid_sampled_token_ids[i].clear()
         if self._on_output is not None:
-            self._on_output(valid_sampled_token_ids)
+            resume = None if self._resume_valid_cpu is None else self._resume_valid_cpu.tolist()
+            self._on_output(valid_sampled_token_ids, resume)
+        self._resume_valid = None
 
         output = self._model_runner_output
         output.sampled_token_ids[:len(valid_sampled_token_ids)] = valid_sampled_token_ids
@@ -1577,6 +1584,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # output records (see _async_spec_accepted_recorder).
         self._async_spec_prev_num_drafts: Optional[np.ndarray] = None
         self._async_spec_prev_num_valid: Optional[torch.Tensor] = None
+        # Prefix caching: the accepted count each row resumes with, which is 1
+        # where the step moved its boundary state into its first slot (see
+        # _mamba_spec_boundary_plan); else its valid tokens. And this step's
+        # delta (see _async_spec_shift), which the boundary copies need.
+        self._async_spec_prev_resume_valid: Optional[torch.Tensor] = None
+        self._async_spec_delta: Optional[torch.Tensor] = None
 
         # Keep in int64 to avoid overflow with long context
         self.max_num_reqs = self.scheduler_config.max_num_seqs
@@ -1857,6 +1870,121 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 dest_window = conv_state.index_select(0, dest)
                 conv_state.index_copy_(0, dest, torch.cat([history, dest_window[:, state_len:]], dim=1))
 
+    @staticmethod
+    def _mamba_spec_boundary_plan(num_running: torch.Tensor, num_valid: torch.Tensor, src_cols: torch.Tensor,
+                                  block_size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The decisions of _copy_mamba_spec_boundary_states as tensors, for async scheduling.
+
+        Per decode row: num_running are the tokens up to and including its
+        first query token, num_valid its accepted drafts + 1, src_cols the
+        first column of its slots. With async scheduling the first two are only
+        known on the device, so _copy_mamba_spec_boundary_states_async plans
+        every possible pair of them on the host (elementwise, any shape).
+
+        Returns per row whether to copy, the slot of the boundary token (bias),
+        the destination column, and the accepted count the next step resumes
+        with: 1 where the boundary column is the first slot (dest == src).
+        """
+        last = num_running + num_valid - 1
+        aligned = last // block_size * block_size
+        crossing = aligned >= num_running
+        bias = (aligned - num_running).clamp(min=0)
+        dest_cols = aligned // block_size - 1
+        same = crossing & (dest_cols == src_cols)
+        do_copy = crossing & ~(same & (bias == 0))
+        resume_valid = torch.where(same, torch.ones_like(num_valid), num_valid)
+        return do_copy, bias, dest_cols, resume_valid
+
+    def _copy_mamba_spec_boundary_states_async(self, scheduler_output: "SchedulerOutput", num_decodes: int,
+                                               num_valid: torch.Tensor) -> torch.Tensor:
+        """_copy_mamba_spec_boundary_states for async scheduling: the copies run on the device.
+
+        num_valid [rows] are the step's valid tokens per row, decodes first.
+        Their counts on the host are delta ahead (see _async_spec_shift), up to
+        num_speculative_tokens, and its accepted drafts reach at most as far
+        beyond. So only a row whose host count is that close to a block
+        boundary can cross one. For those rows the host plans every (delta,
+        valid tokens) pair with its block table, as the synchronous copies do,
+        and the device picks the pair that happened, using the same index ops
+        as _async_spec_shift. Rows that cross nothing write to the pad block.
+        Most steps have no such row.
+        Returns the accepted count each row resumes with (num_valid itself if
+        no row is close to a boundary).
+        """
+        block_size = self.cache_config.mamba_block_size
+        spread = self.speculative_config.num_speculative_tokens
+        rows, host_running, src_cols = [], [], []
+        for i, req_id in enumerate(self.input_batch.req_ids[:num_decodes]):
+            running = (int(self.input_batch.num_computed_tokens_cpu[i]) +
+                       scheduler_output.num_scheduled_tokens[req_id] -
+                       len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ())))
+            if (running + spread) // block_size * block_size >= running - spread:
+                rows.append(i)
+                host_running.append(running)
+                src_cols.append(self._mamba_state_col[req_id])
+        if not rows:
+            return num_valid
+
+        # The plan of every pair, on the host; pair p = delta * width + valid - 1.
+        width = spread + 1
+        pair_delta = torch.arange(width).repeat_interleave(width)
+        pair_valid = torch.arange(1, width + 1).repeat(width)
+        src = torch.tensor(src_cols).view(-1, 1).expand(-1, width * width)
+        do_copy, bias, dest_cols, resume = self._mamba_spec_boundary_plan(
+            torch.tensor(host_running).view(-1, 1) - pair_delta, pair_valid.expand(len(rows), -1), src, block_size)
+        rows_cpu = torch.tensor(rows).view(-1, 1)
+        mamba_groups = [(group_idx, group) for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups)
+                        if isinstance(group.kv_cache_spec, MambaSpec)]
+        fields = []
+        for group_idx, _ in mamba_groups:
+            table = self.input_batch.block_table[group_idx].get_cpu_tensor()
+            last_col = table.shape[1] - 1
+            fields += [
+                table[rows_cpu, (src + bias).clamp(max=last_col)],
+                table[rows_cpu, src],
+                torch.where(do_copy, table[rows_cpu, dest_cols.clamp(0, last_col)], self._MAMBA_PAD_BLOCK_ID),
+            ]
+        # [delta, field, row, valid tokens]
+        fields = torch.stack([f.to(torch.int32) for f in fields + [bias, resume]]).view(-1, len(rows), width, width)
+        fields = async_h2d_copy(fields.permute(2, 0, 1, 3).contiguous(), device=self.device)
+
+        # The pair that happened, per row: by its valid tokens, then by its delta.
+        rows_t = async_h2d_copy(rows, dtype=torch.long, device=self.device)
+        valid_idx = (num_valid.index_select(0, rows_t) - 1).clamp(min=0).to(torch.long).view(1, -1, 1)
+        valid_idx = valid_idx.expand(fields.shape[1], -1, 1)
+        delta = None if self._async_spec_delta is None else self._async_spec_delta.index_select(0, rows_t)
+        picked = fields[0].gather(2, valid_idx).squeeze(2)
+        for d in range(1, width if delta is not None else 1):
+            picked = torch.where((delta == d).view(1, -1), fields[d].gather(2, valid_idx).squeeze(2), picked)
+        bias_t = picked[-2].view(-1, 1, 1)
+
+        from vllm_gaudi.ops.hpu_mamba_mixer2 import HPUMambaMixer2
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        for g, (_, group) in enumerate(mamba_groups):
+            ssm_src, conv_src, dest = (picked[3 * g + k].to(torch.long) for k in range(3))
+            for layer_name in group.layer_names:
+                layer = forward_context.get(layer_name)
+                if not isinstance(layer, HPUMambaMixer2):
+                    continue
+                conv_state, ssm_state = layer.kv_cache[0], layer.kv_cache[1]
+                ssm_state.index_copy_(0, dest, ssm_state.index_select(0, ssm_src))
+                # As _copy_mamba_spec_boundary_states: the conv window from the
+                # boundary token on becomes the window's history.
+                state_len = layer.conv_kernel_size - 1
+                window = conv_state.index_select(0, conv_src)
+                history = window[:, :state_len]
+                for offset in range(1, window.size(1) - state_len + 1):
+                    history = torch.where(bias_t == offset, window[:, offset:offset + state_len], history)
+                dest_window = conv_state.index_select(0, dest)
+                conv_state.index_copy_(0, dest, torch.cat([history, dest_window[:, state_len:]], dim=1))
+
+        # Every row's count: the planned one where a row was planned.
+        slot = [-1] * num_valid.shape[0]
+        for k, row in enumerate(rows):
+            slot[row] = k
+        slot_t = async_h2d_copy(slot, dtype=torch.long, device=self.device)
+        return torch.where(slot_t >= 0, picked[-1].index_select(0, slot_t.clamp(min=0)), num_valid)
+
     def _drop_stale_mamba_blocks(self, blocks: torch.Tensor, group_idx: int, req_index: int, first_col: int) -> None:
         """Turn the block boundary writes of a prefill chunk to stale columns into padding (drafts, prefix caching).
 
@@ -1883,15 +2011,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         return (self.use_async_spec_decode and scheduler_output is not None
                 and self._async_spec_prev_num_valid is not None)
 
-    def _async_spec_shift(self, req_ids: list[str], target_bs: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def _async_spec_shift(self, req_ids: list[str], target_bs: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Per request (padded to target_bs): how far its counts are ahead, on the device.
 
         A request that ran in the previous step was counted with all drafts it
         verified there accepted; delta = drafts + 1 - valid output tokens of
         that step are the positions it is ahead. Requests that did not run in
         the previous step have exact counts (delta 0). Also returns the valid
-        output tokens of each request's last step (from _mamba_num_accepted
-        for requests that did not run in the previous one). int32 tensors.
+        output tokens of each request's last step and the accepted count its
+        mamba state resumes with (they differ only with prefix caching, see
+        _mamba_spec_boundary_plan), both from _mamba_num_accepted for requests
+        that did not run in the previous one. int32 tensors.
         """
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index or {}
         assert self._async_spec_prev_num_drafts is not None and self._async_spec_prev_num_valid is not None
@@ -1906,20 +2036,32 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         prev_num_valid = self._async_spec_prev_num_valid.index_select(0, prev_rows_t.clamp(min=0))
         num_valid = torch.where(in_prev, prev_num_valid, host_num_valid_t)
         delta = torch.where(in_prev, prev_num_drafts_t + 1 - prev_num_valid, torch.zeros_like(prev_num_valid))
-        return delta, num_valid
+        prev_resume = self._async_spec_prev_resume_valid
+        resume_valid = num_valid if prev_resume is None else torch.where(
+            in_prev, prev_resume.index_select(0, prev_rows_t.clamp(min=0)), host_num_valid_t)
+        return delta, num_valid, resume_valid
 
-    def _async_mamba_spec_load_idxs(self, req_indices, target_bs: int,
-                                    num_valid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _async_mamba_spec_load_idxs(self,
+                                    req_indices,
+                                    target_bs: int,
+                                    num_valid: torch.Tensor,
+                                    prev_cols: Optional[list[int]] = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Mamba2 load slots and conv offsets of a speculative decode step, on the device.
 
         Like _prepare_mamba_spec_decode_idxs, but the previous step's accepted
-        tokens (num_valid, see _async_spec_shift) are only known on the device.
+        tokens (num_valid: the count each row resumes with, see
+        _async_spec_shift) are only known on the device. With prefix caching
+        prev_cols are the first columns of the previous step's slots (see
+        _mamba_spec_window_cols), else the slots are columns 0..K.
         Returns load [num_groups, target_bs] and conv offsets [target_bs].
         """
         num_slots = 1 + self.speculative_config.num_speculative_tokens
-        candidates = torch.stack(
-            [self.prepare_mamba_state_idxs(req_indices, [t] * len(req_indices), target_bs) for t in range(num_slots)],
-            dim=-1)
+        prev_cols = prev_cols or [0] * len(req_indices)
+        candidates = torch.stack([
+            self.prepare_mamba_state_idxs(req_indices, [col + t for col in prev_cols], target_bs)
+            for t in range(num_slots)
+        ],
+                                 dim=-1)
         candidates = async_h2d_copy(candidates, device=self.device)
         offsets = (num_valid - 1).clamp(min=0)
         load = candidates.gather(2, offsets.to(torch.long).view(1, -1, 1).expand(candidates.shape[0], -1, 1))
@@ -1985,10 +2127,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         accepted = self._mamba_num_accepted
         requests = self.requests
 
-        def record(valid_rows: list[list[int]]) -> None:
+        def record(valid_rows: list[list[int]], resume: Optional[list[int]] = None) -> None:
             for req_id, row in req_id_to_index.items():
                 if row < len(valid_rows) and req_id in requests:
-                    accepted[req_id] = max(len(valid_rows[row]), 1)
+                    # With prefix caching, the count the state resumes with.
+                    accepted[req_id] = max(resume[row] if resume is not None else len(valid_rows[row]), 1)
 
         return record
 
@@ -1998,6 +2141,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.input_batch.prev_req_id_to_index = None
         self._async_spec_prev_num_valid = None
         self._async_spec_prev_num_drafts = None
+        self._async_spec_prev_resume_valid = None
+        self._async_spec_delta = None
         self._draft_token_ids = None
         self._draft_token_req_ids = None
 
@@ -3763,11 +3908,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # device moves every token back by its delta: positions and block usage
         # arithmetically, slots by picking the variant built here for it.
         async_spec_shift = self._async_spec_shift_active(scheduler_output)
+        # This step's delta, for _copy_mamba_spec_boundary_states_async (None: exact counts).
+        self._async_spec_delta = None
         if async_spec_shift:
             if self.uses_mrope or self.interleaved_sliding_window or self.model_has_chunked_attention:
                 raise NotImplementedError("Async speculative decoding supports neither M-RoPE, sliding window "
                                           "nor chunked attention.")
-            delta, num_valid_prev = self._async_spec_shift(self.input_batch.req_ids[:num_decodes], padded_batch_size)
+            delta, num_valid_prev, resume_valid_prev = self._async_spec_shift(self.input_batch.req_ids[:num_decodes],
+                                                                              padded_batch_size)
+            self._async_spec_delta = delta
             delta_rows = delta.view(-1, 1).expand(-1, num_tokens).reshape(-1)
             real_tokens = torch.zeros((padded_batch_size, num_tokens), dtype=torch.bool)
             real_tokens[:num_decodes] = (torch.arange(num_tokens)[None, :]
@@ -3930,7 +4079,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 mamba_spec_conv_offsets = async_h2d_copy(spec_conv_offsets_cpu, device=self.device)
                 if async_spec_shift:
                     mamba_spec_load_indices, mamba_spec_conv_offsets = self._async_mamba_spec_load_idxs(
-                        req_indices, padded_batch_size, num_valid_prev)
+                        req_indices, padded_batch_size, resume_valid_prev,
+                        spec_window_cols[0] if spec_window_cols is not None else None)
 
         else:
             seq_lens_tensor = None
@@ -5400,6 +5550,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
                 self._async_spec_prev_num_valid = (sampled_token_ids != PLACEHOLDER_TOKEN_ID).sum(dim=1,
                                                                                                   dtype=torch.int32)
+                self._async_spec_prev_resume_valid = self._async_spec_prev_num_valid
+                if self._mamba_spec_decode and self.use_prefix_caching and num_decodes > 0 and not warmup_mode:
+                    self._async_spec_prev_resume_valid = self._copy_mamba_spec_boundary_states_async(
+                        scheduler_output, num_decodes, self._async_spec_prev_num_valid)
                 self._async_spec_prev_num_drafts = np.array([
                     len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
                     for req_id in self.input_batch.req_ids
@@ -5468,7 +5622,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # Prefix caching: the next decode resumes from the column
                     # of the chunk's last token (see _mamba_spec_window_cols).
                     self._mamba_state_col.pop(req_id, None)
-        if self._mamba_spec_decode and self.use_prefix_caching and num_decodes > 0 and not warmup_mode:
+            elif self._mamba_spec_decode and i >= num_decodes:
+                # The same with async scheduling, whose decodes' counts come
+                # with the async output (_async_spec_accepted_recorder).
+                self._mamba_state_col.pop(req_id, None)
+        # Async scheduling copied them on the device after sampling.
+        if (self._mamba_spec_decode and self.use_prefix_caching and num_decodes > 0 and not warmup_mode
+                and not self.use_async_spec_decode):
             self._copy_mamba_spec_boundary_states(scheduler_output, num_decodes)
 
         # NOTE(chendi): enable cache based on PR(#20291)
@@ -5542,6 +5702,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 async_output_copy_stream=self.async_output_copy_stream,
                 on_output=self._async_spec_accepted_recorder(self.input_batch.prev_req_id_to_index or {})
                 if self.use_async_spec_decode and self._mamba_spec_decode else None,
+                resume_valid=self._async_spec_prev_resume_valid
+                if self.use_async_spec_decode and self._mamba_spec_decode and self.use_prefix_caching else None,
             )
             # Hand the async CPU copy + ready event to the input batch for the
             # next step's placeholder splice (see update_async_output_token_ids).
@@ -5573,10 +5735,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         from vllm_gaudi.ops.hpu_mamba_mixer2 import HPUMambaMixer2
         if not any(isinstance(module, HPUMambaMixer2) for module in self.model.modules()):
             return False
-        # HpuPlatform keeps async scheduling off for prefix caching on hybrids:
-        # copying the states at block boundaries needs the accepted tokens.
-        assert not (self.use_prefix_caching and self.use_async_spec_decode), \
-            "Speculative decoding with prefix caching on a Mamba2 hybrid requires synchronous scheduling."
         logger.info(
             "Speculative decoding on a Mamba2 hybrid: verifying up to %d draft tokens per step with one "
             "mamba state slot per speculative position%s.", self.speculative_config.num_speculative_tokens,

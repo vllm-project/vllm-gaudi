@@ -115,10 +115,9 @@ def get_features():
                 ModelType('glm4_moe'), ModelType('gemma4'), ModelType('nemotron_h'))),
         Value('high_level_profiler_enabled', False, env_var='VLLM_PROFILER_ENABLED', env_var_type=boolean),
         # Async scheduling together with speculative decoding (one draft token,
-        # EAGLE-style drafters, no structured output). On by default for
-        # Nemotron-H, where it is validated, unless contiguous PA is on. Off:
-        # speculative decoding schedules synchronously. HpuPlatform mirrors the
-        # default, and turns it off for prefix caching on hybrid models.
+        # EAGLE-style drafters). On by default for Nemotron-H, where it is
+        # validated, unless contiguous PA is on. Off: speculative decoding
+        # schedules synchronously. HpuPlatform mirrors the default.
         Value('async_spec_decode',
               All(ModelType('nemotron_h'), Disabled('use_contiguous_pa')),
               env_var='VLLM_HPU_ASYNC_SPEC_DECODE',
