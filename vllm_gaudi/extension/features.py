@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-from vllm_gaudi.extension.config import Not, Hardware, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Eq, Disabled, Enabled, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
+from vllm_gaudi.extension.config import Not, Hardware, Lazy, VersionRange, ModelType, Kernel, Any, All, Value, ValueFromList, Env, Eq, Disabled, Enabled, MinPackageVersion, boolean, to_dict, split_values_and_flags, list_of
 from vllm_gaudi.extension.kernels import fsdpa, block_softmax_adjustment
 from vllm_gaudi.extension.validation import for_all, choice
 
@@ -108,6 +108,8 @@ def get_features():
         Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
+        Value('mamba_split_prefill_graph',
+              All(ModelType('granitemoehybrid'), Disabled('fullgraph_compilation'), Not(Lazy()))),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
         Value(
             'flatten_input',
