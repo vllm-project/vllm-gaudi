@@ -179,6 +179,21 @@ def mamba_reads_chunk_grid(kv_cache_config: KVCacheConfig) -> bool:
         for group in kv_cache_config.kv_cache_groups for spec in iter_layer_specs(group.kv_cache_spec))
 
 
+def mamba_prep_initial_states(has_initial_states: torch.Tensor, split_prefill_graph: bool) -> Union[bool, torch.Tensor]:
+    """Whether any prefill sequence starts from a cached mamba state, in the
+    form hpu_mamba_mixer2 branches on with a plain `if`.
+
+    A Python bool by default: torch.compile specializes the branch, so the
+    conv and SSM parts of each mamba layer's prefill compile into one graph.
+    With split_prefill_graph (the mamba_split_prefill_graph feature) it stays
+    a 0-dim tensor, and the `if` becomes a data-dependent graph break that
+    compiles the two parts as separate graphs. has_initial_states is
+    expected on the host (the runner passes has_initial_states_cpu), so
+    neither form needs a device sync."""
+    prep_initial_states = torch.any(has_initial_states)
+    return prep_initial_states if split_prefill_graph else bool(prep_initial_states)
+
+
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 HPU_TORCH_DTYPE_TO_STR_DTYPE = {
@@ -1493,6 +1508,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                      if self.mamba_chunk_size_is_explicit else 128)
         else:
             self.mamba_chunk_size = 0
+        self.mamba_split_prefill_graph = get_config().mamba_split_prefill_graph
         # Set from the KV cache spec in initialize_kv_cache; strict until then.
         self._mamba_reads_chunk_grid = True
 
@@ -2980,11 +2996,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if len(has_initial_states_cpu) < target_bs:
                 pad_his = torch.zeros(target_bs - len(has_initial_states_cpu), dtype=has_initial_states_cpu.dtype)
                 has_initial_states_cpu = torch.cat([has_initial_states_cpu, pad_his])
-            # A Python bool, not a 0-dim tensor: hpu_mamba_mixer2 branches on it
-            # with a plain `if`, and branching on a tensor is a data-dependent
-            # graph break in every mamba layer (fatal under fullgraph). The
-            # value is computed on the host, so bool() needs no device sync.
-            prep_initial_states = bool(torch.any(has_initial_states_cpu))
+            prep_initial_states = mamba_prep_initial_states(has_initial_states_cpu, self.mamba_split_prefill_graph)
 
             # The code below carefully constructs the chunks such that:
             # 1. Chunks contain tokens from a *single* sequence only.
