@@ -85,6 +85,10 @@ class HPUBucketingManager():
         # range instead of clamping to 3x physical (see
         # ExponentialBucketingStrategy.get_decode_cfgs).
         self.skip_decode_block_clamp = False
+        # Set by the model runner when contiguous PA runs without the
+        # defragmenter (hybrid models): the highest block id of a decode batch
+        # can then reach num_hpu_blocks at any batch size.
+        self.decode_full_block_range = False
         self.num_hpu_blocks = None
         self._fallback_max_ctx = 0
         self.max_model_len = max_model_len
@@ -227,6 +231,9 @@ class HPUBucketingManager():
                                                    self.max_num_batched_tokens, self.block_size, self.num_hpu_blocks,
                                                    buckets_from_file, self.mamba_chunk_size,
                                                    self.mamba_chunk_size_is_explicit)
+            if get_config().use_contiguous_pa and getattr(self, 'decode_full_block_range',
+                                                          False) and self.num_hpu_blocks:
+                self.decode_buckets = cap_contiguous_pa_decode_buckets(self.decode_buckets, self.num_hpu_blocks)
             if self.num_speculative_tokens:
                 # The existing buckets are used as seed decode buckets
                 self.seed_decode_buckets = self.decode_buckets
@@ -545,6 +552,17 @@ def generate_buckets(bs_range,
         logger().debug(msg)
 
     return sorted(buckets)
+
+
+def cap_contiguous_pa_decode_buckets(buckets, max_blocks):
+    """Contiguous PA decode reads cache[:max_block_id + 1]. Without the
+    defragmenter that id is bounded only by the pool, so a batch of any size can
+    need max_blocks blocks. Cap larger ctx buckets at max_blocks and give every
+    (bs, query) a max_blocks bucket, so runtime lookups stay in the warmed set
+    instead of falling through to a larger bs or an unwarmed shape."""
+    capped = {(bs, query, min(ctx, max_blocks)) for bs, query, ctx in buckets}
+    capped.update((bs, query, max_blocks) for bs, query, _ in buckets)
+    return sorted(capped)
 
 
 def is_greater_or_equal(tuple1, tuple2):

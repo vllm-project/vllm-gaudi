@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-import itertools
-
 import torch
 from vllm_gaudi.utils import async_h2d_copy
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
+from vllm_gaudi.v1.worker.kv_block_layout import pad_slot_cycle
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -210,7 +209,9 @@ class HpuEagleProposer(EagleProposer):
 
         # Calculate the slot mapping and fill with padding
         slot_mapping = block_ids * block_size + clamped_positions % block_size
-        dummy_slots = itertools.cycle(range(model_runner._PAD_SLOT_ID, model_runner._PAD_SLOT_ID + block_size))
+        # The pad row holds attn_block_size slots, which under virtual block
+        # splitting is less than block_size: cycle within it.
+        dummy_slots = pad_slot_cycle(model_runner._PAD_SLOT_ID, model_runner.attn_block_size)
         slot_mapping[num_seq:].apply_(lambda _, ds=dummy_slots: next(ds))
         # Slot mapping needs to be int64 (long) type
         slot_mapping = slot_mapping.to(torch.int64)
