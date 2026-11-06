@@ -1237,7 +1237,8 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
         'chunked_block_list', 'chunked_block_usage', 'chunked_block_groups', 'prep_initial_states',
         'has_initial_states_p', 'last_chunk_indices_p', 'load_indices_tensor', 'store_indices_tensor',
         'query_start_loc', 'query_start_loc_p', 'padding_mask_flat', 'blocks_caching_range',
-        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks', 'image_seg_ids', 'indexer_block_index'
+        'mamba_chunks_to_block_mapping', 'seqlens_offsets_for_blocks', 'image_seg_ids', 'indexer_block_index',
+        'num_real_input_reqs'
     ])
     return attention_metadata
 
@@ -3565,6 +3566,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             query_start_loc=query_start_loc_p,
             indexer_block_index=async_h2d_copy(indexer_block_index, device=self.device)
             if indexer_block_index is not None else None,
+            num_real_input_reqs=torch.tensor(num_decodes, dtype=torch.int64),
         )
 
         return DecodeInputData(num_decodes=num_decodes,
