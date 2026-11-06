@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import math
 import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.utils import get_kv_fetch_extra_args
+from vllm_gaudi.extension.utils import FP8Matmul, get_kv_fetch_extra_args
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 import vllm.model_executor.layers.quantization as vllm_quant
 import habana_frameworks.torch.utils.experimental as htexp
@@ -29,7 +29,6 @@ FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 if is_hpu_gaudi2:
     FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
 
-import functools
 import logging
 import os
 
@@ -155,7 +154,13 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, bat
             block_adjustment = block_adjustment.to(value.dtype)
         sum_adjusted = block_sums.mul(block_adjustment)
 
-        # Sum block's sums that belongs to the same sequences
+        # Sum block's sums that belongs to the same sequences.
+        # With an FP8 KV cache the b2b ops are unit-scale FP8Matmul, which would cast these softmax
+        # denominators to FP8. On Gaudi2 that corrupts batched decode, so keep this reduction in the native dtype.
+        if isinstance(block2batch_matmul_op, FP8Matmul):
+            block2batch_matmul_op = torch.matmul
+        if isinstance(batch2block_matmul_op, FP8Matmul):
+            batch2block_matmul_op = torch.matmul
         group_sum_adjusted = block2batch(sum_adjusted, block_mapping, block2batch_matmul_op)
         group_sum_adjusted = batch2block(group_sum_adjusted, block_mapping, batch2block_matmul_op)
         sum_adjusted = sum_adjusted.view(*adjustment_target_shape)
@@ -1386,40 +1391,45 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         w13_weight_scale = self._cached_w13_scale_views
         w2_weight_scale = self._cached_w2_scale_views
 
+        # Call the overloads by name. The overload packet tries other overloads first,
+        # and a mismatch on a tensor argument (e.g. a float d_scale_hidden_states) formats
+        # that tensor into the error message, which forces a device sync on every call.
         if self.w13_input_scale is None:
             x_fp8, x_scale = dynamic_quant(x)
-            final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
-                                                                   expert_routing_table=topk_ids.to(torch.int64),
-                                                                   router_weights=topk_weights.to(x.dtype),
-                                                                   w12=w13_list,
-                                                                   w3=w2_list,
-                                                                   d_scale_hidden_states=x_scale,
-                                                                   d_scale_w12=w13_weight_scale,
-                                                                   d_scale_w3=w2_weight_scale,
-                                                                   permuted_weights=permuted_weights,
-                                                                   activation=activation,
-                                                                   experts_min=self.experts_min,
-                                                                   experts_max=self.experts_max,
-                                                                   **kwargs)
+            final_hidden_states = torch.ops.hpu.mixture_of_experts.fp8_fused_weights_dynamic(
+                hidden_states=x_fp8,
+                expert_routing_table=topk_ids.to(torch.int64),
+                router_weights=topk_weights.to(x.dtype),
+                w12=w13_list,
+                w3=w2_list,
+                d_scale_hidden_states=x_scale,
+                d_scale_w12=w13_weight_scale,
+                d_scale_w3=w2_weight_scale,
+                permuted_weights=permuted_weights,
+                activation=activation,
+                experts_min=self.experts_min,
+                experts_max=self.experts_max,
+                **kwargs)
         else:
             x_scale = self.w13_input_scale.data
             # w2_input_scale should be List[Tensor] when static and fused
             w2_input_scale = [self.w2_input_scale[i] for i in range(self.num_experts)]
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
-            final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
-                                                                   expert_routing_table=topk_ids.to(torch.int64),
-                                                                   router_weights=topk_weights.to(x.dtype),
-                                                                   w12=w13_list,
-                                                                   w3=w2_list,
-                                                                   d_scale_hidden_states=x_scale,
-                                                                   d_scale_intermediate_hidden_states=w2_input_scale,
-                                                                   d_scale_w12=w13_weight_scale,
-                                                                   d_scale_w3=w2_weight_scale,
-                                                                   permuted_weights=permuted_weights,
-                                                                   activation=activation,
-                                                                   experts_min=self.experts_min,
-                                                                   experts_max=self.experts_max,
-                                                                   **kwargs)
+            final_hidden_states = torch.ops.hpu.mixture_of_experts.fp8_fused_weights(
+                hidden_states=x_fp8,
+                expert_routing_table=topk_ids.to(torch.int64),
+                router_weights=topk_weights.to(x.dtype),
+                w12=w13_list,
+                w3=w2_list,
+                d_scale_hidden_states=x_scale,
+                d_scale_intermediate_hidden_states=w2_input_scale,
+                d_scale_w12=w13_weight_scale,
+                d_scale_w3=w2_weight_scale,
+                permuted_weights=permuted_weights,
+                activation=activation,
+                experts_min=self.experts_min,
+                experts_max=self.experts_max,
+                **kwargs)
 
         return final_hidden_states
 
@@ -1558,19 +1568,37 @@ class MoeWNA16Matmul(torch.nn.Module):
         raise NotImplementedError()
 
 
-@functools.cache
+# Schema of int4_fused_weights once found. A miss is not cached: a lookup made
+# before the bridge registered its ops must not disable the native int4 path for
+# the rest of the process.
+_CACHED_INT4_MOE_SCHEMA = None
+
+
 def _int4_moe_schema():
     """Schema of the bridge's int4_fused_weights overload, or None if it has none."""
-    try:
-        return torch.ops.hpu.mixture_of_experts.int4_fused_weights._schema
-    except (AttributeError, RuntimeError):
-        # Bridge predates the int4_fused_weights overload altogether.
-        return None
+    global _CACHED_INT4_MOE_SCHEMA
+    if _CACHED_INT4_MOE_SCHEMA is None:
+        try:
+            _CACHED_INT4_MOE_SCHEMA = torch.ops.hpu.mixture_of_experts.int4_fused_weights._schema
+        except (AttributeError, RuntimeError):
+            # Bridge predates the int4_fused_weights overload altogether.
+            return None
+    return _CACHED_INT4_MOE_SCHEMA
 
 
 def int4_moe_native_available() -> bool:
     """Whether this bridge provides mixture_of_experts.int4_fused_weights at all."""
     return _int4_moe_schema() is not None
+
+
+def int4_moe_supports_non_gated() -> bool:
+    """Whether the bridge's int4_fused_weights overload takes is_gated.
+
+    Without it the int4 kernel is gated-only, and non-gated experts need w1
+    mirrored into w3 (see HPUCompressedTensorsWNA16MoEMethod._mirror_w1_into_w3).
+    """
+    schema = _int4_moe_schema()
+    return schema is not None and any(arg.name == "is_gated" for arg in schema.arguments)
 
 
 # compressed-tensors stores 4-bit codes as uint4b8 (value + 8), while
@@ -1581,7 +1609,11 @@ _UINT4B8_TO_INT4_XOR = -2004318072  # 0x88888888 as a signed int32
 
 def rebias_uint4b8_to_int4_(packed: torch.Tensor) -> torch.Tensor:
     """In place: int32-packed uint4b8 codes -> signed int4 nibbles (self-inverse)."""
-    return packed.bitwise_xor_(torch.tensor(_UINT4B8_TO_INT4_XOR, dtype=torch.int32, device=packed.device))
+    # The bridge keeps an int scalar exact (int64/double, never float32) and
+    # caches its device copy, so no mask tensor is built per call. no_grad lets
+    # callers pass the Parameter itself instead of its .data.
+    with torch.no_grad():
+        return packed.bitwise_xor_(_UINT4B8_TO_INT4_XOR)
 
 
 class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
@@ -1596,6 +1628,7 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
     * native_int4=True: pass the packed int4 straight to
       .int4_fused_weights overload, so nothing is dequantized. Requires the codes
       rebiased to signed nibbles, which the quant method does once at load.
+      Only this path can run non-gated experts natively (is_gated=False).
     """
 
     def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8, native_int4: bool = False):
@@ -1607,6 +1640,10 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         self.experts_min = experts_min
         self.experts_max = experts_max
         self.native_int4 = native_int4
+        # False makes the int4 kernel skip the gate split+multiply, for non-gated
+        # experts whose w13 is the single I-wide up-projection. Set by the quant
+        # method; gated layers keep True and their kernel call is unchanged.
+        self.is_gated = True
         # Set once the packed codes were rebiased to signed nibbles for the int4
         # kernel. convert_from_uint4 would then decode them wrongly, so the bf16
         # dequant path must refuse to run.
@@ -1707,6 +1744,9 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         if self._cached_int4 is None:
             self._cache_weight_lists()
         w13_p, w2_p, w13_s, w2_s = self._cached_int4
+        # Passed only when non-gated, so gated layers keep working on bridges
+        # whose int4_fused_weights has no is_gated argument.
+        extra = {} if self.is_gated else {"is_gated": False}
 
         def call(lo, hi, sl):
             return torch.ops.hpu.mixture_of_experts.int4_fused_weights(
@@ -1729,6 +1769,7 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
                 # Codes are read as signed int4 nibbles, not compressed-tensors'
                 # uint4b8 (value + 8) -- hence the rebias at load.
                 is_signed=True,
+                **extra,
             )
 
         if self.moe_n_slice == 1:

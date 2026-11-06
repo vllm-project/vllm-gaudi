@@ -258,6 +258,11 @@ class InputBatch:
         # updates. Should reset each step.
         self.batch_update_builder = BatchUpdateBuilder()
 
+        # Set by swap_states, which moves only the CPU copies of the per-row
+        # sampling params. The device copies are re-copied before the next
+        # selective sampling metadata is built (see _resync_moved_rows).
+        self._sampling_rows_moved = False
+
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
         self.logitsprocs = logitsprocs or LogitsProcessors()
@@ -505,6 +510,8 @@ class InputBatch:
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
         self.min_p_cpu[i1], self.min_p_cpu[i2] =\
             self.min_p_cpu[i2], self.min_p_cpu[i1]
+        if i1 != i2:
+            self._sampling_rows_moved = True
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -612,6 +619,7 @@ class InputBatch:
         # TODO: follow upstream PR#16728 for enabling batch_update
         self._invalidate_prompt_token_ids_cache()
         self.sampling_metadata = self._make_sampling_metadata()
+        self._sampling_rows_moved = False
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
@@ -684,24 +692,59 @@ class InputBatch:
         if hasattr(self, '_prompt_token_ids_cache'):
             self._prompt_token_ids_cache = None
 
+    def _resync_moved_rows(self) -> None:
+        """Copy every row's sampling params to the device after swap_states.
+
+        swap_states moves only the CPU copies. The device copies are otherwise
+        refreshed only when skip_copy is False (a request joined or left), so a
+        row that changed owner on any other step would be sampled with the
+        previous owner's temperature, top_p, top_k and penalties. Whole tensors
+        are copied so the shapes stay fixed.
+        """
+        async_h2d_copy(self.temperature_cpu_tensor, self.temperature)
+        async_h2d_copy(self.top_p_cpu_tensor, self.top_p)
+        async_h2d_copy(self.top_k_cpu_tensor, self.top_k)
+        if not self.no_penalties:
+            async_h2d_copy(self.frequency_penalties_cpu_tensor, self.frequency_penalties)
+            async_h2d_copy(self.presence_penalties_cpu_tensor, self.presence_penalties)
+            async_h2d_copy(self.repetition_penalties_cpu_tensor, self.repetition_penalties)
+        # The cached prompt token ids are in row order too.
+        self._invalidate_prompt_token_ids_cache()
+        self._sampling_rows_moved = False
+
     def make_selective_sampling_metadata(
         self,
         req_id_output_token_ids: list[tuple[str, list[int]]],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
+        if self._sampling_rows_moved:
+            self._resync_moved_rows()
         req_indices: list[int] = [self.req_id_to_index[req_id] for req_id, _ in req_id_output_token_ids]
+        # One asynchronous copy of the indices for every per-request tensor.
+        # Indexing a device tensor with the Python list instead makes each one
+        # a synchronous copy, which stalls the host on every step.
+        idx = async_h2d_copy(req_indices, dtype=torch.long, device=self.device)
         prompt_token_ids = None
         if not skip_copy:
-            async_h2d_update(self.temperature_cpu_tensor, self.temperature, req_indices)
-            async_h2d_update(self.top_p_cpu_tensor, self.top_p, req_indices)
-            async_h2d_update(self.top_k_cpu_tensor, self.top_k, req_indices)
+            async_h2d_update(self.temperature_cpu_tensor, self.temperature, req_indices, indices_device=idx)
+            async_h2d_update(self.top_p_cpu_tensor, self.top_p, req_indices, indices_device=idx)
+            async_h2d_update(self.top_k_cpu_tensor, self.top_k, req_indices, indices_device=idx)
             if not self.no_penalties:
                 # Since syncing these tensors is expensive only copy them
                 # if necessary i.e. if there are requests which require
                 # penalties to be applied during sampling.
-                async_h2d_update(self.frequency_penalties_cpu_tensor, self.frequency_penalties, req_indices)
-                async_h2d_update(self.presence_penalties_cpu_tensor, self.presence_penalties, req_indices)
-                async_h2d_update(self.repetition_penalties_cpu_tensor, self.repetition_penalties, req_indices)
+                async_h2d_update(self.frequency_penalties_cpu_tensor,
+                                 self.frequency_penalties,
+                                 req_indices,
+                                 indices_device=idx)
+                async_h2d_update(self.presence_penalties_cpu_tensor,
+                                 self.presence_penalties,
+                                 req_indices,
+                                 indices_device=idx)
+                async_h2d_update(self.repetition_penalties_cpu_tensor,
+                                 self.repetition_penalties,
+                                 req_indices,
+                                 indices_device=idx)
                 # The prompt tokens are used only for applying penalties during
                 # the sampling process. Hence copy these tensors only when
                 # there are requests which need penalties to be applied.
@@ -733,27 +776,39 @@ class InputBatch:
         if not self.no_allowed_token_ids:
             assert self.allowed_token_ids_mask is not None
             assert self.allowed_token_ids_mask_cpu_tensor is not None
-            async_h2d_update(self.allowed_token_ids_mask_cpu_tensor, self.allowed_token_ids_mask, req_indices)
-            allowed_token_ids_mask = self.allowed_token_ids_mask[req_indices]
+            async_h2d_update(self.allowed_token_ids_mask_cpu_tensor,
+                             self.allowed_token_ids_mask,
+                             req_indices,
+                             indices_device=idx)
+            allowed_token_ids_mask = self.allowed_token_ids_mask.index_select(0, idx)
+        # Keyed by row in this selection. A padded selection repeats its first
+        # request, so only the first occurrence of each request gets an entry.
+        bad_words_token_ids: dict[int, list[list[int]]] = {}
+        if self.bad_words_token_ids:
+            seen: set[int] = set()
+            for i, req_idx in enumerate(req_indices):
+                if req_idx not in seen and req_idx in self.bad_words_token_ids:
+                    bad_words_token_ids[i] = self.bad_words_token_ids[req_idx]
+                seen.add(req_idx)
         return SamplingMetadata(
-            temperature=self.temperature[req_indices],
+            temperature=self.temperature.index_select(0, idx),
             all_greedy=self.all_greedy,
             all_random=self.all_random,
-            top_p=None if self.no_top_p else self.top_p[req_indices],
-            top_k=None if self.no_top_k else self.top_k[req_indices],
+            top_p=None if self.no_top_p else self.top_p.index_select(0, idx),
+            top_k=None if self.no_top_k else self.top_k.index_select(0, idx),
             generators={
                 i: self.generators[req_idx]
                 for i, req_idx in enumerate(req_indices) if self.generators.get(req_idx, None) is not None
             },
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
-            frequency_penalties=self.frequency_penalties[req_indices],
-            presence_penalties=self.presence_penalties[req_indices],
-            repetition_penalties=self.repetition_penalties[req_indices],
+            frequency_penalties=self.frequency_penalties.index_select(0, idx),
+            presence_penalties=self.presence_penalties.index_select(0, idx),
+            repetition_penalties=self.repetition_penalties.index_select(0, idx),
             output_token_ids=cast(list[list[int]], output_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
-            bad_words_token_ids=self.bad_words_token_ids,
+            bad_words_token_ids=bad_words_token_ids,
             logitsprocs=self.logitsprocs,
         )
 
