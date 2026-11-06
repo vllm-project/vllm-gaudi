@@ -41,9 +41,8 @@ _GDN_COMPUTE_DTYPE = torch.float32 if os.getenv("VLLM_GDN_COMPUTE_FP32", "1") ==
 _USE_EXACT_SOLVE = os.getenv("VLLM_GDN_EXACT_SOLVE", "0") == "1"
 
 
-@torch._dynamo.disable
 def _preprocess_qk_l2norm(q, k):
-    """L2norm in eager mode — HPU torch.compile miscompiles l2norm."""
+    """L2-normalise q and k in fp32."""
     q = _l2norm_last_dim(q.to(torch.float32))
     k = _l2norm_last_dim(k.to(torch.float32))
     return q, k
@@ -326,7 +325,9 @@ def _hpu_chunk_gdr_phase_b_optimized(
     N = torch.matmul(u_decay.transpose(-1, -2), k_h)  # [S,C,H,V,K]
     R = torch.matmul(w_decay.transpose(-1, -2), k_h)  # [S,C,H,K,K]
 
-    N_t = N.transpose(-1, -2)  # [S,C,H,K,V]
+    # permute, not transpose: the HPU bridge's transpose ignores the pre-allocated
+    # output on a recipe's first launch, so N_t is lost when it crosses recipes.
+    N_t = N.permute(0, 1, 2, 4, 3)  # [S,C,H,K,V]
 
     alpha = torch.exp(g_last).unsqueeze(-1).to(compute_dtype)
     k_eye = torch.eye(Kdim, dtype=compute_dtype, device=device).view(1, 1, 1, Kdim, Kdim)
