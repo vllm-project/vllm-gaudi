@@ -735,7 +735,9 @@ def _attn_kv_layout(num_blocks, spec_block_sizes, kernel_block_size, hybrid_cach
 
 
 @pytest.mark.parametrize("hybrid_cache", [True, False])
-@pytest.mark.parametrize("spec_block_size", [128, 512, 2176])
+# 128 is not split; the others are KV-manager block sizes of hybrid models,
+# 4 to 17 kernel blocks each.
+@pytest.mark.parametrize("spec_block_size", [128, 512, 640, 896, 1152, 1664, 2176])
 def test_attn_pad_block_id_follows_real_blocks(hybrid_cache, spec_block_size):
     """Mamba-like models split their KV-manager blocks into 128-token kernel
     blocks in every layout; padded decode lanes must write past all real
