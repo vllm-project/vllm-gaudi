@@ -473,3 +473,73 @@ def test_check_and_update_config_does_not_rescale_granitemoehybrid_mamba_page_si
         f"granitemoehybrid models. Expected {CORRECT_MAMBA_PAGE_SIZE_PADDED}, "
         f"got {cache_config.mamba_page_size_padded} "
         f"(would be {CORRUPTED_MAMBA_PAGE_SIZE_PADDED} if rescaled with block_size=128).")
+
+
+def _mm_norm_vllm_config(multimodal_config):
+    """Minimal vllm_config for exercising the mm-normalization gate."""
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            model="Qwen/Qwen3-VL",
+            is_hybrid=False,
+            architecture="Qwen3VLForConditionalGeneration",
+            hf_config=SimpleNamespace(model_type="qwen3_vl"),
+            dtype=torch.bfloat16,
+            quantization=None,
+            multimodal_config=multimodal_config,
+            get_num_kv_heads=lambda _parallel: 8,
+            get_head_size=lambda: 128,
+        ),
+        cache_config=SimpleNamespace(
+            block_size=128,
+            user_specified_block_size=False,
+            mamba_block_size=None,
+            mamba_cache_mode=None,
+            mamba_page_size_padded=None,
+            cache_dtype="auto",
+            enable_prefix_caching=False,
+        ),
+        parallel_config=SimpleNamespace(worker_cls="auto", distributed_executor_backend="mp"),
+        compilation_config=SimpleNamespace(custom_ops=[], cudagraph_mode=None, cudagraph_capture_sizes=[], mode=None),
+        load_config=SimpleNamespace(device=None),
+        scheduler_config=SimpleNamespace(async_scheduling=False, ),
+        speculative_config=None,
+    )
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_check_and_update_config_disables_mm_device_do_normalize(initial):
+    """Device-side multimodal input normalization has no HPU kernel.
+
+    Upstream turns it on from a model capability flag, which makes the input
+    processor skip rescale/normalize and hand raw pixels to a device path that
+    does not exist on HPU. The platform must always force it back off.
+    """
+    from vllm.platforms import Platform
+
+    from vllm_gaudi.platform import HpuPlatform
+
+    mm_config = SimpleNamespace(mm_device_do_normalize=initial)
+    vllm_config = _mm_norm_vllm_config(mm_config)
+
+    with patch.object(Platform, "check_and_update_config"), \
+         patch.object(HpuPlatform, "set_compile_env_defaults"):
+        HpuPlatform.check_and_update_config(vllm_config)
+
+    assert mm_config.mm_device_do_normalize is False, (
+        "mm_device_do_normalize must be False on HPU so that normalization "
+        f"stays on the CPU processor (was initially {initial})")
+
+
+def test_check_and_update_config_tolerates_missing_multimodal_config():
+    """Text-only models carry no multimodal_config; the gate must not crash."""
+    from vllm.platforms import Platform
+
+    from vllm_gaudi.platform import HpuPlatform
+
+    vllm_config = _mm_norm_vllm_config(None)
+
+    with patch.object(Platform, "check_and_update_config"), \
+         patch.object(HpuPlatform, "set_compile_env_defaults"):
+        HpuPlatform.check_and_update_config(vllm_config)
+
+    assert vllm_config.model_config.multimodal_config is None
