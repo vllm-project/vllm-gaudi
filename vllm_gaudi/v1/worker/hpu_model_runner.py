@@ -6308,6 +6308,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     batch_size = candidates[idx] if is_batch_based else count
                     self.log_warmup_multimodal(phase, idx, len(candidates), batch_size, 0, width, height)
 
+    @staticmethod
+    def _validation_prompt_buckets(prompt_buckets, all_buckets: bool) -> list:
+        """The prompt buckets the validation warmup runs again, in warmup order.
+
+        The warmup processes the largest seq_len FIRST, creating recipes in early
+        compilations. Later, smaller seq_lens cause guard failures -> NEW
+        compilations with symbolic guards that shadow the earlier ones at
+        inference. By default this re-runs the largest seq_len (all num_blocks
+        variants); with all_buckets every bucket, since a bucket warmed before any
+        such recompilation is shadowed too, e.g. (1, 3072, 0) by the graphs that
+        (1, 2048, 0) compiles.
+        """
+        if all_buckets or not prompt_buckets:
+            return list(prompt_buckets)
+        max_seq_len = max(b[1] for b in prompt_buckets)
+        return [b for b in prompt_buckets if b[1] == max_seq_len]
+
     @torch.inference_mode()
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
@@ -6452,28 +6469,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         # Validation warmup: run smallest buckets outside compile-only mode
         # to trigger torch.compile guard specializations for heterogeneous layers
-        # (e.g. Llama4 mix of MoE/MLP feed_forward types).
+        # (e.g. Llama4 mix of MoE/MLP feed_forward types), and with
+        # prompt_validation_warmup for every prompt bucket.
+        validate_all_prompts = get_config().prompt_validation_warmup
         if (can_use_compile_only_mode and not self.model_config.enforce_eager and not self.is_pooling_model
-                and self._has_heterogeneous_layers):
+                and (self._has_heterogeneous_layers or validate_all_prompts)):
             logger.info("Running validation warmup to trigger guard specializations...")
             saved_graphed = self.graphed_buckets.copy()
             self.graphed_buckets.clear()
 
-            # Re-run only the LARGEST seq_len buckets (all num_blocks variants).
-            # During initial warmup, max seq_len  is processed FIRST, creating
-            # recipes in early compilations. Later, smaller seq_lens cause guard
-            # failures → NEW compilations with symbolic guards that shadow the
-            # earlier ones at inference.
-            #
-            # By re-running max seq_len buckets at the END of warmup, we ensure
-            # the NEWEST dynamo compilations (which will be selected first at
-            # inference) have Synapse recipes for the max seq_len shapes.
-            prompt_buckets = self.bucketing_manager.prompt_buckets
+            # Re-run prompt buckets at the END of warmup, so that the NEWEST
+            # dynamo compilations (which will be selected first at inference)
+            # have Synapse recipes for their shapes (see _validation_prompt_buckets).
+            prompt_buckets = self._validation_prompt_buckets(self.bucketing_manager.prompt_buckets,
+                                                             validate_all_prompts)
             if prompt_buckets:
-                max_seq_len = max(b[1] for b in prompt_buckets)
-                max_seq_buckets = [b for b in prompt_buckets if b[1] == max_seq_len]
-                logger.info("Validation warmup: %s prompt buckets (seq_len=%s)", len(max_seq_buckets), max_seq_len)
-                self.warmup_graphs(max_seq_buckets, True, kv_caches)
+                logger.info("Validation warmup: %s prompt buckets (seq_len %s)", len(prompt_buckets),
+                            sorted({b[1]
+                                    for b in prompt_buckets}))
+                # Shadowed graphs only lack the Synapse recipes for these shapes,
+                # which compile-only mode builds without running the forwards;
+                # heterogeneous layers specialize their guards in real runs.
+                with (compile_only_mode_context()
+                      if validate_all_prompts and not self._has_heterogeneous_layers else contextlib.nullcontext()):
+                    self.warmup_graphs(prompt_buckets, True, kv_caches)
 
             if self.bucketing_manager.decode_buckets:
                 self.warmup_graphs([self.bucketing_manager.decode_buckets[0]], False, kv_caches)
