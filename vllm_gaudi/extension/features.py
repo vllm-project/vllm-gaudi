@@ -108,6 +108,15 @@ def get_features():
         Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
+        # Re-run every prompt bucket in the validation warmup (see
+        # HPUModelRunner.warmup_model). Smaller buckets make Dynamo compile more
+        # general graphs, which inference then picks for the larger buckets
+        # warmed before them; without the re-run, their recipes compile on the
+        # first real prompts.
+        Value('prompt_validation_warmup',
+              ModelType('nemotron_h'),
+              env_var='VLLM_PROMPT_VALIDATION_WARMUP',
+              env_var_type=boolean),
         Value('mamba_split_prefill_graph',
               All(ModelType('granitemoehybrid'), Disabled('fullgraph_compilation'), Not(Lazy()))),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
