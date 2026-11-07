@@ -179,6 +179,21 @@ def mamba_reads_chunk_grid(kv_cache_config: KVCacheConfig) -> bool:
         for group in kv_cache_config.kv_cache_groups for spec in iter_layer_specs(group.kv_cache_spec))
 
 
+def mamba_prep_initial_states(has_initial_states: torch.Tensor, split_prefill_graph: bool) -> Union[bool, torch.Tensor]:
+    """Whether any prefill sequence starts from a cached mamba state, in the
+    form hpu_mamba_mixer2 branches on with a plain `if`.
+
+    A Python bool by default: torch.compile specializes the branch, so the
+    conv and SSM parts of each mamba layer's prefill compile into one graph.
+    With split_prefill_graph (the mamba_split_prefill_graph feature) it stays
+    a 0-dim tensor, and the `if` becomes a data-dependent graph break that
+    compiles the two parts as separate graphs. has_initial_states is
+    expected on the host (the runner passes has_initial_states_cpu), so
+    neither form needs a device sync."""
+    prep_initial_states = torch.any(has_initial_states)
+    return prep_initial_states if split_prefill_graph else bool(prep_initial_states)
+
+
 def attn_pad_block_id(num_blocks: int, attn_block_size: int, kv_cache_groups: list[KVCacheGroupSpec],
                       kernel_block_size_by_gid: dict[int, int], kv_caches: dict[str, Any]) -> int:
     """Return the attention kernel block that padded decode lanes write to.
@@ -1533,6 +1548,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                      if self.mamba_chunk_size_is_explicit else 128)
         else:
             self.mamba_chunk_size = 0
+        self.mamba_split_prefill_graph = get_config().mamba_split_prefill_graph
         # Set from the KV cache spec in initialize_kv_cache; strict until then.
         self._mamba_reads_chunk_grid = True
 
@@ -3020,11 +3036,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             if len(has_initial_states_cpu) < target_bs:
                 pad_his = torch.zeros(target_bs - len(has_initial_states_cpu), dtype=has_initial_states_cpu.dtype)
                 has_initial_states_cpu = torch.cat([has_initial_states_cpu, pad_his])
-            # A Python bool, not a 0-dim tensor: hpu_mamba_mixer2 branches on it
-            # with a plain `if`, and branching on a tensor is a data-dependent
-            # graph break in every mamba layer (fatal under fullgraph). The
-            # value is computed on the host, so bool() needs no device sync.
-            prep_initial_states = bool(torch.any(has_initial_states_cpu))
+            prep_initial_states = mamba_prep_initial_states(has_initial_states_cpu, self.mamba_split_prefill_graph)
 
             # The code below carefully constructs the chunks such that:
             # 1. Chunks contain tokens from a *single* sequence only.
@@ -3535,6 +3547,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # when DP also enabled, some DP ranks will exeucte dummy run with empty
         # SchedulerOutput, in this case we need skip the prepare_input_ids
         if self.use_async_scheduling and scheduler_output is not None:
+            # _prepare_input_ids only writes the rows of requests that were in
+            # the previous step, so seed the decode rows with the host-side
+            # input ids first. Otherwise a decode request that was not in the
+            # previous step reads a stale token from input_ids_hpu.
+            if num_tokens == 1:
+                self.input_ids_hpu[:num_decodes].copy_(token_ids_device[:num_decodes].view(-1))
+            else:
+                self.input_ids_hpu[:total_num_scheduled_tokens].copy_(
+                    async_h2d_copy(self.input_ids_cpu[:total_num_scheduled_tokens], device=self.device))
             self._prepare_input_ids(scheduler_output)
             if num_tokens == 1:
                 token_ids_device[:num_decodes] = self.input_ids_hpu[:num_decodes].view(-1, 1)
@@ -4024,7 +4045,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         token_logprobs = logprobs.gather(-1, token_ids)
         token_ranks = (logprobs >= token_logprobs).sum(-1)
 
-        indices = torch.cat((token_ids, topk_indices), dim=1).to(torch.int32)
+        # Cast to int32 before the cat, as in patches._hpu_gather_logprobs: the
+        # int64 cat -> int32 cast chain can read back wrong ids on HPU.
+        indices = torch.cat((token_ids.to(torch.int32), topk_indices.to(torch.int32)), dim=1)
         combined_logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
 
         return LogprobsTensors(indices, combined_logprobs, token_ranks)
@@ -4822,8 +4845,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # Apply structured output bitmasks if present
             if grammar_output:
                 self.apply_grammar_bitmask(scheduler_output, grammar_output, logits)
+            # Rows are decodes first, so the per-request sampling params must be too.
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits,
-                                                                    pd_info.prompt_req_ids + pd_info.decode_req_ids,
+                                                                    pd_info.decode_req_ids + pd_info.prompt_req_ids,
                                                                     logits.shape[0])
             # Deal with the case of incomplete prompt
             for i in range(logits.shape[0] - num_decodes):
@@ -5898,7 +5922,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             total_num_scheduled_tokens=sum(scheduled_tokens.values()),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=0,
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
         )
@@ -5909,7 +5932,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=0,
             finished_req_ids=set(req.req_id for req in requests),
             free_encoder_mm_hashes=[],
         )
@@ -8010,3 +8032,27 @@ def _apply_inc_patch():
                             f"Fixed supported_dynamic_ops: {fixed_dynamic_ops}")
     except (ImportError, AttributeError):
         pass
+    _register_gate_linear_with_inc()
+
+
+def _register_gate_linear_with_inc():
+    """Make INC quantize ``GateLinear`` MoE routers like ``ReplicatedLinear`` ones.
+
+    INC picks the modules it patches by class name. vllm PR #58234 moved the MoE
+    routers of models such as Granite MoE, Mixtral, Qwen3-MoE and Llama 4 from
+    ``ReplicatedLinear`` to ``GateLinear``, a subclass INC does not know, so FP8
+    runs left those routers unquantized even when the calibration measured them.
+    Calibrations without router measurements need the router in the INC
+    blocklist, as the DeepSeek configs already have.
+    """
+    try:
+        import neural_compressor.torch.algorithms.fp8_quant._core.patching_common  # noqa: F401
+        from neural_compressor.torch.algorithms.fp8_quant.model_configs import get_patched_module_table
+    except ImportError:
+        return
+
+    table = get_patched_module_table()
+    if "GateLinear" in table or "ReplicatedLinear" not in table:
+        return
+    table["GateLinear"] = table["ReplicatedLinear"]
+    logger.info("Registered GateLinear with INC as ReplicatedLinear.")
