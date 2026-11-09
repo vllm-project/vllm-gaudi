@@ -6503,8 +6503,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         # Validation warmup: run smallest buckets outside compile-only mode
         # to trigger torch.compile guard specializations for heterogeneous layers
-        # (e.g. Llama4 mix of MoE/MLP feed_forward types), and with
-        # prompt_validation_warmup for every prompt bucket.
+        # (e.g. Llama4 mix of MoE/MLP feed_forward types). With
+        # prompt_validation_warmup it covers every prompt bucket, in compile-only
+        # mode unless the layers are heterogeneous.
         validate_all_prompts = get_config().prompt_validation_warmup
         if (can_use_compile_only_mode and not self.model_config.enforce_eager and not self.is_pooling_model
                 and (self._has_heterogeneous_layers or validate_all_prompts)):
