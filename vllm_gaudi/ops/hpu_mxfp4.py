@@ -20,6 +20,7 @@ from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOpMXFP4
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.ops.hpu_fused_moe import (
     _normalize_moe_activation,
+    is_plain_softmax_topk,
     select_experts_from_routed,
 )
 from vllm_gaudi.v1.worker.hpu_dp_utils import (
@@ -118,7 +119,7 @@ class HPUGptOssMxfp4MoEMethod(GptOssMxfp4MoEMethod):
             topk_weights, topk_ids = torch.topk(router_logits, layer.top_k, dim=-1)
             topk_weights = F.softmax(topk_weights, dim=-1, dtype=torch.float32)
         else:
-            if layer.use_grouped_topk or getattr(layer, "custom_routing_function", None) is not None:
+            if not is_plain_softmax_topk(layer):
                 # `RoutedExperts` no longer owns a `.router` (upstream PR #41184
                 # moved it onto `MoERunner`); route via the shared helper that
                 # reproduces upstream's select_experts from the layer's params.
