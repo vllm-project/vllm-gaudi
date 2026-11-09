@@ -86,7 +86,10 @@ def mxfp4(monkeypatch):
     module("vllm_gaudi.extension.ops", VllmMixtureOfExpertsOpMXFP4=object)
     module("vllm_gaudi.extension.runtime", get_config=lambda: types.SimpleNamespace(use_dispatch_fn=False))
     module("vllm_gaudi.ops.hpu_situ_moe", MXFP4_BLOCK=32, maybe_situ_moe=None, situ_impl_or_exact=None)
-    module("vllm_gaudi.ops.hpu_fused_moe", _normalize_moe_activation=None, select_experts_from_routed=None)
+    module("vllm_gaudi.ops.hpu_fused_moe",
+           _normalize_moe_activation=None,
+           is_plain_softmax_topk=lambda layer: True,
+           select_experts_from_routed=None)
     module("vllm_gaudi.v1.worker.hpu_dp_utils",
            dispatch_hidden_states=None,
            dispatch_tensor=None,

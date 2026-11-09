@@ -19,6 +19,7 @@ import torch
 _MODULE_PATH = pathlib.Path(__file__).resolve().parents[3] / "vllm_gaudi" / "ops" / "hpu_kda_pytorch.py"
 _spec = importlib.util.spec_from_file_location("hpu_kda_pytorch_under_test", _MODULE_PATH)
 kda = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = kda  # dynamo imports the globals' module by name
 _spec.loader.exec_module(kda)
 
 H, D, W = 3, 8, 4  # heads, head_dim, conv kernel
@@ -676,9 +677,10 @@ def test_gated_rmsnorm_sigmoid_matches_formula():
 # ---------------------------------------------------------------------------------------------------------------
 # Layer-level wiring (models/kimi_k3_kda.py) with stubbed vLLM / Habana modules
 # ---------------------------------------------------------------------------------------------------------------
-def _load_envs_module():
+def _load_envs_module(monkeypatch):
     spec = importlib.util.spec_from_file_location("vllm_gaudi_envs_under_test", _MODULE_PATH.parents[1] / "envs.py")
     module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)  # dynamo imports the globals' module by name
     spec.loader.exec_module(module)
     return module
 
@@ -719,12 +721,13 @@ def _load_layer_module(monkeypatch, metadata):
                                                       habana_torch), ("vllm", types.ModuleType("vllm")),
                       ("vllm.forward_context", forward_context), ("vllm_gaudi", types.ModuleType("vllm_gaudi")),
                       ("vllm_gaudi.ops", types.ModuleType("vllm_gaudi.ops")), ("vllm_gaudi.ops.hpu_kda_pytorch", kda),
-                      ("vllm_gaudi.extension", types.ModuleType("vllm_gaudi.extension")), ("vllm_gaudi.envs",
-                                                                                           _load_envs_module())):
+                      ("vllm_gaudi.extension",
+                       types.ModuleType("vllm_gaudi.extension")), ("vllm_gaudi.envs", _load_envs_module(monkeypatch))):
         monkeypatch.setitem(sys.modules, name, mod)
     path = _MODULE_PATH.parents[1] / "models" / "kimi_k3_kda.py"
     spec = importlib.util.spec_from_file_location("kimi_k3_kda_layer_under_test", path)
     module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     if os.environ.get("KDA_TEST_PREFILL_SETTINGS"):  # "chunk,vec_chunks": small chunks for the subprocess checks
         settings = tuple(int(v) for v in os.environ["KDA_TEST_PREFILL_SETTINGS"].split(","))
@@ -1446,11 +1449,12 @@ def test_chunked_vec_prefill_outputs_are_dense_tensors(lengths, padded, chunk):
         assert t.numel() == t.untyped_storage().nbytes() // t.element_size()
 
 
-def _load_kimi_layer_module():
+def _load_kimi_layer_module(monkeypatch):
     """models/kimi_k3_kda.py by file path (the models package imports vLLM) with a stub forward context."""
     path = pathlib.Path(__file__).resolve().parents[3] / "vllm_gaudi" / "models" / "kimi_k3_kda.py"
     spec = importlib.util.spec_from_file_location("kimi_k3_kda_under_test", path)
     module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     return module
 
@@ -1459,7 +1463,7 @@ def test_chunked_vec_layer_forward_graph_inputs_after_the_break_are_dense(monkey
     """Under torch.compile the tensors that cross the @compiler.disable'd cache write (core, gate_proj, ...) must
     reach the resume graph as plain tensors: HPU compile fails with 'strided_view' on views with a storage
     offset (gate_proj is a slice of the fused input projection)."""
-    layer_mod = _load_kimi_layer_module()
+    layer_mod = _load_kimi_layer_module(monkeypatch)
     tokens, seq_len, hidden, f_dim = 40, 20, 24, D
     monkeypatch.setattr(layer_mod, "_prefill_settings", torch.compiler.assume_constant_result(lambda: (16, 2)))
     meta = types.SimpleNamespace(load_indices_tensor=torch.tensor([1, 2]),

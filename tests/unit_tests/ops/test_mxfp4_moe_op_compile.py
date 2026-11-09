@@ -47,6 +47,7 @@ def ops(monkeypatch):
     sys.modules["vllm.model_executor.layers.fused_moe.activation"].MoEActivation = type("MoEActivation", (), {})
     spec = importlib.util.spec_from_file_location("mxfp4_ops_under_test", _OPS_PATH)
     module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)  # dynamo imports the globals' module by name
     spec.loader.exec_module(module)
 
     def cpu_fused_fwd(hidden_states, expert_routing_table, router_weights, w12_list, w3_list, d_scale_w12, d_scale_w3,
