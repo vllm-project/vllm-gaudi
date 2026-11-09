@@ -179,6 +179,46 @@ def mamba_reads_chunk_grid(kv_cache_config: KVCacheConfig) -> bool:
         for group in kv_cache_config.kv_cache_groups for spec in iter_layer_specs(group.kv_cache_spec))
 
 
+def attn_pad_block_id(num_blocks: int, attn_block_size: int, kv_cache_groups: list[KVCacheGroupSpec],
+                      kernel_block_size_by_gid: dict[int, int], kv_caches: dict[str, Any]) -> int:
+    """Return the attention kernel block that padded decode lanes write to.
+
+    Block tables and slot mappings address kernel blocks: a group with a
+    kernel block size splits each KV-manager block into
+    spec.block_size // kernel_block_size of them, a group without one is not
+    split. The hybrid cache allocates num_blocks * split kernel blocks plus a
+    pad block per attention layer, the other layouts num_blocks + 1 manager
+    blocks, so kernel block num_blocks * split follows the real ones in both.
+    Counted in manager blocks, the pad block would be a real one, and padded
+    lanes would overwrite its KV.
+    """
+    full_attn_groups = [(gid, group) for gid, group in enumerate(kv_cache_groups)
+                        if isinstance(group.kv_cache_spec, FullAttentionSpec)]
+    splits = {
+        group.kv_cache_spec.block_size // kernel_block_size_by_gid.get(gid, group.kv_cache_spec.block_size)
+        for gid, group in full_attn_groups
+    }
+    if len(splits) > 1:
+        raise ValueError(f"Attention groups split KV blocks into different numbers of kernel blocks "
+                         f"({sorted(splits)}); a single pad block cannot follow the real blocks of all of them.")
+    pad_block_id = num_blocks * next(iter(splits), 1)
+    # The KV tensors are flat, one row per slot. Padded lanes write the
+    # attn_block_size slots of the pad block, which must lie past the real
+    # slots of every attention layer and inside its tensor.
+    pad_slots = range(pad_block_id * attn_block_size, (pad_block_id + 1) * attn_block_size)
+    for _, group in full_attn_groups:
+        num_real_slots = num_blocks * group.kv_cache_spec.block_size
+        for layer_name in group.layer_names:
+            if layer_name not in kv_caches:
+                continue
+            kv_cache = kv_caches[layer_name]
+            num_slots = (kv_cache[0] if isinstance(kv_cache, (tuple, list)) else kv_cache).shape[0]
+            if pad_slots.start < num_real_slots or pad_slots.stop > num_slots:
+                raise RuntimeError(f"Layer {layer_name}: pad slots {pad_slots.start}-{pad_slots.stop - 1} must "
+                                   f"follow its {num_real_slots} real slots within its {num_slots} allocated ones.")
+    return pad_block_id
+
+
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 HPU_TORCH_DTYPE_TO_STR_DTYPE = {
@@ -6717,11 +6757,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # kernel block sizes; for other hybrid (mamba) models we still need to
         # reinitialize so that MultiGroupBlockTable has one entry per group.
         #kernel_block_sizes: list[int] = []
+        # Stays empty without mamba-like layers: their block tables are not
+        # split into kernel blocks.
+        kernel_block_size_by_gid: dict[int, int] = {}
         if self.num_gdn > 0 or self.num_mamba_like_layers > 0:
             kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
             self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
 
-            kernel_block_size_by_gid: dict[int, int] = {}
             kernel_idx = 0
             for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
                 kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -7055,8 +7097,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.enable_bucketing:
             self.bucketing_manager.num_hpu_blocks = num_blocks
 
-        self._PAD_BLOCK_ID = num_blocks
-        self._PAD_SLOT_ID = num_blocks * self.attn_block_size
+        self._PAD_BLOCK_ID = attn_pad_block_id(num_blocks, self.attn_block_size, kv_cache_config.kv_cache_groups,
+                                               kernel_block_size_by_gid, kv_caches)
+        self._PAD_SLOT_ID = self._PAD_BLOCK_ID * self.attn_block_size
+        # The mamba state tensors have num_blocks + 1 slots.
         self._MAMBA_PAD_BLOCK_ID = num_blocks
         self._dummy_num_blocks = num_blocks
 
