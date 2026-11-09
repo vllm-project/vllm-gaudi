@@ -444,17 +444,54 @@ def test_compressed_tensors_wna16_moe_method_native_int4(default_vllm_config: No
         experts.moe_op(hidden_states, topk_ids, topk_weights, permuted_weights=False, activation="silu")
 
 
+def _run_load_model_with_drafter(drafter_model, monkeypatch):
+    """Run the real HPUModelRunner.load_model on a stub runner; return its drafter's model.
+
+    No INC, load device "cpu". get_model returns an empty target, the drafter's
+    load_model installs drafter_model as built on the host, and the
+    model-specific patches and the HPU graph wrapping are stubbed out, so only
+    load_model's own drafter branch moves drafter_model to HPU.
+    """
+    import vllm_gaudi.v1.worker.hpu_model_runner as hpu_runner
+
+    target = torch.nn.Module()
+    target.model = torch.nn.Module()
+
+    class _Drafter:
+
+        def load_model(self, target_model):
+            assert target_model is target.model
+            self.model = drafter_model
+
+    monkeypatch.setattr(hpu_runner, "get_model", lambda **kwargs: target)
+    monkeypatch.setattr(hpu_runner, "apply_model_specific_patches", lambda model_runner: None)
+    monkeypatch.setattr(hpu_runner, "_maybe_wrap_in_hpu_graph", lambda model, **kwargs: model)
+    runner = MagicMock(spec=hpu_runner.HPUModelRunner)
+    runner._is_quant_with_inc.return_value = False
+    runner.model_config = SimpleNamespace(model="stub-target", quantization=None)
+    runner.vllm_config = SimpleNamespace(load_config=SimpleNamespace(device="cpu"))
+    runner.lora_config = None
+    runner.is_pooling_model = False
+    runner.use_aux_hidden_state_outputs = False
+    runner.drafter = _Drafter()
+    hpu_runner.HPUModelRunner.load_model(runner)
+    return runner.drafter.model
+
+
+@pytest.mark.parametrize("runner_path", ["inc", "drafter"])
 @pytest.mark.parametrize("native_int4", [False, True], ids=["dequant", "native_int4"])
 def test_compressed_tensors_wna16_moe_method_cpu_first_migration(default_vllm_config: None, dist_init, monkeypatch,
-                                                                 native_int4):
+                                                                 native_int4, runner_path):
     """A CPU-first (or INC) load keeps a single device copy of the WNA16 expert weights.
 
-    Replays the model runner's sequence: process the weights on the host,
-    model.to("hpu"), _rebind_moe_expert_weights, then the
-    _move_remaining_tensors_to_device sweep. Every per-expert view, zero point
-    and _cached_int4 entry must alias the moved Parameters (one storage each)
-    instead of being copied to the device separately, and the layer must still
-    reproduce the reference output.
+    Processes the weights on the host, then moves the layer to HPU the way the
+    model runner does: on the INC path by replaying model.to("hpu"),
+    _rebind_moe_expert_weights and the _move_remaining_tensors_to_device sweep,
+    as the drafter through the real HPUModelRunner.load_model, whose drafter
+    branch has no sweep. Every per-expert view, zero point and _cached_int4
+    entry must alias the moved Parameters (one storage each) instead of being
+    copied to the device separately or left on the host, and the layer must
+    still reproduce the reference output.
     """
     from vllm_gaudi.v1.worker.hpu_model_runner import (_model_has_moe_experts, _move_remaining_tensors_to_device,
                                                        _rebind_moe_expert_weights)
@@ -476,9 +513,12 @@ def test_compressed_tensors_wna16_moe_method_cpu_first_migration(default_vllm_co
     assert experts.moe_op.native_int4 is native_int4
     assert _model_has_moe_experts(oot_op)
 
-    oot_op = oot_op.to("hpu")
-    _rebind_moe_expert_weights(oot_op)
-    _move_remaining_tensors_to_device(oot_op, "hpu")
+    if runner_path == "inc":
+        oot_op = oot_op.to("hpu")
+        _rebind_moe_expert_weights(oot_op)
+        _move_remaining_tensors_to_device(oot_op, "hpu")
+    else:
+        assert _run_load_model_with_drafter(oot_op, monkeypatch) is oot_op
 
     op = experts.moe_op
     for weights, packed, scale, zero_point in ((op.w13_list, experts.w13_weight_packed, experts.w13_weight_scale,
