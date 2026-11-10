@@ -49,12 +49,12 @@ These options are shared with `print-config`.
 | `--input-backoff` | unset | INC `scale_params.input_backoff`. |
 | `--weight-backoff` | unset | INC `scale_params.weight_backoff`. |
 | `--device-for-scales` | unset | INC `device_for_scales`, for example `GAUDI2` for scales compatible with Intel® Gaudi® 2. |
-| `--measure-exclude` | unset | INC `measure_exclude`, for example `NONE` or `OUTPUT`. |
+| `--measure-exclude` | unset | INC `measure_exclude` of the measure config, for example `NONE` to also measure output tensors, or `OUTPUT`. |
 | `--dynamic-quantization` | unset | Write `"dynamic_quantization": true` to the quant config. |
 | `--measure-config PATH` | generated | Use this INC measure JSON instead of generating one. See [Custom INC Configs](advanced.md#custom-inc-configs). |
 | `--quant-config PATH` | generated | Use this INC quant JSON instead of generating one. |
 
-The options marked `unset` are written to the quant config only when given. `--blocklist` and `--allowlist` apply to both configs.
+The options marked `unset` are written only when given: `--measure-exclude` to the measure config, because INC reads it only in the MEASURE phase, and the others to the quant config. `--blocklist` and `--allowlist` apply to both configs.
 
 #### lm-eval Options
 
@@ -291,7 +291,7 @@ The matching quant config:
 }
 ```
 
-`scale_format` is written after `scale_method` when the preset or `--scale-format` sets it. `scale_params`, `device_for_scales`, `measure_exclude`, and `dynamic_quantization` are appended when the matching options are given. The `calibration/quantization_config` directory contains further templates that you can pass with `--quant-config` or set as `QUANT_CONFIG` when serving.
+`scale_format` is written after `scale_method` when the preset or `--scale-format` sets it. `scale_params`, `device_for_scales`, and `dynamic_quantization` are appended when the matching options are given. `--measure-exclude` is written to the measure config, after `observer`. The `calibration/quantization_config` directory contains further templates that you can pass with `--quant-config` or set as `QUANT_CONFIG` when serving.
 
 ### Supported Configuration Options
 

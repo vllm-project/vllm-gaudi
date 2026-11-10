@@ -18,13 +18,13 @@ from vllm_gaudi.calibration.presets import ResolvedPreset
 
 @dataclass(frozen=True)
 class QuantOptions:
-    """Optional QUANTIZE settings that are written only when set.
+    """Optional INC settings that are written only when set.
 
     Attributes:
         input_backoff: ``scale_params.input_backoff``.
         weight_backoff: ``scale_params.weight_backoff``.
         device_for_scales: ``device_for_scales``, for example ``GAUDI2``.
-        measure_exclude: ``measure_exclude``, for example ``OUTPUT``.
+        measure_exclude: ``measure_exclude`` of the MEASURE config, for example ``NONE``; INC reads it only there.
         dynamic_quantization: ``dynamic_quantization``.
     """
 
@@ -39,17 +39,20 @@ def _name_list(names: tuple[str, ...]) -> dict[str, list[str]]:
     return {"types": [], "names": list(names)}
 
 
-def build_measure_config(preset: ResolvedPreset, dump_stats_path: str) -> dict[str, Any]:
+def build_measure_config(preset: ResolvedPreset,
+                         dump_stats_path: str,
+                         options: QuantOptions | None = None) -> dict[str, Any]:
     """Returns the MEASURE config dictionary.
 
     Args:
         preset: Resolved model settings.
         dump_stats_path: Prefix INC uses for the measurement files.
+        options: Optional settings; only ``measure_exclude`` applies to MEASURE.
     """
-    return {
-        "method": "HOOKS",
-        "mode": "MEASURE",
-        "observer": DEFAULT_OBSERVER,
+    config: dict[str, Any] = {"method": "HOOKS", "mode": "MEASURE", "observer": DEFAULT_OBSERVER}
+    if options is not None and options.measure_exclude is not None:
+        config["measure_exclude"] = options.measure_exclude
+    return config | {
         "allowlist": _name_list(preset.allowlist_names),
         "blocklist": _name_list(preset.blocklist_names),
         "quantize_weight": False,
@@ -85,8 +88,6 @@ def build_quant_config(preset: ResolvedPreset,
         config["scale_params"] = scale_params
     if options.device_for_scales is not None:
         config["device_for_scales"] = options.device_for_scales
-    if options.measure_exclude is not None:
-        config["measure_exclude"] = options.measure_exclude
     if options.dynamic_quantization is not None:
         config["dynamic_quantization"] = options.dynamic_quantization
     return config
@@ -97,7 +98,7 @@ def build_configs(preset: ResolvedPreset,
                   options: QuantOptions | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Returns the ``(measure, quant)`` config dictionaries for a layout."""
     dump = layout.dump_stats_path
-    return build_measure_config(preset, dump), build_quant_config(preset, dump, options)
+    return build_measure_config(preset, dump, options), build_quant_config(preset, dump, options)
 
 
 def write_json_atomic(path: Path, data: Mapping[str, Any], *, fsync: bool = False) -> None:
