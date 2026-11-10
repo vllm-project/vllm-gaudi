@@ -90,7 +90,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunn
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists, LogprobsTensors, DraftTokenIds,
                              ModelRunnerOutput, AsyncModelRunnerOutput, KVConnectorOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cache_groups
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
@@ -99,12 +99,12 @@ from vllm.model_executor.models.interfaces import (supports_eagle3, supports_tra
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.v1.worker.utils import (AttentionGroup, prepare_kernel_block_sizes, sanity_check_mm_encoder_outputs)
-from vllm.v1.sample.rejection_sampler import RejectionSampler
-from vllm.v1.spec_decode.eagle import EagleProposer
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.sample.sampler import Sampler
-from vllm.v1.sample.logits_processor import build_logitsprocs
+from vllm_gaudi.v1._vendored.sample.rejection_sampler import RejectionSampler
+from vllm_gaudi.v1._vendored.spec_decode.eagle import EagleProposer
+from vllm_gaudi.v1._vendored.spec_decode.metadata import SpecDecodeMetadata
+from vllm_gaudi.v1._vendored.spec_decode.ngram_proposer import NgramProposer
+from vllm_gaudi.v1._vendored.sample.sampler import Sampler
+from vllm_gaudi.v1._vendored.sample.logits_processor import build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.sampling_params import SamplingParams

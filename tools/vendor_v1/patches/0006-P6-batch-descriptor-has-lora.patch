@@ -1,0 +1,20 @@
+diff --git a/cudagraph_dispatcher.py b/cudagraph_dispatcher.py
+index 62bf99c0..b4e8e981 100644
+--- a/cudagraph_dispatcher.py
++++ b/cudagraph_dispatcher.py
+@@ -147,12 +147,14 @@ class CudagraphDispatcher:
+             uniform_decode = False
+             num_reqs = min(num_tokens_padded, max_num_seqs)
+ 
++        # vllm-gaudi local change [P6]: BatchDescriptor lost has_lora after aac1b2a4f3.
++        lora_kwargs = {"has_lora": has_lora} if hasattr(BatchDescriptor, "has_lora") else {}
+         return BatchDescriptor(
+             num_tokens=num_tokens_padded,
+             num_reqs=num_reqs,
+             uniform=uniform_decode,
+-            has_lora=has_lora,
+             num_active_loras=num_active_loras,
++            **lora_kwargs,
+         )
+ 
+     def add_cudagraph_key(

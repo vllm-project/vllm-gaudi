@@ -26,17 +26,18 @@ Currently:
   replace it with an HPU-safe variant that uses
   ``current_platform.empty_cache()`` instead (see GAUDISW-247825).
 
-* ``vllm.v1.sample.ops.logprobs.batched_count_greater_than`` — upstream
+* ``batched_count_greater_than`` in the V1 ``sample.ops.logprobs`` and
+  ``sample.sampler`` modules — upstream
   decorates this function with ``@torch.compile(dynamic=True, ...)``.
   Habana's ``recipe_compiler`` backend cannot handle the symbolic shapes
   produced by ``dynamic=True`` (and by ``mark_unbacked`` in the caller),
   raising ``TypeError: Cannot convert symbols to int``.  We replace it
   with a plain (uncompiled) version of the same function.  The replacement
-  is deferred to ``load_general_plugins`` time to avoid importing
-  ``vllm.v1.sample.sampler`` during early plugin registration, which would
+  is deferred to ``load_general_plugins`` time to avoid importing the
+  sampler during early plugin registration, which would
   trigger a heavy import chain that interferes with platform initialisation.
 
-* ``vllm.v1.sample.sampler.Sampler.gather_logprobs`` — upstream PR #38933
+* ``Sampler.gather_logprobs`` of the V1 sampler — upstream PR #38933
   added two ``mark_unbacked()`` calls inside ``gather_logprobs`` to prevent
   0->1 batch-size specialization recompiles for ``batched_count_greater_than``
   on CUDA.  On HPU, ``torch._dynamo`` marks ``mark_unbacked`` as a forbidden
@@ -45,6 +46,12 @@ Currently:
   any request with ``logprobs=true``.  We replace ``gather_logprobs`` with an
   identical implementation that omits the two ``mark_unbacked`` calls.  HPU
   handles dynamic batch shapes without this hint.
+
+  These two sampler patches target the vendored copy in
+  ``vllm_gaudi.v1._vendored`` (the one the HPU model runner uses) and, on vLLM
+  before the Model Runner V1 removal (aac1b2a4f3), also the upstream
+  ``vllm.v1.sample`` modules, which upstream models there still import.
+  Never target only the upstream modules again.
 
 * ``vllm.distributed.device_communicators.shm_broadcast.check_shm_free_space``
   — upstream PR #48879 ("Fail fast when /dev/shm is too small for the shm ring
@@ -94,9 +101,10 @@ Currently:
 
 import functools
 import gc
+import importlib
 import inspect
 import os
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from vllm_gaudi.kimi_k3_gate import (KIMI_K3_ARCHITECTURES, current_config_is_kimi_k3, is_kimi_k3_model_config,
                                      kimi_k3_build_context, kimi_k3_seen, mark_kimi_k3_seen)
@@ -255,6 +263,21 @@ def _hpu_cleanup_dist_env_and_memory(shutdown_ray: bool = False) -> None:
         parallel_state.logger.warning("torch._C._host_emptyCache() only available in Pytorch >=2.5")
 
 
+def _v1_sample_modules(name: str) -> list[Any]:
+    """Return the vendored V1 module ``sample.<name>`` and, if it still exists, its upstream twin.
+
+    vLLM before aac1b2a4f3 still ships ``vllm.v1.sample`` and its own models
+    import it, so both copies must carry the same HPU patches until the
+    vLLM pin moves past the V1 removal.
+    """
+    vendored = importlib.import_module(f"vllm_gaudi.v1._vendored.sample.{name}")
+    try:
+        upstream = importlib.import_module(f"vllm.v1.sample.{name}")
+    except ImportError:  # removed upstream in aac1b2a4f3
+        return [vendored]
+    return [vendored, upstream]
+
+
 def _hpu_gather_logprobs(
     logprobs: torch.Tensor,
     num_logprobs: int,
@@ -278,7 +301,7 @@ def _hpu_gather_logprobs(
     Upstream ref: https://github.com/vllm-project/vllm/pull/38933
     """
     from vllm.v1.outputs import LogprobsTensors
-    import vllm.v1.sample.sampler as _sampler_mod
+    import vllm_gaudi.v1._vendored.sample.sampler as _sampler_mod
 
     assert token_ids.dtype == torch.int64
     topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
@@ -303,25 +326,22 @@ def _patch_gather_logprobs() -> None:
     """Replace ``Sampler.gather_logprobs`` with the HPU-safe variant.
 
     Called from the ``load_general_plugins`` hook (same as
-    ``_patch_batched_count_greater_than``) so that ``vllm.v1.sample.*``
+    ``_patch_batched_count_greater_than``) so that the sampler
     imports run after platform initialisation.
 
-    Guarded by ``inspect.getsource`` so this is a no-op on vLLM versions
-    that predate PR #38933 (i.e. where ``gather_logprobs`` does not call
-    ``mark_unbacked``).
+    Guarded by ``inspect.getsource`` so a copy whose ``gather_logprobs``
+    predates PR #38933 (does not call ``mark_unbacked``) is left alone.
     """
     import inspect
 
-    import vllm.v1.sample.sampler as _sampler_mod
-
-    if "mark_unbacked" not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
-        # Older vLLM without PR #38933: no mark_unbacked to remove, so the
-        # stock gather_logprobs is kept. Note that it still builds the ids
-        # with the int64 cat -> int32 cast described in _hpu_gather_logprobs.
-        return
-
-    _sampler_mod.Sampler.gather_logprobs = staticmethod(  # type: ignore[method-assign]
-        _hpu_gather_logprobs)
+    for _sampler_mod in _v1_sample_modules("sampler"):
+        if "mark_unbacked" not in inspect.getsource(_sampler_mod.Sampler.gather_logprobs):
+            # Copy without PR #38933: no mark_unbacked to remove, so the
+            # stock gather_logprobs is kept. Note that it still builds the ids
+            # with the int64 cat -> int32 cast described in _hpu_gather_logprobs.
+            continue
+        _sampler_mod.Sampler.gather_logprobs = staticmethod(  # type: ignore[method-assign]
+            _hpu_gather_logprobs)
 
 
 def _hpu_batched_count_greater_than(x: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
@@ -340,13 +360,10 @@ def _patch_batched_count_greater_than() -> None:
     """Replace ``batched_count_greater_than`` in the sampler & logprobs modules.
 
     Called from the ``load_general_plugins`` hook so that the heavy
-    ``vllm.v1.sample.*`` import chain runs *after* platform initialisation.
+    sampler import chain runs *after* platform initialisation.
     """
-    import vllm.v1.sample.ops.logprobs as _logprobs_mod
-    import vllm.v1.sample.sampler as _sampler_mod
-
-    _logprobs_mod.batched_count_greater_than = _hpu_batched_count_greater_than
-    _sampler_mod.batched_count_greater_than = _hpu_batched_count_greater_than
+    for _mod in _v1_sample_modules("ops.logprobs") + _v1_sample_modules("sampler"):
+        _mod.batched_count_greater_than = _hpu_batched_count_greater_than
 
 
 _GRANITE_LEGACY_LAYER_ALIASES = {

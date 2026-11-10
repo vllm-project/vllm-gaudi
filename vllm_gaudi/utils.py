@@ -1,5 +1,6 @@
 from functools import cache
 import os
+import sys
 from vllm.config import ModelConfig
 import vllm.utils.torch_utils as torch_utils
 from vllm_gaudi.extension.runtime import get_config
@@ -239,7 +240,15 @@ if not htorch.utils.internal.is_lazy():
 
         return tensor
 
-    torch_utils.make_tensor_with_pad = make_tensor_with_pad_hpu
+    # The vendored V1 helper replaces the upstream one, which aac1b2a4f3 removed. The vendored penalties module
+    # binds the name at import, so patch it too if it is already loaded; otherwise it picks up the HPU version.
+    from vllm_gaudi.v1._vendored import _compat as _vendored_compat
+    _vendored_compat.make_tensor_with_pad = make_tensor_with_pad_hpu
+    _vendored_penalties: Any = sys.modules.get("vllm_gaudi.v1._vendored.sample.ops.penalties")
+    if _vendored_penalties is not None:
+        _vendored_penalties.make_tensor_with_pad = make_tensor_with_pad_hpu
+    if hasattr(torch_utils, "make_tensor_with_pad"):  # vLLM before aac1b2a4f3
+        torch_utils.make_tensor_with_pad = make_tensor_with_pad_hpu
 
 
 def make_mrope_positions_tensor_with_pad(input_positions: list[list[int]], input_mrope_positions: list[list[list[int]]],
