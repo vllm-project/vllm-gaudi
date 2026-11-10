@@ -12,14 +12,14 @@ LINEAR = "model.layers.0.mlp.down_proj"
 
 
 def measure_nodes(rank: int, local_experts: int = 2) -> dict:
-    """Per-channel layout: inputs[i][j][0], outputs[i][0], weight[i][0]."""
+    """Layout of the INC maxabs observer, one value per tensor: inputs[i] [[x]], outputs[i] [x], weight [[x]]."""
     base = float(rank + 1)
     nodes = {
         LINEAR: {
-            "inputs": [[[base], [10 - base]]],
+            "inputs": [[[base]], [[10 - base]]],
             "outputs": [[base * 2]],
             "params": {
-                "weight": [[base * 3], [9 - base]]
+                "weight": [[base * 3]]
             }
         },
         GATE: {
