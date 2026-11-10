@@ -142,6 +142,26 @@ def load_user_config(path: str | os.PathLike[str], *, base_dir: str | os.PathLik
     return config
 
 
+def _module_list(config: Mapping[str, Any], key: str) -> dict[str, list[Any]]:
+    value = config.get(key) or {}
+    return {"types": list(value.get("types") or []), "names": list(value.get("names") or [])}
+
+
+def _align_quant_modules(quant: dict[str, Any], measure: Mapping[str, Any], measure_config: str) -> None:
+    # INC fails on a module that QUANTIZE selects but MEASURE did not observe, so the generated quant config
+    # also blocks what the user's measure config blocks, and quantizes only what it measures.
+    blocklist = _module_list(quant, "blocklist")
+    for field, values in _module_list(measure, "blocklist").items():
+        blocklist[field] += [v for v in values if v not in blocklist[field]]
+    quant["blocklist"] = blocklist
+    measure_allow, quant_allow = _module_list(measure, "allowlist"), _module_list(quant, "allowlist")
+    if any(measure_allow.values()):
+        if any(quant_allow.values()) and measure_allow != quant_allow:
+            raise ValueError(f"{measure_config} has another allowlist than the generated quant config "
+                             f"({measure_allow} and {quant_allow}); pass --quant-config as well")
+        quant["allowlist"] = measure_allow
+
+
 def resolve_configs(preset: ResolvedPreset,
                     layout: OutputLayout,
                     options: QuantOptions | None = None,
@@ -153,6 +173,7 @@ def resolve_configs(preset: ResolvedPreset,
 
     QUANTIZE finds the measurements by a file name built from its own ``dump_stats_path`` and
     ``observer``, so a generated config takes both from a user config given for the other phase.
+    A generated quant config also adds the blocklist and takes the allowlist of a user measure config.
 
     Args:
         preset: The resolved model family preset.
@@ -163,8 +184,9 @@ def resolve_configs(preset: ResolvedPreset,
         base_dir: Directory a relative ``dump_stats_path`` is resolved against, normally the invoking cwd.
 
     Raises:
-        ValueError: If a user config is invalid or has the mode of the other phase, or two user configs differ
-            in ``dump_stats_path`` or ``observer``.
+        ValueError: If a user config is invalid or has the mode of the other phase, two user configs differ
+            in ``dump_stats_path`` or ``observer``, or a user measure config and the generated quant config
+            have different allowlists.
     """
     measure, quant = build_configs(preset, layout, options)
     if measure_config:
@@ -186,4 +208,6 @@ def resolve_configs(preset: ResolvedPreset,
         elif normalize(measure_value) != normalize(quant_value):
             raise ValueError(f"--measure-config and --quant-config have different {key} values "
                              f"({measure_value} and {quant_value}); QUANTIZE would not find the measurements")
+    if measure_config and not quant_config:
+        _align_quant_modules(quant, measure, measure_config)
     return measure, quant

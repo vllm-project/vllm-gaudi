@@ -165,3 +165,35 @@ def test_resolve_configs_accepts_quant_config_without_mode(tmp_path):
                                quant_config=str(user),
                                base_dir=tmp_path)
     assert "mode" not in quant
+
+
+def test_generated_quant_config_follows_user_measure_modules(tmp_path):
+    # A module QUANTIZE selects but MEASURE did not observe makes INC fail at the first forward pass.
+    preset = resolve_preset(ModelInfo(model_type="mixtral"), "m")
+    layout = OutputLayout.create("/out", "m", "g3")
+    preset_blocklist = build_configs(preset, layout)[1]["blocklist"]
+    assert preset_blocklist["names"]
+    user = tmp_path / "measure.json"
+    user.write_text(json.dumps({"mode": "MEASURE", "dump_stats_path": "/s/inc"}))
+    _, quant = resolve_configs(preset, layout, measure_config=str(user), base_dir=tmp_path)
+    assert quant["blocklist"] == preset_blocklist
+    user.write_text(
+        json.dumps({
+            "mode": "MEASURE",
+            "dump_stats_path": "/s/inc",
+            "blocklist": {
+                "names": ["mlp", preset_blocklist["names"][0]],
+                "types": ["Matmul"]
+            },
+            "allowlist": {
+                "names": ["layers"]
+            }
+        }))
+    _, quant = resolve_configs(preset, layout, measure_config=str(user), base_dir=tmp_path)
+    assert quant["blocklist"] == {"types": ["Matmul"], "names": [*preset_blocklist["names"], "mlp"]}
+    assert quant["allowlist"] == {"types": [], "names": ["layers"]}
+    with pytest.raises(ValueError, match="allowlist"):
+        resolve_configs(resolve_preset(ModelInfo(model_type="mixtral"), "m", allowlist=("other", )),
+                        layout,
+                        measure_config=str(user),
+                        base_dir=tmp_path)
