@@ -36,6 +36,13 @@ def test_precedence_and_optional_args():
     assert "distributed_executor_backend" not in build()
 
 
+def test_tokenizer_revision_follows_revision():
+    assert "tokenizer_revision" not in build()
+    assert build(user_engine_args={"revision": "abc"})["tokenizer_revision"] == "abc"
+    pinned = build(user_engine_args={"revision": "abc", "tokenizer_revision": "def"})
+    assert pinned["tokenizer_revision"] == "def"
+
+
 def test_default_tasks():
     assert lmeval.default_tasks("text") == ["pile_10k", "gsm8k"]
     assert lmeval.default_tasks("multimodal") == ["mmmu_val"]

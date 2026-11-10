@@ -91,6 +91,9 @@ def build_model_args(*,
     if multimodal and image_max_side:
         args["image_max_side"] = image_max_side
     args.update(user_engine_args or {})
+    # lm-eval loads its own tokenizer with tokenizer_revision only; vLLM falls back to revision.
+    if args.get("revision") is not None and args.get("tokenizer_revision") is None:
+        args["tokenizer_revision"] = args["revision"]
     return args
 
 
