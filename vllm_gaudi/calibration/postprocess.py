@@ -11,12 +11,13 @@ name suffix, so any module prefix works (``model.layers.*``,
 import copy
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
 from vllm_gaudi.calibration.layout import DEFAULT_OBSERVER
-from vllm_gaudi.calibration.measurements import (MEASURE, SCALES, list_measurement_files, load_json, select,
-                                                 write_measurement)
+from vllm_gaudi.calibration.measurements import (MEASURE, MOD_LIST, SCALES, list_measurement_files, load_json,
+                                                 remove_scales, select, write_measurement)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,15 @@ def postprocess_dir(measurements_dir: str | os.PathLike[str],
     source = Path(measurements_dir)
     target = Path(out_dir) if out_dir is not None else None
     files = list_measurement_files(source, observer)
+    if target is not None and target.resolve() != source.resolve():
+        # INC reuses the scale files it finds, so scales of earlier measurements in the target must go; the
+        # source scales, if any, are copied below. unify reads the source world size from the module lists.
+        measured = select(files, kind=MEASURE, world=world)
+        for measured_world in sorted({f.world for f in measured}):
+            remove_scales(target, {f.prefix for f in measured if f.world == measured_world}, measured_world, observer)
+        target.mkdir(parents=True, exist_ok=True)
+        for mod_list in select(files, kind=MOD_LIST, world=world):
+            shutil.copy2(mod_list.path, target / mod_list.path.name)
     results = {}
     for kind in (MEASURE, SCALES):
         for parsed in select(files, kind=kind, world=world):

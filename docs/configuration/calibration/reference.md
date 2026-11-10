@@ -148,7 +148,7 @@ vllm-gaudi-calibrate postprocess -m DIR [-o OUT] [--observer NAME]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-m`, `--measurements` | required | Directory with the measurement files. |
-| `-o`, `--out` | in place | Output directory. |
+| `-o`, `--out` | in place | Output directory. The module lists are copied there too, so `unify` can run on it, and scale files that it holds for the processed measurements are removed first, so that INC does not reuse them. |
 | `--observer` | `maxabs` | INC observer in the file names. Pass the `observer` of a custom measure config. |
 
 ### `detect`
