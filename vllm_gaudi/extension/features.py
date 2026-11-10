@@ -109,8 +109,8 @@ def get_features():
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
         # Re-run every prompt bucket in the validation warmup (see
-        # HPUModelRunner.warmup_model). Smaller buckets make Dynamo compile more
-        # general graphs, which inference then picks for the larger buckets
+        # HPUModelRunner._validation_warmup). Smaller buckets make Dynamo compile
+        # more general graphs, which inference then picks for the larger buckets
         # warmed before them; without the re-run, their recipes compile on the
         # first real prompts.
         Value('prompt_validation_warmup',

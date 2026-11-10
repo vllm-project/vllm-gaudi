@@ -6325,6 +6325,44 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         max_seq_len = max(b[1] for b in prompt_buckets)
         return [b for b in prompt_buckets if b[1] == max_seq_len]
 
+    def _validation_warmup(self, kv_caches, compile_only_mode_context) -> None:
+        """Validation warmup: run buckets again at the end of warmup.
+
+        Heterogeneous layers (e.g. Llama4 mix of MoE/MLP feed_forward types) run
+        the largest prompt buckets and the smallest decode bucket again outside
+        compile-only mode, to trigger torch.compile guard specializations. With
+        prompt_validation_warmup the pass covers every prompt bucket, in
+        compile-only mode unless the layers are heterogeneous.
+        """
+        validate_all_prompts = get_config().prompt_validation_warmup
+        if (self.model_config.enforce_eager or self.is_pooling_model
+                or not (self._has_heterogeneous_layers or validate_all_prompts)):
+            return
+        logger.info("Running validation warmup to trigger guard specializations...")
+        saved_graphed = self.graphed_buckets.copy()
+        self.graphed_buckets.clear()
+
+        # Re-run prompt buckets at the END of warmup, so that the NEWEST
+        # dynamo compilations (which will be selected first at inference)
+        # have Synapse recipes for their shapes (see _validation_prompt_buckets).
+        prompt_buckets = self._validation_prompt_buckets(self.bucketing_manager.prompt_buckets, validate_all_prompts)
+        if prompt_buckets:
+            logger.info("Validation warmup: %s prompt buckets (seq_len %s)", len(prompt_buckets),
+                        sorted({b[1]
+                                for b in prompt_buckets}))
+            # Shadowed graphs only lack the Synapse recipes for these shapes,
+            # which compile-only mode builds without running the forwards;
+            # heterogeneous layers specialize their guards in real runs.
+            with (compile_only_mode_context()
+                  if validate_all_prompts and not self._has_heterogeneous_layers else contextlib.nullcontext()):
+                self.warmup_graphs(prompt_buckets, True, kv_caches)
+
+        if self.bucketing_manager.decode_buckets:
+            self.warmup_graphs([self.bucketing_manager.decode_buckets[0]], False, kv_caches)
+
+        self.graphed_buckets = saved_graphed
+        logger.info("Validation warmup complete.")
+
     @torch.inference_mode()
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
@@ -6467,39 +6505,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                           self.bucketing_manager.decode_buckets, False, kv_caches)
                     self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
 
-        # Validation warmup: run smallest buckets outside compile-only mode
-        # to trigger torch.compile guard specializations for heterogeneous layers
-        # (e.g. Llama4 mix of MoE/MLP feed_forward types). With
-        # prompt_validation_warmup it covers every prompt bucket, in compile-only
-        # mode unless the layers are heterogeneous.
-        validate_all_prompts = get_config().prompt_validation_warmup
-        if (can_use_compile_only_mode and not self.model_config.enforce_eager and not self.is_pooling_model
-                and (self._has_heterogeneous_layers or validate_all_prompts)):
-            logger.info("Running validation warmup to trigger guard specializations...")
-            saved_graphed = self.graphed_buckets.copy()
-            self.graphed_buckets.clear()
-
-            # Re-run prompt buckets at the END of warmup, so that the NEWEST
-            # dynamo compilations (which will be selected first at inference)
-            # have Synapse recipes for their shapes (see _validation_prompt_buckets).
-            prompt_buckets = self._validation_prompt_buckets(self.bucketing_manager.prompt_buckets,
-                                                             validate_all_prompts)
-            if prompt_buckets:
-                logger.info("Validation warmup: %s prompt buckets (seq_len %s)", len(prompt_buckets),
-                            sorted({b[1]
-                                    for b in prompt_buckets}))
-                # Shadowed graphs only lack the Synapse recipes for these shapes,
-                # which compile-only mode builds without running the forwards;
-                # heterogeneous layers specialize their guards in real runs.
-                with (compile_only_mode_context()
-                      if validate_all_prompts and not self._has_heterogeneous_layers else contextlib.nullcontext()):
-                    self.warmup_graphs(prompt_buckets, True, kv_caches)
-
-            if self.bucketing_manager.decode_buckets:
-                self.warmup_graphs([self.bucketing_manager.decode_buckets[0]], False, kv_caches)
-
-            self.graphed_buckets = saved_graphed
-            logger.info("Validation warmup complete.")
+        if can_use_compile_only_mode:
+            self._validation_warmup(kv_caches, compile_only_mode_context)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
