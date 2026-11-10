@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_gaudi.platform import HpuPlatform
+from vllm_gaudi.platform import HpuPlatform, retain_envs
 
 _EAGER_ONLY_VARS = (
     "RUNTIME_SCALE_PATCHING",
@@ -716,3 +716,13 @@ def test_beam_search_step_with_allowlist_is_refused(allowed_token_ids, refused):
         return
     with pytest.raises(VLLMValidationError, match="logprob_token_ids is not supported on HPU"):
         HpuPlatform.validate_request(None, params)
+
+
+@pytest.mark.parametrize("name", ["QUANT_CONFIG", "HCCL_SOCKET_IFNAME", "PT_HPU_LAZY_MODE", "VLLM_SKIP_WARMUP"])
+def test_retain_envs_forwards_ray_worker_vars(name):
+    assert retain_envs(name)
+
+
+@pytest.mark.parametrize("name", ["HOME", "QUANT_CONFIG_BACKUP", "PATH"])
+def test_retain_envs_skips_unrelated_vars(name):
+    assert not retain_envs(name)
