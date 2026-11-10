@@ -77,6 +77,15 @@ def test_quant_options_written_only_when_set():
     assert list(quant)[-3:] == ["scale_params", "device_for_scales", "dynamic_quantization"]
 
 
+def test_measure_exclude_goes_to_the_measure_config():
+    # INC reads measure_exclude only in MEASURE; QUANTIZE cannot add ranges that were not measured.
+    measure, quant = _configs("llama", QuantOptions(measure_exclude="NONE"))
+    assert measure["measure_exclude"] == "NONE"
+    assert list(measure)[:4] == ["method", "mode", "observer", "measure_exclude"]
+    assert "measure_exclude" not in quant
+    assert "measure_exclude" not in _configs("llama")[0]
+
+
 def test_write_json_atomic(tmp_path):
     target = tmp_path / "a" / "cfg.json"
     write_json_atomic(target, {"mode": "MEASURE"}, fsync=True)
