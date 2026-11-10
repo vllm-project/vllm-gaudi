@@ -5,7 +5,7 @@ import pytest
 
 from vllm_gaudi.calibration.expand import expand_dir, expand_nodes
 from vllm_gaudi.calibration.measurements import list_measurement_files, load_npz
-from vllm_gaudi.calibration.unify import build_groups, unify_dir, unify_nodes
+from vllm_gaudi.calibration.unify import NonScalarScaleError, build_groups, unify_dir, unify_nodes
 
 from .measurement_data import (FUSED, GATE, LINEAR, PREFIX, SCALES_PREFIX, measure_nodes, write_measure_run, write_rank)
 
@@ -39,26 +39,34 @@ def test_unify_measure_expert_parallel_concatenates_experts():
     assert ranks[0] == measure_nodes(0)
 
 
-def test_unify_scales_uses_whole_value_max():
+def test_unify_scales_takes_max_per_position():
     ranks = [{
         LINEAR: {
             "inputs": [1.0, 5.0],
-            "outputs": [2.0],
+            "outputs": [2.0, 1.0],
             "params": {
-                "weight": [3.0, 1.0]
+                "weight": 3.0
             }
         }
     }, {
         LINEAR: {
             "inputs": [4.0, 0.5],
-            "outputs": [1.0],
+            "outputs": [1.0, 3.0],
             "params": {
-                "weight": [2.0, 9.0]
+                "weight": 2.0
             }
         }
     }]
     unified = unify_nodes(ranks, scales=True)
-    assert unified[LINEAR] == {"inputs": [4.0, 5.0], "outputs": [2.0], "params": {"weight": [3.0, 1.0]}}
+    assert unified[LINEAR] == {"inputs": [4.0, 5.0], "outputs": [2.0, 3.0], "params": {"weight": 3.0}}
+
+
+# Per-channel weight scales are lists, or {0: out_ch, 1: in_ch} dicts; tensor parallel ranks hold other channels.
+@pytest.mark.parametrize("weights", [([3.0, 1.0], [2.0, 9.0]), ({"0": [3.0], "1": [1.0]}, {"0": [2.0], "1": [9.0]})])
+def test_unify_scales_rejects_per_channel_scales(weights):
+    ranks = [{LINEAR: {"inputs": [1.0], "outputs": [2.0], "params": {"weight": w}}} for w in weights]
+    with pytest.raises(NonScalarScaleError):
+        unify_nodes(ranks, scales=True)
 
 
 def test_unify_scales_expert_parallel_extends_fused_inputs():
@@ -97,6 +105,25 @@ def test_unify_dir_tp2_to_tp1(tmp_path):
     assert scales["inputs"][0].tolist() == 2.0
     assert scales["outputs"][0].tolist() == 0.5
     assert scales["params"]["weight"].tolist() == 0.5
+
+
+def test_unify_dir_leaves_per_channel_scales_to_inc(tmp_path, caplog):
+    write_measure_run(tmp_path, world=2)
+    for rank, weight in enumerate(([3.0, 1.0], [2.0, 9.0])):
+        write_rank(tmp_path, SCALES_PREFIX, rank, 2,
+                   {LINEAR: {
+                       "inputs": [1.0],
+                       "outputs": [0.5],
+                       "params": {
+                           "weight": weight
+                       }
+                   }})
+    stale = write_rank(tmp_path, SCALES_PREFIX, 0, 1, {LINEAR: {"inputs": [9.0]}})
+    written = unify_dir(tmp_path, 1)
+    assert [p.name for p in written] == [f"{PREFIX}_0_1.json"]
+    assert not stale.exists() and not stale.with_suffix(".npz").exists()
+    assert "INC computes the scales" in caplog.text
+    assert "No scale files" not in caplog.text
 
 
 def test_unify_dir_counts_only_the_source_world(tmp_path):
