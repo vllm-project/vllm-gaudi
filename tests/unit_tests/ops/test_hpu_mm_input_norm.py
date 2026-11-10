@@ -3,8 +3,10 @@
 
 import pytest
 import torch
+import habana_frameworks.torch as htorch
 from utils import temporary_op_registry_oot, register_op
 from vllm_gaudi.ops.hpu_mm_input_norm import HPUFusedMMInputNorm
+from vllm_gaudi.utils import HPUCompileConfig
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.platforms import current_platform
 
@@ -43,10 +45,15 @@ def test_fused_mm_input_norm(
         oot = FusedMMInputNorm(IMAGE_MEAN, IMAGE_STD, RESCALE, layout=layout).to(device)
         assert isinstance(oot, HPUFusedMMInputNorm)
 
+        if not htorch.utils.internal.is_lazy():
+            compile_config = HPUCompileConfig()
+            oot = torch.compile(oot, **compile_config.get_compile_args())
+
         pixel_values = torch.randint(0, 256, shape, dtype=torch.uint8, device=device)
         ref_out = native.forward_native(pixel_values, visual_dtype)
-        out = oot.forward_oot(pixel_values, visual_dtype)
+        out = oot(pixel_values, visual_dtype)
 
         assert out.shape == pixel_values.shape
         assert out.dtype == visual_dtype
-        torch.testing.assert_close(out, ref_out, atol=0, rtol=0)
+        # torch.compile may fuse the multiply-add, which differs from eager by 1 ulp.
+        torch.testing.assert_close(out, ref_out)
