@@ -26,6 +26,36 @@ from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
 _SAMPLING_EPS = 1e-5
 
 
+def splice_placeholders(output_token_ids: list[int], new_ids: list[int], keep_length: bool = False) -> None:
+    """Replace the trailing -1 placeholders of ``output_token_ids`` in place with one step's sampled ids.
+
+    Under async scheduling every step appends a -1 per request, and the real ids are only spliced in while a
+    penalty or bad-words consumer needs them, so a request can also carry older placeholders, for tokens already in
+    the KV cache.
+
+    Args:
+        output_token_ids: a request's output ids, ending in -1 placeholders.
+        new_ids: that request's row of the step's sampled ids; -1 marks unused (rejected) slots.
+        keep_length: replace only the newest placeholders and keep the list length (the length then still matches
+            the tokens in the KV cache). Otherwise the whole trailing run of placeholders is replaced, which also
+            drops older placeholders before a penalty consumer reads the list.
+    """
+    if not new_ids:
+        return
+    num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
+    num_placeholders = 0
+    while (num_placeholders < len(output_token_ids) and output_token_ids[-1 - num_placeholders] == -1):
+        num_placeholders += 1
+    num_to_replace = min(num_sampled_ids, num_placeholders)
+    if keep_length:
+        if num_to_replace:
+            output_token_ids[len(output_token_ids) - num_to_replace:] = new_ids[:num_to_replace]
+    elif num_placeholders:
+        # Account for a differing number of placeholders vs sampled ids
+        # (tokens can be discarded after a kv-load failure).
+        output_token_ids[len(output_token_ids) - num_placeholders:] = new_ids[:num_to_replace]
+
+
 class HPUMultiGroupBlockTable(MultiGroupBlockTable):
     """MultiGroupBlockTable that splits KV-manager blocks into kernel blocks.
 
@@ -868,19 +898,7 @@ class InputBatch:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-            new_ids: list[int] = sampled_token_ids[prev_index]
-            if not new_ids:
-                continue
-            num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
-            # Account for a differing number of placeholders vs sampled ids
-            # (tokens can be discarded after a kv-load failure).
-            first_placeholder = len(req_output_token_ids)
-            while (first_placeholder > 0 and req_output_token_ids[first_placeholder - 1] == -1):
-                first_placeholder -= 1
-            num_placeholders = len(req_output_token_ids) - first_placeholder
-            num_to_replace = min(num_sampled_ids, num_placeholders)
-            del new_ids[num_to_replace:]
-            req_output_token_ids[first_placeholder:] = new_ids
+            splice_placeholders(req_output_token_ids, sampled_token_ids[prev_index])
 
     def get_pooling_params(self) -> list[PoolingParams]:
         assert len(self.req_ids) == len(self.pooling_params)

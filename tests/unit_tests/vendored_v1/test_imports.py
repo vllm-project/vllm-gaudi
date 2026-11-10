@@ -59,9 +59,7 @@ REMOVED_NAMES = {
     "vllm.v1.worker.xpu_model_runner": {"XPUModelRunnerV2"},
 }
 # Known sites still being migrated off removed modules: (file, module). Remove an entry with its last import.
-PENDING = {
-    ("vllm_gaudi/v1/worker/hpu_model_runner.py", "vllm.v1.worker.kv_connector_model_runner_mixin"),
-}
+PENDING: set[tuple[str, str]] = set()
 GUARD_EXCEPTIONS = {"ImportError", "ModuleNotFoundError"}
 
 
