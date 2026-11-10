@@ -509,6 +509,8 @@ class HPUMambaMixer2(MambaMixer2):
 
             # 3. State Space Model sequence transformation
             initial_states = None
+            # A 0-dim tensor instead of a bool graph-breaks here, which splits
+            # the prefill graph (see mamba_prep_initial_states).
             if attn_metadata.prep_initial_states:
                 initial_states = ssm_state[load_indices_tensor]
 
