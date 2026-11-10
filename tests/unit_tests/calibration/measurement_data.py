@@ -36,6 +36,31 @@ def measure_nodes(rank: int, local_experts: int = 2) -> dict:
     return nodes
 
 
+def scale_nodes(rank: int, local_experts: int = 2) -> dict:
+    """Layout of INC MAXABS_HW scale files: one float per input, one per output, a scalar weight."""
+    base = float(rank + 1)
+    nodes = {
+        LINEAR: {
+            "inputs": [base],
+            "outputs": [base * 2],
+            "params": {
+                "weight": base * 3
+            }
+        },
+        GATE: {
+            "inputs": [base],
+            "outputs": [base + 0.5]
+        },
+        FUSED: {
+            "inputs": [base, *[100.0 * rank + e for e in range(local_experts)]],
+            "outputs": [base * 10]
+        },
+    }
+    for e in range(local_experts):
+        nodes[f"{FUSED}.w13_list.{e}"] = {"inputs": [100.0 * rank + e]}
+    return nodes
+
+
 def write_rank(directory: Path, prefix: str, rank: int, world: int, nodes: dict) -> Path:
     path = directory / f"{prefix}_{rank}_{world}.json"
     path.write_text(json.dumps({"GlobalRank": None, "LocalRank": rank, "Mode": "DynamicRange", "Nodes": nodes}))

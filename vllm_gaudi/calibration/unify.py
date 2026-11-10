@@ -48,6 +48,29 @@ def detect_source_world(files: list[MeasurementFile]) -> int:
     return worlds[0]
 
 
+class NonScalarScaleError(ValueError):
+    """A scale that is not a single number, such as a per-channel weight scale."""
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _max_scale(a: Any, b: Any) -> Any:
+    # Per-channel scales of a tensor parallel layer cover different channels on each rank, so without the shard
+    # layout neither a whole-list nor an element-wise maximum is correct.
+    for value in (a, b):
+        if not _is_number(value):
+            raise NonScalarScaleError(f"a {type(value).__name__} scale")
+    return max(a, b)
+
+
+def _max_scale_list(a: Any, b: Any) -> list[Any]:
+    if not isinstance(a, list) or not isinstance(b, list) or len(a) != len(b):
+        raise NonScalarScaleError("output scales of different shapes")
+    return [_max_scale(x, y) for x, y in zip(a, b)]
+
+
 def _merge_expert(experts: dict[str, Any], node_name: str, node: dict[str, Any], idx: int, expert_num: int) -> None:
     if node_name not in experts:
         experts[node_name] = node
@@ -69,6 +92,9 @@ def unify_nodes(rank_nodes: list[dict[str, Any]], *, scales: bool, use_ep: bool 
 
     Returns:
         The merged nodes; the inputs are not modified.
+
+    Raises:
+        NonScalarScaleError: If ``scales`` is set and a scale is not a single number.
     """
     unified = copy.deepcopy(rank_nodes[0])
     experts: dict[str, Any] = {}
@@ -88,17 +114,20 @@ def unify_nodes(rank_nodes: list[dict[str, Any]], *, scales: bool, use_ep: bool 
                 _merge_expert(experts, node_name, node if idx == 0 else other, idx, expert_num)
                 continue
             if scales:
-                if fused_moe and idx > 0:
-                    # Input 0 is the hidden states; the rest are per-expert intermediate maxima.
-                    max_inputs[0] = max(other["inputs"][0], max_inputs[0])
-                    max_inputs.extend(other["inputs"][1:])
-                else:
-                    for i in range(len(max_inputs)):
-                        max_inputs[i] = max(other["inputs"][i], max_inputs[i])
-                if max_outputs is not None:
-                    max_outputs = max(other["outputs"], max_outputs)
-                if max_weight is not None:
-                    max_weight = max(other["params"]["weight"], max_weight)
+                try:
+                    if fused_moe and idx > 0:
+                        # Input 0 is the hidden states; the rest are per-expert intermediate maxima.
+                        max_inputs[0] = _max_scale(other["inputs"][0], max_inputs[0])
+                        max_inputs.extend(other["inputs"][1:])
+                    else:
+                        for i in range(len(max_inputs)):
+                            max_inputs[i] = _max_scale(other["inputs"][i], max_inputs[i])
+                    if max_outputs is not None:
+                        max_outputs = _max_scale_list(other["outputs"], max_outputs)
+                    if max_weight is not None:
+                        max_weight = _max_scale(other["params"]["weight"], max_weight)
+                except NonScalarScaleError as exc:
+                    raise NonScalarScaleError(f"{node_name} has {exc}") from None
             else:
                 for i in range(len(max_inputs)):
                     for j in range(len(max_inputs[i])):
@@ -134,12 +163,20 @@ def _unify_kind(files: list[MeasurementFile], groups: list[list[int]], source_wo
         if missing:
             raise ValueError(f"{prefix}: missing {kind} files for ranks {missing} of world size {source_world}")
         target_world = len(groups)
-        for group_index, group in enumerate(groups):
-            sources = [load_json(by_rank[rank].path) for rank in group]
-            data = copy.deepcopy(sources[0])
-            data["LocalRank"] = group_index if target_world != 1 else -1
-            data["Nodes"] = unify_nodes([s["Nodes"] for s in sources], scales=kind == SCALES, use_ep=use_ep)
-            target = out_dir / f"{prefix}_{group_index}_{target_world}.json"
+        unified = []
+        try:
+            for group_index, group in enumerate(groups):
+                sources = [load_json(by_rank[rank].path) for rank in group]
+                data = copy.deepcopy(sources[0])
+                data["LocalRank"] = group_index if target_world != 1 else -1
+                data["Nodes"] = unify_nodes([s["Nodes"] for s in sources], scales=kind == SCALES, use_ep=use_ep)
+                unified.append((group, out_dir / f"{prefix}_{group_index}_{target_world}.json", data))
+        except NonScalarScaleError as exc:
+            logger.warning(
+                "%s: not writing unified scales, %s; per-channel scales cannot be merged without the shard layout, "
+                "so INC computes the scales when the model is served", prefix, exc)
+            continue
+        for group, target, data in unified:
             write_measurement(target, data)
             written.append(target)
             logger.info("Unified ranks %s into %s", group, target.name)
@@ -182,7 +219,7 @@ def unify_dir(measurements_dir: str | os.PathLike[str],
         raise ValueError(f"No measurement files of world size {world} found in {source}")
     if not skip_scales:
         scales = _unify_kind(files, groups, world, target, kind=SCALES, use_ep=use_ep)
-        if not scales:
+        if not select(files, kind=SCALES, world=world):
             logger.warning("No scale files of world size %d found in %s; unified only the measurements", world, source)
         written.extend(scales)
     return written

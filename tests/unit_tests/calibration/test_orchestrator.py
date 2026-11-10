@@ -13,7 +13,7 @@ from vllm_gaudi.calibration.args import CalibrationArgs
 from vllm_gaudi.calibration.detect import ModelInfo
 from vllm_gaudi.calibration.orchestrator import CalibrationError, build_phase_env, run_calibration
 
-from .measurement_data import PREFIX, SCALES_PREFIX, measure_nodes, write_measure_run, write_rank
+from .measurement_data import PREFIX, SCALES_PREFIX, scale_nodes, write_measure_run, write_rank
 
 QWEN = ModelInfo(model_type="qwen2", architectures=("Qwen2ForCausalLM", ), has_chat_template=True, source="test")
 MIXTRAL = ModelInfo(model_type="mixtral", is_moe=True, num_experts=8, has_chat_template=True, source="test")
@@ -38,7 +38,7 @@ class FakeRunner:
             write_measure_run(stats, world)
         if name == "quantize":
             for rank in range(world):
-                write_rank(stats, SCALES_PREFIX, rank, world, measure_nodes(rank))
+                write_rank(stats, SCALES_PREFIX, rank, world, scale_nodes(rank))
         return {"metrics": {"gsm8k": {"exact_match": 0.5}} if spec["eval"] else None, "duration_s": 1.0}
 
 
@@ -119,7 +119,7 @@ def test_measurements_of_an_earlier_run_are_removed(tmp_path):
     stats = tmp_path / "my-model" / "g3"
     stats.mkdir(parents=True)
     write_measure_run(stats, 1)
-    write_rank(stats, SCALES_PREFIX, 0, 1, measure_nodes(0))
+    write_rank(stats, SCALES_PREFIX, 0, 1, scale_nodes(0))
     unrelated = stats / "notes.txt"
     unrelated.write_text("kept")
     with pytest.raises(CalibrationError, match="finalize_calibration"):
