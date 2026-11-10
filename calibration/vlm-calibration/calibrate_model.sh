@@ -4,6 +4,14 @@
 ###############################################################################
 
 set -e
+
+# Deprecated in favor of vllm-gaudi-calibrate. Only warn: exit code and behavior stay the same.
+cat >&2 <<'EOF' || true
+WARNING: calibrate_model.sh is deprecated and will be removed in a future release, after the transition to
+vllm-gaudi-calibrate. See docs/configuration/calibration/migration.md for the option mapping and
+https://github.com/vllm-project/vllm-gaudi/pull/1840 for the plan.
+EOF
+
 pushd "$(dirname "$0")" > /dev/null
 trap 'popd > /dev/null' EXIT
 
