@@ -80,6 +80,22 @@ def test_dry_run_writes_configs_and_manifest_without_engine(tmp_path):
     assert manifest["model_args"]["quantize"]["kv_cache_dtype"] == "fp8_inc"
 
 
+def test_dry_run_keeps_a_finished_calibration(tmp_path):
+    model_dir = tmp_path / "my-model"
+    run_calibration(args(tmp_path), FakeRunner(QWEN))
+    before = {
+        p: p.read_bytes()
+        for p in (model_dir / "maxabs_quant_g3.json", model_dir / "g3" / "calibration_manifest.json")
+    }
+    with pytest.raises(ValueError, match="print-config"):
+        run_calibration(args(tmp_path, dry_run=True, scale_method="maxabs_pow2"), FakeRunner(QWEN))
+    assert {p: p.read_bytes() for p in before} == before
+    # A dry run may replace an earlier dry run.
+    other = tmp_path / "other"
+    run_calibration(args(other, device="g3", dry_run=True), FakeRunner(QWEN))
+    assert run_calibration(args(other, device="g3", dry_run=True), FakeRunner(QWEN))["status"] == "dry-run"
+
+
 def test_dry_run_survives_failed_detection(tmp_path):
 
     def failing(name, spec, env, log_path):

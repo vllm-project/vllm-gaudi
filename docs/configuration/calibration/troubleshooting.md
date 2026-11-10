@@ -109,3 +109,4 @@ If every rank logs its `world_size` with `backend=hccl` and the measure phase th
 | `<N> experts do not split evenly across <M> ranks` | Choose an expert parallel size that divides the number of experts. |
 | `Unsupported HPU device ...` | Calibration supports Intel® Gaudi® 2 and Intel® Gaudi® 3. |
 | `Cannot detect the HPU (...); pass --device g2 or --device g3` | The device is detected from the HPU by default. On a host without an HPU, pass `--device` to `print-config` or to `run --dry-run`. |
+| `<dir> holds a finished calibration, which a dry run would change without recalibrating` | A dry run writes the configs, and the quant config is the one that serving uses. Preview with `print-config`, or dry-run into another output directory. |

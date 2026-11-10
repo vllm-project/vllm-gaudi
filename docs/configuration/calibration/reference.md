@@ -102,7 +102,7 @@ The options marked `unset` are written only when given: `--measure-exclude` to t
 |--------|---------|-------------|
 | `--multi-node` | off | Run the engine on a Ray cluster (`distributed_executor_backend="ray"`). |
 | `--quant-config-buffer PATH` | none | Shared file that every node's `QUANT_CONFIG` points to, for clusters that do not forward `QUANT_CONFIG` to the Ray workers. Requires `--multi-node`. |
-| `--dry-run` | off | Detect the model and write the configs and the manifest without loading the model. |
+| `--dry-run` | off | Detect the model and write the configs and the manifest without loading the model. Refused in a directory that holds a finished calibration, whose quant config it would replace; use `print-config` or another output directory there. |
 | `--keep-logs` | off | Keep `<device>/logs/` after a successful run. Logs are always kept when a phase fails. |
 
 ### `unify`
