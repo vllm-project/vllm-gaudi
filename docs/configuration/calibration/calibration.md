@@ -54,7 +54,7 @@ For a model `Org/Model-Name`, the output directory given with `-o` contains:
 
 `<world>` is the tensor parallel size of the run and `<rank>` goes from `0` to `<world> - 1`. The layout and the config file names are the same as with the deprecated `calibrate_model.sh`, so existing `QUANT_CONFIG` paths keep working.
 
-A run into a directory that already holds a calibration of the same model and device replaces it. Before the MEASURE phase, the tool removes all `inc_output_hooks_*` files of the earlier run, and before the QUANTIZE phase, the scale files. INC would otherwise keep the earlier scales and compute new ones only for modules that have none.
+A run into a directory that already holds a calibration of the same model and device replaces it. First, the tool removes the earlier `calibration_manifest.json`, so a run that fails leaves no manifest. Before the MEASURE phase, the tool removes all `inc_output_hooks_*` files of the earlier run, and before the QUANTIZE phase, the scale files. INC would otherwise keep the earlier scales and compute new ones only for modules that have none.
 
 ## Serving the Calibrated Model
 

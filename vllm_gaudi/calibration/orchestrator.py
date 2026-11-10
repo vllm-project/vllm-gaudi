@@ -392,6 +392,8 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
                             scale_method=args.scale_method,
                             scale_format=args.scale_format,
                             quantize_vision_tower=args.quantize_vision_tower)
+    # This run replaces the configs and outputs of an earlier one; its manifest must not outlive them.
+    layout.manifest.unlink(missing_ok=True)
     measure_cfg, quant_cfg = _write_configs(args, preset, layout)
     logger.info("Model %s: %s, preset %s, device %s", args.model, info.modality, preset.name, device)
 

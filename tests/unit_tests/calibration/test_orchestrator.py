@@ -127,6 +127,15 @@ def test_measurements_of_an_earlier_run_are_removed(tmp_path):
     assert [p.name for p in stats.iterdir()] == ["notes.txt"]
 
 
+def test_failed_rerun_leaves_no_manifest_of_the_earlier_run(tmp_path):
+    manifest_path = tmp_path / "my-model" / "g3" / "calibration_manifest.json"
+    run_calibration(args(tmp_path), FakeRunner(QWEN))
+    assert json.loads(manifest_path.read_text())["status"] == "ok"
+    with pytest.raises(CalibrationError, match="finalize_calibration"):
+        run_calibration(args(tmp_path), FakeRunner(QWEN, write_measurements=False))
+    assert not manifest_path.exists()
+
+
 def test_rerun_removes_outputs_of_another_observer(tmp_path):
     stats = tmp_path / "my-model" / "g3"
     stats.mkdir(parents=True)

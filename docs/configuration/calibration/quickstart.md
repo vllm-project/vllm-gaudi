@@ -51,7 +51,7 @@ QUANT_CONFIG=<output_dir>/qwen2.5-0.5b-instruct/maxabs_quant_g3.json vllm serve 
 
 ## 4. Check the Manifest
 
-Each run writes `<output_dir>/<model_name>/<device>/calibration_manifest.json`. It records how the scales were produced:
+Each finished run, and each dry run, writes `<output_dir>/<model_name>/<device>/calibration_manifest.json`; a failed run leaves none. It records how the scales were produced:
 
 | Key | Content |
 |-----|---------|
