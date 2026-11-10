@@ -153,6 +153,25 @@ def unify_nodes(rank_nodes: list[dict[str, Any]], *, scales: bool, use_ep: bool 
     return unified
 
 
+def _per_channel_node(nodes: dict[str, Any]) -> str | None:
+    # The maxabs observer writes one value per tensor: inputs [[x]], outputs [x], weight [[x]].
+    for name, node in nodes.items():
+        weight = (node.get("params") or {}).get("weight")
+        tensors = [*node.get("inputs", []), *([weight] if weight is not None else [])]
+        if any(len(t) != 1 for t in tensors) or any(len(t) != 1 for t in node.get("outputs") or []):
+            return name
+    return None
+
+
+def _reject_per_channel_measurements(files: list[MeasurementFile]) -> None:
+    for f in files:
+        name = _per_channel_node(load_json(f.path)["Nodes"])
+        if name is not None:
+            raise ValueError(f"{f.path.name}: {name} has per-channel measurements, which cannot be unified: the "
+                             "ranks hold different channels of a tensor parallel layer. Measure with the target "
+                             "world size instead")
+
+
 def _unify_kind(files: list[MeasurementFile], groups: list[list[int]], source_world: int, out_dir: Path, *, kind: str,
                 use_ep: bool) -> list[Path]:
     written = []
@@ -211,6 +230,7 @@ def unify_dir(measurements_dir: str | os.PathLike[str],
     world = source_world if source_world is not None else detect_source_world(files)
     groups = build_groups(world, target_world)
     logger.info("Unifying world size %d to %d, rank groups %s", world, target_world, groups)
+    _reject_per_channel_measurements(select(files, kind=MEASURE, world=world))
 
     # The target world's scales are written again below or, without source scales, left to INC.
     remove_scales(target, {f.prefix for f in select(files, kind=MEASURE, world=world)}, target_world, observer)

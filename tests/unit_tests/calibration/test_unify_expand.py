@@ -18,11 +18,11 @@ def test_build_groups():
             build_groups(source, target)
 
 
-def test_unify_measure_takes_per_channel_max():
+def test_unify_measure_takes_max_per_tensor():
     unified = unify_nodes([measure_nodes(0), measure_nodes(1)], scales=False)
-    assert unified[LINEAR]["inputs"] == [[[2.0], [9.0]]]
+    assert unified[LINEAR]["inputs"] == [[[2.0]], [[9.0]]]
     assert unified[LINEAR]["outputs"] == [[4.0]]
-    assert unified[LINEAR]["params"]["weight"] == [[6.0], [8.0]]
+    assert unified[LINEAR]["params"]["weight"] == [[6.0]]
     # Without expert parallelism the experts are max-merged like any other node.
     assert unified[f"{FUSED}.w13_list.1"]["inputs"] == [[[101]]]
     assert len(unified[FUSED]["outputs"]) == 3
@@ -124,6 +124,23 @@ def test_unify_dir_leaves_per_channel_scales_to_inc(tmp_path, caplog):
     assert not stale.exists() and not stale.with_suffix(".npz").exists()
     assert "INC computes the scales" in caplog.text
     assert "No scale files" not in caplog.text
+
+
+@pytest.mark.parametrize("field", ["inputs", "weight"])
+def test_unify_dir_rejects_per_channel_measurements(tmp_path, field):
+    # maxabs_per_channel keeps one value per channel; tensor parallel ranks hold different channels.
+    write_measure_run(tmp_path, world=2)
+    nodes = measure_nodes(1)
+    if field == "inputs":
+        nodes[LINEAR]["inputs"] = [[[1.0], [2.0]]]
+    else:
+        nodes[LINEAR]["params"]["weight"] = [[1.0], [2.0]]
+    write_rank(tmp_path, PREFIX, 1, 2, nodes)
+    scales = write_rank(tmp_path, SCALES_PREFIX, 0, 1, {LINEAR: {"inputs": [1.0]}})
+    with pytest.raises(ValueError, match="per-channel"):
+        unify_dir(tmp_path, 1)
+    assert not (tmp_path / f"{PREFIX}_0_1.json").exists()
+    assert scales.exists()
 
 
 def test_unify_dir_counts_only_the_source_world(tmp_path):

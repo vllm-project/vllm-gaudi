@@ -107,7 +107,7 @@ The options marked `unset` are written only when given: `--measure-exclude` to t
 
 ### `unify`
 
-Merges per-rank measurement and scale files to a smaller world size. The source world size is read from the `*_mod_list.json` files. Scale files of the target world size that are already in the output directory are removed first, so that, without source scales or with `--skip-scales`, INC computes new scales instead of reusing old ones. Scales are merged by taking the maximum of each single value. Per-channel scales, from a per-channel `scale_method`, cannot be merged without the tensor parallel shard layout, so for them only the measurements are unified, a warning is logged, and INC computes the scales when the model is served.
+Merges per-rank measurement and scale files to a smaller world size. The source world size is read from the `*_mod_list.json` files. Scale files of the target world size that are already in the output directory are removed first, so that, without source scales or with `--skip-scales`, INC computes new scales instead of reusing old ones. Scales are merged by taking the maximum of each single value. Per-channel scales, from a per-channel `scale_method`, cannot be merged without the tensor parallel shard layout, so for them only the measurements are unified, a warning is logged, and INC computes the scales when the model is served. Per-channel measurements, from the `maxabs_per_channel` observer, are rejected before any file is written: the ranks hold different channels of a tensor parallel layer, so measure with the target world size instead.
 
 ```text
 vllm-gaudi-calibrate unify -m DIR -r N [-o OUT] [--ep] [--skip-scales] [--observer NAME]
