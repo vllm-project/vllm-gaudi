@@ -412,6 +412,8 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
     dump = measure_cfg["dump_stats_path"]
     observer = measure_cfg.get("observer", DEFAULT_OBSERVER)
     stats_dir = Path(dump).parent
+    # A custom dump_stats_path may share its directory with other calibrations; leave their files alone.
+    dump_name = Path(dump).name
     model_args = {phase: _model_args(args, preset, info, phase) for phase in args.phases}
     manifest_fields: dict[str, Any] = {
         "status": "dry-run" if args.dry_run else "ok",
@@ -468,7 +470,10 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
         spawn("measure", measure_cfg, layout.measure_config, _eval_spec(args, tasks, args.limit))
         check_measurements(dump, observer, args.tp)
         if args.postprocess:
-            manifest_fields["postprocess"] = postprocess_dir(stats_dir, world=args.tp, observer=observer)
+            manifest_fields["postprocess"] = postprocess_dir(stats_dir,
+                                                             world=args.tp,
+                                                             observer=observer,
+                                                             dump_name=dump_name)
 
     if "quantize" in args.phases:
         evaluation = None
@@ -483,11 +488,16 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
     serve_world = args.tp
     use_ep = _expert_parallel(args, preset)
     if args.unify_to_tp is not None:
-        written = unify_dir(stats_dir, args.unify_to_tp, use_ep=use_ep, source_world=args.tp, observer=observer)
+        written = unify_dir(stats_dir,
+                            args.unify_to_tp,
+                            use_ep=use_ep,
+                            source_world=args.tp,
+                            observer=observer,
+                            dump_name=dump_name)
         manifest_fields["unify"] = {"world": args.unify_to_tp, "files": [p.name for p in written]}
         serve_world = args.unify_to_tp
     if args.expand_to_ep is not None:
-        written = expand_dir(stats_dir, args.expand_to_ep, observer=observer)
+        written = expand_dir(stats_dir, args.expand_to_ep, observer=observer, dump_name=dump_name)
         manifest_fields["expand"] = {"world": args.expand_to_ep, "files": [p.name for p in written]}
         serve_world = args.expand_to_ep
 

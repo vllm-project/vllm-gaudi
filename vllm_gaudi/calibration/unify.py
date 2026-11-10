@@ -209,7 +209,8 @@ def unify_dir(measurements_dir: str | os.PathLike[str],
               use_ep: bool = False,
               skip_scales: bool = False,
               source_world: int | None = None,
-              observer: str = DEFAULT_OBSERVER) -> list[Path]:
+              observer: str = DEFAULT_OBSERVER,
+              dump_name: str | None = None) -> list[Path]:
     """Unifies the measurements in a directory to a smaller world size.
 
     Args:
@@ -220,13 +221,14 @@ def unify_dir(measurements_dir: str | os.PathLike[str],
         skip_scales: Unify only the measurements, not the scales.
         source_world: World size of the measurement run; read from the module lists when None.
         observer: INC observer name used in the file names.
+        dump_name: Unify only the files of this ``dump_stats_path`` basename; None unifies all.
 
     Returns:
         The JSON files written; each has an ``.npz`` twin.
     """
     source = Path(measurements_dir)
     target = Path(out_dir) if out_dir is not None else source
-    files = list_measurement_files(source, observer)
+    files = list_measurement_files(source, observer, dump_name=dump_name)
     world = source_world if source_world is not None else detect_source_world(files)
     groups = build_groups(world, target_world)
     logger.info("Unifying world size %d to %d, rank groups %s", world, target_world, groups)

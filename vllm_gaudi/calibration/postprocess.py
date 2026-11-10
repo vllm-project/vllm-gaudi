@@ -73,7 +73,8 @@ def postprocess_dir(measurements_dir: str | os.PathLike[str],
                     out_dir: str | os.PathLike[str] | None = None,
                     *,
                     world: int | None = None,
-                    observer: str = DEFAULT_OBSERVER) -> dict[str, int]:
+                    observer: str = DEFAULT_OBSERVER,
+                    dump_name: str | None = None) -> dict[str, int]:
     """Fixes every measurement and scales JSON in a directory.
 
     Args:
@@ -81,13 +82,14 @@ def postprocess_dir(measurements_dir: str | os.PathLike[str],
         out_dir: Output directory; defaults to rewriting in place.
         world: Process only files of this world size.
         observer: INC observer name used in the file names.
+        dump_name: Process only the files of this ``dump_stats_path`` basename; None processes all.
 
     Returns:
         Number of changes per file name.
     """
     source = Path(measurements_dir)
     target = Path(out_dir) if out_dir is not None else None
-    files = list_measurement_files(source, observer)
+    files = list_measurement_files(source, observer, dump_name=dump_name)
     if target is not None and target.resolve() != source.resolve():
         # INC reuses the scale files it finds, so scales of earlier measurements in the target must go; the
         # source scales, if any, are copied below. unify reads the source world size from the module lists.
