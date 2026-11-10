@@ -284,10 +284,14 @@ def detect_model_info(args: CalibrationArgs, runner: PhaseRunner) -> tuple[str, 
     return device, info
 
 
+def resolve_model_path(model: str) -> str:
+    """Returns an existing local model path as an absolute path, and a Hugging Face ID unchanged."""
+    return os.path.abspath(model) if os.path.exists(model) else model
+
+
 def _resolve_local_paths(args: CalibrationArgs) -> None:
     # The phases run in a scratch cwd, so local paths are made absolute against the caller's cwd.
-    if os.path.exists(args.model):
-        args.model = os.path.abspath(args.model)
+    args.model = resolve_model_path(args.model)
     if args.include_path is not None:
         args.include_path = os.path.abspath(args.include_path)
     for key in ("tokenizer", "hf_config_path"):
