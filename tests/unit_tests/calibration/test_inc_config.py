@@ -197,3 +197,31 @@ def test_generated_quant_config_follows_user_measure_modules(tmp_path):
                         layout,
                         measure_config=str(user),
                         base_dir=tmp_path)
+
+
+def test_generated_measure_config_measures_what_a_user_quant_config_selects(tmp_path):
+    # maxabs_quant_mixtral.json quantizes lm_head, which the Mixtral preset keeps out of MEASURE.
+    preset = resolve_preset(ModelInfo(model_type="mixtral"), "m")
+    layout = OutputLayout.create("/out", "m", "g3")
+    assert "lm_head" in build_configs(preset, layout)[0]["blocklist"]["names"]
+    user = tmp_path / "quant.json"
+    user.write_text(
+        json.dumps({
+            "mode": "QUANTIZE",
+            "dump_stats_path": "/s/inc",
+            "allowlist": {
+                "types": [],
+                "names": []
+            },
+            "blocklist": {
+                "types": [],
+                "names": ["self_attn"]
+            }
+        }))
+    measure, _ = resolve_configs(preset, layout, quant_config=str(user), base_dir=tmp_path)
+    assert measure["blocklist"] == {"types": [], "names": ["self_attn"]}
+    assert measure["allowlist"] == {"types": [], "names": []}
+    user.write_text(json.dumps({"dump_stats_path": "/s/inc", "allowlist": {"names": ["layers"]}}))
+    measure, _ = resolve_configs(preset, layout, quant_config=str(user), base_dir=tmp_path)
+    assert measure["allowlist"] == {"types": [], "names": ["layers"]}
+    assert measure["blocklist"] == {"types": [], "names": []}

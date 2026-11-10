@@ -173,7 +173,9 @@ def resolve_configs(preset: ResolvedPreset,
 
     QUANTIZE finds the measurements by a file name built from its own ``dump_stats_path`` and
     ``observer``, so a generated config takes both from a user config given for the other phase.
-    A generated quant config also adds the blocklist and takes the allowlist of a user measure config.
+    A generated quant config also adds the blocklist and takes the allowlist of a user measure config, and a
+    generated measure config takes both lists of a user quant config, so MEASURE observes every module that
+    QUANTIZE selects.
 
     Args:
         preset: The resolved model family preset.
@@ -210,4 +212,8 @@ def resolve_configs(preset: ResolvedPreset,
                              f"({measure_value} and {quant_value}); QUANTIZE would not find the measurements")
     if measure_config and not quant_config:
         _align_quant_modules(quant, measure, measure_config)
+    elif quant_config and not measure_config:
+        # Measuring more modules than the preset is harmless; measuring fewer than QUANTIZE selects is not.
+        measure["allowlist"] = _module_list(quant, "allowlist")
+        measure["blocklist"] = _module_list(quant, "blocklist")
     return measure, quant
