@@ -6,8 +6,8 @@ Smaller prompt buckets make Dynamo compile more general graphs, which inference
 then selects for the larger buckets warmed before them. The validation warmup
 runs prompt buckets again at the end, so that those graphs have recipes for
 their shapes: the largest seq_len for models with heterogeneous layers, every
-bucket with prompt_validation_warmup (on by default for Nemotron-H), in
-compile-only mode unless the layers are heterogeneous.
+bucket with prompt_validation_warmup (on by default for Nemotron-H in
+torch.compile mode), in compile-only mode unless the layers are heterogeneous.
 """
 
 from contextlib import contextmanager
@@ -31,14 +31,25 @@ def _prompt_validation_warmup(**values):
     return Config(feature_values, feature_flags, **values).get('prompt_validation_warmup')
 
 
-@pytest.mark.parametrize("model_type, enabled", [("nemotron_h", True), ("llama", False), ("granitemoehybrid", False)])
-def test_prompt_validation_warmup_default(model_type, enabled):
-    assert _prompt_validation_warmup(model_type=model_type) is enabled
+@pytest.mark.parametrize("model_type, bridge_mode, enabled", [
+    ("nemotron_h", "eager", True),
+    ("nemotron_h", "lazy", False),
+    ("llama", "eager", False),
+    ("granitemoehybrid", "eager", False),
+])
+def test_prompt_validation_warmup_default(model_type, bridge_mode, enabled):
+    assert _prompt_validation_warmup(model_type=model_type, bridge_mode=bridge_mode) is enabled
 
 
-@pytest.mark.parametrize("model_type, override", [("nemotron_h", False), ("llama", True)])
-def test_prompt_validation_warmup_env_override(model_type, override):
-    assert _prompt_validation_warmup(model_type=model_type, VLLM_PROMPT_VALIDATION_WARMUP=override) is override
+@pytest.mark.parametrize("model_type, bridge_mode, override", [
+    ("nemotron_h", "eager", False),
+    ("nemotron_h", "lazy", True),
+    ("llama", "eager", True),
+])
+def test_prompt_validation_warmup_env_override(model_type, bridge_mode, override):
+    assert _prompt_validation_warmup(model_type=model_type,
+                                     bridge_mode=bridge_mode,
+                                     VLLM_PROMPT_VALIDATION_WARMUP=override) is override
 
 
 def test_default_reruns_the_largest_seq_len():

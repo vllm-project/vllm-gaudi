@@ -112,9 +112,9 @@ def get_features():
         # HPUModelRunner._validation_warmup). Smaller buckets make Dynamo compile
         # more general graphs, which inference then picks for the larger buckets
         # warmed before them; without the re-run, their recipes compile on the
-        # first real prompts.
+        # first real prompts. Lazy mode runs without Dynamo, so nothing is shadowed.
         Value('prompt_validation_warmup',
-              ModelType('nemotron_h'),
+              All(ModelType('nemotron_h'), Not(Lazy())),
               env_var='VLLM_PROMPT_VALIDATION_WARMUP',
               env_var_type=boolean),
         Value('mamba_split_prefill_graph',
