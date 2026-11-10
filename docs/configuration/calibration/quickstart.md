@@ -37,7 +37,7 @@ See [Multimodal Measure Phase Stops on mmmu_val](troubleshooting.md#multimodal-m
 
 `MODEL` is a Hugging Face model ID or a local model directory. For a model that needs more than one card, add `--tp N`. The command runs the MEASURE phase, the QUANTIZE phase, and a short smoke evaluation of the quantized model. With the defaults, the MEASURE phase processes up to 512 samples of each task (`--limit`). For a group such as `mmmu_val`, the limit applies to each subtask, so the default multimodal run processes all 900 `mmmu_val` samples.
 
-To preview the generated INC configs and the manifest without loading the model, add `--dry-run`. On a host without an HPU, also pass `--device g2` or `--device g3`.
+To preview the generated INC configs and the manifest without loading the model, add `--dry-run`. A dry run writes the configs, so it is refused in a directory that already holds a finished calibration; preview with `print-config` there. On a host without an HPU, also pass `--device g2` or `--device g3`.
 
 ## 3. Serve the Model
 

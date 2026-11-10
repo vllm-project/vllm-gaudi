@@ -365,6 +365,13 @@ def serve_command(args: CalibrationArgs,
     return " ".join(parts)
 
 
+def _is_finished_calibration(manifest: Path) -> bool:
+    try:
+        return json.loads(manifest.read_text()).get("status") == "ok"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runner) -> dict[str, Any]:
     """Calibrates one model and returns the manifest that was written.
 
@@ -392,6 +399,10 @@ def run_calibration(args: CalibrationArgs, runner: PhaseRunner = subprocess_runn
                             scale_method=args.scale_method,
                             scale_format=args.scale_format,
                             quantize_vision_tower=args.quantize_vision_tower)
+    if args.dry_run and _is_finished_calibration(layout.manifest):
+        # The quant config is the serving config of that calibration; previewing other settings would change it.
+        raise ValueError(f"{layout.model_dir} holds a finished calibration, which a dry run would change without "
+                         "recalibrating; preview with print-config or a dry run into another output directory")
     # This run replaces the configs and outputs of an earlier one; its manifest must not outlive them.
     layout.manifest.unlink(missing_ok=True)
     measure_cfg, quant_cfg = _write_configs(args, preset, layout)
