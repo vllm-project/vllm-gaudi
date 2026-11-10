@@ -40,6 +40,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / "manifest.txt"
 PATCH_DIR = HERE / "patches"
+# Upstream V1 tests vendored into one generated package; each line is "<upstream path> <file name>".
+TESTS_MANIFEST = HERE / "manifest-tests.txt"
+TESTS_PATCH_DIR = HERE / "patches-tests"
+TESTS_PKG = "tests.unit_tests.vendored_v1.upstream"
 
 DEST_PKG = "vllm_gaudi.v1._vendored"
 COMPAT_MOD = f"{DEST_PKG}._compat"
@@ -71,16 +75,29 @@ def resolve_rev(repo: Path, rev: str) -> str:
                           text=True).stdout.strip()
 
 
+def manifest_lines(manifest: Path) -> list[str]:
+    """Return the non-comment lines of a manifest file."""
+    return [line.strip() for line in manifest.read_text().splitlines() if line.strip() and not line.startswith("#")]
+
+
 def read_manifest() -> list[str]:
     """Return the upstream paths listed in manifest.txt."""
-    paths = []
-    for line in MANIFEST.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            if not (line.startswith("vllm/v1/") and line.endswith(".py")):
-                raise SystemExit(f"manifest entry outside vllm/v1/: {line}")
-            paths.append(line)
+    paths = manifest_lines(MANIFEST)
+    for path in paths:
+        if not (path.startswith("vllm/v1/") and path.endswith(".py")):
+            raise SystemExit(f"manifest entry outside vllm/v1/: {path}")
     return paths
+
+
+def read_tests_manifest() -> dict[str, str]:
+    """Return {upstream test path: vendored file name} from manifest-tests.txt."""
+    tests = {}
+    for line in manifest_lines(TESTS_MANIFEST):
+        src, name = line.split()
+        if not (src.startswith("tests/") and src.endswith(".py") and name.endswith(".py") and "/" not in name):
+            raise SystemExit(f"bad tests manifest entry: {line}")
+        tests[src] = name
+    return tests
 
 
 def module_of(path: str) -> str:
@@ -106,8 +123,15 @@ def absolute_module(path: str, node: ast.ImportFrom) -> str:
     return ".".join(parts[:keep] + ([node.module] if node.module else []))
 
 
-def rewrite_imports(path: str, src: str, vendored: set[str]) -> str:
-    """Retarget the import statements of one vendored file; everything else is left byte-identical."""
+def rewrite_imports(path: str, src: str, retarget: dict[str, str]) -> str:
+    """Retarget the import statements of one vendored file; everything else is left byte-identical.
+
+    Args:
+        path: upstream path of the file, to resolve relative imports.
+        src: upstream source.
+        retarget: upstream module -> vendored module, for every vendored module.
+    """
+    vendored = set(retarget)
     compat = {(mod, name) for mod, name, _ in COMPAT_HELPERS}
     lines = src.split("\n")
     edits = []
@@ -126,7 +150,7 @@ def rewrite_imports(path: str, src: str, vendored: set[str]) -> str:
                 continue
             stmts: list[ast.stmt] = []
             if keep:
-                stmts.append(ast.ImportFrom(module=dest_module(mod) if mod in vendored else mod, names=keep, level=0))
+                stmts.append(ast.ImportFrom(module=retarget.get(mod, mod), names=keep, level=0))
             if sub:
                 stmts.append(ast.ImportFrom(module=dest_module(mod), names=sub, level=0))
             if helpers:
@@ -142,8 +166,7 @@ def rewrite_imports(path: str, src: str, vendored: set[str]) -> str:
             # Keep the bound name the upstream code uses.
             stmts = [
                 ast.Import(names=[
-                    ast.alias(name=dest_module(a.name), asname=a.asname) if a.name in vendored else a
-                    for a in node.names
+                    ast.alias(name=retarget[a.name], asname=a.asname) if a.name in vendored else a for a in node.names
                 ])
             ]
         else:
@@ -163,10 +186,10 @@ def strip_spdx(src: str) -> str:
     return "\n".join(head + lines[3:]).lstrip("\n")
 
 
-def patch_targets() -> dict[str, list[str]]:
+def patch_targets(patch_dir: Path = PATCH_DIR) -> dict[str, list[str]]:
     """Map each vendored file (relative to the vendored root) to the patch labels that touch it."""
     targets: dict[str, list[str]] = {}
-    for patch in sorted(PATCH_DIR.glob("*.patch")):
+    for patch in sorted(patch_dir.glob("*.patch")):
         match = PATCH_NAME.match(patch.name)
         if match is None:
             raise SystemExit(f"bad patch file name (want NNNN-Pn-desc.patch): {patch.name}")
@@ -178,10 +201,11 @@ def patch_targets() -> dict[str, list[str]]:
     return targets
 
 
-def header(short_rev: str, path: str, labels: list[str]) -> str:
+def header(short_rev: str, path: str, labels: list[str], patch_dir: Path = PATCH_DIR) -> str:
     """Return the provenance header of a vendored file."""
     what = "reduced" if path in REDUCED_UPSTREAM else "removed"
-    changes = "imports retargeted" + (f"; {', '.join(labels)} (see tools/vendor_v1/patches/)" if labels else "")
+    where = f"tools/vendor_v1/{patch_dir.name}/"
+    changes = "imports retargeted" + (f"; {', '.join(labels)} (see {where})" if labels else "")
     return ("# SPDX-License-Identifier: Apache-2.0\n"
             "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project\n"
             f"# Vendored from https://github.com/vllm-project/vllm/blob/{short_rev}/{path}\n"
@@ -221,7 +245,7 @@ def build(repo: Path, rev: str, out: Path) -> None:
     """Generate the vendored tree into ``out`` (which must not exist)."""
     short_rev = rev[:10]
     paths = read_manifest()
-    vendored = {module_of(p) for p in paths}
+    retarget = {module_of(p): dest_module(module_of(p)) for p in paths}
     targets = patch_targets()
     out.mkdir(parents=True)
     (out / "__init__.py").write_text(ROOT_INIT)  # first, so a failed run still leaves a deletable tree
@@ -229,7 +253,7 @@ def build(repo: Path, rev: str, out: Path) -> None:
         rel = path[len("vllm/v1/"):]
         dst = out / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        body = strip_spdx(rewrite_imports(path, git_show(repo, rev, path), vendored))
+        body = strip_spdx(rewrite_imports(path, git_show(repo, rev, path), retarget))
         ast.parse(body, filename=path)  # the rewrite must never emit code that does not parse
         dst.write_text(header(short_rev, path, targets.get(rel, [])) + body)
     (out / "_compat.py").write_text(compat_source(repo, rev, short_rev, targets.get("_compat.py", [])))
@@ -241,6 +265,25 @@ def build(repo: Path, rev: str, out: Path) -> None:
     if unknown:
         raise SystemExit(f"patches target files that are not vendored: {unknown}")
     for patch in sorted(PATCH_DIR.glob("*.patch")):
+        apply_patch(patch, out)
+
+
+def build_tests(repo: Path, rev: str, out: Path) -> None:
+    """Generate the vendored upstream tests into ``out`` (which must not exist)."""
+    short_rev = rev[:10]
+    tests = read_tests_manifest()
+    retarget = {module_of(p): dest_module(module_of(p)) for p in read_manifest()}
+    retarget.update({module_of(src): f"{TESTS_PKG}.{name[:-len('.py')]}" for src, name in tests.items()})
+    targets = patch_targets(TESTS_PATCH_DIR)
+    out.mkdir(parents=True)
+    (out / "__init__.py").write_text("")
+    for src, name in tests.items():
+        body = strip_spdx(rewrite_imports(src, git_show(repo, rev, src), retarget))
+        (out / name).write_text(header(short_rev, src, targets.get(name, []), TESTS_PATCH_DIR) + body)
+    unknown = sorted(set(targets) - set(tests.values()))
+    if unknown:
+        raise SystemExit(f"test patches target files that are not vendored: {unknown}")
+    for patch in sorted(TESTS_PATCH_DIR.glob("*.patch")):
         apply_patch(patch, out)
 
 
@@ -271,26 +314,36 @@ def tree_files(root: Path) -> set[str]:
     return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
 
 
-def check(repo: Path, rev: str, out: Path) -> int:
-    """Rebuild into a temporary directory and diff against ``out``. Return a process exit code."""
+def compare(fresh: Path, committed: Path) -> list[str]:
+    """Diff a freshly built tree against the committed one; return one line per problem."""
+    want, have = tree_files(fresh), tree_files(committed)
+    bad = [f"missing: {committed / f}" for f in sorted(want - have)]
+    bad += [f"unexpected: {committed / f}" for f in sorted(have - want)]
+    for f in sorted(want & have):
+        if not filecmp.cmp(fresh / f, committed / f, shallow=False):
+            bad.append(f"differs: {committed / f}")
+            print(subprocess.run(["git", "diff", "--no-index", "--",
+                                  str(fresh / f), str(committed / f)],
+                                 capture_output=True,
+                                 text=True).stdout,
+                  end="")
+    return bad
+
+
+def check(repo: Path, rev: str, out: Path, tests_out: Path | None = None) -> int:
+    """Rebuild into a temporary directory and diff against ``out`` (and ``tests_out``). Return an exit code."""
     with tempfile.TemporaryDirectory(prefix=".vendor_v1_check-", dir=out.parent) as tmp:
-        fresh = Path(tmp) / out.name
-        build(repo, rev, fresh)
-        want, have = tree_files(fresh), tree_files(out)
-        bad = [f"missing: {f}" for f in sorted(want - have)] + [f"unexpected: {f}" for f in sorted(have - want)]
-        bad += [f"differs: {f}" for f in sorted(want & have) if not filecmp.cmp(fresh / f, out / f, shallow=False)]
-        for f in [b.split(": ", 1)[1] for b in bad if b.startswith("differs: ")]:
-            diff = subprocess.run(["git", "diff", "--no-index", "--",
-                                   str(fresh / f), str(out / f)],
-                                  capture_output=True,
-                                  text=True).stdout
-            print(diff, end="")
+        build(repo, rev, Path(tmp) / out.name)
+        bad = compare(Path(tmp) / out.name, out)
+        if tests_out is not None:
+            build_tests(repo, rev, Path(tmp) / "tests")
+            bad += compare(Path(tmp) / "tests", tests_out)
     if bad:
         print("\n".join(bad))
-        print(f"{out} is not upstream {rev[:10]} + tools/vendor_v1/patches/. Regenerate it with vendor_v1.py, and "
-              "record any local change as a new numbered patch.")
+        print(f"Not upstream {rev[:10]} + tools/vendor_v1/patches*/. Regenerate with vendor_v1.py, and record any "
+              "local change as a new numbered patch.")
         return 1
-    print(f"{out}: OK ({len(want)} files match upstream {rev[:10]} + {len(list(PATCH_DIR.glob('*.patch')))} patches)")
+    print(f"OK: {out}{' and ' + str(tests_out) if tests_out else ''} match upstream {rev[:10]} + the patches")
     return 0
 
 
@@ -300,12 +353,16 @@ def main() -> int:
     parser.add_argument("--vllm-repo", type=Path, required=True, help="path to a vLLM git checkout")
     parser.add_argument("--rev", required=True, help="vLLM commit to vendor from")
     parser.add_argument("--out", type=Path, required=True, help="vendored tree, e.g. vllm_gaudi/v1/_vendored")
+    parser.add_argument("--tests-out",
+                        type=Path,
+                        help="vendored upstream tests, e.g. tests/unit_tests/vendored_v1/upstream")
     parser.add_argument("--check", action="store_true", help="verify --out instead of regenerating it")
     args = parser.parse_args()
     rev = resolve_rev(args.vllm_repo, args.rev)
     out = args.out.resolve()
+    tests_out = args.tests_out.resolve() if args.tests_out else None
     if args.check:
-        return check(args.vllm_repo, rev, out)
+        return check(args.vllm_repo, rev, out, tests_out)
     if out.exists():
         # Only ever delete a tree this script generated (a wrong or empty --out would otherwise remove it).
         init = out / "__init__.py"
@@ -313,7 +370,11 @@ def main() -> int:
             raise SystemExit(f"refusing to delete {out}: it is not a tree generated by vendor_v1.py")
         shutil.rmtree(out)
     build(args.vllm_repo, rev, out)
-    print(f"{out}: regenerated from upstream {rev[:10]}")
+    if tests_out is not None:
+        if tests_out.exists():
+            shutil.rmtree(tests_out)
+        build_tests(args.vllm_repo, rev, tests_out)
+    print(f"regenerated {out}{' and ' + str(tests_out) if tests_out else ''} from upstream {rev[:10]}")
     return 0
 
 
