@@ -17,11 +17,14 @@ RESCALE = 1 / 255
 DEVICE = [current_platform.device_type]
 
 # (layout, input shape): Gemma 4 channel-last rows, with a pixel count that is a
-# multiple of 256 and one that is not; Qwen-style (patches, C*L); NCHW images.
+# multiple of 256 and one that is not; other narrow rows; Mistral 3 / Kimi-K2.5
+# (patches, C*14*14); Qwen-style (patches, C*2*14*14); NCHW images.
 SHAPES = [
     ("pcl", (2 * 280 * 256, 3)),
     ("pcl", (7 * 17, 3)),
     ("pcl", (64, 3 * 2)),
+    ("pcl", (64, 3 * 4)),
+    ("pcl", (64, 3 * 14 * 14)),
     ("pcl", (96, 3 * 2 * 14 * 14)),
     ("bchw", (2, 3, 32, 48)),
 ]

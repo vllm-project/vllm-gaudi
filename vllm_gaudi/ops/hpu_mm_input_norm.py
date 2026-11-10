@@ -6,9 +6,11 @@ import math
 import torch
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 
-# Width of the rows the affine transform runs on. TPC kernels vectorize along the
-# innermost dim, and Gemma 4 passes channel-last pixels as (pixels, 3), which
-# _unpack turns into (pixels, 3, 1): one element per row.
+# TPC kernels vectorize along the innermost dim. Gemma 4 passes channel-last
+# pixels as (pixels, 3), which _unpack turns into (pixels, 3, 1): one element per
+# row. forward_native is slow on Gaudi only when that dim is shorter than
+# _NARROW_LENGTH; such rows are folded into rows of up to _WIDE_ROW elements.
+_NARROW_LENGTH = 8
 _WIDE_ROW = 768
 
 
@@ -19,7 +21,7 @@ class HPUFusedMMInputNorm(FusedMMInputNorm):
         x3, out_shape = self._unpack(pixel_values)
         rows, channels, length = (int(d) for d in x3.shape)
         row = channels * length
-        if row >= _WIDE_ROW:
+        if length >= _NARROW_LENGTH or row >= _WIDE_ROW:
             return self.forward_native(pixel_values, visual_dtype)
 
         # Every row has the same per-element weight pattern, so folding k rows
