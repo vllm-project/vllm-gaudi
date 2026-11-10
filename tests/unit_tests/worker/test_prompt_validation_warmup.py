@@ -6,8 +6,9 @@ Smaller prompt buckets make Dynamo compile more general graphs, which inference
 then selects for the larger buckets warmed before them. The validation warmup
 runs prompt buckets again at the end, so that those graphs have recipes for
 their shapes: the largest seq_len for models with heterogeneous layers, every
-bucket with prompt_validation_warmup (on by default for Nemotron-H in
-torch.compile mode), in compile-only mode unless the layers are heterogeneous.
+bucket with prompt_validation_warmup (on by default for Nemotron-H with prefix
+caching in torch.compile mode), in compile-only mode unless the layers are
+heterogeneous.
 """
 
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm_gaudi.extension import environment
 from vllm_gaudi.extension.config import Config
 from vllm_gaudi.extension.features import get_features
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
@@ -27,29 +29,49 @@ KV_CACHES = object()
 
 def _prompt_validation_warmup(**values):
     values.setdefault("bridge_mode", "eager")
+    values.setdefault("enable_prefix_caching", True)
     feature_values, feature_flags = get_features()
     return Config(feature_values, feature_flags, **values).get('prompt_validation_warmup')
 
 
-@pytest.mark.parametrize("model_type, bridge_mode, enabled", [
-    ("nemotron_h", "eager", True),
-    ("nemotron_h", "lazy", False),
-    ("llama", "eager", False),
-    ("granitemoehybrid", "eager", False),
+@pytest.mark.parametrize("model_type, bridge_mode, prefix_caching, enabled", [
+    ("nemotron_h", "eager", True, True),
+    ("nemotron_h", "eager", False, False),
+    ("nemotron_h", "lazy", True, False),
+    ("llama", "eager", True, False),
+    ("granitemoehybrid", "eager", True, False),
 ])
-def test_prompt_validation_warmup_default(model_type, bridge_mode, enabled):
-    assert _prompt_validation_warmup(model_type=model_type, bridge_mode=bridge_mode) is enabled
-
-
-@pytest.mark.parametrize("model_type, bridge_mode, override", [
-    ("nemotron_h", "eager", False),
-    ("nemotron_h", "lazy", True),
-    ("llama", "eager", True),
-])
-def test_prompt_validation_warmup_env_override(model_type, bridge_mode, override):
+def test_prompt_validation_warmup_default(model_type, bridge_mode, prefix_caching, enabled):
     assert _prompt_validation_warmup(model_type=model_type,
                                      bridge_mode=bridge_mode,
+                                     enable_prefix_caching=prefix_caching) is enabled
+
+
+@pytest.mark.parametrize("model_type, bridge_mode, prefix_caching, override", [
+    ("nemotron_h", "eager", True, False),
+    ("nemotron_h", "eager", False, True),
+    ("nemotron_h", "lazy", True, True),
+    ("llama", "eager", True, True),
+])
+def test_prompt_validation_warmup_env_override(model_type, bridge_mode, prefix_caching, override):
+    assert _prompt_validation_warmup(model_type=model_type,
+                                     bridge_mode=bridge_mode,
+                                     enable_prefix_caching=prefix_caching,
                                      VLLM_PROMPT_VALIDATION_WARMUP=override) is override
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_enable_prefix_caching_is_the_engine_setting(monkeypatch, enabled):
+    # prefix_caching stays True unless VLLM_CONTIGUOUS_PA is set, so the default reads the engine setting.
+    monkeypatch.setattr(environment, "_VLLM_VALUES", {})
+    for env_var in ("VLLM_CONTIGUOUS_PA", "VLLM_PREFIX_CACHING", "VLLM_ENABLE_PREFIX_CACHING"):
+        monkeypatch.delenv(env_var, raising=False)
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="nemotron_h")),
+                                  cache_config=SimpleNamespace(enable_prefix_caching=enabled))
+    environment.set_vllm_config(vllm_config)
+    config = Config(*environment.get_environment())
+    assert config.get('enable_prefix_caching') is enabled
+    assert config.get('prefix_caching') is True
 
 
 def test_default_reruns_the_largest_seq_len():

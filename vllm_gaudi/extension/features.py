@@ -113,8 +113,10 @@ def get_features():
         # more general graphs, which inference then picks for the larger buckets
         # warmed before them; without the re-run, their recipes compile on the
         # first real prompts. Lazy mode runs without Dynamo, so nothing is shadowed.
+        # On by default only with prefix caching: without it, the first prompts
+        # after a boot gain little for the same warmup cost.
         Value('prompt_validation_warmup',
-              All(ModelType('nemotron_h'), Not(Lazy())),
+              All(ModelType('nemotron_h'), Enabled('enable_prefix_caching'), Not(Lazy())),
               env_var='VLLM_PROMPT_VALIDATION_WARMUP',
               env_var_type=boolean),
         Value('mamba_split_prefill_graph',
