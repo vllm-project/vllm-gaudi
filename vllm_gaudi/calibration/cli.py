@@ -345,17 +345,20 @@ def _cmd_print_config(ns: argparse.Namespace) -> int:
     from vllm_gaudi.calibration.detect import ModelInfo, detect_device, detect_model
     from vllm_gaudi.calibration.inc_config import resolve_configs
     from vllm_gaudi.calibration.layout import OutputLayout
+    from vllm_gaudi.calibration.orchestrator import resolve_model_path
     from vllm_gaudi.calibration.presets import resolve_preset
 
+    # Same model directory name as run, also for MODEL=. or a path ending in "..".
+    model = resolve_model_path(ns.model)
     device = ns.device or detect_device()
     try:
-        info = detect_model(ns.model, ns.trust_remote_code)
+        info = detect_model(model, ns.trust_remote_code)
     except (ImportError, OSError, ValueError) as exc:
         logger.warning("Model detection failed (%s); selecting the preset by model name", exc)
         info = ModelInfo()
     if ns.modality is not None:
         info = dataclasses.replace(info, is_multimodal=ns.modality == "multimodal")
-    layout = OutputLayout.create(ns.output_dir, ns.model, device)
+    layout = OutputLayout.create(ns.output_dir, model, device)
     preset = resolve_preset(info,
                             layout.model_name,
                             extra_blocklist=ns.blocklist,

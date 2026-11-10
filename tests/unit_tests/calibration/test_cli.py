@@ -111,6 +111,21 @@ def test_standalone_commands_take_the_observer(tmp_path, command):
         assert (tmp_path / "inc_output_hooks_maxabs_per_channel_0_1.json").is_file()
 
 
+@pytest.mark.parametrize("model", [".", "sub/.."])
+def test_print_config_names_a_local_model_like_run(tmp_path, monkeypatch, capsys, model):
+    from vllm_gaudi.calibration import detect
+    from vllm_gaudi.calibration.detect import ModelInfo
+
+    model_dir = tmp_path / "My-Model"
+    (model_dir / "sub").mkdir(parents=True)
+    monkeypatch.chdir(model_dir)
+    monkeypatch.setattr(detect, "detect_model", lambda model, trust_remote_code: ModelInfo(model_type="llama"))
+    assert cli.main(["print-config", model, "-o", str(tmp_path / "out"), "--device", "g3"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    quant = printed[str(tmp_path / "out" / "my-model" / "maxabs_quant_g3.json")]
+    assert quant["dump_stats_path"] == str(tmp_path / "out" / "my-model" / "g3" / "inc_output")
+
+
 def test_print_config_aligns_user_config_like_run(tmp_path, monkeypatch, capsys):
     from vllm_gaudi.calibration import detect
     from vllm_gaudi.calibration.detect import ModelInfo
