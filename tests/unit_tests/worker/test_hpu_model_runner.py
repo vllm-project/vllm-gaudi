@@ -19,7 +19,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCach
 from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, attn_pad_block_id
-from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
+from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, splice_placeholders
 
 BLOCK_SIZE = 128
 NUM_BLOCKS = 10
@@ -128,6 +128,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 block_ids=([0], ),
                 num_computed_tokens=0,
                 lora_request=None,
+                prefill_token_ids=[1, 2, 3],
             ))
         num_scheduled_tokens[req_id] = 3
         total_num_scheduled_tokens += num_scheduled_tokens[req_id]
@@ -209,7 +210,8 @@ def test_update_states_request_finished(model_runner, dist_init):
     assert not _is_req_scheduled(model_runner, req_id)
 
 
-def test_update_states_request_resumed(model_runner, dist_init):
+def test_update_states_request_rescheduled(model_runner, dist_init):
+    """A running request skipped for a step is added back from its cached state."""
     req_id = "req_0"
 
     # new req
@@ -235,15 +237,13 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_added(model_runner, req_id)
     assert not _is_req_scheduled(model_runner, req_id)
 
-    # resume req
+    # reschedule req
     cached_req_data = CachedRequestData(
         req_ids=[req_id],
-        resumed_req_ids={req_id},
         new_token_ids=[[]],
-        new_block_ids=[([0], )],
-        num_computed_tokens=[0],
+        new_block_ids=[([1], )],
+        num_computed_tokens=[3],
         num_output_tokens=[0],
-        all_token_ids={},
     )
 
     scheduler_output = SchedulerOutput(
@@ -263,6 +263,136 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
     assert _is_req_state_block_table_match(model_runner, req_id)
+    # New blocks are appended, never replace the cached ones.
+    assert model_runner.requests[req_id].block_ids == ([0, 1], )
+
+
+def _empty_step(**kwargs) -> SchedulerOutput:
+    fields = dict(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    fields.update(kwargs)
+    return SchedulerOutput(**fields)
+
+
+def _new_request_step(req_id: str, prefill_token_ids: list[int], sampling_params: SamplingParams) -> SchedulerOutput:
+    new_req = NewRequestData(
+        req_id=req_id,
+        prompt_token_ids=[1, 2, 3],
+        mm_features=[],
+        sampling_params=sampling_params,
+        pooling_params=None,
+        block_ids=([0], ),
+        num_computed_tokens=0,
+        lora_request=None,
+        prefill_token_ids=prefill_token_ids,
+    )
+    num_tokens = len(prefill_token_ids)
+    return _empty_step(scheduled_new_reqs=[new_req],
+                       num_scheduled_tokens={req_id: num_tokens},
+                       total_num_scheduled_tokens=num_tokens)
+
+
+def test_update_states_request_preempted_and_resumed(model_runner, dist_init):
+    """A preempted request is dropped, then resumes as a new request whose prefill_token_ids hold its outputs."""
+    req_id = "req_0"
+    sampling_params = SamplingParams(temperature=0.8, seed=7)
+
+    model_runner._update_states(_new_request_step(req_id, [1, 2, 3], sampling_params))
+    generator = model_runner.requests[req_id].generator
+    assert generator is not None
+
+    model_runner._update_states(_empty_step(preempted_req_ids={req_id}))
+    assert not _is_req_added(model_runner, req_id)
+    assert not _is_req_scheduled(model_runner, req_id)
+
+    model_runner._update_states(_new_request_step(req_id, [1, 2, 3, 7, 8], sampling_params))
+    req_state = model_runner.requests[req_id]
+    row = model_runner.input_batch.req_id_to_index[req_id]
+    assert req_state.output_token_ids == [7, 8]
+    assert req_state.num_prompt_tokens == 3
+    # The batch re-prefills the earlier outputs together with the prompt.
+    assert model_runner.input_batch.num_prompt_tokens[row] == 5
+    assert model_runner.input_batch.token_ids_cpu[row, :5].tolist() == [1, 2, 3, 7, 8]
+    assert req_state.generator is generator
+    assert req_id not in model_runner._preempted_generators
+
+
+class _ReadyEvent:
+    """Stands in for the copy-ready event of a finished async device-to-host copy."""
+
+    def synchronize(self):
+        pass
+
+
+def _skip_then_reschedule(model_runner, req_id: str, num_placeholders: int = 1):
+    # Earlier steps sampled tokens for req_id; under async scheduling without penalties only -1 placeholders are
+    # known, one per step.
+    model_runner.use_async_scheduling = True
+    model_runner._update_states(_new_request_step(req_id, [1, 2, 3], SamplingParams()))
+    model_runner.requests[req_id].output_token_ids.extend([-1] * num_placeholders)
+    # Step 2 leaves the running request out.
+    model_runner._update_states(_empty_step())
+    assert not _is_req_scheduled(model_runner, req_id)
+    # Step 3 schedules it again.
+    cached = CachedRequestData(req_ids=[req_id],
+                               new_token_ids=[[]],
+                               new_block_ids=[None],
+                               num_computed_tokens=[2 + num_placeholders],
+                               num_output_tokens=[num_placeholders])
+    model_runner._update_states(
+        _empty_step(scheduled_cached_reqs=cached, num_scheduled_tokens={req_id: 1}, total_num_scheduled_tokens=1))
+
+
+def test_update_states_async_skipped_request_placeholder_repaired(model_runner, dist_init):
+    req_id = "req_0"
+    model_runner._last_async_copy = (torch.tensor([[42]], dtype=torch.int32), _ReadyEvent(), {req_id: 0})
+    _skip_then_reschedule(model_runner, req_id)
+    row = model_runner.input_batch.req_id_to_index[req_id]
+    assert model_runner.requests[req_id].output_token_ids == [42]
+    assert model_runner.input_batch.token_ids_cpu[row, :4].tolist() == [1, 2, 3, 42]
+    assert model_runner.num_skipped_placeholder_repairs == 1
+    assert req_id not in model_runner._pending_placeholder_repair
+
+
+def test_update_states_async_skipped_request_keeps_older_placeholders(model_runner, dist_init):
+    """Only the newest placeholder is this step's input; older ones are already in the KV cache and stay."""
+    req_id = "req_0"
+    model_runner._last_async_copy = (torch.tensor([[42]], dtype=torch.int32), _ReadyEvent(), {req_id: 0})
+    _skip_then_reschedule(model_runner, req_id, num_placeholders=3)
+    row = model_runner.input_batch.req_id_to_index[req_id]
+    assert model_runner.requests[req_id].output_token_ids == [-1, -1, 42]
+    assert model_runner.input_batch.num_tokens[row] == 6
+    assert model_runner.input_batch.token_ids_cpu[row, 5] == 42
+
+
+@pytest.mark.parametrize("output_ids, new_ids, keep_length, expected", [
+    ([5, -1], [42], False, [5, 42]),
+    ([5, -1], [42], True, [5, 42]),
+    ([-1, -1, -1], [42], False, [42]),
+    ([-1, -1, -1], [42], True, [-1, -1, 42]),
+    ([5, -1, -1], [42, 43], True, [5, 42, 43]),
+    ([5, -1], [42, -1], True, [5, 42]),
+    ([5, -1], [-1], True, [5, -1]),
+    ([5, -1, -1], [-1], False, [5]),
+    ([5, 6], [42], False, [5, 6]),
+])
+def test_splice_placeholders(output_ids, new_ids, keep_length, expected):
+    splice_placeholders(output_ids, new_ids, keep_length=keep_length)
+    assert output_ids == expected
+
+
+def test_update_states_async_skipped_request_without_copy_fails(model_runner, dist_init):
+    model_runner._last_async_copy = None
+    with pytest.raises(RuntimeError, match="placeholder"):
+        _skip_then_reschedule(model_runner, "req_0")
 
 
 def test_get_nans_in_logits(model_runner, dist_init):
