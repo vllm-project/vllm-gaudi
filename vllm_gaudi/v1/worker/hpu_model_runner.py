@@ -1991,27 +1991,28 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         rows_cpu = torch.tensor(rows).view(-1, 1)
         mamba_groups = [(group_idx, group) for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups)
                         if isinstance(group.kv_cache_spec, MambaSpec)]
-        fields = []
+        plan_fields = []
         for group_idx, _ in mamba_groups:
             table = self.input_batch.block_table[group_idx].get_cpu_tensor()
             last_col = table.shape[1] - 1
-            fields += [
+            plan_fields += [
                 table[rows_cpu, (src + bias).clamp(max=last_col)],
                 table[rows_cpu, src],
                 torch.where(do_copy, table[rows_cpu, dest_cols.clamp(0, last_col)], self._MAMBA_PAD_BLOCK_ID),
             ]
         # [delta, field, row, valid tokens]
-        fields = torch.stack([f.to(torch.int32) for f in fields + [bias, resume]]).view(-1, len(rows), width, width)
-        fields = async_h2d_copy(fields.permute(2, 0, 1, 3).contiguous(), device=self.device)
+        plan = torch.stack([f.to(torch.int32) for f in plan_fields + [bias, resume]]).view(-1, len(rows), width, width)
+        plan = async_h2d_copy(plan.permute(2, 0, 1, 3).contiguous(), device=self.device)
 
         # The pair that happened, per row: by its valid tokens, then by its delta.
         rows_t = async_h2d_copy(rows, dtype=torch.long, device=self.device)
         valid_idx = (num_valid.index_select(0, rows_t) - 1).clamp(min=0).to(torch.long).view(1, -1, 1)
-        valid_idx = valid_idx.expand(fields.shape[1], -1, 1)
+        valid_idx = valid_idx.expand(plan.shape[1], -1, 1)
         delta = None if self._async_spec_delta is None else self._async_spec_delta.index_select(0, rows_t)
-        picked = fields[0].gather(2, valid_idx).squeeze(2)
-        for d in range(1, width if delta is not None else 1):
-            picked = torch.where((delta == d).view(1, -1), fields[d].gather(2, valid_idx).squeeze(2), picked)
+        picked = plan[0].gather(2, valid_idx).squeeze(2)
+        if delta is not None:
+            for d in range(1, width):
+                picked = torch.where((delta == d).view(1, -1), plan[d].gather(2, valid_idx).squeeze(2), picked)
         bias_t = picked[-2].view(-1, 1, 1)
 
         from vllm_gaudi.ops.hpu_mamba_mixer2 import HPUMambaMixer2
@@ -2171,7 +2172,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         padding = torch.full((rows.shape[0], width - 1), PLACEHOLDER_TOKEN_ID, dtype=torch.int32, device=rows.device)
         return torch.cat([rows, padding], dim=1)
 
-    def _async_spec_accepted_recorder(self, req_id_to_index: dict[str, int]) -> Callable[[list[list[int]]], None]:
+    def _async_spec_accepted_recorder(
+            self, req_id_to_index: dict[str, int]) -> Callable[[list[list[int]], Optional[list[int]]], None]:
         """Callback for a step's async output: records its valid-token counts in _mamba_num_accepted.
 
         The worker's output thread runs it once the output copy is done, which
@@ -4011,7 +4013,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         positions_device = async_h2d_copy(positions, device=self.device)
         if async_spec_shift:
-            positions_device = positions_device - delta_rows.view(-1, 1).to(positions_device.dtype)
+            # The padded rows of a request are at position 0 (pad_sequence above),
+            # so its delta would move them below 0, out of the RoPE table.
+            positions_device = (positions_device - delta_rows.view(-1, 1).to(positions_device.dtype)).clamp(min=0)
         block_tables_list = self._resolve_all_blocks(block_tables_list)
 
         # CONTEXT_LENS [batch_size]
