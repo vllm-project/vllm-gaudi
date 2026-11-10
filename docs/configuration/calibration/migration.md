@@ -14,7 +14,7 @@ The same table applies to the text and the vision-language script. The new comma
 | `-o <dir>` | `-o <dir>` | Same layout below the directory. |
 | `-d <dataset>` | `--tasks`, `--include-path` | Datasets are replaced by lm-eval tasks. See [Calibration Data](#calibration-data). |
 | `-l <n>` | `--limit <n>` | Samples per task. Default `512`. Now always honored. |
-| `-b <n>` | `--batch-size <n>` | Default changed from `32` to `auto`. |
+| `-b <n>` | `--max-num-seqs <n> --batch-size <n>` | The text script used `-b` as the `max_num_seqs` of the measure engine and as the number of prompts per request; the vision-language script ignored it. `--max-num-seqs` sets the vLLM `max_num_seqs` of both phases (preset default `32`), and `--batch-size` the lm-eval batch size (default `auto`). |
 | `-t <n>` | `--tp <n>` | Values above 8 need `--multi-node`. See [Multi-Node Calibration with Ray](advanced.md#multi-node-calibration-with-ray). |
 | `-r <n>` | `--unify-to-tp <n>` | Must be smaller than `--tp` and divide it. |
 | `-u` | `--expert-parallel` | Measures and quantizes with expert parallelism and unifies with the expert parallel rule. The old vision-language script uses `-u` only for the unify rule. |
@@ -28,7 +28,8 @@ For example:
 ./calibrate_model.sh -m meta-llama/Llama-3.1-405B-Instruct -d <dataset>.pkl -o <output_dir> -b 128 -t 16 -l 4096 -r 8
 
 # New
-vllm-gaudi-calibrate run meta-llama/Llama-3.1-405B-Instruct -o <output_dir> --tp 16 --limit 4096 --unify-to-tp 8 --multi-node
+vllm-gaudi-calibrate run meta-llama/Llama-3.1-405B-Instruct -o <output_dir> --tp 16 --limit 4096 --unify-to-tp 8 --multi-node \
+    --max-num-seqs 128 --batch-size 128
 ```
 
 Options that the old script passed to the step scripts and that are gone:
