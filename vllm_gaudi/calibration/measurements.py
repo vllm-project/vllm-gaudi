@@ -78,13 +78,23 @@ def parse_measurement_filename(path: str | os.PathLike[str],
 
 
 def list_measurement_files(directory: str | os.PathLike[str],
-                           observer: str = DEFAULT_OBSERVER) -> list[MeasurementFile]:
-    """Returns the INC output files in a directory, sorted by kind, prefix, world, rank and extension."""
+                           observer: str = DEFAULT_OBSERVER,
+                           *,
+                           dump_name: str | None = None) -> list[MeasurementFile]:
+    """Returns the INC output files in a directory, sorted by kind, prefix, world, rank and extension.
+
+    Args:
+        directory: Directory to scan.
+        observer: INC observer name used in the file names.
+        dump_name: Keep only the files of this ``dump_stats_path`` basename; None keeps every calibration's.
+    """
+    measure_prefix = f"{dump_name}_hooks_{observer}" if dump_name is not None else None
     files = []
     for entry in sorted(Path(directory).iterdir()):
         if entry.is_file():
             parsed = parse_measurement_filename(entry, observer)
-            if parsed is not None:
+            if parsed is not None and (measure_prefix is None or parsed.prefix == measure_prefix
+                                       or parsed.prefix.startswith(f"{measure_prefix}_")):
                 files.append(parsed)
     return sorted(files, key=lambda f: (f.kind, f.prefix, f.world, f.rank, f.ext))
 

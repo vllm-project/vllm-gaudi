@@ -49,7 +49,8 @@ def expand_dir(measurements_dir: str | os.PathLike[str],
                target_world: int,
                out_dir: str | os.PathLike[str] | None = None,
                *,
-               observer: str = DEFAULT_OBSERVER) -> list[Path]:
+               observer: str = DEFAULT_OBSERVER,
+               dump_name: str | None = None) -> list[Path]:
     """Expands the unified world size 1 measurement in a directory to ``target_world`` ranks.
 
     Args:
@@ -57,6 +58,7 @@ def expand_dir(measurements_dir: str | os.PathLike[str],
         target_world: Number of expert parallel ranks.
         out_dir: Output directory; defaults to ``measurements_dir``.
         observer: INC observer name used in the file names.
+        dump_name: Expand only the files of this ``dump_stats_path`` basename; None looks at all.
 
     Returns:
         The JSON files written; each has an ``.npz`` twin.
@@ -65,7 +67,8 @@ def expand_dir(measurements_dir: str | os.PathLike[str],
         raise ValueError(f"The target world size must be at least 2, got {target_world}")
     source = Path(measurements_dir)
     target = Path(out_dir) if out_dir is not None else source
-    sources = [f for f in select(list_measurement_files(source, observer), kind=MEASURE, world=1) if f.rank == 0]
+    files = list_measurement_files(source, observer, dump_name=dump_name)
+    sources = [f for f in select(files, kind=MEASURE, world=1) if f.rank == 0]
     if len(sources) != 1:
         raise ValueError(f"Expected exactly one world size 1 measurement in {source}, found "
                          f"{[f.path.name for f in sources]}; unify the measurements to world size 1 first")

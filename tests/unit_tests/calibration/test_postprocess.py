@@ -88,6 +88,15 @@ def test_postprocess_to_another_dir_replaces_its_scales_and_copies_module_lists(
     assert unify_dir(out, 1, skip_scales=True)
 
 
+def test_postprocess_dump_name_skips_other_calibrations(tmp_path):
+    prefix = "model.layers.0.self_attn.attn"
+    write_rank(tmp_path, PREFIX, 0, 1, attention(prefix))
+    other = write_rank(tmp_path, "other_hooks_maxabs", 0, 1, attention(prefix))
+    before = other.read_bytes()
+    assert postprocess_dir(tmp_path, dump_name="inc_output") == {f"{PREFIX}_0_1.json": 2}
+    assert other.read_bytes() == before
+
+
 def test_postprocess_in_place_leaves_unchanged_files(tmp_path):
     path = write_rank(tmp_path, PREFIX, 0, 1, {"model.layers.0.mlp.down_proj": {"inputs": [[[1.0]]]}})
     before = path.read_text()

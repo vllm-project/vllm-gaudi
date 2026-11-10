@@ -13,7 +13,7 @@ from vllm_gaudi.calibration.args import CalibrationArgs
 from vllm_gaudi.calibration.detect import ModelInfo
 from vllm_gaudi.calibration.orchestrator import CalibrationError, build_phase_env, run_calibration
 
-from .measurement_data import PREFIX, SCALES_PREFIX, scale_nodes, write_measure_run, write_rank
+from .measurement_data import PREFIX, SCALES_PREFIX, measure_nodes, scale_nodes, write_measure_run, write_rank
 
 QWEN = ModelInfo(model_type="qwen2", architectures=("Qwen2ForCausalLM", ), has_chat_template=True, source="test")
 MIXTRAL = ModelInfo(model_type="mixtral", is_moe=True, num_experts=8, has_chat_template=True, source="test")
@@ -208,6 +208,29 @@ def test_preset_and_user_env_reach_the_phase(tmp_path):
     assert manifest["preset"]["name"] == "mixtral"
     quant = json.loads((tmp_path / "my-model" / "maxabs_quant_g3.json").read_text())
     assert quant["scale_format"] == "CONST"
+
+
+def test_run_leaves_another_calibration_in_the_stats_dir_alone(tmp_path):
+    # A custom dump_stats_path can share a directory with the files of another calibration.
+    def plant(out):
+        stats = out / "my-model" / "g3"
+        stats.mkdir(parents=True)
+        other = [
+            write_rank(stats, "other_hooks_maxabs", rank, world, measure_nodes(rank)) for world, rank in OTHER_FILES
+        ]
+        (stats / "other_hooks_maxabs_0_2_mod_list.json").write_text("[]")
+        return {p: p.read_bytes() for p in other}
+
+    before = plant(tmp_path / "unify")
+    run_calibration(args(tmp_path / "unify", tp=2, unify_to_tp=1), FakeRunner(QWEN))
+    assert {p: p.read_bytes() for p in before} == before
+    # Expand needs exactly one world size 1 measurement; the other calibration's must not count.
+    before = plant(tmp_path / "expand")
+    run_calibration(args(tmp_path / "expand", expand_to_ep=2), FakeRunner(MIXTRAL))
+    assert {p: p.read_bytes() for p in before} == before
+
+
+OTHER_FILES = ((1, 0), (2, 0), (2, 1))
 
 
 def test_engine_arg_expert_parallel_drives_unify_and_serve(tmp_path, monkeypatch):
