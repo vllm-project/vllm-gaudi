@@ -5,8 +5,9 @@ import pytest
 
 from vllm_gaudi.calibration.measurements import load_npz
 from vllm_gaudi.calibration.postprocess import fix_kv_cache_inputs, postprocess_dir
+from vllm_gaudi.calibration.unify import unify_dir
 
-from .measurement_data import PREFIX, SCALES_PREFIX, write_rank
+from .measurement_data import PREFIX, SCALES_PREFIX, write_measure_run, write_rank
 
 
 def attention(prefix: str, *, mla: bool = False) -> dict:
@@ -71,6 +72,20 @@ def test_postprocess_dir(tmp_path):
     npz = load_npz(out / f"{PREFIX}_0_1.npz")
     assert npz["LocalRank"] == 0
     assert npz["Nodes"][f"{prefix}.impl.matmul_qk"]["inputs"][1].tolist() == [[7.0]]
+
+
+def test_postprocess_to_another_dir_replaces_its_scales_and_copies_module_lists(tmp_path):
+    source, out = tmp_path / "src", tmp_path / "out"
+    source.mkdir()
+    out.mkdir()
+    write_measure_run(source, world=2)
+    stale = [write_rank(out, SCALES_PREFIX, rank, 2, {"stale": {"inputs": [9.0]}}) for rank in range(2)]
+    other_world = write_rank(out, SCALES_PREFIX, 0, 1, {"stale": {"inputs": [9.0]}})
+    postprocess_dir(source, out)
+    # INC would reuse scales of earlier measurements instead of computing them from the new ones.
+    assert not any(p.exists() or p.with_suffix(".npz").exists() for p in stale)
+    assert other_world.exists()
+    assert unify_dir(out, 1, skip_scales=True)
 
 
 def test_postprocess_in_place_leaves_unchanged_files(tmp_path):
