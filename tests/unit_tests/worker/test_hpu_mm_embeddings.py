@@ -117,6 +117,7 @@ def _make_mock_runner(
     runner.requests = requests
     runner.encoder_cache = encoder_cache
     runner.uses_mrope = False
+    runner.is_kimi_k3 = False
     runner.device = "cpu"
     runner.is_mm_embed = _FakeCpuGpuBuffer(max_tokens)
     return runner
