@@ -17,14 +17,16 @@ on:
       head_sha:   { description: 'PR head commit SHA',            required: true, type: string }
       base_ref:   { description: 'PR target branch',              required: true, type: string }
       pr_title:   { description: 'PR title',                      required: false, type: string }
-      # is_draft and is_merge_group are unused but stay declared, so dispatches
-      # from trigger runs that started before an update are still accepted.
+      # is_merge_group is unused but stays declared, so dispatches from trigger
+      # runs that started before an update are still accepted.
       is_draft:   { description: 'Draft PR (true/false)',         required: true, type: string, default: 'false' }
       skip_tests:           { description: 'Skip Gaudi tests (true/false)',                  required: true,  type: string, default: 'false' }
       is_merge_group:       { description: 'Triggered from merge queue (true/false)',        required: true,  type: string, default: 'false' }
       use_hourly_runner:    { description: 'Use hourly-ci pool (maintainers only)',          required: false, type: string, default: 'false' }
       vllm_ref_override:    { description: 'Override upstream vllm checkout ref (branch/tag/SHA; maintainers only)', required: false, type: string, default: '' }
-      nixl_changed:         { description: 'NIXL Dockerfile changed (true/false); build-tests it when true', required: false, type: string, default: 'true' }
+      # Sent only by a trigger that did the draft and behind-base checks. Empty:
+      # the build job does those checks and the NIXL Dockerfile is built.
+      nixl_changed:         { description: 'NIXL Dockerfile changed (true/false); build-tests it unless false', required: false, type: string, default: '' }
 
 # Least-privilege default; post-comment opts into pull-requests: write at the
 # job level.
@@ -102,6 +104,28 @@ jobs:
           # Fetch full history for accurate commit comparison
           ref: ${{ inputs.head_sha }}
           clean: true # Ensure a clean workspace before checkout
+      - name: Check draft and behind-base state
+        # Trigger runs that started before the trigger did these checks itself
+        # dispatch without nixl_changed, so check here instead.
+        if: inputs.nixl_changed == ''
+        env:
+          IS_DRAFT: ${{ inputs.is_draft }}
+          BASE_REF: ${{ inputs.base_ref }}
+        run: |
+          if [[ "$IS_DRAFT" == "true" ]]; then
+            echo "::error::This is a draft PR. Mark it as ready for review to run the CI."
+            exit 1
+          fi
+          # The checkout is shallow; the ancestry check needs full history.
+          unshallow=()
+          if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+            unshallow=(--unshallow)
+          fi
+          git fetch --no-tags "${unshallow[@]}" origin "refs/heads/$BASE_REF"
+          if ! git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "::error::The branch is behind $BASE_REF. Merge or rebase to get the latest changes."
+            exit 1
+          fi
       - name: Discover test functions
         id: discover
         run: |
@@ -431,22 +455,22 @@ jobs:
           EXITCODE=$?
           echo "Test script exited with code: $EXITCODE"
 
-  # Build-test the production NIXL Dockerfile when the PR changes it. The
-  # trigger detects the change and passes it as inputs.nixl_changed. The steps,
-  # not the job, are conditional: a skipped job would also skip post-comment.
+  # Build-test the production NIXL Dockerfile unless the trigger found it
+  # unchanged (inputs.nixl_changed == 'false'). The steps, not the job, are
+  # conditional: a skipped job would also skip post-comment.
   build_nixl_dockerfile:
     needs: [pre_merge_hpu_test_build]
     runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name }}
     timeout-minutes: 90
     steps:
       - name: Checkout repository
-        if: inputs.nixl_changed == 'true'
+        if: inputs.nixl_changed != 'false'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ inputs.head_sha }}
           clean: true
       - name: Build nixl Dockerfile (validation only)
-        if: inputs.nixl_changed == 'true'
+        if: inputs.nixl_changed != 'false'
         run: |
           echo "Building .cd/Dockerfile.ubuntu.pytorch.vllm.nixl.latest to verify it builds correctly..."
           docker build \
@@ -456,7 +480,7 @@ jobs:
             .
           echo "Nixl Dockerfile build succeeded."
       - name: Cleanup test image
-        if: always() && inputs.nixl_changed == 'true'
+        if: always() && inputs.nixl_changed != 'false'
         run: docker rmi -f nixl-dockerfile-build-test || true
 
   # Final gate: pre-merge-trigger.yaml reports this job's result. It passes only
