@@ -1421,8 +1421,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.enable_bucketing = get_config().use_bucketing
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.skip_warmup = get_config().skip_warmup
-        # DSA indexer top-k width; None for models without a sparse attention indexer.
-        self.dsa_index_topk = getattr(self.model_config.hf_text_config, "index_topk", None)
+        # DSA indexer top-k width; None for models without a sparse attention indexer. Kimi-K3.x runs dense MLA.
+        self.dsa_index_topk = None if self.is_kimi_k3 else getattr(self.model_config.hf_text_config, "index_topk", None)
 
         model_config = self.model_config
         cache_config = self.cache_config
