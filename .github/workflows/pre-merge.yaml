@@ -1,7 +1,8 @@
 name: Basic HPU test suite
 
-# NOTE: run-name MUST contain both "#<pr_number>" and "[<head_sha>]".
-# pre-merge-trigger.yaml relies on this format to correlate dispatched runs.
+# NOTE: keep the run-name format. pre-merge-trigger.yaml finds a PR's earlier
+# runs by "#<pr_number> " (with the space) to cancel them, and people look up
+# test runs by "PR #<pr_number> [<head_sha>]".
 run-name: "PR #${{ inputs.pr_number }} [${{ inputs.head_sha }}]"
 
 on:
@@ -221,7 +222,7 @@ jobs:
           clean: true # Ensure a clean workspace before checkout
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -640,6 +641,7 @@ jobs:
           issue-number: ${{ inputs.pr_number }}
           body: |
             ### ✅ CI Passed
+            Tested commit: **`${{ inputs.head_sha }}`**
             All checks passed successfully against the following vllm commit:
             **`${{ needs.pre_merge_hpu_test_build.outputs.target_commit }}`**
 

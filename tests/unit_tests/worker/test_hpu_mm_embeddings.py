@@ -88,7 +88,6 @@ def _make_scheduler_output(req_tokens: dict[str, int]) -> SchedulerOutput:
         total_num_scheduled_tokens=sum(req_tokens.values()),
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -118,6 +117,7 @@ def _make_mock_runner(
     runner.requests = requests
     runner.encoder_cache = encoder_cache
     runner.uses_mrope = False
+    runner.is_kimi_k3 = False
     runner.device = "cpu"
     runner.is_mm_embed = _FakeCpuGpuBuffer(max_tokens)
     return runner

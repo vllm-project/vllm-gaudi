@@ -13,12 +13,12 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, SchedulerConf
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.core.kv_cache_planning import (estimate_max_model_len, get_kv_cache_configs)
+from vllm.v1.core.kv_cache_planning import (estimate_max_model_len, get_global_kv_cache_groups, get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.sample.metadata import SamplingMetadata
 import vllm_gaudi.extension.environment as environment
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
+from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, attn_pad_block_id
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 
 BLOCK_SIZE = 128
@@ -139,7 +139,6 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         total_num_scheduled_tokens=total_num_scheduled_tokens,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -199,7 +198,6 @@ def test_update_states_request_finished(model_runner, dist_init):
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
         finished_req_ids={req_id},
         free_encoder_mm_hashes=[],
     )
@@ -229,7 +227,6 @@ def test_update_states_request_resumed(model_runner, dist_init):
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -256,7 +253,6 @@ def test_update_states_request_resumed(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -333,7 +329,6 @@ def test_update_states_no_changes(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -368,7 +363,6 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -521,7 +515,8 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     assert page_size == 262144
     num_expected_blocks = 40960  # 20GB / 256KB (page_size) / 2 (num layers)
     assert num_expected_blocks == available_memory // page_size // 2
-    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory])[0]
+    global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, [kv_cache_spec])
+    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory], global_kv_cache_groups)[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     # PR #51718 coalesces same-spec layers into ONE backing KVCacheTensor
     # (layers=[layer_0, layer_1]) whose size spans the full allocation.
@@ -597,7 +592,8 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     # which is twice as many as without KV sharing
     page_size = 128 * 8 * 64 * 2 * 2  # 128 for block_size, 2 for K+V, 2 for bfloat16
     num_expected_blocks = available_memory / page_size  # 20GB / 256KB
-    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory])[0]
+    global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, [kv_cache_spec])
+    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory], global_kv_cache_groups)[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
     # Each layer now has twice the available memory for KV cache
@@ -713,3 +709,69 @@ def test_use_graphs_enforce_eager(model_runner):
         assert model_runner._use_graphs(attn_metadata, 1) is False
     finally:
         model_runner.model_config.enforce_eager = orig
+
+
+def _attn_kv_layout(num_blocks, spec_block_sizes, kernel_block_size, hybrid_cache):
+    """One attention layer per KV cache group, with the flat KV tensors that
+    initialize_kv_cache allocates: the hybrid cache sizes them in kernel
+    blocks, the other layouts in KV-manager blocks."""
+    kv_cache_groups, kv_caches = [], {}
+    for gid, spec_block_size in enumerate(spec_block_sizes):
+        spec = FullAttentionSpec(block_size=spec_block_size, num_kv_heads=1, head_size=1, dtype=torch.bfloat16)
+        kv_cache_groups.append(KVCacheGroupSpec(layer_names=[f"layer.{gid}"], kv_cache_spec=spec))
+        if hybrid_cache:
+            num_slots = (num_blocks * (spec_block_size // kernel_block_size) + 1) * kernel_block_size
+        else:
+            num_slots = (num_blocks + 1) * spec_block_size
+        cache = torch.empty((num_slots, 1, 1), dtype=torch.bfloat16, device="cpu")
+        kv_caches[f"layer.{gid}"] = (cache, cache, None, None)
+    return kv_cache_groups, kv_caches
+
+
+@pytest.mark.parametrize("hybrid_cache", [True, False])
+# 128 is not split; the others are KV-manager block sizes of hybrid models,
+# 4 to 17 kernel blocks each.
+@pytest.mark.parametrize("spec_block_size", [128, 512, 640, 896, 1152, 1664, 2176])
+def test_attn_pad_block_id_follows_real_blocks(hybrid_cache, spec_block_size):
+    """Mamba-like models split their KV-manager blocks into 128-token kernel
+    blocks in every layout; padded decode lanes must write past all real
+    slots."""
+    num_blocks, kernel_block_size = 10, 128
+    kv_cache_groups, kv_caches = _attn_kv_layout(num_blocks, [spec_block_size], kernel_block_size, hybrid_cache)
+    pad_block_id = attn_pad_block_id(num_blocks, kernel_block_size, kv_cache_groups, {0: kernel_block_size}, kv_caches)
+    assert pad_block_id == num_blocks * (spec_block_size // kernel_block_size)
+    # The slots _create_decode_input_data cycles padded decode lanes through.
+    pad_slot_base = pad_block_id * kernel_block_size
+    pad_slots = range(pad_slot_base, pad_slot_base + kernel_block_size)
+    assert pad_slots.start >= num_blocks * spec_block_size
+    assert pad_slots.stop <= kv_caches["layer.0"][0].shape[0]
+
+
+def test_attn_pad_block_id_unsplit_block_tables():
+    """Without kernel block sizes the block tables are not split, and the pad
+    block is the extra KV-manager block."""
+    num_blocks, block_size = 10, 128
+    kv_cache_groups, kv_caches = _attn_kv_layout(num_blocks, [block_size], block_size, hybrid_cache=False)
+    assert attn_pad_block_id(num_blocks, block_size, kv_cache_groups, {}, kv_caches) == num_blocks
+
+
+def test_attn_pad_block_id_rejects_mixed_splits():
+    kv_cache_groups, kv_caches = _attn_kv_layout(10, [256, 640], 128, hybrid_cache=True)
+    with pytest.raises(ValueError, match="different numbers of kernel blocks"):
+        attn_pad_block_id(10, 128, kv_cache_groups, {0: 128, 1: 128}, kv_caches)
+
+
+def test_attn_pad_block_id_rejects_pad_block_in_real_slots():
+    """A pad id counted in KV-manager blocks while slots are counted in kernel
+    blocks lands in a real block."""
+    kv_cache_groups, kv_caches = _attn_kv_layout(10, [512], 128, hybrid_cache=False)
+    with pytest.raises(RuntimeError, match="must follow its 5120 real slots"):
+        attn_pad_block_id(10, 128, kv_cache_groups, {}, kv_caches)
+
+
+def test_attn_pad_block_id_rejects_missing_pad_block():
+    kv_cache_groups, kv_caches = _attn_kv_layout(10, [512], 128, hybrid_cache=True)
+    cache = kv_caches["layer.0"][0][:-128]
+    kv_caches["layer.0"] = (cache, cache, None, None)
+    with pytest.raises(RuntimeError, match="within its 5120 allocated ones"):
+        attn_pad_block_id(10, 128, kv_cache_groups, {0: 128}, kv_caches)

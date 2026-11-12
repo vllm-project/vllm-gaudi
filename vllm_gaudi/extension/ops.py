@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import math
 import habana_frameworks.torch.core as htcore
 from vllm_gaudi.extension.runtime import get_config
-from vllm_gaudi.extension.utils import get_kv_fetch_extra_args
+from vllm_gaudi.extension.utils import FP8Matmul, get_kv_fetch_extra_args
 from vllm_gaudi.extension.scales import ConvertScaleToHwAligned
 import vllm.model_executor.layers.quantization as vllm_quant
 import habana_frameworks.torch.utils.experimental as htexp
@@ -29,7 +29,6 @@ FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 if is_hpu_gaudi2:
     FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
 
-import functools
 import logging
 import os
 
@@ -62,6 +61,9 @@ def _as_activation_str(activation):
     """Normalize activation to string for HPU custom op."""
     if isinstance(activation, MoEActivation):
         activation = activation.value
+    if activation == "situ":
+        from vllm_gaudi.ops.hpu_situ_moe import situ_fused_alias
+        return situ_fused_alias() or activation
     return _MOE_ACTIVATION_ALIASES.get(activation, activation)
 
 
@@ -155,7 +157,13 @@ def pipelined_pa(attn, value, block_bias, block_groups, block_mapping, sink, bat
             block_adjustment = block_adjustment.to(value.dtype)
         sum_adjusted = block_sums.mul(block_adjustment)
 
-        # Sum block's sums that belongs to the same sequences
+        # Sum block's sums that belongs to the same sequences.
+        # With an FP8 KV cache the b2b ops are unit-scale FP8Matmul, which would cast these softmax
+        # denominators to FP8. On Gaudi2 that corrupts batched decode, so keep this reduction in the native dtype.
+        if isinstance(block2batch_matmul_op, FP8Matmul):
+            block2batch_matmul_op = torch.matmul
+        if isinstance(batch2block_matmul_op, FP8Matmul):
+            batch2block_matmul_op = torch.matmul
         group_sum_adjusted = block2batch(sum_adjusted, block_mapping, block2batch_matmul_op)
         group_sum_adjusted = batch2block(group_sum_adjusted, block_mapping, batch2block_matmul_op)
         sum_adjusted = sum_adjusted.view(*adjustment_target_shape)
@@ -1392,40 +1400,45 @@ class VllmMixtureOfExpertsOpFP8PerChannel(VllmMixtureOfExpertsOpBase):
         w13_weight_scale = self._cached_w13_scale_views
         w2_weight_scale = self._cached_w2_scale_views
 
+        # Call the overloads by name. The overload packet tries other overloads first,
+        # and a mismatch on a tensor argument (e.g. a float d_scale_hidden_states) formats
+        # that tensor into the error message, which forces a device sync on every call.
         if self.w13_input_scale is None:
             x_fp8, x_scale = dynamic_quant(x)
-            final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
-                                                                   expert_routing_table=topk_ids.to(torch.int64),
-                                                                   router_weights=topk_weights.to(x.dtype),
-                                                                   w12=w13_list,
-                                                                   w3=w2_list,
-                                                                   d_scale_hidden_states=x_scale,
-                                                                   d_scale_w12=w13_weight_scale,
-                                                                   d_scale_w3=w2_weight_scale,
-                                                                   permuted_weights=permuted_weights,
-                                                                   activation=activation,
-                                                                   experts_min=self.experts_min,
-                                                                   experts_max=self.experts_max,
-                                                                   **kwargs)
+            final_hidden_states = torch.ops.hpu.mixture_of_experts.fp8_fused_weights_dynamic(
+                hidden_states=x_fp8,
+                expert_routing_table=topk_ids.to(torch.int64),
+                router_weights=topk_weights.to(x.dtype),
+                w12=w13_list,
+                w3=w2_list,
+                d_scale_hidden_states=x_scale,
+                d_scale_w12=w13_weight_scale,
+                d_scale_w3=w2_weight_scale,
+                permuted_weights=permuted_weights,
+                activation=activation,
+                experts_min=self.experts_min,
+                experts_max=self.experts_max,
+                **kwargs)
         else:
             x_scale = self.w13_input_scale.data
             # w2_input_scale should be List[Tensor] when static and fused
             w2_input_scale = [self.w2_input_scale[i] for i in range(self.num_experts)]
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0 / x_scale, False, False, torch.float8_e4m3fn)[0]
-            final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x_fp8,
-                                                                   expert_routing_table=topk_ids.to(torch.int64),
-                                                                   router_weights=topk_weights.to(x.dtype),
-                                                                   w12=w13_list,
-                                                                   w3=w2_list,
-                                                                   d_scale_hidden_states=x_scale,
-                                                                   d_scale_intermediate_hidden_states=w2_input_scale,
-                                                                   d_scale_w12=w13_weight_scale,
-                                                                   d_scale_w3=w2_weight_scale,
-                                                                   permuted_weights=permuted_weights,
-                                                                   activation=activation,
-                                                                   experts_min=self.experts_min,
-                                                                   experts_max=self.experts_max,
-                                                                   **kwargs)
+            final_hidden_states = torch.ops.hpu.mixture_of_experts.fp8_fused_weights(
+                hidden_states=x_fp8,
+                expert_routing_table=topk_ids.to(torch.int64),
+                router_weights=topk_weights.to(x.dtype),
+                w12=w13_list,
+                w3=w2_list,
+                d_scale_hidden_states=x_scale,
+                d_scale_intermediate_hidden_states=w2_input_scale,
+                d_scale_w12=w13_weight_scale,
+                d_scale_w3=w2_weight_scale,
+                permuted_weights=permuted_weights,
+                activation=activation,
+                experts_min=self.experts_min,
+                experts_max=self.experts_max,
+                **kwargs)
 
         return final_hidden_states
 
@@ -1564,19 +1577,37 @@ class MoeWNA16Matmul(torch.nn.Module):
         raise NotImplementedError()
 
 
-@functools.cache
+# Schema of int4_fused_weights once found. A miss is not cached: a lookup made
+# before the bridge registered its ops must not disable the native int4 path for
+# the rest of the process.
+_CACHED_INT4_MOE_SCHEMA = None
+
+
 def _int4_moe_schema():
     """Schema of the bridge's int4_fused_weights overload, or None if it has none."""
-    try:
-        return torch.ops.hpu.mixture_of_experts.int4_fused_weights._schema
-    except (AttributeError, RuntimeError):
-        # Bridge predates the int4_fused_weights overload altogether.
-        return None
+    global _CACHED_INT4_MOE_SCHEMA
+    if _CACHED_INT4_MOE_SCHEMA is None:
+        try:
+            _CACHED_INT4_MOE_SCHEMA = torch.ops.hpu.mixture_of_experts.int4_fused_weights._schema
+        except (AttributeError, RuntimeError):
+            # Bridge predates the int4_fused_weights overload altogether.
+            return None
+    return _CACHED_INT4_MOE_SCHEMA
 
 
 def int4_moe_native_available() -> bool:
     """Whether this bridge provides mixture_of_experts.int4_fused_weights at all."""
     return _int4_moe_schema() is not None
+
+
+def int4_moe_supports_non_gated() -> bool:
+    """Whether the bridge's int4_fused_weights overload takes is_gated.
+
+    Without it the int4 kernel is gated-only, and non-gated experts need w1
+    mirrored into w3 (see HPUCompressedTensorsWNA16MoEMethod._mirror_w1_into_w3).
+    """
+    schema = _int4_moe_schema()
+    return schema is not None and any(arg.name == "is_gated" for arg in schema.arguments)
 
 
 # compressed-tensors stores 4-bit codes as uint4b8 (value + 8), while
@@ -1587,7 +1618,11 @@ _UINT4B8_TO_INT4_XOR = -2004318072  # 0x88888888 as a signed int32
 
 def rebias_uint4b8_to_int4_(packed: torch.Tensor) -> torch.Tensor:
     """In place: int32-packed uint4b8 codes -> signed int4 nibbles (self-inverse)."""
-    return packed.bitwise_xor_(torch.tensor(_UINT4B8_TO_INT4_XOR, dtype=torch.int32, device=packed.device))
+    # The bridge keeps an int scalar exact (int64/double, never float32) and
+    # caches its device copy, so no mask tensor is built per call. no_grad lets
+    # callers pass the Parameter itself instead of its .data.
+    with torch.no_grad():
+        return packed.bitwise_xor_(_UINT4B8_TO_INT4_XOR)
 
 
 class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
@@ -1602,6 +1637,7 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
     * native_int4=True: pass the packed int4 straight to
       .int4_fused_weights overload, so nothing is dequantized. Requires the codes
       rebiased to signed nibbles, which the quant method does once at load.
+      Only this path can run non-gated experts natively (is_gated=False).
     """
 
     def __init__(self, num_experts: int, experts_min: int = 0, experts_max: int = 8, native_int4: bool = False):
@@ -1613,6 +1649,10 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         self.experts_min = experts_min
         self.experts_max = experts_max
         self.native_int4 = native_int4
+        # False makes the int4 kernel skip the gate split+multiply, for non-gated
+        # experts whose w13 is the single I-wide up-projection. Set by the quant
+        # method; gated layers keep True and their kernel call is unchanged.
+        self.is_gated = True
         # Set once the packed codes were rebiased to signed nibbles for the int4
         # kernel. convert_from_uint4 would then decode them wrongly, so the bf16
         # dequant path must refuse to run.
@@ -1713,6 +1753,9 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         if self._cached_int4 is None:
             self._cache_weight_lists()
         w13_p, w2_p, w13_s, w2_s = self._cached_int4
+        # Passed only when non-gated, so gated layers keep working on bridges
+        # whose int4_fused_weights has no is_gated argument.
+        extra = {} if self.is_gated else {"is_gated": False}
 
         def call(lo, hi, sl):
             return torch.ops.hpu.mixture_of_experts.int4_fused_weights(
@@ -1735,6 +1778,7 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
                 # Codes are read as signed int4 nibbles, not compressed-tensors'
                 # uint4b8 (value + 8) -- hence the rebias at load.
                 is_signed=True,
+                **extra,
             )
 
         if self.moe_n_slice == 1:
@@ -1806,6 +1850,54 @@ class VllmMixtureOfExpertsOpWNA16(torch.nn.Module):
         return final_hidden_states
 
 
+# MXFP4 MoE op calls of VllmMixtureOfExpertsOpMXFP4. The ops only run in graph mode: an eager caller wraps them in
+# torch.compile, a caller inside a compiled region traces them into its graph (see _get_compiled_forward).
+def _mxfp4_bias_fused_fwd(hidden_states, expert_routing_table, router_weights, w12_list, w3_list, w12_bias, w3_bias,
+                          d_scale_w12, d_scale_w3, block_size, experts_min, experts_max, chunk_size, total_experts,
+                          alpha, limit):
+    return torch.ops.hpu.mixture_of_experts.bias_mxfp4_fused_weights(
+        hidden_states,
+        expert_routing_table,
+        router_weights,
+        w12_list,
+        w3_list,
+        w12_bias,
+        w3_bias,
+        d_scale_w12,
+        d_scale_w3,
+        block_size=block_size,
+        permuted_weights=True,
+        experts_min=experts_min,
+        experts_max=experts_max,
+        is_fp4=True,
+        chunk_size=chunk_size,
+        total_experts=total_experts,
+        alpha=alpha,
+        limit=limit,
+    )
+
+
+def _mxfp4_fused_fwd(hidden_states, expert_routing_table, router_weights, w12_list, w3_list, d_scale_w12, d_scale_w3,
+                     block_size, activation, experts_min, experts_max, chunk_size, total_experts):
+    return torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights(
+        hidden_states,
+        expert_routing_table,
+        router_weights,
+        w12_list,
+        w3_list,
+        d_scale_w12,
+        d_scale_w3,
+        block_size=block_size,
+        permuted_weights=True,
+        activation=activation,
+        experts_min=experts_min,
+        experts_max=experts_max,
+        is_fp4=True,
+        chunk_size=chunk_size,
+        total_experts=total_experts,
+    )
+
+
 class MoeMXFP4Matmul(torch.nn.Module):
     """Weight holder for packed MXFP4 weights + E8M0 scales (+ optional bias)."""
 
@@ -1824,6 +1916,19 @@ class MoeMXFP4Matmul(torch.nn.Module):
     def set_bias(self, b: torch.Tensor):
         """b: bf16 per-expert bias (GPT-OSS SwiGLU-OAI), shape (out_features,)."""
         self.bias = b
+
+
+_mxfp4_moe_op_logged = False
+
+
+def _log_mxfp4_moe_op_once(in_graph_call: bool) -> None:
+    """Log once per process whether the Kimi-K3 in-graph call gate is on for the MXFP4 MoE op."""
+    global _mxfp4_moe_op_logged
+    if not _mxfp4_moe_op_logged:
+        _mxfp4_moe_op_logged = True
+        # vLLM installs handlers on the "vllm" logger tree only, so the logger must live under it.
+        logging.getLogger("vllm.gaudi.kimi_patches").info(
+            "VllmMixtureOfExpertsOpMXFP4 built (first layer in this process): in_graph_call=%s", in_graph_call)
 
 
 class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
@@ -1847,9 +1952,14 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
                  has_bias: bool = False,
                  alpha: float = 1.702,
                  limit: float = 7.0,
-                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None):
+                 dispatch_fn: Callable[[torch.Tensor], torch.Tensor] = None,
+                 in_graph_call: bool = False):
         super().__init__(global_num_experts, num_total_experts, experts_min, experts_max, None, dispatch_fn)
         self.block_size = block_size
+        # Set for Kimi-K3 layers only: inside a compiled region call the op directly (see _get_compiled_forward).
+        self.in_graph_call = in_graph_call
+        if in_graph_call:
+            _log_mxfp4_moe_op_once(in_graph_call)
         # GPT-OSS SwiGLU-OAI: per-expert bias on both projections + alpha/limit.
         # When has_bias is set, the op applies gpt_swiglu (clamp ±limit, alpha-silu)
         # internally and the "activation" string is ignored.
@@ -1892,60 +2002,15 @@ class VllmMixtureOfExpertsOpMXFP4(VllmMixtureOfExpertsOpBase):
         return ret
 
     def _get_compiled_forward(self):
+        # Kimi-K3 (in_graph_call): inside a compiled region call the op directly. Building the nested torch.compile
+        # wrapper there is a graph break ('torch.compile call with > 1 args'), and Dynamo keeps the frames split at
+        # that break for every layer traced before the wrapper existed, even after it is cached. Other models keep
+        # the upstream behaviour (nested wrapper), which is faster for them.
+        if self.in_graph_call and torch.compiler.is_compiling():
+            return _mxfp4_bias_fused_fwd if self.has_bias else _mxfp4_fused_fwd
         if self._compiled_forward is None:
-            if self.has_bias:
-
-                @torch.compile(backend="hpu_backend")
-                def _mxfp4_bias_fused_fwd(hidden_states, expert_routing_table, router_weights, w12_list, w3_list,
-                                          w12_bias, w3_bias, d_scale_w12, d_scale_w3, block_size, experts_min,
-                                          experts_max, chunk_size, total_experts, alpha, limit):
-                    return torch.ops.hpu.mixture_of_experts.bias_mxfp4_fused_weights(
-                        hidden_states,
-                        expert_routing_table,
-                        router_weights,
-                        w12_list,
-                        w3_list,
-                        w12_bias,
-                        w3_bias,
-                        d_scale_w12,
-                        d_scale_w3,
-                        block_size=block_size,
-                        permuted_weights=True,
-                        experts_min=experts_min,
-                        experts_max=experts_max,
-                        is_fp4=True,
-                        chunk_size=chunk_size,
-                        total_experts=total_experts,
-                        alpha=alpha,
-                        limit=limit,
-                    )
-
-                self._compiled_forward = _mxfp4_bias_fused_fwd
-            else:
-
-                @torch.compile(backend="hpu_backend")
-                def _mxfp4_fused_fwd(hidden_states, expert_routing_table, router_weights, w12_list, w3_list,
-                                     d_scale_w12, d_scale_w3, block_size, activation, experts_min, experts_max,
-                                     chunk_size, total_experts):
-                    return torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights(
-                        hidden_states,
-                        expert_routing_table,
-                        router_weights,
-                        w12_list,
-                        w3_list,
-                        d_scale_w12,
-                        d_scale_w3,
-                        block_size=block_size,
-                        permuted_weights=True,
-                        activation=activation,
-                        experts_min=experts_min,
-                        experts_max=experts_max,
-                        is_fp4=True,
-                        chunk_size=chunk_size,
-                        total_experts=total_experts,
-                    )
-
-                self._compiled_forward = _mxfp4_fused_fwd
+            fwd = _mxfp4_bias_fused_fwd if self.has_bias else _mxfp4_fused_fwd
+            self._compiled_forward = torch.compile(fwd, backend="hpu_backend")
         return self._compiled_forward
 
     def forward(self, hidden_states, expert_routing_table, router_weights, permuted_weights=True, activation="silu"):
