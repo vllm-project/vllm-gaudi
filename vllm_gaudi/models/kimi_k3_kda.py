@@ -190,7 +190,8 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                     mask = mask.reshape(num_seqs, seq_len)
                 chunk_size, vec_chunks = _prefill_settings()
                 sub_chunk = _intra_sub_chunk()
-                # a strided view would cross the graph break below (strided_view fails in Synapse)
+                # gate_proj is a strided slice of ``projected`` and is used after the graph break below; the resume
+                # graph would receive it as a view with storage offset (strided_view fails in Synapse)
                 gate_proj = gate_proj.contiguous()
                 core, slots, conv_rows, ssm_rows = kda_prefill_step(mixed_qkv.reshape(num_seqs, seq_len, -1),
                                                                     raw_g.reshape(num_seqs, seq_len, -1),

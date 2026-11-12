@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig)
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -42,6 +42,7 @@ def _scheduler(cls, max_num_batched_tokens=MNBT, max_model_len=2048, long_prefil
     vllm_config = VllmConfig(scheduler_config=scheduler_config,
                              model_config=model_config,
                              cache_config=cache_config,
+                             device_config=DeviceConfig("cpu"),
                              parallel_config=ParallelConfig())
     num_blocks = 1024
     kv_cache_config = KVCacheConfig(
