@@ -2198,7 +2198,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.is_kimi_k3:
             # The scheduler dedups identical mm_hash values within a step, so the payload of an item may be
             # held by another request of the step. Encode only items overlapping the tokens scheduled here.
-            payloads = {}
+            payloads: dict[str, Any] = {}
             for req_id, input_ids in scheduler_output.scheduled_encoder_inputs.items():
                 req_state = self.requests.get(req_id)
                 if req_state is None:

@@ -416,18 +416,18 @@ def _chunk_start_states(s_t: torch.Tensor, tw: torch.Tensor, tu: torch.Tensor,
         p.append(torch.bmm(a_i, p[-1]))
         c.append(torch.baddbmm(b_i, a_i, c[-1]))
     x = s_t.reshape(bsz * heads, kdim, vdim)
-    xs = [x]
+    block_starts = [x]
     for p_j, c_j in zip(p[-1].reshape(num_blocks, bsz * heads, kdim, kdim)[:-1],
                         c[-1].reshape(num_blocks, bsz * heads, kdim, vdim)[:-1]):
         x = torch.baddbmm(c_j, p_j, x)
-        xs.append(x)
-    xs = torch.stack(xs)  # [num_blocks, B*H, K, V]
+        block_starts.append(x)
+    xs = torch.stack(block_starts)  # [num_blocks, B*H, K, V]
     xs_rows = xs.flatten(0, 1)
-    starts = [xs] + [
+    block_chunk_starts = [xs] + [
         torch.baddbmm(c_i, p_i, xs_rows).reshape(num_blocks, bsz * heads, kdim, vdim)
         for p_i, c_i in zip(p[:-1], c[:-1])
     ]
-    starts = torch.stack(starts, 1)
+    starts = torch.stack(block_chunk_starts, 1)
     starts = starts.reshape(num_blocks * block, bsz, heads, kdim, vdim)[:num_chunks]
     # final state: one step from the last chunk start (the padded maps are not identities)
     a_last = eye * gamma_last[-1] - tw[-1]
