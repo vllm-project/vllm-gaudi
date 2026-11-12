@@ -56,6 +56,29 @@ jobs:
           ref: ${{ inputs.head_sha }}
           clean: true # Ensure a clean workspace before checkout
 
+      - name: Check draft and behind-base state
+        # Same check as in pre_merge_hpu_test_build, for older trigger runs
+        # with skip_tests, where that job does not run.
+        if: inputs.nixl_changed == '' && inputs.skip_tests == 'true'
+        env:
+          IS_DRAFT: ${{ inputs.is_draft }}
+          BASE_REF: ${{ inputs.base_ref }}
+        run: |
+          if [[ "$IS_DRAFT" == "true" ]]; then
+            echo "::error::This is a draft PR. Mark it as ready for review to run the CI."
+            exit 1
+          fi
+          # The checkout is shallow; the ancestry check needs full history.
+          unshallow=()
+          if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+            unshallow=(--unshallow)
+          fi
+          git fetch --no-tags "${unshallow[@]}" origin "refs/heads/$BASE_REF"
+          if ! git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "::error::The branch is behind $BASE_REF. Merge or rebase to get the latest changes."
+            exit 1
+          fi
+
       - name: Setup Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
