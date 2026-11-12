@@ -147,21 +147,24 @@ jobs:
                     owner: context.repo.owner, repo: context.repo.repo, run_id: id,
                     filter: 'latest', per_page: 100,
                   });
-                  const lint = jobs.find(j => j.name === 'pre-commit' &&
-                    j.status === 'completed' && j.conclusion !== 'success');
-                  if (lint) {
-                    await cancelDispatchedRun(id, `pre-commit ${lint.conclusion}`);
-                    core.setFailed(`pre-commit ${lint.conclusion}: ${run.html_url}`);
-                    return;
-                  }
                   const gates = jobs.filter(j => j.name === GATE);
                   if (gates.length > 1) {
                     core.setFailed(`Found ${gates.length} ${GATE} jobs, expected one: ${run.html_url}`);
                     return;
                   }
                   if (gates.length === 1 && gates[0].status === 'completed') {
+                    // Only the comment and cleanup jobs are left: let the run
+                    // finish, so a failed run keeps its 'failure' conclusion.
+                    core.setOutput('gate_done', 'true');
                     if (gates[0].conclusion !== 'success')
                       core.setFailed(`${GATE} ${gates[0].conclusion}: ${run.html_url}`);
+                    return;
+                  }
+                  const lint = jobs.find(j => j.name === 'pre-commit' &&
+                    j.status === 'completed' && j.conclusion !== 'success');
+                  if (lint) {
+                    await cancelDispatchedRun(id, `pre-commit ${lint.conclusion}`);
+                    core.setFailed(`pre-commit ${lint.conclusion}: ${run.html_url}`);
                     return;
                   }
                   if (run.status === 'completed') {
@@ -340,7 +343,8 @@ jobs:
             else await waitForRun(runId);
 
       - name: Cancel dispatched run if trigger was cancelled or failed
-        if: always() && steps.dispatch.outputs.run_id != ''
+        # Not after a finished gate: the run is then done apart from cleanup.
+        if: always() && steps.dispatch.outputs.run_id != '' && steps.dispatch.outputs.gate_done != 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           RUN_ID: ${{ steps.dispatch.outputs.run_id }}
