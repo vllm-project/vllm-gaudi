@@ -164,26 +164,44 @@ def _removed(module: str) -> bool:
 
 
 def test_no_imports_of_code_removed_with_model_runner_v1():
-    """Every import of upstream V1 code must go to the vendored copy, or be guarded for the old vLLM pin."""
+    """Every import (or alias attribute read) of removed V1 code must use the vendored copy, or be guarded."""
     offenders = []
     for path in sorted(p for d in ("vllm_gaudi", "tests") for p in (REPO / d).rglob("*.py")):
         rel = str(path.relative_to(REPO))
         tree = ast.parse(path.read_text(), filename=rel)
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        # Local names bound to a module in REMOVED_NAMES, so `alias.removed_name` reads are caught too.
+        aliases: dict[str, str] = {}
         for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                aliases.update({a.asname: a.name for a in node.names if a.asname and a.name in REMOVED_NAMES})
+            elif isinstance(node, ast.ImportFrom):
+                module = _absolute(node.module, node.level, path)
+                aliases.update({
+                    a.asname or a.name: f"{module}.{a.name}"
+                    for a in node.names if f"{module}.{a.name}" in REMOVED_NAMES
+                })
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.stmt, ast.expr)):  # only these carry a line number
+                continue
+            lineno = node.lineno
             hits: list[tuple[str, str | None]]
             if isinstance(node, ast.Import):
                 hits = [(a.name, None) for a in node.names if _removed(a.name)]
             elif isinstance(node, ast.ImportFrom):
                 module = _absolute(node.module, node.level, path)
                 hits = [
-                    (module, a.name) for a in node.names
+                    (module, f"import {a.name}") for a in node.names
                     if _removed(module) or _removed(f"{module}.{a.name}") or a.name in REMOVED_NAMES.get(module, ())
                 ]
+            elif (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)
+                  and isinstance(node.value, ast.Name)
+                  and node.attr in REMOVED_NAMES.get(aliases.get(node.value.id, ""), ())):
+                hits = [(aliases[node.value.id], f"attribute {node.attr}")]
             else:
                 continue
-            for module, name in hits:
+            for module, what in hits:
                 if (rel, module) not in PENDING and not _guarded(node, parents):
-                    offenders.append(f"{rel}:{node.lineno}: {module}" + (f" import {name}" if name else ""))
+                    offenders.append(f"{rel}:{lineno}: {module}" + (f" {what}" if what else ""))
     assert not offenders, ("imports of vLLM code removed in aac1b2a4f3; use vllm_gaudi.v1._vendored instead:\n" +
                            "\n".join(offenders))
