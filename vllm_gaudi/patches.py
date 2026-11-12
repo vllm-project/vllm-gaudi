@@ -1535,6 +1535,11 @@ def _patch_kimi_k3_arch() -> None:
         _patch_kimi_attn_res()
         _patch_kimi_linear_weights()
         _patch_mla_bind_kv_cache()
+        from vllm.model_executor.models import config as _model_config
+        k3_config_cls = getattr(_model_config, "KimiK3ForConditionalGenerationConfig", None)
+        if k3_config_cls is not None:
+            # K3.1 shares the K3 quantization hook (MXFP4 experts instead of compressed-tensors)
+            _model_config.MODELS_CONFIG_MAP.setdefault("KimiK31ForConditionalGeneration", k3_config_cls)
         import vllm.models.kimi_k3 as k3_pkg
         import vllm.models.kimi_k3.amd.linear as _amd_linear
         import vllm.models.kimi_k3.amd.mla as _amd_mla
