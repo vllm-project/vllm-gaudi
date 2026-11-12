@@ -78,7 +78,7 @@ def test_auto_mode_leaves_non_kimi_models_on_the_upstream_loader(monkeypatch):
     monkeypatch.delenv("VLLM_HPU_DROP_WEIGHT_PAGE_CACHE", raising=False)
     original = default_loader.safetensors_weights_iterator
     messages = []
-    monkeypatch.setattr(wpc.logger, "info", lambda msg, *args: messages.append(msg % args))
+    monkeypatch.setattr(wpc.logger, "debug", lambda msg, *args: messages.append(msg % args))
     with wpc.drop_weight_page_cache_during_load(_config("Llama4ForConditionalGeneration")):
         assert default_loader.safetensors_weights_iterator is original
     assert any("Weight page cache: disabled" in m for m in messages)

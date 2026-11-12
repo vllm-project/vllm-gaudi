@@ -92,11 +92,33 @@ class HpuPlatform(Platform):
 
     # VLLM_* variables read by vllm-gaudi outside vllm_gaudi.envs and extension/features.py.
     gaudi_env_vars: tuple[str, ...] = (
+        "VLLM_BUILD",
+        "VLLM_CONFIG_HIDDEN_LAYERS",
+        "VLLM_COS_SIN_RECOMPUTE",
+        "VLLM_DISABLE_MARK_SCALES_AS_CONST",
+        "VLLM_DYNAMIC_KV_QUANT",
         "VLLM_EXPONENTIAL_BUCKETING",
+        "VLLM_FP32_SOFTMAX_VISION",
         "VLLM_FULL_WARMUP",
+        "VLLM_GAUDI_SKIP_SLEEP_HOST_GUARD",
+        "VLLM_GAUDI_SLEEP_HOST_RESERVE_MB",
+        "VLLM_GDN_COMPUTE_FP32",
+        "VLLM_GDN_EXACT_SOLVE",
+        "VLLM_GDN_LEGACY_PHASE_B",
         "VLLM_GRAPH_RESERVED_MEM",
         "VLLM_HPU_BIND_NUMA",
+        "VLLM_HPU_DROP_WEIGHT_PAGE_CACHE",
+        "VLLM_KV_CONNECTOR",
+        "VLLM_KV_TRANSFER_CONFIG",
+        "VLLM_MAMBA_USE_PYTORCH",
+        "VLLM_MAMBA_USE_SELECTIVE_STATE_UPDATE_REF_PT",
+        "VLLM_MULTIMODAL_BUCKETS",
         "VLLM_MULTIMODAL_RESOLUTIONS",
+        "VLLM_NIXL_DEVICE_TO_DEVICE",
+        "VLLM_TORCH_PROFILER_DIR",
+        "VLLM_USE_FAKE_HPU",
+        "VLLM_USE_HYBRID_CACHE",
+        "VLLM_USE_NAIVE_MAMBA_CACHE_SHARING",
         "VLLM_WEIGHT_LOAD_FORCE_SYNC",
     )
 
