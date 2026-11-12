@@ -147,6 +147,8 @@ _GAUDI_ENV = {
     "VLLM_CONTIGUOUS_PA": "false",
     "VLLM_PROFILE_DECODE": "1,1024",
     "VLLM_SKIP_WARMUP": "true",
+    "VLLM_BUILD": "1.0.0",
+    "VLLM_HW": "gaudi3",
 }
 
 

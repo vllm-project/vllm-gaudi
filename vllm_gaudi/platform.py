@@ -92,7 +92,6 @@ class HpuPlatform(Platform):
 
     # VLLM_* variables read by vllm-gaudi outside vllm_gaudi.envs and extension/features.py.
     gaudi_env_vars: tuple[str, ...] = (
-        "VLLM_BUILD",
         "VLLM_CONFIG_HIDDEN_LAYERS",
         "VLLM_COS_SIN_RECOMPUTE",
         "VLLM_DISABLE_MARK_SCALES_AS_CONST",
@@ -127,9 +126,10 @@ class HpuPlatform(Platform):
         # Same checks as the upstream Platform.validate_environ, plus the VLLM_* variables of vllm-gaudi.
         import vllm_gaudi.envs as gaudi_envs
         from vllm_gaudi.extension import features
+        from vllm_gaudi.extension.environment import get_environment
         known = set(envs.environment_variables) | set(gaudi_envs.environment_variables) | set(cls.gaudi_env_vars)
         known |= set(features.get_user_flags()) | set(features.get_experimental_flags())
-        known |= set(features.get_features()[1])
+        known |= set(features.get_features()[1]) | set(get_environment()[1])
         removed = getattr(envs, "removed_environment_variables", {})
         for env in os.environ:
             if hint := removed.get(env):
