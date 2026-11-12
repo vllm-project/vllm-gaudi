@@ -2,8 +2,13 @@
 from collections.abc import Iterable
 from functools import cached_property
 
+from vllm.logger import init_logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.request import Request, RequestStatus
+
+import vllm_gaudi.envs as gaudi_envs
+
+logger = init_logger("vllm.gaudi.hpu_async_scheduler")
 
 
 class HPUAsyncScheduler(AsyncScheduler):
@@ -31,6 +36,7 @@ class HPUAsyncScheduler(AsyncScheduler):
                 upstream by vllm-project/vllm#44558, which made EngineCore call
                 ``schedule(self._should_throttle_prefills())`` positionally.
         """
+        self._step_prefill_req_ids: set[str] = set()
         output = super().schedule(throttle_prefills)
         for request in self.running:
             # vLLM Request no longer exposes num_cached_tokens on newer
@@ -39,6 +45,41 @@ class HPUAsyncScheduler(AsyncScheduler):
                     and request.num_cached_tokens < request.num_external_computed_tokens):
                 request.num_cached_tokens = request.num_computed_tokens
         return output
+
+    @cached_property
+    def _min_prefill_chunk(self) -> int:
+        """``VLLM_HPU_MIN_PREFILL_CHUNK``: smallest first chunk of a new prefill
+        that may join a step already carrying another prefill (0 = off)."""
+        value = gaudi_envs.VLLM_HPU_MIN_PREFILL_CHUNK.strip()
+        if not value:
+            return 0
+        try:
+            return max(int(value), 0)
+        except ValueError:
+            logger.warning("Ignoring non-integer VLLM_HPU_MIN_PREFILL_CHUNK=%r; rule disabled.", value)
+            return 0
+
+    def _reserve_prefill_lookahead(self, request: Request, num_computed_tokens: int, num_new_tokens: int) -> int:
+        """HPU override: with ``VLLM_HPU_MIN_PREFILL_CHUNK`` set, defer a waiting
+        request whose first chunk would be smaller than
+        min(threshold, remaining tokens) while another prefill is in the step.
+
+        The HPU runner executes each prefill of a hybrid model as a separate
+        pass, so a small head chunk in the leftover budget costs a full extra
+        pass. Returning 0 makes the base scheduler requeue the request for the
+        next step. Running requests and lone prefills are never deferred.
+        """
+        num_new_tokens = super()._reserve_prefill_lookahead(request, num_computed_tokens, num_new_tokens)
+        min_chunk = self._min_prefill_chunk
+        if min_chunk == 0 or num_new_tokens == 0:
+            return num_new_tokens
+        remaining = request.num_tokens - num_computed_tokens
+        if (request.status != RequestStatus.RUNNING and num_new_tokens < min(min_chunk, remaining)
+                and any(r.request_id in self._step_prefill_req_ids for r in self.running)):
+            return 0
+        if remaining > 1:
+            self._step_prefill_req_ids.add(request.request_id)
+        return num_new_tokens
 
     def _update_requests_with_invalid_blocks(
         self,

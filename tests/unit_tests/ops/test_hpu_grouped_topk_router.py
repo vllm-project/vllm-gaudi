@@ -63,6 +63,7 @@ def router(monkeypatch):
            GroupedTopk=GroupedTopk,
            fused_grouped_topk=None)
     spec = importlib.util.spec_from_file_location("hpu_grouped_topk_router_under_test", _ROUTER_PATH)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -244,7 +245,7 @@ def test_hpu_grouped_topk_op_selects_the_same_experts(router):
 def test_kimi_k3_routing_compiles_to_one_graph_for_all_token_counts(router):
     dynamo.reset()
     counter = CompileCounter()
-    targets = set()
+    targets: set[str] = set()
 
     def backend(gm, example_inputs):
         targets.update(str(node.target) for node in gm.graph.nodes if node.op in ("call_function", "call_method"))
