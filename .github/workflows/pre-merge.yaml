@@ -17,10 +17,10 @@ on:
       head_sha:   { description: 'PR head commit SHA',            required: true, type: string }
       base_ref:   { description: 'PR target branch',              required: true, type: string }
       pr_title:   { description: 'PR title',                      required: false, type: string }
-      # is_merge_group is unused but stays declared, so dispatches from trigger
-      # runs that started before an update are still accepted.
       is_draft:   { description: 'Draft PR (true/false)',         required: true, type: string, default: 'false' }
       skip_tests:           { description: 'Skip Gaudi tests (true/false)',                  required: true,  type: string, default: 'false' }
+      # is_merge_group is always 'false' now but stays declared, so dispatches
+      # from trigger runs that started before an update are still accepted.
       is_merge_group:       { description: 'Triggered from merge queue (true/false)',        required: true,  type: string, default: 'false' }
       use_hourly_runner:    { description: 'Use hourly-ci pool (maintainers only)',          required: false, type: string, default: 'false' }
       vllm_ref_override:    { description: 'Override upstream vllm checkout ref (branch/tag/SHA; maintainers only)', required: false, type: string, default: '' }
