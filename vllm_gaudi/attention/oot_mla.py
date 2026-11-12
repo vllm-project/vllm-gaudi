@@ -383,7 +383,7 @@ class HPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                 raise ValueError("DCP query replication is not supported on HPU with the fused QKV-gate")
             if getattr(mla_modules, "skip_o_proj", False):
                 raise ValueError("skip_o_proj is not supported on HPU with the fused QKV-gate")
-            logger.info_once("HPU MLA wrapper forward: fused QKV-gate (Kimi-K3)")
+            logger.debug_once("HPU MLA wrapper forward: fused QKV-gate (Kimi-K3)")
 
     def get_input_quant_key(self):
         # The quantized-activation fusion (QuantizedActivation) is a ROCm/CUDA optimization; HPU always gets

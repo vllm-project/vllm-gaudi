@@ -119,7 +119,7 @@ def log_prefill_settings() -> None:
         logger().warning(
             "HPU_KIMI_KDA_INTRA_SUB_CHUNK=%d ignored: it must divide the KDA prefill chunk %d into "
             "at least two blocks; using the full pairwise path", sub_chunk, chunk_size)
-    logger().info("Kimi-K3 KDA prefill: chunk %d,%d, intra sub-chunk %d", chunk_size, vec_chunks, effective)
+    logger().debug("Kimi-K3 KDA prefill: chunk %d,%d, intra sub-chunk %d", chunk_size, vec_chunks, effective)
 
 
 def _state_indices(self, attn_metadata) -> torch.Tensor:

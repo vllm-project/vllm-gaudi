@@ -913,8 +913,8 @@ def install_inline_moe_forward_entry(model: torch.nn.Module) -> int:
         class_names.add(type(module).__name__)
         replaced += 1
     if replaced:
-        logger.info("Replaced the opaque moe_forward entry with the inline HPU path in %d MoE runners (%s), pid %d",
-                    replaced, ", ".join(sorted(class_names)), os.getpid())
+        logger.debug("Replaced the opaque moe_forward entry with the inline HPU path in %d MoE runners (%s), pid %d",
+                     replaced, ", ".join(sorted(class_names)), os.getpid())
     else:
         logger.warning("No MoE runner was switched to the inline HPU path (HPU_FUSED_MOE=%s), pid %d",
                        int(_MOE_COMPILE), os.getpid())

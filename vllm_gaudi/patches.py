@@ -969,7 +969,7 @@ def _kimi_patch_not_applicable(name: str) -> None:
 
 
 def _kimi_patches_log_installed() -> None:
-    _kimi_patch_logger().info("Kimi-K3 patches installed: %s", ", ".join(_KIMI_PATCHES_INSTALLED))
+    _kimi_patch_logger().debug("Kimi-K3 patches installed: %s", ", ".join(_KIMI_PATCHES_INSTALLED))
 
 
 def _kimi_patches_log_failed(only=None) -> None:
@@ -1073,7 +1073,7 @@ def ensure_kimi_k3_patches(model_config) -> None:
                 _KIMI_PATCHES_INSTALLED.remove(name)
             _KIMI_PATCHES_FAILED.setdefault(name, "not live on the vllm.models.kimi_k3 classes after the retry")
     log = _kimi_patch_logger()
-    log.info("Kimi-K3 patches installed (retry before get_model): %s", ", ".join(_KIMI_PATCHES_INSTALLED))
+    log.debug("Kimi-K3 patches installed (retry before get_model): %s", ", ".join(_KIMI_PATCHES_INSTALLED))
     missing = [name for name, ok in live.items() if not ok]
     if missing:
         log.warning("Kimi-K3 patches not live after the retry: %s", ", ".join(missing))

@@ -2201,7 +2201,7 @@ def test_prefill_settings_come_from_env(monkeypatch, value, expected):
 def test_log_prefill_settings_logs_the_parsed_values_once(monkeypatch, caplog):
     monkeypatch.setenv("HPU_KIMI_KDA_PREFILL_CHUNK", "64,0")
     module = _load_layer_module(monkeypatch, {"value": None})
-    with caplog.at_level(logging.INFO, logger="kimi_k3_kda_test"):
+    with caplog.at_level(logging.DEBUG, logger="kimi_k3_kda_test"):
         module.log_prefill_settings()
     assert [r.getMessage() for r in caplog.records] == ["Kimi-K3 KDA prefill: chunk 64,0, intra sub-chunk 0"]
 

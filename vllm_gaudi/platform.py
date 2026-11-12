@@ -90,31 +90,28 @@ class HpuPlatform(Platform):
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
-    # VLLM_* variables read by vllm-gaudi itself. Only used by the fallback below, when the vLLM Platform has no
-    # validate_environ. vLLM calls it in EngineArgs.create_engine_config before any ModelConfig exists, so it cannot
-    # be gated per model: every model takes the upstream check, and a Kimi-K3 run may log 'Unknown vLLM environment
-    # variable' warnings for these names (log only).
+    # VLLM_* variables read by vllm-gaudi outside vllm_gaudi.envs and extension/features.py.
     gaudi_env_vars: tuple[str, ...] = (
-        "VLLM_BUCKETING_FROM_FILE",
         "VLLM_EXPONENTIAL_BUCKETING",
         "VLLM_FULL_WARMUP",
         "VLLM_GRAPH_RESERVED_MEM",
         "VLLM_HPU_BIND_NUMA",
-        "VLLM_MOE_CHUNK",
-        "VLLM_MOE_TOKEN_BOUNDARY",
         "VLLM_MULTIMODAL_RESOLUTIONS",
-        "VLLM_SKIP_WARMUP",
         "VLLM_WEIGHT_LOAD_FORCE_SYNC",
     )
 
     @classmethod
     def validate_environ(cls, hard_fail: bool) -> None:
-        upstream = getattr(super(), "validate_environ", None)
-        if upstream is not None:
-            return upstream(hard_fail)
+        # Same checks as the upstream Platform.validate_environ, plus the VLLM_* variables of vllm-gaudi.
         import vllm_gaudi.envs as gaudi_envs
+        from vllm_gaudi.extension import features
         known = set(envs.environment_variables) | set(gaudi_envs.environment_variables) | set(cls.gaudi_env_vars)
+        known |= set(features.get_user_flags()) | set(features.get_experimental_flags())
+        known |= set(features.get_features()[1])
+        removed = getattr(envs, "removed_environment_variables", {})
         for env in os.environ:
+            if hint := removed.get(env):
+                raise ValueError(f"{env} has been removed. {hint}")
             if env.startswith("VLLM_") and env not in known:
                 if hard_fail:
                     raise ValueError(f"Unknown vLLM environment variable detected: {env}")
