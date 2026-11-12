@@ -134,10 +134,15 @@ def rewrite_imports(path: str, src: str, vendored: set[str]) -> str:
         elif isinstance(node, ast.Import):
             if not any(alias.name in vendored for alias in node.names):
                 continue
+            # `import vllm.v1.x` binds `vllm`, which a retargeted import cannot keep, so refuse it.
+            for alias in node.names:
+                if alias.name in vendored and alias.asname is None:
+                    raise SystemExit(f"{path}:{node.lineno}: unaliased `import {alias.name}` of a vendored "
+                                     "module cannot be retargeted; extend rewrite_imports to handle it")
             # Keep the bound name the upstream code uses.
             stmts = [
                 ast.Import(names=[
-                    ast.alias(name=dest_module(a.name), asname=a.asname or a.name) if a.name in vendored else a
+                    ast.alias(name=dest_module(a.name), asname=a.asname) if a.name in vendored else a
                     for a in node.names
                 ])
             ]
