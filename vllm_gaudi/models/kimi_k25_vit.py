@@ -185,6 +185,22 @@ def get_rope_shape(org, interpolation_mode, shape):
         (1, 2, 0)).flatten(end_dim=1))
 
 
+def _keep_pos_embeds_in_weight_dtype(orig_get_pos_embeds):
+    """Wrap ``Learnable2DInterpPosEmbDivided_fixed.get_pos_embeds`` so it returns the weight dtype.
+
+    For grids with t > 1 (video chunks) upstream adds ``time_weight``, a float32 non-persistent
+    buffer, to the bf16 position embedding, so the sum is float32. ``MoonVision3dPatchEmbed`` adds
+    it to the bf16 patch projection, and the float32 hidden state then reaches the bf16
+    ``wqkv`` matmul in ``attention_qkvpacked`` ("Float != BFloat16"). Images (t == 1) never touch
+    ``time_weight``, so they are unaffected; for them the cast is a no-op.
+    """
+
+    def get_pos_embeds(self, grid_thws):
+        return orig_get_pos_embeds(self, grid_thws).to(self.weight.dtype)
+
+    return get_pos_embeds
+
+
 # Swap the complex-dtype / Inductor-compiled callables in the upstream module so
 # the Kimi-K2.5 vision tower runs on HPU.  Guarded so an upstream rewrite (or a
 # renamed symbol) makes this a no-op rather than an error.
@@ -207,3 +223,7 @@ if _rope_cls is not None:
 
 if hasattr(_vit, "get_rope_shape") and hasattr(_vit, "get_rope_shape_decorate"):
     _vit.get_rope_shape = _vit.get_rope_shape_decorate(get_rope_shape)
+
+_pos_emb_cls = getattr(_vit, "Learnable2DInterpPosEmbDivided_fixed", None)
+if _pos_emb_cls is not None and hasattr(_pos_emb_cls, "get_pos_embeds"):
+    _pos_emb_cls.get_pos_embeds = _keep_pos_embeds_in_weight_dtype(_pos_emb_cls.get_pos_embeds)
