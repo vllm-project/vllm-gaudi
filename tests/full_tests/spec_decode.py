@@ -530,7 +530,9 @@ if __name__ == "__main__":
             print(f"acc_rate: {proc['result']['acc_rate']}")
             print(f"num_draft_tokens: {proc['result']['num_draft_tokens']}")
             print(f"num_drafts: {proc['result']['num_drafts']}")
-            if prompts:
+            if 'error' in proc['result']:
+                print(f"error: {proc['result']['error']}")
+            elif prompts:
                 for prompt, text in zip(prompts, proc['result']['ret_spec']):
                     print("---")
                     print(f"Prompt: {prompt}")
@@ -545,4 +547,8 @@ if __name__ == "__main__":
                 assert proc['result']['acc_rate'] >= args.assert_accept_rate, \
                     f"Acceptance rate {proc['result']['acc_rate']} is lower" \
                     f"than the threshold {args.assert_accept_rate}"
+        # A task that raised must fail the run even without a threshold (the random-weight smoke runs).
+        failed = [key for key, proc in task_queue.items() if 'error' in proc['result']]
+        if failed:
+            raise SystemExit(f"Spec decode task(s) failed: {', '.join(failed)}")
         logging.info("Benchmark finished.")
