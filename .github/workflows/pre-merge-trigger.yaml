@@ -131,8 +131,9 @@ jobs:
 
             // Contract 2: the result is the pre_merge_hpu_test job alone, so the
             // check turns green as soon as the tests are done. Exactly one such
-            // job in the latest attempt, and only 'success' passes. A failed
-            // pre-commit cancels the run.
+            // job in the latest attempt, and only 'success' passes. A pre-commit
+            // that ends without success (failed, timed out, cancelled) cancels
+            // the run.
             async function waitForGate(id) {
               const GATE = 'pre_merge_hpu_test';
               for (let i = 0; i < 1440; i++) {
@@ -146,9 +147,11 @@ jobs:
                     owner: context.repo.owner, repo: context.repo.repo, run_id: id,
                     filter: 'latest', per_page: 100,
                   });
-                  if (jobs.some(j => j.name === 'pre-commit' && j.conclusion === 'failure')) {
-                    await cancelDispatchedRun(id, 'pre-commit failed');
-                    core.setFailed(`pre-commit failed: ${run.html_url}`);
+                  const lint = jobs.find(j => j.name === 'pre-commit' &&
+                    j.status === 'completed' && j.conclusion !== 'success');
+                  if (lint) {
+                    await cancelDispatchedRun(id, `pre-commit ${lint.conclusion}`);
+                    core.setFailed(`pre-commit ${lint.conclusion}: ${run.html_url}`);
                     return;
                   }
                   const gates = jobs.filter(j => j.name === GATE);
