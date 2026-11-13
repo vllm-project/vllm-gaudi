@@ -10,8 +10,8 @@ from typing import Optional
 from itertools import cycle
 from unittest.mock import patch
 
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.sampler import Sampler
+from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.sample.sampler import Sampler
 
 from vllm.utils.torch_utils import set_random_seed
 from vllm.platforms import current_platform
@@ -220,7 +220,7 @@ def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float, mi
                 q[i].exponential_(generator=generator)
         return probs.div_(q).argmax(dim=-1).view(-1)
 
-    with patch("vllm.v1.sample.ops.topk_topp_sampler.random_sample", _mock_random_sample):
+    with patch("vllm_gaudi.v1._vendored.sample.ops.topk_topp_sampler.random_sample", _mock_random_sample):
         sampler_output = sampler(
             logits=logits,
             sampling_metadata=sampling_metadata,

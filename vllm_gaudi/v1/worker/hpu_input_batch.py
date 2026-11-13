@@ -13,13 +13,13 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils.collection_utils import swap_dict_values
+from vllm_gaudi.v1._vendored._compat import swap_dict_values
 from vllm.utils.math_utils import cdiv
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.block_table import MultiGroupBlockTable
-from vllm.v1.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessors)
+from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.worker.block_table import MultiGroupBlockTable
+from vllm_gaudi.v1._vendored.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessors)
 
 from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
 

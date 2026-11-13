@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from vllm.v1.sample import rejection_sampler
+from vllm_gaudi.v1._vendored.sample import rejection_sampler
 import torch
 from typing import Callable, Optional
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm_gaudi.v1._vendored.sample.logits_processor.builtin import MinTokensLogitsProcessor
+from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.sample.ops.bad_words import apply_bad_words_with_drafts
+from vllm_gaudi.v1._vendored.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm_gaudi.v1._vendored.spec_decode.metadata import SpecDecodeMetadata
 
 PLACEHOLDER_TOKEN_ID = rejection_sampler.PLACEHOLDER_TOKEN_ID
 # Requests with a temperature below this are greedy, as in vllm.v1.sample.sampler.

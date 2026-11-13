@@ -46,6 +46,7 @@ column_limit = 120
 ignore_patterns = [
     "build/**",
     "examples/**",
+    "vllm_gaudi/v1/_vendored/**",
 ]
 
 [tool.ruff]
@@ -82,17 +83,49 @@ ignore = [
     "UP007",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Vendored upstream code (tools/vendor_v1/) stays byte-identical to upstream apart from numbered patches, so only
+# the pyflakes rules run on it: they catch names broken by the import rewrite.
+"vllm_gaudi/v1/_vendored/**" = ["E", "UP", "B", "SIM", "G"]
+
 [tool.mypy]
 plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 explicit_package_bases = true
 check_untyped_defs = true
 follow_imports = "silent"
+# Vendored upstream code, see tools/vendor_v1/.
+exclude = ["^vllm_gaudi/v1/_vendored/"]
 
 # After fixing type errors resulting from follow_imports: "skip" -> "silent",
 # move the directory here and remove it from tools/mypy.sh
 files = [
     "vllm_gaudi/*.py",
+]
+
+# These tests load modules with importlib and stub vllm modules via sys.modules / SimpleNamespace,
+# so mypy cannot resolve the dynamically created attributes.
+[[tool.mypy.overrides]]
+module = [
+    "tests.unit_tests.ops.test_hpu_kda_pytorch",
+    "tests.unit_tests.ops.test_hpu_situ_moe",
+    "tests.unit_tests.ops.test_mxfp4_moe_op_compile",
+    "tests.unit_tests.test_kimi_k3_gate",
+    "tests.unit_tests.test_kimi_mxfp4_routing",
+    "tests.unit_tests.test_kimi_patch_gating",
+    "tests.unit_tests.test_kimi_patch_retry",
+    "tests.unit_tests.test_weight_page_cache",
+]
+disable_error_code = [
+    "attr-defined",
+    "arg-type",
+    "union-attr",
+    "var-annotated",
+    "func-returns-value",
+    "assignment",
+    "method-assign",
+    "call-arg",
+    "name-defined",
 ]
 
 

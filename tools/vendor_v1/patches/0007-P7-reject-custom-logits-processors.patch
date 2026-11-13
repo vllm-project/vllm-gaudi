@@ -1,0 +1,60 @@
+diff --git a/sample/logits_processor/__init__.py b/sample/logits_processor/__init__.py
+index e56ba331..9013bfba 100644
+--- a/sample/logits_processor/__init__.py
++++ b/sample/logits_processor/__init__.py
+@@ -38,6 +38,9 @@ STR_SPEC_DEC_REJECTS_LOGITSPROCS = (
+     "Custom logits processors are not supported when speculative decoding is enabled."
+ )
+ 
++# vllm-gaudi local change [P7]
++STR_HPU_REJECTS_LOGITSPROCS = "Custom logits processors are not supported on HPU"
++
+ LOGITSPROCS_GROUP = "vllm.logits_processors"
+ 
+ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
+@@ -49,31 +52,10 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
+ 
+ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
+     """Load all installed logit processor plugins."""
+-    from importlib.metadata import entry_points
+-
+-    installed_logitsprocs_plugins = entry_points(group=LOGITSPROCS_GROUP)
+-    if len(installed_logitsprocs_plugins) == 0:
+-        logger.debug("No logitsprocs plugins installed (group %s).", LOGITSPROCS_GROUP)
+-        return []
+-
+-    # Load logitsprocs plugins
+-    logger.debug("Loading installed logitsprocs plugins (group %s):", LOGITSPROCS_GROUP)
+-    classes: list[type[LogitsProcessor]] = []
+-    for entrypoint in installed_logitsprocs_plugins:
+-        try:
+-            logger.debug(
+-                "- Loading logitproc plugin entrypoint=%s target=%s",
+-                entrypoint.name,
+-                entrypoint.value,
+-            )
+-            with guard_cuda_initialization():
+-                classes.append(entrypoint.load())
+-        except Exception as e:
+-            logger.error("Failed to load LogitsProcessor plugin %s: %s", entrypoint, e)
+-            raise RuntimeError(
+-                f"Failed to load LogitsProcessor plugin {entrypoint}"
+-            ) from e
+-    return classes
++    # vllm-gaudi local change [P7]: custom logits processors are not supported on HPU. The entry-point group is
++    # shared with the Model Runner V2 interface, so loading installed plugins here would break every model start.
++    logger.debug("Skipping installed logitsprocs plugins (group %s): not supported on HPU.", LOGITSPROCS_GROUP)
++    return []
+ 
+ 
+ def _load_logitsprocs_by_fqcns(
+@@ -188,6 +170,9 @@ def build_logitsprocs(
+     is_pooling_model: bool,
+     custom_logitsprocs: Sequence[str | type[LogitsProcessor]] = (),
+ ) -> LogitsProcessors:
++    # vllm-gaudi local change [P7]
++    if custom_logitsprocs:
++        raise ValueError(STR_HPU_REJECTS_LOGITSPROCS)
+     if is_pooling_model:
+         if custom_logitsprocs:
+             raise ValueError(STR_POOLING_REJECTS_LOGITSPROCS)

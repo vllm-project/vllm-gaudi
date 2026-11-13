@@ -38,7 +38,7 @@ from vllm.multimodal.inputs import (MultiModalBatchedField, MultiModalFeatureSpe
 from vllm.multimodal.utils import strip_covered_mm_data
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm_gaudi.v1.worker.hpu_input_batch import CachedRequestState
 
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 
@@ -117,6 +117,7 @@ def _make_mock_runner(
     runner.requests = requests
     runner.encoder_cache = encoder_cache
     runner.uses_mrope = False
+    runner.is_kimi_k3 = False
     runner.device = "cpu"
     runner.is_mm_embed = _FakeCpuGpuBuffer(max_tokens)
     return runner

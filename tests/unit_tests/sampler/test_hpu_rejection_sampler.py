@@ -18,12 +18,12 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.plugins import load_general_plugins
-from vllm.v1.sample.logits_processor import LogitsProcessors
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.penalties import apply_all_penalties
-from vllm.v1.sample.rejection_sampler import RejectionSampler
-from vllm.v1.sample.sampler import Sampler
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm_gaudi.v1._vendored.sample.logits_processor import LogitsProcessors
+from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.sample.ops.penalties import apply_all_penalties
+from vllm_gaudi.v1._vendored.sample.rejection_sampler import RejectionSampler
+from vllm_gaudi.v1._vendored.sample.sampler import Sampler
+from vllm_gaudi.v1._vendored.spec_decode.metadata import SpecDecodeMetadata
 from vllm_gaudi.v1.sample.hpu_rejection_sampler import (PLACEHOLDER_TOKEN_ID, apply_sampling_constraints,
                                                         rejection_sample, rejection_sample_greedy,
                                                         rejection_sample_random)

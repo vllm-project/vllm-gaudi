@@ -14,8 +14,8 @@ import types
 import torch
 
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm_gaudi.v1._vendored.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
+from vllm_gaudi.v1._vendored.spec_decode.metadata import SpecDecodeMetadata
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
 
 
