@@ -37,8 +37,8 @@ def splice_placeholders(output_token_ids: list[int], new_ids: list[int], keep_le
         output_token_ids: a request's output ids, ending in -1 placeholders.
         new_ids: that request's row of the step's sampled ids; -1 marks unused (rejected) slots.
         keep_length: replace only the newest placeholders and keep the list length (the length then still matches
-            the tokens in the KV cache). Otherwise the whole trailing run of placeholders is replaced, which also
-            drops older placeholders before a penalty consumer reads the list.
+            the tokens in the KV cache). Otherwise the whole trailing run of placeholders is replaced, which
+            shortens the list.
     """
     if not new_ids:
         return
@@ -879,6 +879,11 @@ class InputBatch:
         copy-ready event and replace the placeholders. No-op when no consumer
         reads output_token_ids (sampled_token_ids_cpu left None by
         set_async_sampled_token_ids) or there is no prior step to repair.
+
+        Only the newest placeholders are replaced: a request that decoded
+        while no consumer was in the batch keeps its older -1s, so its list
+        still matches its KV cache when it is re-added after a skipped step.
+        The penalty kernel maps -1 to its pad id.
         """
         if self.sampled_token_ids_cpu is None or self.prev_req_id_to_index is None:
             # Output token ids not needed or not async scheduling.
@@ -898,7 +903,7 @@ class InputBatch:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-            splice_placeholders(req_output_token_ids, sampled_token_ids[prev_index])
+            splice_placeholders(req_output_token_ids, sampled_token_ids[prev_index], keep_length=True)
 
     def get_pooling_params(self) -> list[PoolingParams]:
         assert len(self.req_ids) == len(self.pooling_params)
