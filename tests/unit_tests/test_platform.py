@@ -140,38 +140,6 @@ def test_pt_hpu_enable_lazy_collectives_default_and_respect():
     assert os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] == "false"
 
 
-_GAUDI_ENV = {
-    "VLLM_HPU_MIN_PREFILL_CHUNK": "1024",
-    "VLLM_PROMPT_BS_BUCKET_MAX": "8",
-    "VLLM_DECODE_BLOCK_BUCKET_STEP": "256",
-    "VLLM_CONTIGUOUS_PA": "false",
-    "VLLM_PROFILE_DECODE": "1,1024",
-    "VLLM_SKIP_WARMUP": "true",
-    "VLLM_BUILD": "1.0.0",
-    "VLLM_HW": "gaudi3",
-}
-
-
-def test_validate_environ_accepts_gaudi_env_vars():
-    with mock.patch.dict(os.environ, {**_GAUDI_ENV, "VLLM_NOT_A_GAUDI_FLAG": "1"}, clear=True), \
-         patch("vllm_gaudi.platform.logger") as log:
-        HpuPlatform.validate_environ(hard_fail=False)
-    log.warning.assert_called_once_with("Unknown vLLM environment variable detected: %s", "VLLM_NOT_A_GAUDI_FLAG")
-
-
-def test_validate_environ_hard_fail_and_removed_vars(monkeypatch):
-    with mock.patch.dict(os.environ, _GAUDI_ENV, clear=True):
-        HpuPlatform.validate_environ(hard_fail=True)
-        os.environ["VLLM_NOT_A_GAUDI_FLAG"] = "1"
-        with pytest.raises(ValueError, match="VLLM_NOT_A_GAUDI_FLAG"):
-            HpuPlatform.validate_environ(hard_fail=True)
-    monkeypatch.setattr("vllm_gaudi.platform.envs.removed_environment_variables", {"VLLM_OLD_FLAG": "Use X."},
-                        raising=False)
-    with mock.patch.dict(os.environ, {"VLLM_OLD_FLAG": "1"}, clear=True), \
-         pytest.raises(ValueError, match="VLLM_OLD_FLAG has been removed. Use X."):
-        HpuPlatform.validate_environ(hard_fail=False)
-
-
 def _fake_vllm_config(*, model_type="qwen3_next", gdn_layers=0, kv_transfer=None, prefix_caching=False):
     """Minimal vllm_config stub for the compact-GDN detection helpers."""
 

@@ -235,8 +235,8 @@ def wrap_safetensors_iterator(original: Callable[..., Iterator[tuple[str, torch.
         if seen is not None:
             seen.extend(files)
         lag = _LAG
-        logger.debug("Weight page cache: dropping shards after use (lag %d of %d shards, %.1f GiB)", lag, len(files),
-                     _files_size_bytes(files) / 2**30)
+        logger.info("Weight page cache: dropping shards after use (lag %d of %d shards, %.1f GiB)", lag, len(files),
+                    _files_size_bytes(files) / 2**30)
         batch = _DropBatch()
         started = 0  # shards opened so far
         next_drop = 0  # first shard whose cache is not dropped yet
@@ -279,7 +279,7 @@ def wrap_safetensors_iterator(original: Callable[..., Iterator[tuple[str, torch.
                 if not batch.wait(_WAIT_S):
                     logger.warning("Weight page cache: %d background drops still pending after %.0f s", batch.pending,
                                    _WAIT_S)
-                logger.debug(
+                logger.info(
                     "Weight page cache: loader finished, fadvise(DONTNEED) called for %d shards (%d failed); "
                     "background fadvise time total %.1f s, max %.2f s per shard", batch.dropped, batch.failed,
                     batch.total_s, batch.max_s)
@@ -324,8 +324,6 @@ def drop_weight_page_cache_during_load(model_config=None):
         if seen:
             try:  # must never replace an exception raised by get_model
                 calls = sum(drop_file_page_cache(path) for path in seen)
-                logger.info("Weight page cache: final fadvise(DONTNEED) called for %d/%d shards (%.1f GiB)", calls,
-                            len(seen),
-                            _files_size_bytes(seen) / 2**30)
+                logger.info("Weight page cache: final fadvise(DONTNEED) called for %d/%d shards", calls, len(seen))
             except Exception as exc:
                 logger.warning("Weight page cache: final drop failed: %s", exc)

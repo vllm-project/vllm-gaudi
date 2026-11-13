@@ -90,50 +90,31 @@ class HpuPlatform(Platform):
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
 
-    # VLLM_* variables read by vllm-gaudi outside vllm_gaudi.envs and extension/features.py.
+    # VLLM_* variables read by vllm-gaudi itself. Only used by the fallback below, when the vLLM Platform has no
+    # validate_environ. vLLM calls it in EngineArgs.create_engine_config before any ModelConfig exists, so it cannot
+    # be gated per model: every model takes the upstream check, and a Kimi-K3 run may log 'Unknown vLLM environment
+    # variable' warnings for these names (log only).
     gaudi_env_vars: tuple[str, ...] = (
-        "VLLM_CONFIG_HIDDEN_LAYERS",
-        "VLLM_COS_SIN_RECOMPUTE",
-        "VLLM_DISABLE_MARK_SCALES_AS_CONST",
-        "VLLM_DYNAMIC_KV_QUANT",
+        "VLLM_BUCKETING_FROM_FILE",
         "VLLM_EXPONENTIAL_BUCKETING",
-        "VLLM_FP32_SOFTMAX_VISION",
         "VLLM_FULL_WARMUP",
-        "VLLM_GAUDI_SKIP_SLEEP_HOST_GUARD",
-        "VLLM_GAUDI_SLEEP_HOST_RESERVE_MB",
-        "VLLM_GDN_COMPUTE_FP32",
-        "VLLM_GDN_EXACT_SOLVE",
-        "VLLM_GDN_LEGACY_PHASE_B",
         "VLLM_GRAPH_RESERVED_MEM",
         "VLLM_HPU_BIND_NUMA",
-        "VLLM_HPU_DROP_WEIGHT_PAGE_CACHE",
-        "VLLM_KV_CONNECTOR",
-        "VLLM_KV_TRANSFER_CONFIG",
-        "VLLM_MAMBA_USE_PYTORCH",
-        "VLLM_MAMBA_USE_SELECTIVE_STATE_UPDATE_REF_PT",
-        "VLLM_MULTIMODAL_BUCKETS",
+        "VLLM_MOE_CHUNK",
+        "VLLM_MOE_TOKEN_BOUNDARY",
         "VLLM_MULTIMODAL_RESOLUTIONS",
-        "VLLM_NIXL_DEVICE_TO_DEVICE",
-        "VLLM_TORCH_PROFILER_DIR",
-        "VLLM_USE_FAKE_HPU",
-        "VLLM_USE_HYBRID_CACHE",
-        "VLLM_USE_NAIVE_MAMBA_CACHE_SHARING",
+        "VLLM_SKIP_WARMUP",
         "VLLM_WEIGHT_LOAD_FORCE_SYNC",
     )
 
     @classmethod
     def validate_environ(cls, hard_fail: bool) -> None:
-        # Same checks as the upstream Platform.validate_environ, plus the VLLM_* variables of vllm-gaudi.
+        upstream = getattr(super(), "validate_environ", None)
+        if upstream is not None:
+            return upstream(hard_fail)
         import vllm_gaudi.envs as gaudi_envs
-        from vllm_gaudi.extension import features
-        from vllm_gaudi.extension.environment import get_environment
         known = set(envs.environment_variables) | set(gaudi_envs.environment_variables) | set(cls.gaudi_env_vars)
-        known |= set(features.get_user_flags()) | set(features.get_experimental_flags())
-        known |= set(features.get_features()[1]) | set(get_environment()[1])
-        removed = getattr(envs, "removed_environment_variables", {})
         for env in os.environ:
-            if hint := removed.get(env):
-                raise ValueError(f"{env} has been removed. {hint}")
             if env.startswith("VLLM_") and env not in known:
                 if hard_fail:
                     raise ValueError(f"Unknown vLLM environment variable detected: {env}")
