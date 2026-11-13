@@ -55,10 +55,7 @@ def _run_role(args: argparse.Namespace) -> None:
     from vllm import LLM, SamplingParams
 
     llm = LLM(**_engine_kwargs(args, args.role))
-    if args.seeded:
-        params = SamplingParams(temperature=0.8, top_p=0.95, seed=1234, max_tokens=args.max_tokens, ignore_eos=True)
-    else:
-        params = SamplingParams(temperature=0.0, max_tokens=args.max_tokens, ignore_eos=True)
+    params = SamplingParams(temperature=0.0, max_tokens=args.max_tokens, ignore_eos=True)
     outputs = llm.generate(BASE_PROMPTS, params)
     agree = None
     if args.role == "reference" and args.score:
@@ -111,7 +108,6 @@ def _lcp(a: list[int], b: list[int]) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--async-scheduling", action="store_true")
-    parser.add_argument("--seeded", action="store_true", help="seeded random sampling instead of greedy")
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--min-agree", type=float, default=0.95, help="minimum argmax-token fraction per request")
     parser.add_argument("--out-prefix", default="preemption")
@@ -134,9 +130,8 @@ def main() -> None:
           f"min_lcp={min(lcp):.3f} mean_lcp={sum(lcp) / len(lcp):.3f} "
           f"preemptions={preempted['num_preemptions']}")
     assert all(len(p) == args.max_tokens for p in preempted["token_ids"]), "a request did not finish"
-    if not args.seeded:
-        assert min(agree) >= args.min_agree, (f"tokens stop following their context (min argmax fraction "
-                                              f"{min(agree):.4f} < {args.min_agree})")
+    assert min(agree) >= args.min_agree, (f"tokens stop following their context (min argmax fraction "
+                                          f"{min(agree):.4f} < {args.min_agree})")
 
 
 if __name__ == "__main__":
