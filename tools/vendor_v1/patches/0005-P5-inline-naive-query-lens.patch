@@ -1,0 +1,14 @@
+diff --git a/spec_decode/utils.py b/spec_decode/utils.py
+index dd6ab127..8f8bab47 100644
+--- a/spec_decode/utils.py
++++ b/spec_decode/utils.py
+@@ -374,7 +374,8 @@ def compute_new_slot_mapping(
+     req_indices = torch.arange(batch_size, device=cad.query_start_loc.device)
+     req_indices = torch.repeat_interleave(
+         req_indices,
+-        cad.naive_query_lens() + num_new_tokens,
++        # vllm-gaudi local change [P5]: naive_query_lens() is gone after aac1b2a4f3; this is its body.
++        cad.query_start_loc[1:] - cad.query_start_loc[:-1] + num_new_tokens,
+         output_size=len(new_positions),
+     )
+     # Clamp the positions to prevent an out-of-bounds error when indexing
