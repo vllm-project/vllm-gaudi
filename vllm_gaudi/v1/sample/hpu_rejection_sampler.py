@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from vllm.v1.sample import rejection_sampler
+from vllm_gaudi.v1._vendored.sample import rejection_sampler
 import torch
 from typing import Optional
-from vllm.v1.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 
 PLACEHOLDER_TOKEN_ID = rejection_sampler.PLACEHOLDER_TOKEN_ID
 GREEDY_TEMPERATURE = rejection_sampler.GREEDY_TEMPERATURE

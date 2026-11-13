@@ -1,0 +1,26 @@
+# Upstream vLLM files vendored into vllm_gaudi/v1/_vendored/ by tools/vendor_v1/vendor_v1.py.
+# One path per line, relative to the vLLM repository root, all under vllm/v1/.
+# These are the Model Runner V1 modules vllm-gaudi needs (with their transitive imports) that upstream
+# removed in aac1b2a4f3 (vllm-project/vllm#63373).
+vllm/v1/cudagraph_dispatcher.py
+vllm/v1/sample/logits_processor/__init__.py
+vllm/v1/sample/logits_processor/builtin.py
+vllm/v1/sample/logits_processor/interface.py
+vllm/v1/sample/logits_processor/state.py
+vllm/v1/sample/metadata.py
+vllm/v1/sample/ops/bad_words.py
+vllm/v1/sample/ops/logprobs.py
+vllm/v1/sample/ops/penalties.py
+vllm/v1/sample/ops/topk_topp_sampler.py
+vllm/v1/sample/rejection_sampler.py
+vllm/v1/sample/sampler.py
+vllm/v1/sample/thinking_budget_state.py
+vllm/v1/spec_decode/eagle.py
+vllm/v1/spec_decode/fly.py
+vllm/v1/spec_decode/llm_base_proposer.py
+vllm/v1/spec_decode/metadata.py
+vllm/v1/spec_decode/ngram_proposer.py
+vllm/v1/spec_decode/utils.py
+vllm/v1/spec_decode/vocab_mapping.py
+vllm/v1/worker/block_table.py
+vllm/v1/worker/gpu_input_batch.py
