@@ -415,7 +415,9 @@ class InputBatch:
 
             if sampling_params.logprobs is not None:
                 self.num_logprobs[req_id] = sampling_params.logprobs
-            if sampling_params.prompt_logprobs is not None:
+            # A request that already has outputs (resumed after preemption, or re-added after a skipped step)
+            # sent its prompt logprobs before; scoring the prompt again would send them twice.
+            if sampling_params.prompt_logprobs is not None and not request.output_token_ids:
                 self.num_prompt_logprobs[req_id] = (sampling_params.prompt_logprobs)
 
             if sampling_params.allowed_token_ids:
