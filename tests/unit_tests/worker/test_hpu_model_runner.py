@@ -18,7 +18,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, Schedu
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
 from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 import vllm_gaudi.extension.environment as environment
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, attn_pad_block_id
+from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, attn_pad_block_id, bucket_ctx_to_kernel_blocks
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch
 
 BLOCK_SIZE = 128
@@ -775,3 +775,27 @@ def test_attn_pad_block_id_rejects_missing_pad_block():
     kv_caches["layer.0"] = (cache, cache, None, None)
     with pytest.raises(RuntimeError, match="within its 5120 allocated ones"):
         attn_pad_block_id(10, 128, kv_cache_groups, {0: 128}, kv_caches)
+
+
+@pytest.mark.parametrize(
+    "num_blocks, block_size, kernel_block_size, expected",
+    [
+        (0, 128, 528, 0),
+        (1, 128, 528, 1),  # one 128-token bucket block needs a whole 528-token kernel block
+        (10, 128, 528, 3),  # 1280 tokens
+        (63, 128, 528, 16),  # 8064 tokens; the integer ratio 128 // 528 gave 0 and dropped the context
+        (4, 528, 128, 17),  # 2112 tokens; the integer ratio 528 // 128 = 4 gave 16
+        (3, 1152, 128, 27),  # exact split
+        (7, 128, 128, 7),
+    ])
+def test_bucket_ctx_to_kernel_blocks(num_blocks, block_size, kernel_block_size, expected):
+    assert bucket_ctx_to_kernel_blocks(num_blocks, block_size, kernel_block_size) == expected
+
+
+@pytest.mark.parametrize("block_size, kernel_block_size", [(128, 528), (128, 768), (528, 128), (2176, 128)])
+@pytest.mark.parametrize("num_blocks", [1, 2, 10, 1986])
+def test_bucket_ctx_to_kernel_blocks_covers_the_context(num_blocks, block_size, kernel_block_size):
+    kernel_blocks = bucket_ctx_to_kernel_blocks(num_blocks, block_size, kernel_block_size)
+    # Every token of the bucket's context fits, with less than one kernel block to spare.
+    assert kernel_blocks * kernel_block_size >= num_blocks * block_size
+    assert (kernel_blocks - 1) * kernel_block_size < num_blocks * block_size

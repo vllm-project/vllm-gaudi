@@ -238,6 +238,19 @@ def attn_pad_block_id(num_blocks: int, attn_block_size: int, kv_cache_groups: li
     return pad_block_id
 
 
+def bucket_ctx_to_kernel_blocks(num_blocks: int, block_size: int, kernel_block_size: int) -> int:
+    """Return the attention kernel blocks that cover num_blocks bucketing blocks.
+
+    Prompt buckets count context in block_size units and block tables address
+    kernel blocks. Either can be the larger one: hybrid models split KV-manager
+    blocks into smaller kernel blocks, but the 128-token bucketing unit can also
+    sit under larger kernel blocks (e.g. 528 tokens). Convert through tokens.
+    An integer block ratio is 0 in the second case, and a prefill chunk with
+    context would then get no context blocks at all.
+    """
+    return cdiv(num_blocks * block_size, kernel_block_size)
+
+
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 HPU_TORCH_DTYPE_TO_STR_DTYPE = {
@@ -3018,7 +3031,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Scale to attn_block_size units so context_blocks padding matches the
         # block_table entries which use kernel_block_size = attn_block_size.
         if self.attn_block_size != self.block_size:
-            target_blocks = target_blocks * (self.block_size // self.attn_block_size)
+            target_blocks = bucket_ctx_to_kernel_blocks(target_blocks, self.block_size, self.attn_block_size)
 
         target_bs += self.get_dp_padding(target_bs)
         target_seq += self.get_dp_padding(target_seq)
