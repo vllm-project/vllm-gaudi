@@ -31,6 +31,8 @@ import vllm_gaudi.envs as gaudi_envs
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.extension.ops import VllmMixtureOfExpertsOp
 from vllm_gaudi.extension.runtime import get_config
+from vllm_gaudi.kimi_k3_gate import current_config_is_kimi_k3
+from vllm_gaudi.ops.hpu_grouped_topk_router import enable_kimi_k3_grouped_topk
 from vllm_gaudi.utils import has_quant_config
 from vllm_gaudi.v1.worker.hpu_dp_utils import dispatch_hidden_states, dispatch_tensor, get_hpu_dp_metadata
 
@@ -911,8 +913,8 @@ def install_inline_moe_forward_entry(model: torch.nn.Module) -> int:
         class_names.add(type(module).__name__)
         replaced += 1
     if replaced:
-        logger.info("Replaced the opaque moe_forward entry with the inline HPU path in %d MoE runners (%s), pid %d",
-                    replaced, ", ".join(sorted(class_names)), os.getpid())
+        logger.debug("Replaced the opaque moe_forward entry with the inline HPU path in %d MoE runners (%s), pid %d",
+                     replaced, ", ".join(sorted(class_names)), os.getpid())
     else:
         logger.warning("No MoE runner was switched to the inline HPU path (HPU_FUSED_MOE=%s), pid %d",
                        int(_MOE_COMPILE), os.getpid())
@@ -1097,6 +1099,8 @@ def create_fused_moe_router(
         assert custom_routing_function is None
         if num_expert_group is None or topk_group is None:
             raise ValueError("num_expert_group and topk_group must be provided when use_grouped_topk is True")
+        if current_config_is_kimi_k3():
+            enable_kimi_k3_grouped_topk()
         grouped_topk_router = GroupedTopKRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,

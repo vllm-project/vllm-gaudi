@@ -164,7 +164,7 @@ def test_in_graph_call_skips_the_nested_wrapper_only_while_compiling(ops, monkey
 
 def test_first_moe_op_per_process_logs_in_graph_call_once(ops, caplog):
     ops._mxfp4_moe_op_logged = False
-    with caplog.at_level("INFO", logger="vllm"):
+    with caplog.at_level("DEBUG", logger="vllm"):
         _make_moe_op(ops, in_graph_call=True)
         _make_moe_op(ops, in_graph_call=False)
 

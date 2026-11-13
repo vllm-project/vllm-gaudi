@@ -547,6 +547,11 @@ def arch_modules(kda_modules, monkeypatch):
     registry = types.SimpleNamespace(register_model=lambda *args: None)
     module("vllm.model_executor.models")
     module("vllm.model_executor.models.registry", ModelRegistry=registry)
+    k3_config = type("KimiK3ForConditionalGenerationConfig", (), {})
+    models_config = module("vllm.model_executor.models.config",
+                           MODELS_CONFIG_MAP={"KimiK3ForConditionalGeneration": k3_config},
+                           KimiK3ForConditionalGenerationConfig=k3_config)
+    sys.modules["vllm.model_executor.models"].config = models_config
     sys.modules["vllm_gaudi.attention.oot_mla"].HPUMultiHeadLatentAttentionWrapper = object
     module("vllm.models.kimi_k3.amd.ops.attn_res", attn_res=None)
     deferred = types.ModuleType("vllm_gaudi.models.kimi_k3_kda")
@@ -615,6 +620,14 @@ def test_kimi_moe_forward_flattens_only_for_k3_layers(arch_modules):
 
     assert arch_modules.test_k3_model().moe(x).dim() == 2
     assert arch_modules.test_linear.KimiMoE()(x).dim() == 3
+
+
+def test_k31_shares_the_k3_quantization_config_hook(arch_modules):
+    config = sys.modules["vllm.model_executor.models.config"]
+    arch_modules._patch_kimi_k3_arch()
+    arch_modules._patch_kimi_k3_arch()
+
+    assert config.MODELS_CONFIG_MAP["KimiK31ForConditionalGeneration"] is config.KimiK3ForConditionalGenerationConfig
 
 
 def test_linear_model_forward_wrapper_works_without_step(arch_modules):

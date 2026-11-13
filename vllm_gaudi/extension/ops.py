@@ -1921,7 +1921,7 @@ def _log_mxfp4_moe_op_once(in_graph_call: bool) -> None:
     if not _mxfp4_moe_op_logged:
         _mxfp4_moe_op_logged = True
         # vLLM installs handlers on the "vllm" logger tree only, so the logger must live under it.
-        logging.getLogger("vllm.gaudi.kimi_patches").info(
+        logging.getLogger("vllm.gaudi.kimi_patches").debug(
             "VllmMixtureOfExpertsOpMXFP4 built (first layer in this process): in_graph_call=%s", in_graph_call)
 
 

@@ -72,6 +72,9 @@ def _make_runner_stub(max_prefill_batch_size: int,
     # merge tests exercise the non-mamba path. Tests that need the mamba guard
     # override this to a positive value.
     stub.num_mamba_like_layers = 0
+    stub.is_kimi_k3 = False
+    stub.use_prefix_caching = False
+    stub._kimi_prefill_merge_enabled = (HPUModelRunner._kimi_prefill_merge_enabled.__get__(stub))
 
     stub._can_merge_prefill_contents = (HPUModelRunner._can_merge_prefill_contents.__get__(stub))
     stub._get_prompt_bucketing_fn = (HPUModelRunner._get_prompt_bucketing_fn.__get__(stub))

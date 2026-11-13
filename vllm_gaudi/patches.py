@@ -969,7 +969,7 @@ def _kimi_patch_not_applicable(name: str) -> None:
 
 
 def _kimi_patches_log_installed() -> None:
-    _kimi_patch_logger().info("Kimi-K3 patches installed: %s", ", ".join(_KIMI_PATCHES_INSTALLED))
+    _kimi_patch_logger().debug("Kimi-K3 patches installed: %s", ", ".join(_KIMI_PATCHES_INSTALLED))
 
 
 def _kimi_patches_log_failed(only=None) -> None:
@@ -1073,7 +1073,7 @@ def ensure_kimi_k3_patches(model_config) -> None:
                 _KIMI_PATCHES_INSTALLED.remove(name)
             _KIMI_PATCHES_FAILED.setdefault(name, "not live on the vllm.models.kimi_k3 classes after the retry")
     log = _kimi_patch_logger()
-    log.info("Kimi-K3 patches installed (retry before get_model): %s", ", ".join(_KIMI_PATCHES_INSTALLED))
+    log.debug("Kimi-K3 patches installed (retry before get_model): %s", ", ".join(_KIMI_PATCHES_INSTALLED))
     missing = [name for name, ok in live.items() if not ok]
     if missing:
         log.warning("Kimi-K3 patches not live after the retry: %s", ", ".join(missing))
@@ -1214,6 +1214,7 @@ def _patch_kimi_k3_hybrid_config() -> None:
                 _report_kimi_config_patches(self)
                 if _is_kimi_k3_config(self):
                     mark_kimi_k3_seen()
+                    _log_kimi_k3_settings()
                 # Ensure KimiMoE does not pad moe_intermediate_size from 3072 to 4096 under EP
                 # (saves device memory on every card)
                 if _is_kimi_k3_config(self):
@@ -1261,6 +1262,8 @@ def _kimi_k3_runner_class(base: type) -> type:
         try:
             return base.__getattr__(self, name)  # type: ignore[attr-defined]
         except AttributeError:
+            if name == "quant_method":
+                raise  # loaders would process the runner as if it owned the expert weights
             # __dict__ lookup (a submodule lives in _modules): no recursion into __getattr__ while the runner is built
             routed = self.__dict__.get("_modules", {}).get("routed_experts", self.__dict__.get("routed_experts"))
             if routed is not None and hasattr(routed, name):
@@ -1435,7 +1438,7 @@ def _patch_kimi_linear_weights() -> None:
 def _patch_kimi_attn_res() -> None:
     """Pure PyTorch fallback for Kimi-K3 attn_res when Triton is disabled on HPU."""
     try:
-        from vllm_gaudi.ops.hpu_kda_pytorch import attn_res_torch as _torch_attn_res
+        from vllm_gaudi.ops.hpu_kda_pytorch import attn_res_bank, attn_res_torch as _torch_attn_res
 
         try:
             import vllm.models.kimi_k3.amd.ops.attn_res as _attn_res_mod
@@ -1463,7 +1466,7 @@ def _patch_kimi_attn_res() -> None:
                 return _torch_attn_res(
                     prefix_sum,
                     delta,
-                    block_residual,
+                    attn_res_bank(block_residual),
                     norm.weight,
                     proj.weight.squeeze(0),
                     None if output_norm is None else output_norm.weight,
@@ -1481,6 +1484,25 @@ def _patch_kimi_attn_res() -> None:
         _kimi_patch_ok("attn_res")
     except Exception:
         _kimi_patch_failed("attn_res")
+
+
+_kimi_k3_settings_logged = False
+
+
+def _log_kimi_k3_settings() -> None:
+    """Log the Kimi-K3 KDA prefill and video settings once per process, only when the served model is Kimi-K3."""
+    global _kimi_k3_settings_logged
+    if _kimi_k3_settings_logged:
+        return
+    _kimi_k3_settings_logged = True
+    try:
+        from vllm_gaudi.models.kimi_k3_kda import log_prefill_settings
+        from vllm_gaudi.models.kimi_k3_video import log_video_settings
+        log_prefill_settings()
+        log_video_settings()
+    except Exception:  # a settings log must not fail the config build
+        from vllm_gaudi.extension.logger import logger
+        logger().debug("Kimi-K3 settings log failed", exc_info=True)
 
 
 def _mark_kimi_k3_construction(model_cls: type, shared_layer_classes: tuple[type, ...]) -> None:
@@ -1513,6 +1535,11 @@ def _patch_kimi_k3_arch() -> None:
         _patch_kimi_attn_res()
         _patch_kimi_linear_weights()
         _patch_mla_bind_kv_cache()
+        from vllm.model_executor.models import config as _model_config
+        k3_config_cls = getattr(_model_config, "KimiK3ForConditionalGenerationConfig", None)
+        if k3_config_cls is not None:
+            # K3.1 shares the K3 quantization hook (MXFP4 experts instead of compressed-tensors)
+            _model_config.MODELS_CONFIG_MAP.setdefault("KimiK31ForConditionalGeneration", k3_config_cls)
         import vllm.models.kimi_k3 as k3_pkg
         import vllm.models.kimi_k3.amd.linear as _amd_linear
         import vllm.models.kimi_k3.amd.mla as _amd_mla
@@ -1530,6 +1557,7 @@ def _patch_kimi_k3_arch() -> None:
         from vllm.model_executor.models.registry import ModelRegistry
         ModelRegistry.register_model("KimiLinearForCausalLM", _amd_linear.KimiLinearForCausalLM)
         ModelRegistry.register_model("KimiK3ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
+        ModelRegistry.register_model("KimiK31ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
         ModelRegistry.register_model("KimiK3MTP", _amd_mtp.KimiK3MTP)
         _kimi_patch_installed("model_registration")
 
@@ -1577,7 +1605,7 @@ def _patch_kimi_k3_arch() -> None:
                     # vLLM 28a5fba06+ passes `step` (5th positional argument) and reads step.layer(idx) per layer;
                     # ac7f3e11e has no such parameter, so it is forwarded only when given.
                     kwargs["step"] = step
-                return run_with_deferred_kda_state(
+                output = run_with_deferred_kda_state(
                     self,
                     orig_linear_model_forward,
                     self,
@@ -1587,10 +1615,42 @@ def _patch_kimi_k3_arch() -> None:
                     inputs_embeds=inputs_embeds,
                     **kwargs,
                 )
+                # pipeline parallel: send the plain block bank, not the (bank, bank_ms) layer state
+                residual = output.tensors.get("residual") if hasattr(output, "tensors") else None
+                if isinstance(residual, tuple):
+                    output["residual"] = residual[0]
+                return output
 
             _amd_linear.KimiLinearModel.forward = _safe_kimi_linear_model_forward
             _amd_linear.KimiLinearModel._patched_hpu_tokens = True
         _kimi_patch_installed("linear_model_tokens_1d")
+
+        # Kimi-K3.1 checkpoints carry DSA indexer tensors that the dense MLA built on HPU has no parameters for.
+        orig_linear_load_weights = getattr(_amd_linear.KimiLinearModel, "load_weights", None)
+        if orig_linear_load_weights is not None and not getattr(_amd_linear.KimiLinearModel, "_patched_skip_indexer",
+                                                                False):
+
+            def _load_weights_skip_indexer(self, weights):
+                if not getattr(self, "_hpu_kimi_k3", False):  # standalone Kimi-Linear: upstream loader
+                    return orig_linear_load_weights(self, weights)
+
+                def _without_indexer():
+                    warned = False
+                    for item in weights:
+                        if ".self_attn.indexer." in item[0]:
+                            if not warned:
+                                warned = True
+                                _kimi_patch_logger().warning(
+                                    "Kimi-K3: DSA is not supported on HPU, skipping the DSA indexer weights "
+                                    "(dense MLA attention is used)")
+                            continue
+                        yield item
+
+                return orig_linear_load_weights(self, _without_indexer())
+
+            _amd_linear.KimiLinearModel.load_weights = _load_weights_skip_indexer
+            _amd_linear.KimiLinearModel._patched_skip_indexer = True
+        _kimi_patch_installed("skip_dsa_indexer_weights")
 
         # out-of-place attn_res on the decoder layer (2D inputs, bank shape check): the in-place updates of the
         # upstream version do not survive the per-layer graph boundaries of torch.compile mode
@@ -1615,9 +1675,19 @@ def _patch_kimi_k3_arch() -> None:
             _amd_linear.KimiMoE.forward = _safe_moe_forward
             _amd_linear.KimiMoE._patched_moe_2d = True
         _kimi_patch_installed("kimi_moe_2d")
+        _patch_kimi_k3_video()
         _kimi_patch_ok("k3_arch")
     except Exception:
         _kimi_patch_failed("k3_arch")
+
+
+def _patch_kimi_k3_video() -> None:
+    """Add the video modality to the Kimi-K3 model (K3 only, see ``vllm_gaudi/models/kimi_k3_video.py``).
+
+    Depends on the K3 model registration of ``_patch_kimi_k3_arch``.
+    """
+    from vllm_gaudi.models.kimi_k3_video import install_kimi_k3_video
+    install_kimi_k3_video()
 
 
 def _hpu_mxfp4_routed_apply(layer, x, topk_weights, topk_ids, group_size):
