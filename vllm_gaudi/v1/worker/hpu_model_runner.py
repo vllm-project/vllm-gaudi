@@ -86,11 +86,11 @@ from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     iter_layer_specs,
 )
-from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
+from vllm.v1.worker.gpu.kv_connector import KVConnector, NO_OP_KV_CONNECTOR, get_kv_connector
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists, LogprobsTensors, DraftTokenIds,
                              ModelRunnerOutput, AsyncModelRunnerOutput, KVConnectorOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cache_groups
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
@@ -99,12 +99,12 @@ from vllm.model_executor.models.interfaces import (supports_eagle3, supports_tra
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.v1.worker.utils import (AttentionGroup, prepare_kernel_block_sizes, sanity_check_mm_encoder_outputs)
-from vllm.v1.sample.rejection_sampler import RejectionSampler
-from vllm.v1.spec_decode.eagle import EagleProposer
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.sample.sampler import Sampler
-from vllm.v1.sample.logits_processor import build_logitsprocs
+from vllm_gaudi.v1._vendored.sample.rejection_sampler import RejectionSampler
+from vllm_gaudi.v1._vendored.spec_decode.eagle import EagleProposer
+from vllm_gaudi.v1._vendored.spec_decode.metadata import SpecDecodeMetadata
+from vllm_gaudi.v1._vendored.spec_decode.ngram_proposer import NgramProposer
+from vllm_gaudi.v1._vendored.sample.sampler import Sampler
+from vllm_gaudi.v1._vendored.sample.logits_processor import build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.sampling_params import SamplingParams
@@ -114,7 +114,6 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
-from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import OffloadingConnectorMetadata
@@ -1064,7 +1063,7 @@ def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num
     )
 
 
-class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
+class HpuKVConnectorModelRunnerMixin:
 
     def __init__(self):
         super().__init__()
@@ -1410,6 +1409,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
         self.is_driver_worker = is_driver_worker
+        # Replaced by an active connector once the KV caches exist (initialize_kv_cache).
+        self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
         self.use_aux_hidden_state_outputs = False
         self.supports_mm_inputs = False
 
@@ -4447,7 +4448,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
             # For D case, wait until kv finish load here
-            return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+            return self.kv_connector.no_forward(scheduler_output)
 
         if self.is_pooling_model:
             # 1. padding input_ids and positions 2. fill attn_metadata
@@ -7247,9 +7248,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         len(self._gdn_slot_free_list))
 
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))
-            if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
-                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
+            # Registers the caches with the KV transfer group.
+            self.kv_connector = get_kv_connector(self.vllm_config, self.get_kv_caches_4D(kv_caches))
 
         # TODO: check if this one is needed; for now seems that not
         # if has_mamba:

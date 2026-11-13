@@ -1,0 +1,16 @@
+diff --git a/spec_decode/llm_base_proposer.py b/spec_decode/llm_base_proposer.py
+index fb2fc7cb..cd506ceb 100644
+--- a/spec_decode/llm_base_proposer.py
++++ b/spec_decode/llm_base_proposer.py
+@@ -122,8 +122,9 @@ class SpecDecodeBaseProposer:
+         )
+         self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
+ 
+-        self.use_heterogeneous_vocab: bool = (
+-            self.speculative_config.use_heterogeneous_vocab
++        # vllm-gaudi local change [P1]: the field is gone after aac1b2a4f3 (no heterogeneous vocab).
++        self.use_heterogeneous_vocab: bool = getattr(
++            self.speculative_config, "use_heterogeneous_vocab", False
+         )
+         self.vocab_mapping: VocabMapping | None = None
+ 
