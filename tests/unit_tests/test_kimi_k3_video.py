@@ -375,8 +375,7 @@ def _stub_vision_tower_forward(tower, pixels, grids, *, use_data_parallel=False,
     """Row counts of the real vision_tower_forward for a [t, h, w] grid with a 2x2 merge, without the tower weights.
 
     The plain path pools a chunk over time (tpool_patch_merger): h*w//4 rows. The data-parallel path
-    (run_dp_sharded_mrope_vision_model) sizes its outputs as t*h*w//4 and ignores the pooling, which is the upstream
-    behaviour that made a 4-frame chunk return 4x the rows.
+    (run_dp_sharded_mrope_vision_model) sizes its outputs as t*h*w//4 and ignores the pooling.
     """
     merge_area = tower.merge_kernel_size[0] * tower.merge_kernel_size[1]
     return [
@@ -606,7 +605,7 @@ def _video_model(video, use_data_parallel):
 def test_embed_rows_equal_the_placeholder_count_for_a_20_frame_864x480_video(video, use_data_parallel):
     # Through the processor: the grids come from the processor, the placeholder count from the prompt replacement.
     # The model may have use_data_parallel=True (K3 with TP16); the video path must not use the DP-sharded tower
-    # helper, whose outputs ignore the temporal pooling (5 chunks x 2232 = 11160 rows instead of 2790).
+    # helper, whose outputs ignore the temporal pooling.
     proc = _processor(video)
     item = _ibm_video(video.utils)
     out = proc._call_hf_processor({"videos": [item]}, {})
