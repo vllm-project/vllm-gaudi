@@ -66,6 +66,7 @@ def make_new_request(req_id, prompt_token_ids, num_computed_tokens=0):
         block_ids=[[0]],
         num_computed_tokens=num_computed_tokens,
         lora_request=None,
+        prefill_token_ids=prompt_token_ids,
     )
 
 

@@ -26,6 +26,36 @@ from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
 _SAMPLING_EPS = 1e-5
 
 
+def splice_placeholders(output_token_ids: list[int], new_ids: list[int], keep_length: bool = False) -> None:
+    """Replace the trailing -1 placeholders of ``output_token_ids`` in place with one step's sampled ids.
+
+    Under async scheduling every step appends a -1 per request, and the real ids are only spliced in while a
+    penalty or bad-words consumer needs them, so a request can also carry older placeholders, for tokens already in
+    the KV cache.
+
+    Args:
+        output_token_ids: a request's output ids, ending in -1 placeholders.
+        new_ids: that request's row of the step's sampled ids; -1 marks unused (rejected) slots.
+        keep_length: replace only the newest placeholders and keep the list length (the length then still matches
+            the tokens in the KV cache). Otherwise the whole trailing run of placeholders is replaced, which
+            shortens the list.
+    """
+    if not new_ids:
+        return
+    num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
+    num_placeholders = 0
+    while (num_placeholders < len(output_token_ids) and output_token_ids[-1 - num_placeholders] == -1):
+        num_placeholders += 1
+    num_to_replace = min(num_sampled_ids, num_placeholders)
+    if keep_length:
+        if num_to_replace:
+            output_token_ids[len(output_token_ids) - num_to_replace:] = new_ids[:num_to_replace]
+    elif num_placeholders:
+        # Account for a differing number of placeholders vs sampled ids
+        # (tokens can be discarded after a kv-load failure).
+        output_token_ids[len(output_token_ids) - num_placeholders:] = new_ids[:num_to_replace]
+
+
 class HPUMultiGroupBlockTable(MultiGroupBlockTable):
     """MultiGroupBlockTable that splits KV-manager blocks into kernel blocks.
 
@@ -385,7 +415,9 @@ class InputBatch:
 
             if sampling_params.logprobs is not None:
                 self.num_logprobs[req_id] = sampling_params.logprobs
-            if sampling_params.prompt_logprobs is not None:
+            # A request that already has outputs (resumed after preemption, or re-added after a skipped step)
+            # sent its prompt logprobs before; scoring the prompt again would send them twice.
+            if sampling_params.prompt_logprobs is not None and not request.output_token_ids:
                 self.num_prompt_logprobs[req_id] = (sampling_params.prompt_logprobs)
 
             if sampling_params.allowed_token_ids:
@@ -849,6 +881,11 @@ class InputBatch:
         copy-ready event and replace the placeholders. No-op when no consumer
         reads output_token_ids (sampled_token_ids_cpu left None by
         set_async_sampled_token_ids) or there is no prior step to repair.
+
+        Only the newest placeholders are replaced: a request that decoded
+        while no consumer was in the batch keeps its older -1s, so its list
+        still matches its KV cache when it is re-added after a skipped step.
+        The penalty kernel maps -1 to its pad id.
         """
         if self.sampled_token_ids_cpu is None or self.prev_req_id_to_index is None:
             # Output token ids not needed or not async scheduling.
@@ -868,19 +905,7 @@ class InputBatch:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-            new_ids: list[int] = sampled_token_ids[prev_index]
-            if not new_ids:
-                continue
-            num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
-            # Account for a differing number of placeholders vs sampled ids
-            # (tokens can be discarded after a kv-load failure).
-            first_placeholder = len(req_output_token_ids)
-            while (first_placeholder > 0 and req_output_token_ids[first_placeholder - 1] == -1):
-                first_placeholder -= 1
-            num_placeholders = len(req_output_token_ids) - first_placeholder
-            num_to_replace = min(num_sampled_ids, num_placeholders)
-            del new_ids[num_to_replace:]
-            req_output_token_ids[first_placeholder:] = new_ids
+            splice_placeholders(req_output_token_ids, sampled_token_ids[prev_index], keep_length=True)
 
     def get_pooling_params(self) -> list[PoolingParams]:
         assert len(self.req_ids) == len(self.pooling_params)

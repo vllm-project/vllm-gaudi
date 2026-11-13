@@ -468,6 +468,7 @@ run_mistral3_test() {
 run_preemption_test() {
     echo "➡️ Testing preemption handling..."
     VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/preemption.py"
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/preemption.py" --async-scheduling
     echo "✅ Test with preemption handling passed."
 }
 
