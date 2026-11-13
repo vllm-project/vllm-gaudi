@@ -5122,7 +5122,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)  # type: ignore
 
         if self.use_async_scheduling:
-            assert_output_rows(req_ids_output_copy, len(postprocessed_sampled_token_ids))
+            assert_output_rows(all_req_ids, len(postprocessed_sampled_token_ids), req_ids_output_copy)
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 sampled_token_ids=postprocessed_sampled_token_ids,
