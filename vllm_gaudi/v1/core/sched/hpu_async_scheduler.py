@@ -2,13 +2,10 @@
 from collections.abc import Iterable
 from functools import cached_property
 
-from vllm.logger import init_logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.request import Request, RequestStatus
 
 import vllm_gaudi.envs as gaudi_envs
-
-logger = init_logger("vllm.gaudi.hpu_async_scheduler")
 
 
 class HPUAsyncScheduler(AsyncScheduler):
@@ -56,7 +53,6 @@ class HPUAsyncScheduler(AsyncScheduler):
         try:
             return max(int(value), 0)
         except ValueError:
-            logger.warning("Ignoring non-integer VLLM_HPU_MIN_PREFILL_CHUNK=%r; rule disabled.", value)
             return 0
 
     def _reserve_prefill_lookahead(self, request: Request, num_computed_tokens: int, num_new_tokens: int) -> int:

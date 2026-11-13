@@ -303,7 +303,7 @@ def drop_weight_page_cache_during_load(model_config=None):
         from vllm_gaudi.patches import _is_kimi_k3_config
 
         if not _is_kimi_k3_config(model_config):
-            logger.debug("Weight page cache: disabled (auto mode is limited to Kimi-K3; set %s=1 to force)", _ENV_DROP)
+            logger.info("Weight page cache: disabled (auto mode is limited to Kimi-K3; set %s=1 to force)", _ENV_DROP)
             mode = "off"
     if mode == "off":
         yield
