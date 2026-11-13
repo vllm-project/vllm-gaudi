@@ -76,6 +76,7 @@ def set_vllm_config(cfg):
     else:
         _VLLM_VALUES['model_type'] = cfg.model_config.model_type
     _VLLM_VALUES['prefix_caching'] = cfg.cache_config.enable_prefix_caching
+    _VLLM_VALUES['enable_prefix_caching'] = cfg.cache_config.enable_prefix_caching
 
 
 def _get_vllm_engine_version(_):
@@ -109,7 +110,10 @@ def get_environment():
         Value('engine_version', _get_vllm_engine_version, env_var_type=str),
         Value('bridge_mode', _get_pt_bridge_mode, env_var_type=str, check=choice('eager', 'lazy')),
         VllmValue('model_type', str),
+        # prefix_caching is False only when VLLM_CONTIGUOUS_PA rules prefix caching
+        # out; enable_prefix_caching is the engine setting (--enable-prefix-caching).
         VllmValue('prefix_caching', boolean, depend=_get_prefix),
+        VllmValue('enable_prefix_caching', boolean),
         Value('vllm_gaudi_commit', _get_vllm_hash, env_var_type=str)
     ]
     return split_values_and_flags(values)
