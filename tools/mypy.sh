@@ -23,6 +23,7 @@ run_mypy() {
 run_mypy # Note that this is less strict than CI
 run_mypy tests
 run_mypy vllm_gaudi/attention
+run_mypy vllm_gaudi/calibration
 run_mypy vllm_gaudi/distributed
 #run_mypy vllm_gaudi/extension # NOTE(kzawora): re-enable this once extension refactor is ready
 run_mypy vllm_gaudi/ops

@@ -1,5 +1,8 @@
 # Calibrating Multiple Nodes
 
+!!! warning
+    `calibrate_model.sh` and the step scripts are deprecated and will be removed in a future release. Use `vllm-gaudi-calibrate` instead: see [Multi-Node Calibration with Ray](advanced.md#multi-node-calibration-with-ray), and [Migration](migration.md) for the option mapping. This page documents the deprecated scripts until then.
+
 This procedure explains how to perform calibration for multiple Intel® Gaudi® nodes with more than 8 cards. It requires execution within a [Gaudi Pytorch container](https://docs.habana.ai/en/latest/Installation_Guide/Additional_Installation/Docker_Installation.html#use-intel-gaudi-containers).
 
 As an example, we use the Llama 3.1 405B model running in tensor parallelism 16 mode spanning two Intel® Gaudi® 2 nodes.
@@ -8,7 +11,7 @@ As an example, we use the Llama 3.1 405B model running in tensor parallelism 16 
 
 Before you start:
 
-- Familiarize with [notes and recommendations](calibration.md#notes-and-recommendations).
+- Familiarize with [notes and recommendations](calibration_one_node.md#notes-and-recommendations).
 - Ensure that all nodes in your multi-node setup are connected to an Network File System (NFS) mount.
 - Ensure you have a multi-node configuration with more than 8 cards.
 
