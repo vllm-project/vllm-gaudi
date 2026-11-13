@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Vendored from https://github.com/vllm-project/vllm/blob/b46907cce0/tests/v1/sample/utils.py
-# (removed upstream in aac1b2a4f3, vllm-project/vllm#63373). Local changes: imports retargeted.
+# (reduced upstream in aac1b2a4f3, vllm-project/vllm#63373). Local changes: imports retargeted.
 from collections.abc import Iterator
 from enum import Enum
 from typing import NamedTuple

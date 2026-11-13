@@ -14,14 +14,18 @@ The vendored tree is a pure function of (vLLM rev, manifest.txt, patches/):
 4. Generate ``_compat.py`` and the package ``__init__.py`` files.
 5. Apply ``patches/NNNN-Pn-*.patch`` in order with ``git apply`` (paths relative to the vendored root).
 
-``--check`` rebuilds the tree in a temporary directory and fails if it differs from the committed one, so the
-committed code is always "upstream at rev + the listed patches". Only git objects are read: no torch or vllm
-install is needed.
+With ``--tests-out``, the upstream tests listed in ``manifest-tests.txt`` (``<upstream path> <file name>``) are
+vendored the same way into one package, with their imports retargeted to the vendored code and to each other, and
+``patches-tests/NNNN-Pn-*.patch`` applied relative to that package.
+
+``--check`` rebuilds the tree (and the tests tree with ``--tests-out``) in a temporary directory and fails if it
+differs from the committed one, so the committed code is always "upstream at rev + the listed patches". Only git
+objects are read: no torch or vllm install is needed.
 
 Usage::
 
     python3 -P tools/vendor_v1/vendor_v1.py --vllm-repo ../vllm --rev b46907cce0f702eec703bbdac5c5f984cbd2be40 \
-        --out vllm_gaudi/v1/_vendored [--check]
+        --out vllm_gaudi/v1/_vendored [--tests-out tests/unit_tests/vendored_v1/upstream] [--check]
 """
 
 from __future__ import annotations
@@ -56,7 +60,7 @@ COMPAT_HELPERS = [
     ("vllm.utils.torch_utils", "make_tensor_with_pad", "vllm/utils/torch_utils.py"),
 ]
 # Files that still exist upstream after the removal, in a reduced form.
-REDUCED_UPSTREAM = {"vllm/v1/sample/ops/topk_topp_sampler.py"}
+REDUCED_UPSTREAM = {"vllm/v1/sample/ops/topk_topp_sampler.py", "tests/v1/sample/utils.py"}
 
 PATCH_NAME = re.compile(r"^\d{4}-(P\d+)-[\w.-]+\.patch$")
 
@@ -357,7 +361,9 @@ def main() -> int:
     parser.add_argument("--tests-out",
                         type=Path,
                         help="vendored upstream tests, e.g. tests/unit_tests/vendored_v1/upstream")
-    parser.add_argument("--check", action="store_true", help="verify --out instead of regenerating it")
+    parser.add_argument("--check",
+                        action="store_true",
+                        help="verify --out (and --tests-out) instead of regenerating them")
     args = parser.parse_args()
     rev = resolve_rev(args.vllm_repo, args.rev)
     out = args.out.resolve()
