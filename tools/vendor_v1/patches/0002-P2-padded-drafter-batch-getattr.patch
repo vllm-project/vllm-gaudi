@@ -1,0 +1,14 @@
+diff --git a/spec_decode/llm_base_proposer.py b/spec_decode/llm_base_proposer.py
+index cd506ceb..e6ada4c8 100644
+--- a/spec_decode/llm_base_proposer.py
++++ b/spec_decode/llm_base_proposer.py
+@@ -316,7 +316,8 @@ class SpecDecodeBaseProposer:
+             self.allowed_attn_types = tuple(rocm_types)
+ 
+     def _raise_if_padded_drafter_batch_disabled(self):
+-        if self.speculative_config.disable_padded_drafter_batch:
++        # vllm-gaudi local change [P2]: the option is gone after aac1b2a4f3 (always padded).
++        if getattr(self.speculative_config, "disable_padded_drafter_batch", False):
+             raise NotImplementedError(
+                 "Speculative Decoding with draft models or parallel drafting only "
+                 "supports padded drafter batch. Please unset "
