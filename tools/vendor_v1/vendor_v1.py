@@ -380,6 +380,9 @@ def main() -> int:
     rev = resolve_rev(args.vllm_repo, args.rev)
     out = args.out.resolve()
     tests_out = args.tests_out.resolve() if args.tests_out else None
+    if tests_out is not None and (tests_out == out or tests_out in out.parents or out in tests_out.parents):
+        # Regenerating one would delete the other.
+        raise SystemExit(f"--out {out} and --tests-out {tests_out} must not be the same or nested")
     if args.check:
         return check(args.vllm_repo, rev, out, tests_out)
     # Only ever delete trees this script generated (a wrong or empty path would otherwise remove unrelated files).
