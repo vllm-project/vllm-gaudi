@@ -395,6 +395,67 @@ def test_update_states_async_skipped_request_without_copy_fails(model_runner, di
         _skip_then_reschedule(model_runner, "req_0")
 
 
+def _readd_after_skip(model_runner, req_id: str, output_ids: list[int], num_computed_tokens: int):
+    model_runner._last_async_copy = (torch.tensor([[44]], dtype=torch.int32), _ReadyEvent(), {req_id: 0})
+    model_runner.use_async_scheduling = True
+    model_runner._update_states(_new_request_step(req_id, [1, 2, 3], SamplingParams()))
+    model_runner.requests[req_id].output_token_ids.extend(output_ids)
+    model_runner._update_states(_empty_step())
+    cached = CachedRequestData(req_ids=[req_id],
+                               new_token_ids=[[]],
+                               new_block_ids=[None],
+                               num_computed_tokens=[num_computed_tokens],
+                               num_output_tokens=[len(output_ids)])
+    num_new = 3 + len(output_ids) - num_computed_tokens
+    model_runner._update_states(
+        _empty_step(scheduled_cached_reqs=cached,
+                    num_scheduled_tokens={req_id: max(num_new, 1)},
+                    total_num_scheduled_tokens=max(num_new, 1)))
+
+
+def test_update_states_async_penalty_splice_keeps_list_for_readd(model_runner, dist_init):
+    """A penalty request joining the batch splices every request's newest placeholder. It must not drop the older
+    ones of a request that decoded without a consumer, or that request's list would end short of its KV cache and a
+    later skip and re-add would read past it."""
+    req_id = "req_0"
+    model_runner.use_async_scheduling = True
+    model_runner._update_states(_new_request_step(req_id, [1, 2, 3], SamplingParams()))
+    outputs = model_runner.requests[req_id].output_token_ids
+    outputs.extend([-1, -1, -1])
+    batch = model_runner.input_batch
+    batch.prev_req_id_to_index = {req_id: 0}
+    batch.sampled_token_ids_cpu = torch.tensor([[41]], dtype=torch.int32)
+    batch.async_copy_ready_event = _ReadyEvent()
+    batch.update_async_output_token_ids()
+    assert outputs == [-1, -1, 41]
+    # The next step's -1, then a skipped step and the re-add: the input position 6 is the repaired id.
+    outputs.append(-1)
+    model_runner._last_async_copy = (torch.tensor([[44]], dtype=torch.int32), _ReadyEvent(), {req_id: 0})
+    model_runner._update_states(_empty_step())
+    cached = CachedRequestData(req_ids=[req_id],
+                               new_token_ids=[[]],
+                               new_block_ids=[None],
+                               num_computed_tokens=[6],
+                               num_output_tokens=[4])
+    model_runner._update_states(
+        _empty_step(scheduled_cached_reqs=cached, num_scheduled_tokens={req_id: 1}, total_num_scheduled_tokens=1))
+    row = model_runner.input_batch.req_id_to_index[req_id]
+    assert model_runner.input_batch.token_ids_cpu[row, 6] == 44
+
+
+def test_update_states_async_readded_request_shorter_than_kv_cache_fails(model_runner, dist_init):
+    """Four outputs were sampled but the list holds two: the input position (6) lies past the re-added row, which
+    would feed a stale token, so the re-add refuses instead."""
+    with pytest.raises(RuntimeError, match="past its 5 known tokens"):
+        _readd_after_skip(model_runner, "req_0", [41, -1], num_computed_tokens=6)
+
+
+def test_update_states_async_readded_request_with_placeholder_to_compute_fails(model_runner, dist_init):
+    """A KV-load failure rolled num_computed_tokens back to the prompt: the older placeholder must be recomputed."""
+    with pytest.raises(RuntimeError, match="inside the tokens to compute"):
+        _readd_after_skip(model_runner, "req_0", [5, -1, -1], num_computed_tokens=3)
+
+
 def test_get_nans_in_logits(model_runner, dist_init):
     req_ids = ("req_0", "req_1")
 

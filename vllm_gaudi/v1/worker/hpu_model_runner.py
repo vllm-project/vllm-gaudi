@@ -2138,6 +2138,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # Under async scheduling its last sampled id may still be a -1 placeholder: it is this step's
                 # input token, so splice in the real id from that step's CPU copy.
                 self._repair_skipped_request_placeholder(req_id, req_state.output_token_ids)
+                if self.use_async_scheduling and is_last_rank:
+                    self._check_readded_request_inputs(req_id, req_state, num_computed_tokens)
                 req_ids_to_add.append(req_id)
                 continue
 
@@ -2196,6 +2198,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
         return batch_changed
+
+    @staticmethod
+    def _check_readded_request_inputs(req_id: str, req_state: CachedRequestState, num_computed_tokens: int) -> None:
+        """Refuse a re-added request whose tokens to compute are not all known.
+
+        Under async scheduling the re-added row is built from the output list, which must reach past
+        num_computed_tokens with real ids. A KV-load failure that rolled num_computed_tokens back over older -1
+        placeholders breaks that, and a list shorter than the KV cache would read past the row. The scheduler no
+        longer sends all_token_ids, so neither can be repaired here, and the row would feed a stale or -1 token.
+        """
+        num_tokens = req_state.num_prompt_tokens + len(req_state.output_token_ids)
+        if num_tokens <= num_computed_tokens:
+            raise RuntimeError(f"Request {req_id} resumes at position {num_computed_tokens}, past its {num_tokens} "
+                               "known tokens.")
+        if -1 in req_state.output_token_ids[max(num_computed_tokens - req_state.num_prompt_tokens, 0):]:
+            raise RuntimeError(f"Request {req_id} resumes with a -1 placeholder inside the tokens to compute.")
 
     def _repair_skipped_request_placeholder(self, req_id: str, output_token_ids: list[int]) -> None:
         """Splice the real id over the trailing -1 of a request re-added after a skipped step.
