@@ -273,11 +273,85 @@ def kda_chunked_steps(state: torch.Tensor,
     return out[:, :seq_len], state
 
 
-def _intra_chunk_terms(cum: torch.Tensor, kc: torch.Tensor, qc: torch.Tensor, vc: torch.Tensor, bc: torch.Tensor,
-                       k_gamma: torch.Tensor, q_gamma: torch.Tensor, strict: torch.Tensor, lower: torch.Tensor):
-    """State-independent terms of a group of chunks (all inputs [B,H,G,C,*], bc [B,H,G,C,1]).
+def parse_prefill_settings(value: str) -> tuple[int, int]:
+    """Parse HPU_KIMI_KDA_PREFILL_CHUNK ``"<chunk_size>,<vec_chunks>"``."""
+    parts = [p.strip() for p in value.split(",")]
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        raise ValueError(f"HPU_KIMI_KDA_PREFILL_CHUNK must be '<chunk_size>,<vec_chunks>', got {value!r}")
+    chunk_size, vec_chunks = int(parts[0]), int(parts[1])
+    if chunk_size <= 0 or (chunk_size > 16 and chunk_size % 16 != 0):
+        raise ValueError(f"HPU_KIMI_KDA_PREFILL_CHUNK chunk_size must be positive and, above 16, a multiple of 16, "
+                         f"got {chunk_size}")
+    return chunk_size, vec_chunks
 
-    With U = Uv - Wk S_0^T the pseudo values of ``kda_chunked_steps``, returns ``(uv, wk, q_eff, o_intra)`` with
+
+def parse_intra_sub_chunk(value: str) -> int:
+    """Parse HPU_KIMI_KDA_INTRA_SUB_CHUNK (empty or 0 = off)."""
+    value = value.strip()
+    if not value:
+        return 0
+    if not value.isdigit():
+        raise ValueError(f"HPU_KIMI_KDA_INTRA_SUB_CHUNK must be a non-negative integer, got {value!r}")
+    return int(value)
+
+
+def effective_intra_sub_chunk(chunk_size: int, sub_chunk: int) -> int:
+    """``sub_chunk`` if it splits ``chunk_size`` into at least two equal blocks, else 0 (full pairwise path)."""
+    return sub_chunk if 0 < sub_chunk < chunk_size and chunk_size % sub_chunk == 0 else 0
+
+
+def _pairwise_terms(cum: torch.Tensor, kc: torch.Tensor, qc: torch.Tensor):
+    """Raw A and Aqk ``sum_k x_i k_j exp(G_i - G_j)`` of [N,C,K] inputs from the full [N,C,C,K] pairwise decay."""
+    # exp(G_i - G_j) for j <= i; the clamp keeps the masked-out upper triangle finite (0 * inf would be NaN)
+    decay = torch.exp(torch.clamp(cum.unsqueeze(-2) - cum.unsqueeze(-3), max=0.0))  # [N,C(i),C(j),K]
+    k_decayed = decay * kc.unsqueeze(-3)  # k_j * exp(G_i - G_j)
+    # contract with k_i (A) and q_i (Aqk) over K elementwise: as matmuls these are width-1 batched GEMVs
+    a_raw = (k_decayed * kc.unsqueeze(-2)).sum(-1)  # [N,C(i),C(j)]
+    aqk_raw = (k_decayed * qc.unsqueeze(-2)).sum(-1)
+    return a_raw, aqk_raw
+
+
+def _pairwise_terms_blocked(cum: torch.Tensor, kc: torch.Tensor, qc: torch.Tensor, sub_chunk: int):
+    """``_pairwise_terms`` with the chunk split into M sub-chunks of ``sub_chunk`` rows.
+
+    Diagonal blocks use the pairwise form. Block (I, J), J < I, factors through r_J = G at the last row of J:
+    ``exp(G_i - G_j) = exp(G_i - r_J) exp(r_J - G_j)``, both exponents <= 0 since G is non-increasing.
+    Blocks J > I are zero.
+    """
+    batch, chunk, kdim = cum.shape
+    m = chunk // sub_chunk
+    diags = _pairwise_terms(*(x.reshape(batch * m, sub_chunk, kdim) for x in (cum, kc, qc)))
+    cum_b = cum.reshape(batch, m, sub_chunk, kdim)
+    last = cum_b[:, :, -1:, :]  # r_J, [N,M,1,K]
+    right_t = (kc.reshape(batch, m, sub_chunk, kdim) * torch.exp(last - cum_b)).transpose(-1, -2)  # [N,M,K,S]
+    # all M block columns at once; rows of block J and above are replaced below
+    left_decay = torch.exp(torch.clamp(cum.unsqueeze(1) - last, max=0.0))  # [N,M(J),C,K]
+    blk = torch.arange(m, device=cum.device)
+    on_diag = (blk.unsqueeze(1) == blk).reshape(m, 1, m, 1)
+    below = (blk.unsqueeze(1) > blk).reshape(m, 1, m, 1)
+    outs = []
+    for x, diag in zip((kc, qc), diags):
+        off = torch.matmul(x.unsqueeze(1) * left_decay, right_t)  # [N,M(J),C,S]
+        off = off.transpose(1, 2).reshape(batch, m, sub_chunk, m, sub_chunk)  # [N,M(I),S,M(J),S]
+        diag = diag.reshape(batch, m, sub_chunk, 1, sub_chunk)
+        full = torch.where(on_diag, diag, torch.where(below, off, 0.0))
+        outs.append(full.reshape(batch, chunk, chunk))
+    return outs[0], outs[1]
+
+
+def _intra_chunk_terms(cum: torch.Tensor,
+                       kc: torch.Tensor,
+                       qc: torch.Tensor,
+                       vc: torch.Tensor,
+                       bc: torch.Tensor,
+                       k_gamma: torch.Tensor,
+                       q_gamma: torch.Tensor,
+                       strict: torch.Tensor,
+                       lower: torch.Tensor,
+                       sub_chunk: int = 0):
+    """State-independent terms of a group of chunks (all inputs [G,B,H,C,*], bc [G,B,H,C,1]).
+
+    With U = Uv - Wk S_0^T the pseudo values of the chunk, returns ``(uv, wk, q_eff, o_intra)`` with
     ``Uv = (I + A)^-1 (beta V)``, ``Wk = (I + A)^-1 (beta K exp(G))``, so that the chunk output is
     ``O = q_eff S_0^T + o_intra`` (``q_eff = Q exp(G) - Aqk Wk``, ``o_intra = Aqk Uv``).
     """
@@ -289,12 +363,11 @@ def _intra_chunk_terms(cum: torch.Tensor, kc: torch.Tensor, qc: torch.Tensor, vc
         return x.reshape(lead[0] * lead[1] * lead[2], *x.shape[3:])
 
     cum, kc, qc, vc, bc, k_gamma, q_gamma = (fold(x) for x in (cum, kc, qc, vc, bc, k_gamma, q_gamma))
-    # exp(G_i - G_j) for j <= i; the clamp keeps the masked-out upper triangle finite (0 * inf would be NaN)
-    decay = torch.exp(torch.clamp(cum.unsqueeze(-2) - cum.unsqueeze(-3), max=0.0))  # [N,C(i),C(j),K]
-    k_decayed = decay * kc.unsqueeze(-3)  # k_j * exp(G_i - G_j)
-    # contract with k_i (A) and q_i (Aqk) over K; two matmuls instead of a stride-2 last-dim select of one
-    a_raw = torch.matmul(k_decayed, kc.unsqueeze(-1)).squeeze(-1)  # [N,C(i),C(j)]
-    aqk_raw = torch.matmul(k_decayed, qc.unsqueeze(-1)).squeeze(-1)
+    chunk = strict.shape[-1]
+    if effective_intra_sub_chunk(chunk, sub_chunk):
+        a_raw, aqk_raw = _pairwise_terms_blocked(cum, kc, qc, sub_chunk)
+    else:
+        a_raw, aqk_raw = _pairwise_terms(cum, kc, qc)
     a_mat = a_raw * strict * bc  # beta_i on the row
     aqk = aqk_raw * lower
     inv = _unit_lower_inverse_dense(a_mat)
@@ -305,6 +378,64 @@ def _intra_chunk_terms(cum: torch.Tensor, kc: torch.Tensor, qc: torch.Tensor, vc
     return tuple(x.reshape(*lead, *x.shape[1:]) for x in (uv, wk, q_eff, o_intra))
 
 
+_SCAN_BLOCK = 8  # chunks per block of the state recurrence scan
+
+
+def _chunk_start_states(s_t: torch.Tensor, tw: torch.Tensor, tu: torch.Tensor,
+                        gamma_last: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Chunk-initial states [N,B,H,K,V] and the final state of ``s <- s * gl + Tu - Tw s`` from s_t [B,H,K,V].
+
+    The affine chunk maps ``s -> A s + Tu`` with ``A = diag(gl) - Tw`` are composed within blocks of
+    ``_SCAN_BLOCK`` chunks, batched over the blocks, so only the block-initial states are stepped sequentially;
+    the carries are added by ``baddbmm``.
+    """
+    num_chunks, bsz, heads, kdim, vdim = tu.shape
+    scan_block = _SCAN_BLOCK
+    # not min() and no division by num_chunks: no Min / symbolic divisor in the traced shapes
+    if scan_block < num_chunks:
+        block, num_blocks = scan_block, (num_chunks + scan_block - 1) // scan_block
+    else:
+        block, num_blocks = num_chunks, 1
+    rows = num_blocks * bsz * heads  # explicit sizes: no reshape(-1) divisions in the traced shapes
+    eye = torch.eye(kdim, dtype=tw.dtype, device=tw.device)
+
+    # chunk j * block + i goes to row i * num_blocks + j: one gather instead of pad + transpose copy; the padded
+    # tail repeats the last chunk and only feeds discarded starts and the unused carry of the last block
+    order = torch.arange(num_blocks * block, device=tw.device).reshape(num_blocks, block).t()
+    order = order.clamp_max(num_chunks - 1).reshape(num_blocks * block)
+
+    # [block, num_blocks * B*H, K, D]: the position in the block leads, so every step reads a leading-dim slice
+    def to_blocks(x):
+        return x.index_select(0, order).reshape(block, rows, kdim, x.shape[-1])
+
+    # maps A = diag(gl) - Tw [N,B,H,K,K] built inline so the natural-order buffer is freed after the gather
+    a_blk, b_blk = to_blocks(eye * gamma_last - tw), to_blocks(tu)
+    # prefix maps within the blocks: P_i = A_i P_{i-1}, c_i = A_i c_{i-1} + b_i
+    p, c = [a_blk[0]], [b_blk[0]]
+    for a_i, b_i in zip(a_blk[1:], b_blk[1:]):
+        p.append(torch.bmm(a_i, p[-1]))
+        c.append(torch.baddbmm(b_i, a_i, c[-1]))
+    x = s_t.reshape(bsz * heads, kdim, vdim)
+    block_starts = [x]
+    for p_j, c_j in zip(p[-1].reshape(num_blocks, bsz * heads, kdim, kdim)[:-1],
+                        c[-1].reshape(num_blocks, bsz * heads, kdim, vdim)[:-1]):
+        x = torch.baddbmm(c_j, p_j, x)
+        block_starts.append(x)
+    xs = torch.stack(block_starts)  # [num_blocks, B*H, K, V]
+    xs_rows = xs.flatten(0, 1)
+    block_chunk_starts = [xs] + [
+        torch.baddbmm(c_i, p_i, xs_rows).reshape(num_blocks, bsz * heads, kdim, vdim)
+        for p_i, c_i in zip(p[:-1], c[:-1])
+    ]
+    starts = torch.stack(block_chunk_starts, 1)
+    starts = starts.reshape(num_blocks * block, bsz, heads, kdim, vdim)[:num_chunks]
+    # final state: one step from the last chunk start (the padded maps are not identities)
+    a_last = eye * gamma_last[-1] - tw[-1]
+    s_t = torch.baddbmm(tu[-1].reshape(bsz * heads, kdim, vdim), a_last.reshape(bsz * heads, kdim, kdim),
+                        starts[-1].reshape(bsz * heads, kdim, vdim))
+    return starts, s_t.reshape(bsz, heads, kdim, vdim)
+
+
 def kda_chunked_steps_vec(state: torch.Tensor,
                           q: torch.Tensor,
                           k: torch.Tensor,
@@ -312,17 +443,30 @@ def kda_chunked_steps_vec(state: torch.Tensor,
                           g: torch.Tensor,
                           beta: torch.Tensor,
                           chunk_size: int = 64,
-                          vec_chunks: int = 16) -> tuple[torch.Tensor, torch.Tensor]:
-    """``kda_chunked_steps`` with everything that does not depend on the state batched over the chunks.
+                          vec_chunks: int = 16,
+                          sub_chunk: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
+    """Chunk-parallel (WY / UT form) delta rule, equal to ``kda_recurrent_steps``.
 
-    Same arguments and result. The pairwise decay, A, Aqk, the exact (I + A)^-1 and the terms derived from it
-    (``_intra_chunk_terms``) are computed for ``vec_chunks`` chunks at a time (0 = all at once; the pairwise
-    tensor is [vec_chunks, C, C, K] per head), so only the state recurrence stays sequential, kept in the
-    transposed layout s = S^T [K, V] (5 ops per chunk)::
+    q,k [B,L,H,K] (normalized, q scaled); v [B,L,H,V]; g [B,L,H,K] LOG forget gate (<= 0); beta [B,L,H];
+    state [B,H,V,K]. Tokens past the real length must have g = 0 and beta = 0 (exact no-ops); the sequence is
+    zero-padded to a multiple of ``chunk_size`` the same way. With G_i the cumulative log gate inside the chunk,
+    U the pseudo values and S_0 the state before the chunk::
+
+        (I + A) U = beta * (V - (K * exp(G)) S_0^T)       A_ij = beta_i sum_k k_i k_j exp(G_i - G_j)   (j < i)
+        O = (Q * exp(G)) S_0^T + Aqk U                    Aqk_ij = sum_k q_i k_j exp(G_i - G_j)        (j <= i)
+        S = S_0 * exp(G_C) + U^T (K * exp(G_C - G))
+
+    Only exp(G_i - G_j) with j <= i (always <= 1) is evaluated, so nothing overflows however negative the gate
+    gets. Everything that does not depend on the state is batched over the chunks. The pairwise decay, A, Aqk,
+    the exact (I + A)^-1 and the terms derived from it (``_intra_chunk_terms``) are computed for ``vec_chunks``
+    chunks at a time (0 = all at once; the pairwise tensor is [vec_chunks, C, C, K] per head), so only the state
+    recurrence stays sequential, kept in the transposed layout s = S^T [K, V] (5 ops per chunk)::
 
         U   = Uv - Wk s                  s <- s * exp(G_C)^T + (K exp(G_C - G))^T U
 
-    and the outputs of all chunks come from the stacked chunk-initial states in one matmul at the end.
+    and the outputs of all chunks come from the stacked chunk-initial states in one matmul at the end; the
+    chunk transitions are composed with a scan (see ``_chunk_start_states``). ``sub_chunk`` > 0 computes A and Aqk
+    blockwise (see ``_intra_chunk_terms``).
     """
     if chunk_size <= 0 or (chunk_size > 16 and chunk_size % 16 != 0):
         raise ValueError(f"chunk_size must be positive and, above 16, a multiple of 16, got {chunk_size}")
@@ -340,12 +484,13 @@ def kda_chunked_steps_vec(state: torch.Tensor,
     beta = torch.nn.functional.pad(beta, (0, 0, 0, pad))
     group = vec_chunks if 0 < vec_chunks < num_chunks else num_chunks  # not min(): no Min in the traced shapes
 
-    def to_chunks(x):  # [B, N*C, H, D] -> [B, H, N, C, D]
-        return x.reshape(bsz, num_chunks, chunk, heads, -1).permute(0, 3, 1, 2, 4).contiguous()
+    # chunk axis leading and contiguous: chunk groups and the recurrence steps are dense leading-dim slices
+    def to_chunks(x):  # [B, N*C, H, D] -> [N, B, H, C, D]
+        return x.reshape(bsz, num_chunks, chunk, heads, -1).permute(1, 0, 3, 2, 4).contiguous()
 
     qc, kc, vc, gc = to_chunks(q), to_chunks(k), to_chunks(v), to_chunks(g)
-    bc = beta.reshape(bsz, num_chunks, chunk, heads).permute(0, 3, 1, 2).contiguous().unsqueeze(-1)  # [B,H,N,C,1]
-    cum = torch.cumsum(gc, dim=3)  # G, [B,H,N,C,K]
+    bc = beta.reshape(bsz, num_chunks, chunk, heads).permute(1, 0, 3, 2).contiguous().unsqueeze(-1)  # [N,B,H,C,1]
+    cum = torch.cumsum(gc, dim=3)  # G, [N,B,H,C,K]
     last = cum[:, :, :, -1:, :]  # G_C
     q_gamma = qc * torch.exp(cum)
     k_gamma = kc * torch.exp(cum)
@@ -359,21 +504,19 @@ def kda_chunked_steps_vec(state: torch.Tensor,
     for start in range(0, num_chunks, group):
         sl = slice(start, start + group)
         terms.append(
-            _intra_chunk_terms(cum[:, :, sl], kc[:, :, sl], qc[:, :, sl], vc[:, :, sl], bc[:, :, sl], k_gamma[:, :, sl],
-                               q_gamma[:, :, sl], strict, lower))
-    uv, wk, q_eff, o_intra = (torch.cat(parts, dim=2) if len(parts) > 1 else parts[0] for parts in zip(*terms))
+            _intra_chunk_terms(cum[sl], kc[sl], qc[sl], vc[sl], bc[sl], k_gamma[sl], q_gamma[sl], strict, lower,
+                               sub_chunk))
+    uv, wk, q_eff, o_intra = (torch.cat(parts) if len(parts) > 1 else parts[0] for parts in zip(*terms))
 
-    s_t = state.transpose(-1, -2)  # [B,H,K,V]
-    starts = []
-    # chunk axis first and contiguous, so the loop only selects dense slices (no strided views of permuted tensors)
-    uv_c, wk_c, tail_c, gl_c = (x.movedim(2, 0).contiguous() for x in (uv, wk, k_tail_t, gamma_last))
-    for uv_n, wk_n, tail_n, gl_n in zip(uv_c, wk_c, tail_c, gl_c):
-        starts.append(s_t)
-        s_t = s_t * gl_n + torch.matmul(tail_n, uv_n - torch.matmul(wk_n, s_t))
-    out = torch.matmul(q_eff, torch.stack(starts, dim=2)) + o_intra  # [B,H,N,C,V]
-    out = out.permute(0, 2, 3, 1, 4).reshape(bsz, num_chunks * chunk, heads, vdim)
-    # exact shape and a dense layout: this output crosses a graph break (storage offset 0, no padded tail)
-    return out[:, :seq_len].contiguous(), s_t.transpose(-1, -2)
+    tw = torch.matmul(k_tail_t, wk)  # [N,B,H,K,K]
+    tu = torch.matmul(k_tail_t, uv)  # [N,B,H,K,V]
+
+    starts, s_t = _chunk_start_states(state.transpose(-1, -2), tw, tu, gamma_last)
+    out = torch.matmul(q_eff, starts) + o_intra  # [N,B,H,C,V]
+    out = out.permute(1, 0, 3, 2, 4).reshape(bsz, num_chunks * chunk, heads, vdim)
+    # exact shape and a dense layout: this output crosses a graph break (storage offset 0, no padded tail);
+    # clone, since with B = 1 the slice of the reshaped buffer is already contiguous
+    return out[:, :seq_len].clone(memory_format=torch.contiguous_format), s_t.transpose(-1, -2)
 
 
 def _prepare_qkv_gates(conv_out: torch.Tensor, raw_g: torch.Tensor, raw_beta: torch.Tensor, A_log: torch.Tensor,
@@ -419,7 +562,8 @@ def kda_prefill_step(mixed_qkv: torch.Tensor,
                      num_heads: int,
                      head_dim: int,
                      chunk_size: int = 64,
-                     vec_chunks: int = 16):
+                     vec_chunks: int = 16,
+                     sub_chunk: int = 0):
     """Out-of-place prefill: only READS the caches, returns ``(o, slots, conv_rows, ssm_rows)`` like
     ``kda_decode_step`` (store the rows with ``write_kda_decode_state``), so it is traceable by torch.compile.
 
@@ -465,7 +609,15 @@ def kda_prefill_step(mixed_qkv: torch.Tensor,
     q, k, v, g, beta = _prepare_qkv_gates(conv_out, raw_g, raw_beta, A_log, dt_bias, lower_bound, num_heads, head_dim,
                                           token_mask)
     state = read_ssm_state(ssm_cache, slots) * use_init.reshape(bsz, 1, 1, 1)
-    out, state = kda_chunked_steps_vec(state, q, k, v, g, beta, chunk_size=chunk_size, vec_chunks=vec_chunks)
+    out, state = kda_chunked_steps_vec(state,
+                                       q,
+                                       k,
+                                       v,
+                                       g,
+                                       beta,
+                                       chunk_size=chunk_size,
+                                       vec_chunks=vec_chunks,
+                                       sub_chunk=sub_chunk)
     ssm_rows = state.to(dtype=ssm_cache.dtype).contiguous()
     return out, slots, conv_rows, ssm_rows
 
@@ -554,17 +706,42 @@ def attn_res_functional(prefix: torch.Tensor, delta: torch.Tensor | None, blocks
                         output_norm_eps: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Out-of-place ``attn_res``: returns ``(new_prefix, new_blocks, mixed)``, no input is modified.
 
-    Same numbers as the Triton kernel up to the rounding of the softmax weights of the stored blocks and of their
-    weighted sum to the bank dtype (see ``attn_res_torch``, which adds its in-place side effects). Needed in
-    torch.compile mode, where regional compilation makes the prefix and the block bank graph inputs and HPU
-    compile can silently drop in-place writes to them. ``new_prefix`` is ``prefix`` itself without a delta and
-    ``new_blocks`` is ``blocks`` itself without a block write (no copy in those cases). All shapes are static.
+    Same numbers as the Triton kernel up to fp32 reduction order (see ``attn_res_torch``, which adds its in-place
+    side effects). Needed in torch.compile mode, where regional compilation makes the prefix and the block bank
+    graph inputs and HPU compile can silently drop in-place writes to them. ``new_prefix`` is ``prefix`` itself
+    without a delta and ``new_blocks`` is ``blocks`` itself without a block write (no copy in those cases). All
+    shapes are static.
+    """
+    new_prefix, new_blocks, _, mixed = attn_res_functional_cached(prefix, delta, blocks, None, norm_weight, qk_weight,
+                                                                  output_norm_weight, num_blocks, block_write_idx, eps,
+                                                                  output_norm_eps)
+    return new_prefix, new_blocks, mixed
+
+
+def attn_res_bank_mean_square(blocks: torch.Tensor, num_valid_blocks: int) -> torch.Tensor:
+    """fp32 ``mean(v^2)`` of the first ``num_valid_blocks`` stored blocks of ``blocks`` [M, R, D]; zeros after."""
+    num_tokens, num_bank, hidden = blocks.shape
+    valid = torch.square(blocks[:, :num_valid_blocks].float()).sum(dim=-1) / hidden
+    return torch.cat((valid, valid.new_zeros(num_tokens, num_bank - num_valid_blocks)), dim=1)
+
+
+def attn_res_functional_cached(
+        prefix: torch.Tensor, delta: torch.Tensor | None, blocks: torch.Tensor, bank_ms: torch.Tensor | None,
+        norm_weight: torch.Tensor, qk_weight: torch.Tensor, output_norm_weight: torch.Tensor | None, num_blocks: int,
+        block_write_idx: int, eps: float,
+        output_norm_eps: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+    """``attn_res_functional`` that also takes and returns ``bank_ms`` [M, R], the fp32 ``mean(v^2)`` per stored block.
+
+    The bank read uses ``bank_ms`` instead of a pass over the bank; a block write also writes its mean square.
+    Same numbers as recomputing it from the stored (rounded) block. ``bank_ms=None``: recomputed per read.
     """
     num_tokens, hidden = prefix.shape
     if delta is not None and delta.shape != prefix.shape:
         raise ValueError(f"delta {tuple(delta.shape)} does not match prefix {tuple(prefix.shape)}")
     if blocks.dim() != 3 or blocks.shape[0] != num_tokens or blocks.shape[-1] != hidden:
         raise ValueError(f"block bank {tuple(blocks.shape)} does not match prefix {tuple(prefix.shape)}")
+    if bank_ms is not None and bank_ms.shape != blocks.shape[:2]:
+        raise ValueError(f"bank mean squares {tuple(bank_ms.shape)} do not match the bank {tuple(blocks.shape)}")
 
     if delta is not None:
         new_prefix = (prefix.float() + delta.float()).to(prefix.dtype)
@@ -572,32 +749,67 @@ def attn_res_functional(prefix: torch.Tensor, delta: torch.Tensor | None, blocks
     else:
         new_prefix = prefix
         updated = prefix.float()
-    new_blocks = blocks
+    own_ms = None
+    new_blocks, new_ms = blocks, bank_ms
     if block_write_idx >= 0:
-        new_blocks = torch.cat(
-            (blocks[:, :block_write_idx], updated.to(blocks.dtype).unsqueeze(1), blocks[:, block_write_idx + 1:]),
-            dim=1)
+        written = updated.to(blocks.dtype)
+        new_blocks = torch.cat((blocks[:, :block_write_idx], written.unsqueeze(1), blocks[:, block_write_idx + 1:]),
+                               dim=1)
+        if bank_ms is not None:
+            own_ms = torch.square(updated).sum(dim=-1, keepdim=True) / hidden  # [M, 1]
+            written_ms = own_ms if blocks.dtype == prefix.dtype else torch.square(written.float()).sum(
+                dim=-1, keepdim=True) / hidden
+            new_ms = torch.cat((bank_ms[:, :block_write_idx], written_ms, bank_ms[:, block_write_idx + 1:]), dim=1)
 
     if num_blocks == 0:
         mixed = updated
     else:
-        # The stored blocks are read in their own dtype (no fp32 copy of the [M, S, D] bank, no cat with the
-        # prefix): every value of the reference fp32 mix is exactly representable in that dtype anyway. The
-        # updated prefix is a separate [M, D] term; reductions accumulate in fp32 and the weighted sum of the
-        # blocks is one batched matmul ([M, 1, S] x [M, S, D]) on the matrix engine.
+        # The stored blocks are read in their own dtype (no cat with the prefix); the updated prefix is a
+        # separate [M, D] term and reductions accumulate in fp32.
         bank = new_blocks[:, :num_blocks]  # [M, S, D]
         qk = norm_weight.float() * qk_weight.float()  # [D]
-        bank_rstd = torch.rsqrt(torch.square(bank.float()).sum(dim=-1) / hidden + eps)  # [M, S]
+        bank_sq = torch.square(bank.float()).sum(dim=-1) / hidden if new_ms is None else new_ms[:, :num_blocks]
+        bank_rstd = torch.rsqrt(bank_sq + eps)  # [M, S]
         bank_logits = (bank.float() * qk).sum(dim=-1) * bank_rstd
-        own_rstd = torch.rsqrt(torch.square(updated).sum(dim=-1, keepdim=True) / hidden + eps)  # [M, 1]
+        if own_ms is None:
+            own_ms = torch.square(updated).sum(dim=-1, keepdim=True) / hidden
+        own_rstd = torch.rsqrt(own_ms + eps)  # [M, 1]
         own_logit = (updated * qk).sum(dim=-1, keepdim=True) * own_rstd
         probs = torch.softmax(torch.cat((bank_logits, own_logit), dim=-1), dim=-1)  # [M, S + 1]
-        bank_probs = probs[:, :num_blocks].to(bank.dtype).unsqueeze(1)  # [M, 1, S]
-        mixed = torch.bmm(bank_probs, bank).squeeze(1).float() + probs[:, num_blocks:] * updated
+        # fp32 weighted sum over the stored blocks as elementwise ops (no M=1 bmm), in the kernel's order
+        mixed = probs[:, :1] * bank[:, 0].float()
+        for r in range(1, num_blocks):
+            mixed = mixed + probs[:, r:r + 1] * bank[:, r].float()
+        mixed = mixed + probs[:, num_blocks:] * updated
     if output_norm_weight is not None:
         mixed = mixed * torch.rsqrt(mixed.pow(2).mean(dim=-1, keepdim=True) + output_norm_eps)
         mixed = mixed * output_norm_weight.float()
-    return new_prefix, new_blocks, mixed.to(prefix.dtype)
+    return new_prefix, new_blocks, new_ms, mixed.to(prefix.dtype)
+
+
+_compiled_attn_res_functional: Callable | None = None
+
+
+def _hpu_lazy_mode() -> bool:
+    try:
+        import habana_frameworks.torch.utils.internal as htu
+    except ImportError:
+        return False
+    return htu.is_lazy()
+
+
+def _eager_attn_res_functional(device_type: str) -> Callable:
+    """``attn_res_functional`` for a call outside a compiled region.
+
+    On HPU in torch.compile mode it runs as its own compiled graph: eagerly, every op of the per-block mix is a
+    separate recipe.
+    """
+    global _compiled_attn_res_functional
+    if device_type != "hpu" or torch.compiler.is_compiling() or _hpu_lazy_mode():
+        return attn_res_functional
+    if _compiled_attn_res_functional is None:
+        _compiled_attn_res_functional = torch.compile(attn_res_functional, backend="hpu_backend", dynamic=False)
+    return _compiled_attn_res_functional
 
 
 def attn_res_torch(prefix: torch.Tensor,
@@ -631,9 +843,9 @@ def attn_res_torch(prefix: torch.Tensor,
         return out.view(prefix.shape)
     if prefix.dim() != 2:
         raise ValueError(f"attn_res expects a 2D or 3D prefix, got {tuple(prefix.shape)}")
-    new_prefix, new_blocks, mixed = attn_res_functional(prefix, delta, blocks, norm_weight, qk_weight,
-                                                        output_norm_weight, num_blocks, block_write_idx, eps,
-                                                        output_norm_eps)
+    functional = _eager_attn_res_functional(prefix.device.type)
+    new_prefix, new_blocks, mixed = functional(prefix, delta, blocks, norm_weight, qk_weight, output_norm_weight,
+                                               num_blocks, block_write_idx, eps, output_norm_eps)
     if delta is not None:
         prefix.copy_(new_prefix)  # the kernel's in-place side effect
     if block_write_idx >= 0:
@@ -649,12 +861,15 @@ def forward_attn_residual_functional(self, positions, hidden_states, block_resid
     ``(prefix_sum, block_residual, mlp_out)`` like upstream, but ``block_residual`` is a new tensor in block-write
     layers (the bank copy costs ``tokens * bank * hidden`` elements per write layer).
     """
+    blocks, bank_ms = block_residual if isinstance(block_residual, tuple) else (block_residual, None)
+    if bank_ms is None:
+        bank_ms = attn_res_bank_mean_square(blocks, self.prev_valid_blocks)
     prefix_sum = hidden_states
     write_idx = self.block_write_idx if self.is_block_write_layer else -1
-    new_prefix, block_residual, hidden_states = _layer_attn_res(prefix_sum, block_residual,
-                                                                self.self_attention_res_proj,
-                                                                self.self_attention_res_norm, self.prev_valid_blocks,
-                                                                prefix_delta, self.input_layernorm, write_idx)
+    new_prefix, blocks, bank_ms, hidden_states = _layer_attn_res(prefix_sum, blocks, bank_ms,
+                                                                 self.self_attention_res_proj,
+                                                                 self.self_attention_res_norm, self.prev_valid_blocks,
+                                                                 prefix_delta, self.input_layernorm, write_idx)
     # in a block-write layer the updated prefix lives in the bank and the attention output starts the new prefix
     prefix_sum = None if self.is_block_write_layer else new_prefix
 
@@ -666,11 +881,11 @@ def forward_attn_residual_functional(self, positions, hidden_states, block_resid
         prefix_delta = hidden_states
 
     mlp_valid_blocks = self.prev_valid_blocks + (1 if self.is_block_write_layer else 0)
-    prefix_sum, block_residual, hidden_states = _layer_attn_res(prefix_sum, block_residual, self.mlp_res_proj,
-                                                                self.mlp_res_norm, mlp_valid_blocks, prefix_delta,
-                                                                self.post_attention_layernorm, -1)
+    prefix_sum, blocks, bank_ms, hidden_states = _layer_attn_res(prefix_sum, blocks, bank_ms, self.mlp_res_proj,
+                                                                 self.mlp_res_norm, mlp_valid_blocks, prefix_delta,
+                                                                 self.post_attention_layernorm, -1)
     hidden_states = self.mlp(hidden_states)
-    return prefix_sum, block_residual, hidden_states
+    return prefix_sum, (blocks, bank_ms), hidden_states
 
 
 # upstream vllm/models/kimi_k3/amd/linear.py names it KimiDecoderLayer; KimiLinearDecoderLayer is the older name
@@ -696,6 +911,7 @@ def install_functional_attn_res(linear_mod) -> type | None:
 
     Returns the patched class (idempotent), or None when ``linear_mod`` has no such class; the caller must report
     that loudly: without the patch the in-place upstream version runs inside the per-layer compiled graphs.
+    The layers pass the block bank on as ``(bank, bank_ms)`` (see ``attn_res_functional_cached``).
     """
     cls: Any = kimi_decoder_layer_class(linear_mod)
     if cls is None or getattr(cls.forward_attn_residual, "_hpu_functional_attn_res", False):
@@ -708,17 +924,23 @@ def install_functional_attn_res(linear_mod) -> type | None:
             prefix_delta = prefix_delta.reshape(-1, prefix_delta.shape[-1])
         if positions is not None and positions.dim() == 2:
             positions = positions.reshape(-1)
-        if block_residual.dim() == 3 and (block_residual.shape[0] != hidden_states.shape[0]
-                                          or block_residual.shape[-1] != hidden_states.shape[-1]):
+        blocks = attn_res_bank(block_residual)
+        if blocks.dim() == 3 and (blocks.shape[0] != hidden_states.shape[0]
+                                  or blocks.shape[-1] != hidden_states.shape[-1]):
             # Silently replacing the block bank with zeros would drop the stored blocks and corrupt every
             # later attn_res mix, so fail loudly instead.
-            raise RuntimeError(f"Kimi-K3 block residual bank {tuple(block_residual.shape)} does not match "
+            raise RuntimeError(f"Kimi-K3 block residual bank {tuple(blocks.shape)} does not match "
                                f"the hidden states {tuple(hidden_states.shape)}")
         return forward_attn_residual_functional(self, positions, hidden_states, block_residual, prefix_delta)
 
     forward_attn_residual._hpu_functional_attn_res = True  # type: ignore[attr-defined]
     cls.forward_attn_residual = forward_attn_residual
     return cls
+
+
+def attn_res_bank(block_residual) -> torch.Tensor:
+    """The block bank of a decoder-layer ``block_residual`` output: a plain bank or a ``(bank, bank_ms)`` tuple."""
+    return block_residual[0] if isinstance(block_residual, tuple) else block_residual
 
 
 def attn_res_layer_variants(modules) -> int:
@@ -732,7 +954,8 @@ def attn_res_layer_variants(modules) -> int:
     return max(1, len(variants))
 
 
-def _layer_attn_res(prefix_sum, block_residual, proj, norm, num_valid_blocks, delta, output_norm, block_write_idx):
-    return attn_res_functional(prefix_sum, delta, block_residual, norm.weight, proj.weight.squeeze(0),
-                               None if output_norm is None else output_norm.weight, num_valid_blocks, block_write_idx,
-                               norm.variance_epsilon, 0.0 if output_norm is None else output_norm.variance_epsilon)
+def _layer_attn_res(prefix_sum, blocks, bank_ms, proj, norm, num_valid_blocks, delta, output_norm, block_write_idx):
+    return attn_res_functional_cached(prefix_sum, delta, blocks, bank_ms, norm.weight, proj.weight.squeeze(0),
+                                      None if output_norm is None else output_norm.weight, num_valid_blocks,
+                                      block_write_idx, norm.variance_epsilon,
+                                      0.0 if output_norm is None else output_norm.variance_epsilon)

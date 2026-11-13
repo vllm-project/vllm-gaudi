@@ -10,6 +10,7 @@ Also covers _execute_mm_encoder with prefix-cached (stripped) mm items.
 import sys
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
 # Stub habana_frameworks so the test can run on CPU (no HPU required).
@@ -111,13 +112,14 @@ def _make_mock_runner(
     requests: dict,
     encoder_cache: dict,
     max_tokens: int = 1024,
+    is_kimi_k3: bool = False,
 ) -> MagicMock:
     """Create a mock HPUModelRunner with the attributes needed by _gather_mm_embeddings."""
     runner = MagicMock(spec=HPUModelRunner)
     runner.requests = requests
     runner.encoder_cache = encoder_cache
     runner.uses_mrope = False
-    runner.is_kimi_k3 = False
+    runner.is_kimi_k3 = is_kimi_k3
     runner.device = "cpu"
     runner.is_mm_embed = _FakeCpuGpuBuffer(max_tokens)
     return runner
@@ -332,3 +334,98 @@ class TestExecuteMmEncoderPrefixCached:
 
         assert runner.model.embed_multimodal.call_count == 1
         assert set(runner.encoder_cache) == {"hash_new"}
+
+
+IS_EMBED = torch.tensor([False, True, True, False, True, False])
+
+
+def _masked_feature(identifier: str, data: bool = True) -> MultiModalFeatureSpec:
+    feature = _make_pixel_mm_feature(identifier, 0, 6)
+    return MultiModalFeatureSpec(data=feature.data if data else None,
+                                 modality="image",
+                                 identifier=identifier,
+                                 mm_position=PlaceholderRange(offset=0, length=6, is_embed=IS_EMBED))
+
+
+def _run_encoder(features_by_req: dict, is_kimi_k3: bool, scheduled_encoder_inputs=None, tokens=6):
+    outputs = torch.arange(3 * HIDDEN_SIZE, dtype=torch.float32).reshape(3, HIDDEN_SIZE)
+    requests = {
+        req_id: _make_request_state(req_id, 6, features, num_computed_tokens=0)
+        for req_id, features in features_by_req.items()
+    }
+    runner = _make_mock_runner(requests, encoder_cache={}, is_kimi_k3=is_kimi_k3)
+    runner.pin_memory = False
+    runner.model = MagicMock()
+    runner.model.embed_multimodal.side_effect = lambda **kw: [
+        outputs.clone() for _ in range(kw["pixel_values"].shape[0])
+    ]
+    sched = _make_scheduler_output({req_id: tokens for req_id in requests})
+    sched.scheduled_encoder_inputs = scheduled_encoder_inputs or {}
+    HPUModelRunner._execute_mm_encoder(runner, sched, list(requests))
+    return runner, outputs
+
+
+class TestEncoderCacheIsEmbed:
+    """The Kimi-K3 index path must cache and gather exactly what the boolean-mask path does."""
+
+    def test_scatter_matches_mask_path(self):
+        base, outputs = _run_encoder({"r": [_masked_feature("h")]}, is_kimi_k3=False)
+        kimi, _ = _run_encoder({"r": [_masked_feature("h")]}, is_kimi_k3=True)
+        cached = kimi.encoder_cache["h"]
+        assert torch.equal(cached.isnan(), base.encoder_cache["h"].isnan())
+        assert torch.equal(cached[IS_EMBED], outputs)
+        assert cached[~IS_EMBED].isnan().all()
+
+    def test_gather_matches_mask_path(self):
+        cached = torch.full((6, HIDDEN_SIZE), float("nan"))
+        cached[IS_EMBED] = torch.arange(3 * HIDDEN_SIZE, dtype=torch.float32).reshape(3, HIDDEN_SIZE)
+        results = []
+        for is_kimi_k3 in (False, True):
+            requests = {"r": _make_request_state("r", 6, [_masked_feature("h")])}
+            runner = _make_mock_runner(requests, {"h": cached}, is_kimi_k3=is_kimi_k3)
+            embeds, is_mm = HPUModelRunner._gather_mm_embeddings(runner,
+                                                                 _make_scheduler_output({"r": 6}), ["r"],
+                                                                 total_num_scheduled_tokens=6,
+                                                                 padded_seq_len=None)
+            results.append((torch.cat(embeds), is_mm[:6].clone()))
+        assert torch.equal(results[0][0], results[1][0])
+        assert torch.equal(results[0][1], results[1][1])
+        assert torch.equal(results[1][1], IS_EMBED)
+
+
+class TestKimiEncoderItems:
+    """Kimi-K3 collects the encoder items of the step and takes payloads from deduplicated requests."""
+
+    def test_payload_taken_from_other_request(self):
+        # The scheduler dedups the identical hash: only r0 keeps the payload, r1 is scheduled without it.
+        runner, _ = _run_encoder({
+            "r0": [_masked_feature("h")],
+            "r1": [_masked_feature("h", data=False)]
+        },
+                                 is_kimi_k3=True,
+                                 scheduled_encoder_inputs={"r0": [0]})
+        assert runner.model.embed_multimodal.call_count == 1
+        assert set(runner.encoder_cache) == {"h"}
+
+    def test_non_overlapping_item_is_skipped(self):
+        requests = {"r": _make_request_state("r", 400, [_make_pixel_mm_feature("h", 300, 50)], num_computed_tokens=0)}
+        runner = _make_mock_runner(requests, {}, is_kimi_k3=True)
+        runner.pin_memory = False
+        runner.model = MagicMock()
+        HPUModelRunner._execute_mm_encoder(runner, _make_scheduler_output({"r": 100}), ["r"])
+        assert runner.model.embed_multimodal.call_count == 0
+        assert not runner.encoder_cache
+
+
+class TestKimiEncoderCacheRowCount:
+    """The Kimi-K3 index scatter rejects an encoder output that does not match is_embed, like the mask path."""
+
+    def test_row_count_mismatch_raises(self):
+        requests = {"r": _make_request_state("r", 6, [_masked_feature("h")])}
+        runner = _make_mock_runner(requests, {}, is_kimi_k3=True)
+        runner.pin_memory = False
+        runner.model = MagicMock()
+        runner.model.embed_multimodal.side_effect = lambda **kw: [torch.zeros(2, HIDDEN_SIZE)]
+        with pytest.raises(ValueError, match="selects 3 positions"):
+            HPUModelRunner._execute_mm_encoder(runner, _make_scheduler_output({"r": 6}), ["r"])
+        assert not runner.encoder_cache

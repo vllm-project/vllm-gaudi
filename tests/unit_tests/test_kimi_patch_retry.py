@@ -90,7 +90,7 @@ def test_failed_first_attempt_is_retried_and_live(patches, monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, "vllm.models.kimi_k3", types.ModuleType("vllm.models.kimi_k3"))
     attempt()  # plugin-load attempt hits the circular import
     assert "kda_forward" in patches._KIMI_PATCHES_FAILED
-    with caplog.at_level(logging.INFO, logger="vllm.gaudi.kimi_patches"):
+    with caplog.at_level(logging.DEBUG, logger="vllm.gaudi.kimi_patches"):
         patches.ensure_kimi_k3_patches(K3_CONFIG)
     assert patches._kimi_patches_live()["kda_forward"]
     assert "kda_forward" in patches._KIMI_PATCHES_INSTALLED
