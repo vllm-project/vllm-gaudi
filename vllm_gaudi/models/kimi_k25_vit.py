@@ -186,14 +186,7 @@ def get_rope_shape(org, interpolation_mode, shape):
 
 
 def _keep_pos_embeds_in_weight_dtype(orig_get_pos_embeds):
-    """Wrap ``Learnable2DInterpPosEmbDivided_fixed.get_pos_embeds`` so it returns the weight dtype.
-
-    For grids with t > 1 (video chunks) upstream adds ``time_weight``, a float32 non-persistent
-    buffer, to the bf16 position embedding, so the sum is float32. ``MoonVision3dPatchEmbed`` adds
-    it to the bf16 patch projection, and the float32 hidden state then reaches the bf16
-    ``wqkv`` matmul in ``attention_qkvpacked`` ("Float != BFloat16"). Images (t == 1) never touch
-    ``time_weight``, so they are unaffected; for them the cast is a no-op.
-    """
+    """Upstream adds a float32 ``time_weight`` for t > 1; cast the result back to the weight dtype."""
 
     def get_pos_embeds(self, grid_thws):
         return orig_get_pos_embeds(self, grid_thws).to(self.weight.dtype)

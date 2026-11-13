@@ -71,7 +71,7 @@ def router(monkeypatch):
 
 def reference_grouped_topk(gating_output, topk, renormalize, num_expert_group, topk_group, scoring_func,
                            routed_scaling_factor, e_score_correction_bias, use_sorted):
-    """The previous HPU grouped_topk: group mask for every group count, one torch.topk over all experts, gather."""
+    """Reference HPU grouped_topk: group mask for every group count, one torch.topk over all experts, gather."""
     gating_output = gating_output.float()
     scores = torch.softmax(gating_output, dim=-1) if scoring_func == "softmax" else gating_output.sigmoid()
     num_token = scores.size(0)
