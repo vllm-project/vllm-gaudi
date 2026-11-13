@@ -140,4 +140,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Exit at once: a failed engine can hang in teardown, and the parent waits for each child without a timeout.
+        import traceback
+        traceback.print_exc()
+        os._exit(1)
