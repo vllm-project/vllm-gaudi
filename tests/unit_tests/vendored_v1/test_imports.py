@@ -82,6 +82,14 @@ def test_vendored_tree_matches_manifest():
     assert {f for f in files if f in expected or not f.endswith("__init__.py")} == expected
 
 
+def test_vendored_tests_tree_matches_manifest():
+    """The vendored upstream tests are exactly the files manifest-tests.txt lists, so a lost one fails here."""
+    lines = (REPO / "tools/vendor_v1/manifest-tests.txt").read_text().splitlines()
+    expected = {line.split()[1] for line in lines if line.strip() and not line.startswith("#")} | {"__init__.py"}
+    files = {p.name for p in (REPO / "tests/unit_tests/vendored_v1/upstream").glob("*.py")}
+    assert files == expected
+
+
 @pytest.mark.parametrize("patch", sorted((REPO / "tools/vendor_v1/patches").glob("*.patch")), ids=lambda p: p.name)
 def test_vendored_patch_is_applied(patch):
     """Every line a local patch adds is in the committed vendored file (tools/vendor_v1/vendor_v1.py --check
