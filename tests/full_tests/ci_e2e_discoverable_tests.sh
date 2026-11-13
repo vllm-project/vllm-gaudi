@@ -504,10 +504,10 @@ _run_spec_decode_eagle_test() {
 }
 
 # Spec decode with the DeepSeek-V3 eagle MTP drafter. Both checkpoints have random weights, so this only checks
-# that the drafter loads and runs; there is no acceptance or accuracy threshold.
+# that the drafter loads and proposes drafts; there is no acceptance or accuracy threshold.
 _run_spec_decode_eaglemtp_test() {
     echo "➡️ Testing Spec-decode with DeepSeek eagle MTP..."
-    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task deepseek_eaglemtp --osl 2048
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task deepseek_eaglemtp --osl 2048 --assert_drafts
     echo "✅ Test with spec decode with DeepSeek eagle MTP passed."
 }
 

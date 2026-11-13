@@ -396,6 +396,9 @@ if __name__ == "__main__":
                         type=float,
                         default=0.0,
                         help="Assert that the acceptance rate is at least this value.")
+    parser.add_argument("--assert_drafts",
+                        action="store_true",
+                        help="Assert that every speculative task proposed drafts (for runs with no threshold).")
     parser.add_argument("--do_profile", action="store_true", help="Enable profiling during generation.")
     parser.add_argument("--accuracy_rate",
                         type=float,
@@ -547,6 +550,8 @@ if __name__ == "__main__":
                 assert proc['result']['acc_rate'] >= args.assert_accept_rate, \
                     f"Acceptance rate {proc['result']['acc_rate']} is lower" \
                     f"than the threshold {args.assert_accept_rate}"
+            if args.assert_drafts and 'spec' in key and 'error' not in proc['result']:
+                assert proc['result']['num_drafts'] > 0, f"Task {key} ran without proposing any drafts"
         # A task that raised must fail the run even without a threshold (the random-weight smoke runs).
         failed = [key for key, proc in task_queue.items() if 'error' in proc['result']]
         if failed:
