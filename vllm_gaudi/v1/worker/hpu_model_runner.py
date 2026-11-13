@@ -1991,6 +1991,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 self._preempted_generators.pop(req_id, None)
             elif req_state is not None and req_state.generator is not None:
                 self._preempted_generators[req_id] = req_state.generator
+        # A dropped request may come back in this same step; its previous-step row must not be scattered into it.
+        if self.input_batch.prev_req_id_to_index is not None:
+            for req_id in dropped_req_ids:
+                self.input_batch.prev_req_id_to_index.pop(req_id, None)
 
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and

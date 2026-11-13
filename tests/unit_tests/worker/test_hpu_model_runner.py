@@ -325,6 +325,16 @@ def test_update_states_request_preempted_and_resumed(model_runner, dist_init):
     assert req_id not in model_runner._preempted_generators
 
 
+def test_update_states_dropped_request_leaves_previous_step_rows(model_runner, dist_init):
+    """A dropped request's previous-step row is removed, so if it resumes in the same step, _prepare_input_ids cannot
+    scatter its discarded in-flight sample into it."""
+    req_id = "req_0"
+    model_runner._update_states(_new_request_step(req_id, [1, 2, 3], SamplingParams()))
+    model_runner.input_batch.prev_req_id_to_index = {req_id: 0, "req_1": 1}
+    model_runner._update_states(_empty_step(preempted_req_ids={req_id}))
+    assert model_runner.input_batch.prev_req_id_to_index == {"req_1": 1}
+
+
 class _ReadyEvent:
     """Stands in for the copy-ready event of a finished async device-to-host copy."""
 
