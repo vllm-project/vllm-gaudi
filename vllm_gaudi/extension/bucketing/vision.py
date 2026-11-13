@@ -63,6 +63,12 @@ MULTIMODAL_CONFIG = {
         'is_batch_based': False,
         'buckets': []
     },
+    # Kimi-K3 only. The runner looks the config up by HF model_type ('kimi_k3'); a broader 'kimi' key would also
+    # capture Kimi-K2.5/K2.6/VL, which must keep the upstream lookup.
+    'kimi_k3': {
+        'is_batch_based': False,
+        'buckets': []
+    },
     'gemma4': {
         'is_batch_based': False,
         'buckets': []
