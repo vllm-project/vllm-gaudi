@@ -335,6 +335,22 @@ def test_update_states_dropped_request_leaves_previous_step_rows(model_runner, d
     assert model_runner.input_batch.prev_req_id_to_index == {"req_1": 1}
 
 
+def test_update_states_resumed_request_does_not_rescore_prompt(model_runner, dist_init):
+    """Prompt logprobs go out once: a request resumed with outputs already sent them, one preempted before any
+    output has not."""
+    params = SamplingParams(prompt_logprobs=1)
+    scored = model_runner.input_batch.num_prompt_logprobs
+    model_runner._update_states(_new_request_step("req_0", [1, 2, 3], params))
+    model_runner._update_states(_new_request_step("req_1", [1, 2, 3], params))
+    assert {"req_0", "req_1"} <= scored.keys()
+
+    model_runner._update_states(_empty_step(preempted_req_ids={"req_0", "req_1"}))
+    model_runner._update_states(_new_request_step("req_0", [1, 2, 3, 7, 8], params))
+    model_runner._update_states(_new_request_step("req_1", [1, 2, 3], params))
+    assert "req_0" not in scored
+    assert "req_1" in scored
+
+
 class _ReadyEvent:
     """Stands in for the copy-ready event of a finished async device-to-host copy."""
 
