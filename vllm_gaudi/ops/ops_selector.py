@@ -149,3 +149,46 @@ def _wrap_selective_state_update_ref(selective_state_update_ref_fn):
                 return result
 
     return wrapped
+
+
+def selective_state_update_spec(state, x, dt, A, B, C, D, dt_bias, dt_softplus, load_state_indices, store_state_indices,
+                                out):
+    """Decode SSM update for speculative decoding (verify T tokens per request).
+
+    Follows upstream ``selective_state_update`` with ``num_accepted_tokens``:
+    each request owns ``1 + num_speculative_tokens`` state slots. The
+    recurrence starts from slot ``load_state_indices`` (the state after the
+    last accepted token of the previous step) and the state after query token
+    ``t`` is written to slot ``store_state_indices[:, t]``, so whichever prefix
+    the rejection sampler accepts, its state is already saved.
+
+    state: [num_slots, nheads, dim, dstate]
+    x, dt, out: [batch * T, nheads, dim], request-major; B, C: [batch * T, ngroups, dstate]
+    load_state_indices: [batch]; store_state_indices: [batch, T]
+    """
+    from .pytorch_implementation import selective_state_update_ref
+
+    batch, num_tokens = store_state_indices.shape
+
+    def per_request(t):
+        return t.reshape(batch, num_tokens, *t.shape[1:])
+
+    x, dt, B, C = per_request(x), per_request(dt), per_request(B), per_request(C)
+    # Same dedicated gather/copy kernels as the non-speculative wrapper above.
+    cur = torch.index_select(state, 0, load_state_indices.long())
+    outs = []
+    for t in range(num_tokens):
+        # selective_state_update_ref advances `cur` in place.
+        outs.append(
+            selective_state_update_ref(cur,
+                                       x[:, t],
+                                       dt[:, t],
+                                       A,
+                                       B[:, t],
+                                       C[:, t],
+                                       D=D,
+                                       dt_bias=dt_bias,
+                                       dt_softplus=dt_softplus))
+        state.index_copy_(0, store_state_indices[:, t].long(), cur)
+    out.copy_(torch.stack(outs, dim=1).reshape(out.shape))
+    return out

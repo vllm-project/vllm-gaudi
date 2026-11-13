@@ -40,9 +40,10 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_gaudi.ops.granite_causal_conv1d import (
     granite_causal_conv1d_fn,
     granite_causal_conv1d_update,
+    granite_causal_conv1d_update_spec,
 )
 from vllm_gaudi.ops.ssd_combined import hpu_mamba_chunk_scan_combined_varlen
-from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl
+from vllm_gaudi.ops.ops_selector import get_selective_state_update_impl, selective_state_update_spec
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.logger import logger as init_logger
 
@@ -445,6 +446,13 @@ class HPUMambaMixer2(MambaMixer2):
 
             load_indices_tensor = _select_cache_group(attn_metadata.load_indices_tensor, self.cache_group_idx)
             store_indices_tensor = _select_cache_group(attn_metadata.store_indices_tensor, self.cache_group_idx)
+            # Decode with speculative decoding only (see the decode branch).
+            spec_store_indices = attn_metadata.mamba_spec_store_indices
+            spec_load_indices = spec_conv_offsets = None
+            if spec_store_indices is not None:
+                spec_store_indices = _select_cache_group(spec_store_indices, self.cache_group_idx)
+                spec_load_indices = _select_cache_group(attn_metadata.mamba_spec_load_indices, self.cache_group_idx)
+                spec_conv_offsets = attn_metadata.mamba_spec_conv_offsets
             if enable_prefix_caching and attn_metadata.is_prompt:
                 blocks_caching_range = _select_cache_group(attn_metadata.blocks_caching_range, self.cache_group_idx)
                 mamba_chunks_to_block_mapping = _select_cache_group(attn_metadata.mamba_chunks_to_block_mapping,
@@ -535,17 +543,40 @@ class HPUMambaMixer2(MambaMixer2):
 
         # Process decode requests
         if has_decode:
+            # Speculative decoding verifies up to 1 + num_spec tokens per
+            # request (rows are request-major), and the drafts the rejection
+            # sampler drops must not survive in the recurrent state. The runner
+            # provides the spec indices for every decode step then, also for
+            # steps without drafts, since the next state slot depends on how
+            # many tokens the previous step accepted.
+            use_spec_decode = spec_store_indices is not None
+            assert use_spec_decode or self.num_spec == 0, \
+                "speculative decoding requires the mamba_spec_* decode metadata"
+
             # 2. Convolution sequence transformation
-            hidden_states_B_C = granite_causal_conv1d_update(
-                hidden_states_B_C,
-                conv_state,
-                self.conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                load_cache_indices=load_indices_tensor,
-                store_cache_indices=store_indices_tensor,
-                query_start_loc=query_start_loc_p,
-            )
+            if use_spec_decode:
+                hidden_states_B_C = granite_causal_conv1d_update_spec(
+                    hidden_states_B_C,
+                    conv_state,
+                    self.conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=store_indices_tensor,
+                    history_offsets=spec_conv_offsets,
+                    num_tokens=spec_store_indices.size(-1),
+                    load_state_indices=load_indices_tensor,
+                )
+            else:
+                hidden_states_B_C = granite_causal_conv1d_update(
+                    hidden_states_B_C,
+                    conv_state,
+                    self.conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    load_cache_indices=load_indices_tensor,
+                    store_cache_indices=store_indices_tensor,
+                    query_start_loc=query_start_loc_p,
+                )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(hidden_states_B_C)
 
@@ -563,19 +594,35 @@ class HPUMambaMixer2(MambaMixer2):
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor
             # NOTE: final output is an in-place update of out tensor
-            hpu_selective_state_update = get_selective_state_update_impl()
-            hpu_selective_state_update(
-                ssm_state,
-                hidden_states_d,
-                dt,
-                A_d,
-                B_d,
-                C_d,
-                D_d,
-                z=None,
-                dt_bias=dt_bias,
-                dt_softplus=True,
-                state_batch_indices=load_indices_tensor,
-                dst_state_batch_indices=store_indices_tensor,
-                out=output.view(output.shape[0], -1, self.head_dim),
-            )
+            if use_spec_decode:
+                selective_state_update_spec(
+                    ssm_state,
+                    hidden_states_d,
+                    dt,
+                    A_d,
+                    B_d,
+                    C_d,
+                    D_d,
+                    dt_bias,
+                    True,
+                    spec_load_indices,
+                    spec_store_indices,
+                    out=output.view(output.shape[0], -1, self.head_dim),
+                )
+            else:
+                hpu_selective_state_update = get_selective_state_update_impl()
+                hpu_selective_state_update(
+                    ssm_state,
+                    hidden_states_d,
+                    dt,
+                    A_d,
+                    B_d,
+                    C_d,
+                    D_d,
+                    z=None,
+                    dt_bias=dt_bias,
+                    dt_softplus=True,
+                    state_batch_indices=load_indices_tensor,
+                    dst_state_batch_indices=store_indices_tensor,
+                    out=output.view(output.shape[0], -1, self.head_dim),
+                )
