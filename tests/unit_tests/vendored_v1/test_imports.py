@@ -107,15 +107,18 @@ def _load_hpu_plugins():
     load_general_plugins()
 
 
-def test_sampler_patches_hit_the_vendored_copy():
-    from vllm_gaudi import patches
+def _is_hpu_patch(fn, name):
+    # By name, not identity: tests that re-import vllm_gaudi.patches leave the package attribute on another copy.
+    return (fn.__module__, fn.__qualname__) == ("vllm_gaudi.patches", name)
 
+
+def test_sampler_patches_hit_the_vendored_copy():
     _load_hpu_plugins()
     sampler = importlib.import_module(f"{VENDORED_PKG}.sample.sampler")
     logprobs = importlib.import_module(f"{VENDORED_PKG}.sample.ops.logprobs")
-    assert sampler.Sampler.gather_logprobs is patches._hpu_gather_logprobs
-    assert sampler.batched_count_greater_than is patches._hpu_batched_count_greater_than
-    assert logprobs.batched_count_greater_than is patches._hpu_batched_count_greater_than
+    assert _is_hpu_patch(sampler.Sampler.gather_logprobs, "_hpu_gather_logprobs")
+    assert _is_hpu_patch(sampler.batched_count_greater_than, "_hpu_batched_count_greater_than")
+    assert _is_hpu_patch(logprobs.batched_count_greater_than, "_hpu_batched_count_greater_than")
 
 
 def test_installed_logits_processor_plugins_are_not_loaded(monkeypatch):
