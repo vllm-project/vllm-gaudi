@@ -350,11 +350,13 @@ def compare(fresh: Path, committed: Path) -> list[str]:
 def check(repo: Path, rev: str, out: Path, tests_out: Path | None = None) -> int:
     """Rebuild into a temporary directory and diff against ``out`` (and ``tests_out``). Return an exit code."""
     with tempfile.TemporaryDirectory(prefix=".vendor_v1_check-", dir=out.parent) as tmp:
-        build(repo, rev, Path(tmp) / out.name)
-        bad = compare(Path(tmp) / out.name, out)
+        # Separate subdirectories, so the two trees never share a staging path whatever their names.
+        fresh_out, fresh_tests = Path(tmp) / "out" / out.name, Path(tmp) / "tests_out" / "tests"
+        build(repo, rev, fresh_out)
+        bad = compare(fresh_out, out)
         if tests_out is not None:
-            build_tests(repo, rev, Path(tmp) / "tests")
-            bad += compare(Path(tmp) / "tests", tests_out)
+            build_tests(repo, rev, fresh_tests)
+            bad += compare(fresh_tests, tests_out)
     if bad:
         print("\n".join(bad))
         print(f"Not upstream {rev[:10]} + tools/vendor_v1/patches*/. Regenerate with vendor_v1.py, and record any "
