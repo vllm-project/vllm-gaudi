@@ -4322,13 +4322,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                       logits_device: torch.Tensor,
                       request_ids: Optional[list[str]] = None,
                       pad_to: Optional[int] = None,
-                      logits_requests=None,
-                      sampling_metadata: Optional[SamplingMetadata] = None) -> tuple[torch.Tensor, SamplingMetadata]:
+                      logits_requests=None) -> tuple[torch.Tensor, SamplingMetadata]:
         htorch.core.mark_step()
-        if sampling_metadata is None:
-            # Async scheduling: repair -1 placeholders before penalties read them.
-            self.input_batch.update_async_output_token_ids()
-            sampling_metadata = self._prepare_sampling(batch_changed, request_ids, pad_to, logits_requests)
+        # Async scheduling: repair -1 placeholders before penalties read them.
+        self.input_batch.update_async_output_token_ids()
+        sampling_metadata = self._prepare_sampling(batch_changed, request_ids, pad_to, logits_requests)
         sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
         htorch.core.mark_step()
         return sampler_output, sampling_metadata
@@ -4743,16 +4741,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         ######################### PREFILLS #########################
         if num_prefills > 0:
-            prefill_sampling_metadata = []
-            for req_id, logits_indices, logits_requests in zip(prefill_data.request_ids, prefill_data.logits_indices,
-                                                               prefill_data.logits_requests):
-                metadata = None
-                # Kimi-K3: build the sampling metadata (host-to-device copies) before the forward, not after it
-                if (self.is_kimi_k3 and logits_indices.numel() > 0 and not self.use_structured_output
-                        and not self.input_batch.needs_output_token_ids):
-                    self.input_batch.update_async_output_token_ids()
-                    metadata = self._prepare_sampling(batch_changed, req_id, logits_indices.shape[0], logits_requests)
-                prefill_sampling_metadata.append(metadata)
             htorch.core.mark_step()
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(prefill_data))):
@@ -4807,13 +4795,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # not complete the prompt and no logits are generated.
                     if logits_device.numel() > 0:
                         with self.profiler.record_event('internal', "sampler"):
-                            sampler_output, sampling_metadata = self._run_sampling(
-                                batch_changed,
-                                logits_device,
-                                req_id,
-                                logits_device.shape[0],
-                                logits_requests,
-                                sampling_metadata=prefill_sampling_metadata[idx])
+                            sampler_output, sampling_metadata = self._run_sampling(batch_changed, logits_device, req_id,
+                                                                                   logits_device.shape[0],
+                                                                                   logits_requests)
                             prefill_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
                             prefill_sampled_requests.extend(logits_requests)
                             logprobs_segments.append((list(logits_requests), sampler_output.logprobs_tensors))
@@ -4856,12 +4840,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             assert decode_data is not None
             lora_mask, lora_logits_mask = self._configure_lora(decode_data.token_ids, self.requests,
                                                                pd_info.decode_req_ids, False)
-            decode_sampling_metadata = None
-            if (self.is_kimi_k3 and not self.use_structured_output and decode_data.spec_decode_metadata is None
-                    and not self.input_batch.needs_output_token_ids):
-                self.input_batch.update_async_output_token_ids()
-                decode_sampling_metadata = self._prepare_sampling(batch_changed, pd_info.decode_req_ids,
-                                                                  decode_data.logits_indices.shape[0], None)
             self.event_start = self.profiler.get_timestamp_us()
             self.profiler.start("internal", "decode")
             htorch.core.mark_step()
@@ -4886,12 +4864,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     ##### Sampling Start #####
                     spec_decode_metadata = decode_data.spec_decode_metadata
                     sampler_output, sampling_metadata = self._run_sampling(
-                        batch_changed,
-                        logits_device
+                        batch_changed, logits_device
                         if spec_decode_metadata is None else logits_device[spec_decode_metadata.bonus_logits_indices],
-                        pd_info.decode_req_ids,
-                        logits_device.shape[0],
-                        sampling_metadata=decode_sampling_metadata)
+                        pd_info.decode_req_ids, logits_device.shape[0])
 
                     if spec_decode_metadata is None:
                         decode_sampled_token_ids.append(sampler_output.sampled_token_ids.flatten())
