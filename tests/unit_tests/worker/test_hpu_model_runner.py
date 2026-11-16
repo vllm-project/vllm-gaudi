@@ -237,13 +237,16 @@ def test_update_states_request_rescheduled(model_runner, dist_init):
     assert _is_req_added(model_runner, req_id)
     assert not _is_req_scheduled(model_runner, req_id)
 
+    # The full prefill sampled a token: the input of the decode step below.
+    model_runner.requests[req_id].output_token_ids.append(4)
+
     # reschedule req
     cached_req_data = CachedRequestData(
         req_ids=[req_id],
         new_token_ids=[[]],
         new_block_ids=[([1], )],
         num_computed_tokens=[3],
-        num_output_tokens=[0],
+        num_output_tokens=[1],
     )
 
     scheduler_output = SchedulerOutput(
@@ -282,22 +285,29 @@ def _empty_step(**kwargs) -> SchedulerOutput:
     return SchedulerOutput(**fields)
 
 
+def _new_requests_step(prefill_token_ids: dict[str, list[int]], sampling_params: SamplingParams) -> SchedulerOutput:
+    """One step that schedules every request in prefill_token_ids as new (prompt [1, 2, 3])."""
+    new_reqs = [
+        NewRequestData(
+            req_id=req_id,
+            prompt_token_ids=[1, 2, 3],
+            mm_features=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            block_ids=([0], ),
+            num_computed_tokens=0,
+            lora_request=None,
+            prefill_token_ids=token_ids,
+        ) for req_id, token_ids in prefill_token_ids.items()
+    ]
+    num_scheduled_tokens = {req_id: len(token_ids) for req_id, token_ids in prefill_token_ids.items()}
+    return _empty_step(scheduled_new_reqs=new_reqs,
+                       num_scheduled_tokens=num_scheduled_tokens,
+                       total_num_scheduled_tokens=sum(num_scheduled_tokens.values()))
+
+
 def _new_request_step(req_id: str, prefill_token_ids: list[int], sampling_params: SamplingParams) -> SchedulerOutput:
-    new_req = NewRequestData(
-        req_id=req_id,
-        prompt_token_ids=[1, 2, 3],
-        mm_features=[],
-        sampling_params=sampling_params,
-        pooling_params=None,
-        block_ids=([0], ),
-        num_computed_tokens=0,
-        lora_request=None,
-        prefill_token_ids=prefill_token_ids,
-    )
-    num_tokens = len(prefill_token_ids)
-    return _empty_step(scheduled_new_reqs=[new_req],
-                       num_scheduled_tokens={req_id: num_tokens},
-                       total_num_scheduled_tokens=num_tokens)
+    return _new_requests_step({req_id: prefill_token_ids}, sampling_params)
 
 
 def test_update_states_request_preempted_and_resumed(model_runner, dist_init):
@@ -340,13 +350,13 @@ def test_update_states_resumed_request_does_not_rescore_prompt(model_runner, dis
     output has not."""
     params = SamplingParams(prompt_logprobs=1)
     scored = model_runner.input_batch.num_prompt_logprobs
-    model_runner._update_states(_new_request_step("req_0", [1, 2, 3], params))
-    model_runner._update_states(_new_request_step("req_1", [1, 2, 3], params))
+    # Both requests go in one step: a request left out of a step leaves the batch, and its scoring entry with it.
+    model_runner._update_states(_new_requests_step({"req_0": [1, 2, 3], "req_1": [1, 2, 3]}, params))
     assert {"req_0", "req_1"} <= scored.keys()
 
     model_runner._update_states(_empty_step(preempted_req_ids={"req_0", "req_1"}))
-    model_runner._update_states(_new_request_step("req_0", [1, 2, 3, 7, 8], params))
-    model_runner._update_states(_new_request_step("req_1", [1, 2, 3], params))
+    model_runner._update_states(_new_requests_step({"req_0": [1, 2, 3, 7, 8], "req_1": [1, 2, 3]}, params))
+    assert {"req_0", "req_1"} <= model_runner.input_batch.req_id_to_index.keys()
     assert "req_0" not in scored
     assert "req_1" in scored
 
