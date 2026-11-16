@@ -361,6 +361,29 @@ def test_update_states_resumed_request_does_not_rescore_prompt(model_runner, dis
     assert "req_1" in scored
 
 
+@pytest.mark.parametrize(
+    "context_len, query_len, expected",
+    [
+        # Within the prompt.
+        (0, 4, [[0, 1, 2, 3], [0, 1, 1, 3], [0, 2, 2, 3]]),
+        # Prompt tail, then generated positions (index + delta).
+        (2, 4, [[2, 3, 3, 4], [1, 3, 3, 4], [2, 3, 3, 4]]),
+        # Three generated positions: a (3, 3) block that must not be transposed.
+        (0, 7, [[0, 1, 2, 3, 3, 4, 5], [0, 1, 1, 3, 3, 4, 5], [0, 2, 2, 3, 3, 4, 5]]),
+        # Entirely past the prompt, as for a resumed request whose prefix hit covers some outputs.
+        (6, 2, [[5, 6], [5, 6], [5, 6]]),
+    ])
+def test_align_and_pad_mrope_positions(model_runner, context_len, query_len, expected):
+    """Positions past the prompt follow the scheduled token index, also when the computed tokens already reach past
+    the prompt."""
+    model_runner.requests["req_0"] = SimpleNamespace(
+        mrope_positions=torch.tensor([[0, 1, 2, 3], [0, 1, 1, 3], [0, 2, 2, 3]], dtype=torch.int32),
+        mrope_position_delta=-1,
+    )
+    positions = model_runner._align_and_pad_mrope_positions(["req_0"], [context_len], [query_len], (1, query_len), -1)
+    assert positions.tolist() == expected
+
+
 class _ReadyEvent:
     """Stands in for the copy-ready event of a finished async device-to-host copy."""
 

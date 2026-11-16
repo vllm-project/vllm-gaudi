@@ -2858,22 +2858,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     raise RuntimeError(f"MROPE needs extension beyond prompt but mrope_position_delta is None: "
                                        f"req_id={req_id} cl={cl} qsl={qsl} mp_total={mp_total} remain={remain}")
 
-                # generate mrope positions for the extra using delta.
+                # generate mrope positions for the extra using delta. They start at the first scheduled token past
+                # the prompt: a resumed request's computed tokens can already reach past it.
                 extra_pos = MRotaryEmbedding.get_next_input_positions(
                     mrope_position_delta=int(delta),
-                    context_len=mp_total,
-                    seq_len=mp_total + extra,
+                    context_len=max(cl, mp_total),
+                    seq_len=cl + qsl,
                 )
 
+                # One list per axis, so the shape is already (3, extra). Never transpose: with extra == 3 the
+                # shape alone cannot tell the layouts apart.
                 extra_part = torch.as_tensor(extra_pos, dtype=torch.int32, device=prompt_part.device)
-
-                # normalize shapes to (3, extra)
-                if extra_part.ndim == 1:  # repeat for 3 axes
-                    extra_part = extra_part.unsqueeze(0).repeat(3, 1)
-                elif extra_part.ndim == 2:  # (3, extra) or (extra, 3)
-                    if extra_part.shape[0] == extra and extra_part.shape[1] == 3:
-                        extra_part = extra_part.transpose(0, 1).contiguous()
-                else:
+                if tuple(extra_part.shape) != (3, extra):
                     raise RuntimeError(f"Unexpected extra_part shape: {tuple(extra_part.shape)}")
 
                 input_mrope_position = torch.cat([prompt_part, extra_part], dim=1)
