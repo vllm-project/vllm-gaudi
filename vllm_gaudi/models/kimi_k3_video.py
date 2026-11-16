@@ -22,8 +22,9 @@ compilation compiles every ``nn.ModuleList`` of the model, including ``vision_to
 the tower runs in an HPU graph. A video chunk (T=4, 36x62 patches for 864x480) is a new input shape, so it creates new
 graphs. The multimodal warmup precompiles them from the video shape of ``--limit-mm-per-prompt``, e.g.
 ``{"video": {"count": 1, "width": 864, "height": 480, "num_frames": 20}}``; a video shape that was not warmed up
-compiles on the first request. The loader frame count is capped at that ``num_frames`` (the dummy frame count when
-unset), so every request fits the profiled encoder cache budget.
+compiles on the first request. The default loader frame count is capped at that ``num_frames`` (the dummy frame count
+when unset); a larger client ``media_io_kwargs`` value is accepted by the loader and the request is rejected if it
+exceeds the encoder cache budget.
 
 The K3 classes cannot be imported while the plugin loads, so everything that subclasses them is built by
 ``install_kimi_k3_video`` when the K3 patches are applied.
