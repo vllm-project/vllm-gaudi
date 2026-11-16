@@ -1501,6 +1501,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._draft_token_ids: Optional[Union[list[list[int]], torch.Tensor]] = None
         # The requests of _draft_token_ids' rows, in the batch order they were proposed in.
         self._draft_token_req_ids: Optional[list[str]] = None
+        # Async scheduling: the drafts the next step's inputs take (see _record_draft_token_ids).
+        self._async_spec_draft_token_ids: Optional[torch.Tensor] = None
         self.input_ids_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int32,
                                          device="cpu",
@@ -1669,6 +1671,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._mamba_spec_decode = False
         self._mamba_num_accepted: dict[str, int] = {}
         self._mamba_state_col: dict[str, int] = {}
+        # The block tables that hold those slots (see may_reinitialize_input_batch).
+        self._mamba_spec_group_ids: frozenset[int] = frozenset()
         # Async scheduling with speculative decoding keeps the previous step's
         # results on the device: the drafts each of its rows verified, and the
         # valid output tokens per row (see _async_spec_shift). Requests that
@@ -1822,7 +1826,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _make_buffer(self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True) -> CpuGpuBuffer:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory, with_numpy=numpy)
 
-    def prepare_mamba_state_idxs(self, req_indices, block_table_offsets, target_bs):
+    def prepare_mamba_state_idxs(self, req_indices, block_table_offsets, target_bs, group_ids=None):
+        """State block ids at block_table_offsets per KV cache group, padded to target_bs: [num_groups, target_bs].
+
+        With group_ids only those groups are read and the others get pad ids.
+        Speculative decoding passes _mamba_spec_group_ids: only those tables
+        have its extra state columns, which can lie past an attention table's
+        last column.
+        """
         num_indices = len(req_indices)
         all_state_indices_cpu = []
         for group_idx in range(len(self.input_batch.block_table.block_tables)):
@@ -1833,6 +1844,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     req_id = self.input_batch.req_ids[req_idx]
                     base_slot = self._gdn_req_to_base_slot[req_id]
                     state_indices_cpu[i] = base_slot * self._num_gdn_groups + g_offset + 1
+            elif group_ids is not None and group_idx not in group_ids:
+                state_indices_cpu = torch.full((num_indices, ), self._MAMBA_PAD_BLOCK_ID, dtype=torch.int32)
             else:
                 block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
                 state_indices_cpu = block_table_cpu_tensor[req_indices, block_table_offsets].clone()
@@ -1864,10 +1877,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self._mamba_num_accepted.get(req_ids[i] if i < len(req_ids) else None, 1) - 1 for i in req_indices
         ]
         prev_cols, curr_cols = window_cols or ([0] * len(req_indices), [0] * len(req_indices))
+        groups = self._mamba_spec_group_ids
         load = self.prepare_mamba_state_idxs(req_indices,
-                                             [col + offset for col, offset in zip(prev_cols, last_accepted)], target_bs)
+                                             [col + offset for col, offset in zip(prev_cols, last_accepted)], target_bs,
+                                             groups)
         store = torch.stack([
-            self.prepare_mamba_state_idxs(req_indices, [col + t for col in curr_cols], target_bs)
+            self.prepare_mamba_state_idxs(req_indices, [col + t for col in curr_cols], target_bs, groups)
             for t in range(num_tokens)
         ],
                             dim=-1)
@@ -2151,8 +2166,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         """
         num_slots = 1 + self.speculative_config.num_speculative_tokens
         prev_cols = prev_cols or [0] * len(req_indices)
+        groups = self._mamba_spec_group_ids
         candidates = torch.stack([
-            self.prepare_mamba_state_idxs(req_indices, [col + t for col in prev_cols], target_bs)
+            self.prepare_mamba_state_idxs(req_indices, [col + t for col in prev_cols], target_bs, groups)
             for t in range(num_slots)
         ],
                                  dim=-1)
@@ -2240,6 +2256,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._async_spec_delta = None
         self._draft_token_ids = None
         self._draft_token_req_ids = None
+        self._async_spec_draft_token_ids = None
 
     def _scatter_async_spec_input_ids(self, token_ids: torch.Tensor, req_ids: list[str], num_tokens: int,
                                       num_tokens_per_req: list[int]) -> None:
@@ -2247,11 +2264,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         token_ids are the flattened [batch * num_tokens, 1] decode rows. For a
         request that ran in the previous step, row 0 gets that step's last
-        valid output token and rows 1.. its drafts; the host only has
-        placeholders for them. Other requests keep the host's token ids.
+        valid output token and rows 1.. its drafts (_async_spec_draft_token_ids);
+        the host only has placeholders for them. Other requests keep the host's
+        token ids.
         """
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index or {}
         num_spec = self.speculative_config.num_speculative_tokens
+        drafts = self._async_spec_draft_token_ids
         first_dst, first_src, draft_dst, draft_src = [], [], [], []
         for i, req_id in enumerate(req_ids):
             prev_row = prev_req_id_to_index.get(req_id)
@@ -2259,7 +2278,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 continue
             first_dst.append(i * num_tokens)
             first_src.append(prev_row)
-            if self._draft_token_ids is not None:
+            if drafts is not None:
                 for k in range(num_tokens_per_req[i] - 1):
                     draft_dst.append(i * num_tokens + 1 + k)
                     draft_src.append(prev_row * num_spec + k)
@@ -2274,11 +2293,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             0, async_h2d_copy(first_dst, dtype=torch.long, device=self.device),
             last_valid.index_select(0, async_h2d_copy(first_src, dtype=torch.long, device=self.device)).to(flat.dtype))
         if draft_dst:
-            assert isinstance(self._draft_token_ids, torch.Tensor)
+            assert drafts is not None
             flat.index_copy_(
                 0, async_h2d_copy(draft_dst, dtype=torch.long, device=self.device),
-                self._draft_token_ids.reshape(-1).index_select(
-                    0, async_h2d_copy(draft_src, dtype=torch.long, device=self.device)).to(flat.dtype))
+                drafts.reshape(-1).index_select(0, async_h2d_copy(draft_src, dtype=torch.long,
+                                                                  device=self.device)).to(flat.dtype))
 
     def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int], is_prompt: bool):
         '''
@@ -4153,9 +4172,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # step and written to the first slot of this one.
                 spec_window_cols = self._mamba_spec_window_cols(req_indices, context_lens, num_scheduled_tokens)
                 load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, spec_window_cols[0],
-                                                                       padded_batch_size)
+                                                                       padded_batch_size, self._mamba_spec_group_ids)
                 store_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, spec_window_cols[1],
-                                                                        padded_batch_size)
+                                                                        padded_batch_size, self._mamba_spec_group_ids)
             elif self.use_prefix_caching:
                 load_state_indices_cpu = self.prepare_mamba_state_idxs(req_indices, block_idx_last_computed_token_cpu,
                                                                        padded_batch_size)
@@ -5793,13 +5812,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         ################## Spec Decode ##################
         # Now, we will call drafter to propose draft token ids
         if self.speculative_config:
-            self._draft_token_ids = self.propose_draft_token_ids(
-                scheduler_output, postprocessed_sampled_token_ids, sampling_metadata, non_flattened_hidden_states,
-                sample_hidden_states, aux_hidden_states, prefill_sampled_token_ids_device,
-                decode_sampled_token_ids_device, non_flattened_hidden_states_prefills, sample_hidden_states_prefills,
-                aux_hidden_states_prefills, num_decodes, prefill_data if num_prefills > 0 else None,
-                decode_data if num_decodes > 0 else None)
-            self._draft_token_req_ids = list(self.input_batch.req_ids)
+            self._record_draft_token_ids(
+                self.propose_draft_token_ids(scheduler_output, postprocessed_sampled_token_ids, sampling_metadata,
+                                             non_flattened_hidden_states, sample_hidden_states, aux_hidden_states,
+                                             prefill_sampled_token_ids_device, decode_sampled_token_ids_device,
+                                             non_flattened_hidden_states_prefills, sample_hidden_states_prefills,
+                                             aux_hidden_states_prefills, num_decodes,
+                                             prefill_data if num_prefills > 0 else None,
+                                             decode_data if num_decodes > 0 else None))
         ################## Spec Decode end ##################
 
         # Create output.
@@ -8196,6 +8216,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             (self._mamba_spec_decode and isinstance(spec, MambaSpec)) else cdiv(max_model_len, spec.block_size)
             for spec in kv_cache_specs
         ]
+        # Only these tables have the speculative state columns; the state index
+        # lookups of speculative decoding read no others (prepare_mamba_state_idxs).
+        self._mamba_spec_group_ids = frozenset(i for i, spec in enumerate(kv_cache_specs)
+                                               if self._mamba_spec_decode and isinstance(spec, MambaSpec))
 
         if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [self.cache_config.block_size]:
             assert self.vllm_config.offload_config.uva.cpu_offload_gb == 0, (
@@ -8306,6 +8330,21 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         logger.info("Reloading weights inplace...")
         model_loader.load_weights(self.model, model_config=self.model_config)
         torch.hpu.synchronize()
+
+    def _record_draft_token_ids(self, draft_token_ids: Optional[Union[list[list[int]], torch.Tensor]]) -> None:
+        """Keep a step's drafts for take_draft_token_ids and, with async scheduling, for the next step's inputs.
+
+        take_draft_token_ids hands the drafts to the scheduler and clears them.
+        With async structured output the engine takes them after the next
+        step's execute_model, to build its grammar bitmask, while this runner
+        builds that step's inputs only in sample_tokens, after the take. So
+        _scatter_async_spec_input_ids reads its own reference, which the take
+        leaves in place.
+        """
+        self._draft_token_ids = draft_token_ids
+        self._draft_token_req_ids = list(self.input_batch.req_ids)
+        self._async_spec_draft_token_ids = (draft_token_ids if self.use_async_spec_decode
+                                            and isinstance(draft_token_ids, torch.Tensor) else None)
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:

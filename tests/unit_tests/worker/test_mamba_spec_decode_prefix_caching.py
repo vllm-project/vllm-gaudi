@@ -78,6 +78,7 @@ def _make_runner_stub(rows: dict[str, list[int]], num_computed: list[int]):
                                    _mamba_num_accepted={},
                                    _mamba_state_col={},
                                    _compact_gdn_group_ids=set(),
+                                   _mamba_spec_group_ids=frozenset({1}),
                                    _MAMBA_PAD_BLOCK_ID=PAD_BLOCK_ID)
     for name in ("prepare_mamba_state_idxs", "_mamba_spec_window_cols", "_prepare_mamba_spec_decode_idxs",
                  "_copy_mamba_spec_boundary_states", "_drop_stale_mamba_blocks"):
@@ -104,6 +105,24 @@ def test_decode_slots_move_along_the_block_table():
     # The conv window is read from the first slot of the previous step.
     assert runner.prepare_mamba_state_idxs([0, 1], cols[0], 3)[1].tolist() == [7, 5, PAD_BLOCK_ID]
     assert conv_offsets.tolist() == [1, 0, 0]
+
+
+def test_slots_past_the_attention_tables_last_column():
+    """Only the mamba table has the speculative columns: with equal block sizes, the slots of a request's last tokens
+    reach one column past the attention table's last. The lookups read the mamba group only; the others get pad ids."""
+    last_col = MAX_MODEL_LEN // BLOCK_SIZE - 1  # the attention table's last column
+    runner = _make_runner_stub({"a": [0] * last_col + [11, 12]}, num_computed=[MAX_MODEL_LEN - 1 - NUM_SPEC])
+    runner._mamba_num_accepted["a"] = 1
+
+    load, store, _ = runner._prepare_mamba_spec_decode_idxs([0], 2, 1 + NUM_SPEC, ([last_col], [last_col]))
+    assert load.tolist() == [[PAD_BLOCK_ID, PAD_BLOCK_ID], [11, PAD_BLOCK_ID]]
+    assert store.tolist() == [[[PAD_BLOCK_ID, PAD_BLOCK_ID]] * 2, [[11, 12], [PAD_BLOCK_ID, PAD_BLOCK_ID]]]
+
+    # The async loads pick among the same slots on the device; "a" accepted its draft.
+    runner.speculative_config = types.SimpleNamespace(num_speculative_tokens=NUM_SPEC)
+    num_valid = torch.tensor([2, 1], dtype=torch.int32, device="hpu")
+    load, _ = HPUModelRunner._async_mamba_spec_load_idxs(runner, [0], 2, num_valid, [last_col])
+    assert load.cpu().tolist() == [[PAD_BLOCK_ID, PAD_BLOCK_ID], [12, PAD_BLOCK_ID]]
 
 
 def test_prefill_skips_stale_columns():

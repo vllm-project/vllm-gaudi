@@ -223,11 +223,38 @@ def test_input_ids_take_the_last_valid_token_and_the_drafts():
                                                                               dtype=torch.int32,
                                                                               device=DEVICE)),
         _async_spec_prev_num_valid=torch.tensor([1, 2], dtype=torch.int32, device=DEVICE),
-        _draft_token_ids=torch.tensor([[70], [60]], device=DEVICE))
+        _async_spec_draft_token_ids=torch.tensor([[70], [60]], device=DEVICE))
     # The host only has placeholders for a and b; "new" did not run before.
     token_ids = torch.tensor([[-1], [-1], [-1], [-1], [5], [-1]], dtype=torch.int32, device=DEVICE)
     HPUModelRunner._scatter_async_spec_input_ids(runner, token_ids, ["a", "b", "new"], 2, [2, 2, 1])
     assert token_ids.view(-1).cpu().tolist() == [6, 60, 7, 70, 5, -1]
+
+
+def test_input_ids_keep_the_drafts_the_engine_took():
+    """Async structured output: the engine takes the drafts for the grammar bitmask after the next step's
+    execute_model, and this runner builds that step's inputs only afterwards, in sample_tokens."""
+    runner = types.SimpleNamespace(device=DEVICE,
+                                   use_async_spec_decode=True,
+                                   speculative_config=types.SimpleNamespace(num_speculative_tokens=1),
+                                   input_batch=types.SimpleNamespace(req_ids=["b", "a"],
+                                                                     prev_req_id_to_index={
+                                                                         "b": 0,
+                                                                         "a": 1
+                                                                     },
+                                                                     prev_sampled_token_ids=torch.tensor(
+                                                                         [[7, -1], [5, 6]],
+                                                                         dtype=torch.int32,
+                                                                         device=DEVICE)),
+                                   _async_spec_prev_num_valid=torch.tensor([1, 2], dtype=torch.int32, device=DEVICE))
+    # The previous step's sample_tokens proposed the drafts.
+    HPUModelRunner._record_draft_token_ids(runner, torch.tensor([[70], [60]], device=DEVICE))
+    # execute_model, then the engine takes them.
+    taken = HPUModelRunner.take_draft_token_ids(runner)
+    assert taken is not None and taken.req_ids == ["b", "a"] and taken.draft_token_ids == [[70], [60]]
+    # sample_tokens builds the inputs.
+    token_ids = torch.tensor([[-1], [-1], [-1], [-1]], dtype=torch.int32, device=DEVICE)
+    HPUModelRunner._scatter_async_spec_input_ids(runner, token_ids, ["a", "b"], 2, [2, 2])
+    assert token_ids.view(-1).cpu().tolist() == [6, 60, 7, 70]
 
 
 def test_spec_rows_pad_single_tokens():

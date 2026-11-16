@@ -62,6 +62,7 @@ def _make_runner_stub(requests: list[CachedRequestState]):
     runner = types.SimpleNamespace(input_batch=batch,
                                    _mamba_num_accepted={},
                                    _compact_gdn_group_ids=set(),
+                                   _mamba_spec_group_ids=frozenset({1}),
                                    _MAMBA_PAD_BLOCK_ID=PAD_BLOCK_ID)
     runner.prepare_mamba_state_idxs = types.MethodType(HPUModelRunner.prepare_mamba_state_idxs, runner)
     return runner
