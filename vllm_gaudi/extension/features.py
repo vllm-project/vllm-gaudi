@@ -108,6 +108,17 @@ def get_features():
         Value('regional_compilation', True, env_var='VLLM_T_COMPILE_REGIONAL_COMPILATION', env_var_type=boolean),
         Value('dynamic_shapes_compilation', True, env_var='VLLM_T_COMPILE_DYNAMIC_SHAPES', env_var_type=boolean),
         Value('fullgraph_compilation', False, env_var='VLLM_T_COMPILE_FULLGRAPH', env_var_type=boolean),
+        # Re-run every prompt bucket in the validation warmup (see
+        # HPUModelRunner._validation_warmup). Smaller buckets make Dynamo compile
+        # more general graphs, which inference then picks for the larger buckets
+        # warmed before them; without the re-run, their recipes compile on the
+        # first real prompts. Lazy mode runs without Dynamo, so nothing is shadowed.
+        # On by default only with prefix caching: without it, the first prompts
+        # after a boot gain little for the same warmup cost.
+        Value('prompt_validation_warmup',
+              All(ModelType('nemotron_h'), Enabled('enable_prefix_caching'), Not(Lazy())),
+              env_var='VLLM_PROMPT_VALIDATION_WARMUP',
+              env_var_type=boolean),
         Value('mamba_split_prefill_graph',
               All(ModelType('granitemoehybrid'), Disabled('fullgraph_compilation'), Not(Lazy()))),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
