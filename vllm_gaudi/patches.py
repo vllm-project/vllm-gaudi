@@ -992,7 +992,7 @@ _KIMI_PATCHES_WARNED: set[str] = set()
 _KIMI_K3_MODULE = "vllm.models.kimi_k3"
 _KIMI_K3_ARCHITECTURES = KIMI_K3_ARCHITECTURES
 # Patches that act in the process which builds the config (APIServer, EngineCore), not only in model workers.
-_KIMI_CONFIG_PATCHES = ("hybrid_config", "k3_arch")
+_KIMI_CONFIG_PATCHES = ("hybrid_config", "k3_arch", "video_frame_cap")
 
 
 def _is_kimi_k3_model(model) -> bool:
@@ -1211,14 +1211,16 @@ def _patch_kimi_k3_hybrid_config() -> None:
 
             def _hpu_post_init(self, *args, **kwargs):
                 orig_post_init(self, *args, **kwargs)
-                _report_kimi_config_patches(self)
                 if _is_kimi_k3_config(self):
-                    mark_kimi_k3_seen()
                     try:
                         from vllm_gaudi.models.kimi_k3_video import limit_video_loader_frames
                         limit_video_loader_frames(self)
+                        _kimi_patch_ok("video_frame_cap")
                     except Exception:  # the frame cap must not fail the config build
                         _kimi_patch_failed("video_frame_cap")
+                _report_kimi_config_patches(self)
+                if _is_kimi_k3_config(self):
+                    mark_kimi_k3_seen()
                     _log_kimi_k3_settings()
                 # Ensure KimiMoE does not pad moe_intermediate_size from 3072 to 4096 under EP
                 # (saves device memory on every card)

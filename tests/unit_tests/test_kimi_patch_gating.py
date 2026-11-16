@@ -323,17 +323,49 @@ def test_k3_config_disables_moe_padding(config_patches, architectures):
     assert cfg.hf_config.min_moe_intermediate_per_partition == 1
 
 
-def test_k3_config_build_survives_a_failing_video_frame_cap(config_patches):
+def _capture_kimi_warnings(config_patches, monkeypatch):
+    warnings = []
+    stub = types.SimpleNamespace(warning=lambda msg, *args: warnings.append(msg % args), debug=lambda *a, **k: None)
+    monkeypatch.setattr(config_patches, "_kimi_patch_logger", lambda: stub)
+    return warnings
+
+
+def test_k3_config_build_survives_a_failing_video_frame_cap(config_patches, monkeypatch):
 
     def failing_cap(cfg):
         raise RuntimeError("no multimodal config")
 
     config_patches.test_video.limit_video_loader_frames = failing_cap
+    warnings = _capture_kimi_warnings(config_patches, monkeypatch)
 
     cfg = config_patches.test_model_config(["KimiK3ForConditionalGeneration"])
 
     assert cfg.hf_config.min_moe_intermediate_per_partition == 1
     assert "RuntimeError" in config_patches._KIMI_PATCHES_FAILED["video_frame_cap"]
+    assert any("'video_frame_cap' was not installed" in w for w in warnings)
+
+
+def test_k3_config_build_applies_the_video_frame_cap_and_reports_nothing(config_patches, monkeypatch):
+    capped = []
+    config_patches.test_video.limit_video_loader_frames = capped.append
+    warnings = _capture_kimi_warnings(config_patches, monkeypatch)
+
+    cfg = config_patches.test_model_config(["KimiK3ForConditionalGeneration"])
+
+    assert capped == [cfg]
+    assert "video_frame_cap" not in config_patches._KIMI_PATCHES_FAILED
+    assert not warnings
+
+
+def test_non_k3_config_build_does_not_apply_the_video_frame_cap(config_patches, monkeypatch):
+    capped = []
+    config_patches.test_video.limit_video_loader_frames = capped.append
+    warnings = _capture_kimi_warnings(config_patches, monkeypatch)
+
+    config_patches.test_model_config(["Llama4ForConditionalGeneration"])
+
+    assert not capped
+    assert not warnings
 
 
 @pytest.mark.parametrize("architectures", [["Kimi_K25ForConditionalGeneration"], ["DeepseekV3ForCausalLM"]])
