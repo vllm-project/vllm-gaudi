@@ -413,6 +413,13 @@ def _frame_cap_config(video_options):
     return types.SimpleNamespace(multimodal_config=types.SimpleNamespace(limit_per_prompt=limit))
 
 
+def test_loader_frames_are_not_capped_for_configs_without_multimodal_config(video):
+    video.mod.install_kimi_k3_video()
+    video.mod.limit_video_loader_frames(types.SimpleNamespace(multimodal_config=None))
+
+    assert video.renderer._K3_MEDIA_IO_DEFAULTS["video"]["num_frames"] == 256
+
+
 def test_loader_frames_are_capped_at_the_limit_mm_per_prompt_video_frames(video):
     video.mod.install_kimi_k3_video()
     video.mod.limit_video_loader_frames(_frame_cap_config(types.SimpleNamespace(num_frames=32)))

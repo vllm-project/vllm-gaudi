@@ -1559,8 +1559,11 @@ def _patch_kimi_k3_arch() -> None:
 
         # The K3 models build their language model under a submodel config that looks like a standalone Kimi-Linear
         # one: mark the construction and the Kimi-K3 instances of the classes shared with Kimi-Linear.
+        from vllm_gaudi.ops.hpu_kda_pytorch import find_kimi_decoder_layer_class
+        shared_classes = tuple(c for c in (_amd_linear.KimiLinearModel, _amd_linear.KimiMoE,
+                                           find_kimi_decoder_layer_class(_amd_linear)) if c is not None)
         for k3_cls in (_amd_model.KimiK3ForConditionalGeneration, _amd_mtp.KimiK3MTP):
-            _mark_kimi_k3_construction(k3_cls, (_amd_linear.KimiLinearModel, _amd_linear.KimiMoE))
+            _mark_kimi_k3_construction(k3_cls, shared_classes)
 
         # Monkey-patch KimiLinearModel.forward to ensure tokens/positions are 1D/2D
         # so block_residual is allocated with shape [num_tokens, attn_res_block_num, hidden_size].

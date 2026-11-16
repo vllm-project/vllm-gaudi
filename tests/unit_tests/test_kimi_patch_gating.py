@@ -520,12 +520,16 @@ def arch_modules(kda_modules, monkeypatch):
         def forward(self, hidden_states):
             return hidden_states
 
+    class KimiDecoderLayer(torch.nn.Module):
+        pass
+
     class KimiK3ForConditionalGeneration(torch.nn.Module):
 
         def __init__(self, *args, **kwargs):
             super().__init__()
             self.model = KimiLinearModel()
             self.moe = KimiMoE()
+            self.layer = KimiDecoderLayer()
 
     class KimiK3MTP(KimiK3ForConditionalGeneration):
         pass
@@ -539,6 +543,7 @@ def arch_modules(kda_modules, monkeypatch):
     linear = module("vllm.models.kimi_k3.amd.linear",
                     KimiLinearModel=KimiLinearModel,
                     KimiMoE=KimiMoE,
+                    KimiDecoderLayer=KimiDecoderLayer,
                     KimiLinearForCausalLM=object,
                     KimiK3MultiHeadLatentAttentionWrapper=object)
     module("vllm.models.kimi_k3.amd.mla", KimiK3MultiHeadLatentAttentionWrapper=object)
@@ -605,8 +610,29 @@ def test_k3_construction_tags_shared_layers_and_runs_in_the_build_context(arch_m
 
     assert k3_cls.__init__ is wrapped
     assert seen == [True] and not building_kimi_k3()
-    assert model.model._hpu_kimi_k3 and model.moe._hpu_kimi_k3
+    assert model.model._hpu_kimi_k3 and model.moe._hpu_kimi_k3 and model.layer._hpu_kimi_k3
     assert not hasattr(arch_modules.test_linear.KimiMoE(), "_hpu_kimi_k3")
+    assert not hasattr(arch_modules.test_linear.KimiDecoderLayer(), "_hpu_kimi_k3")
+
+
+def test_k3_tagged_decoder_layer_returns_the_bank_state_and_a_standalone_one_a_plain_bank(arch_modules):
+    from vllm_gaudi.ops import hpu_kda_pytorch as kda
+    _forward_wrapper(arch_modules)
+    k3_layer = arch_modules.test_k3_model().layer
+    standalone_layer = arch_modules.test_linear.KimiDecoderLayer()
+    for layer in (k3_layer, standalone_layer):
+        layer.is_block_write_layer, layer.block_write_idx, layer.prev_valid_blocks = False, -1, 1
+        layer.self_attention_res_proj = layer.mlp_res_proj = types.SimpleNamespace(weight=torch.ones(1, 4))
+        layer.self_attention_res_norm = layer.mlp_res_norm = types.SimpleNamespace(weight=torch.ones(4),
+                                                                                   variance_epsilon=1e-6)
+        layer.input_layernorm = layer.post_attention_layernorm = None
+        layer._run_self_attn = lambda positions, h: h
+        layer.mlp = lambda h: h
+    hidden, blocks, delta = torch.randn(3, 4), torch.randn(3, 2, 4), torch.randn(3, 4)
+
+    assert isinstance(kda.forward_attn_residual_functional(k3_layer, None, hidden, blocks, delta)[1], tuple)
+    assert isinstance(
+        kda.forward_attn_residual_functional(standalone_layer, None, hidden, blocks, delta)[1], torch.Tensor)
 
 
 def test_kimi_moe_forward_flattens_only_for_k3_layers(arch_modules):

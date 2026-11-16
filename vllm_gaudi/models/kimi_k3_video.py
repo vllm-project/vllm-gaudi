@@ -421,14 +421,14 @@ def install_kimi_k3_video() -> None:
 
 
 def limit_video_loader_frames(model_config) -> None:
-    """Caps the loader frame count at the video ``num_frames`` of ``--limit-mm-per-prompt`` (the profiled and warmed
-    shape), or at the dummy frame count when it is not set. Client ``media_io_kwargs`` can still lower it."""
+    """Caps the default loader frame count at the video ``num_frames`` of ``--limit-mm-per-prompt`` (the profiled and
+    warmed shape), or at the dummy frame count when it is not set. Configs without a multimodal config are skipped."""
     import vllm.renderers.kimi_k3 as k3_renderer
     video_defaults = k3_renderer._K3_MEDIA_IO_DEFAULTS.get("video")
-    if video_defaults is None:
-        return
     mm_config = getattr(model_config, "multimodal_config", None)
-    options = mm_config.limit_per_prompt.get("video") if mm_config is not None else None
+    if video_defaults is None or mm_config is None:
+        return
+    options = mm_config.limit_per_prompt.get("video")
     num_frames = getattr(options, "num_frames", None) or DUMMY_VIDEO_NUM_FRAMES
     video_defaults["num_frames"] = min(video_defaults["num_frames"], num_frames)
 
