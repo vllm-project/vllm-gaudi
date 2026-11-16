@@ -2211,6 +2211,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_computed_tokens with real ids. A KV-load failure that rolled num_computed_tokens back over older -1
         placeholders breaks that, and a list shorter than the KV cache would read past the row. The scheduler no
         longer sends all_token_ids, so neither can be repaired here, and the row would feed a stale or -1 token.
+        With more than the next input left to compute, add_request counts every known token as prompt, and the
+        penalty prompt tensor does not mask -1, so then no output may be a placeholder at all.
         """
         num_tokens = req_state.num_prompt_tokens + len(req_state.output_token_ids)
         if num_tokens <= num_computed_tokens:
@@ -2218,6 +2220,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                "known tokens.")
         if -1 in req_state.output_token_ids[max(num_computed_tokens - req_state.num_prompt_tokens, 0):]:
             raise RuntimeError(f"Request {req_id} resumes with a -1 placeholder inside the tokens to compute.")
+        if num_computed_tokens < num_tokens - 1 and -1 in req_state.output_token_ids:
+            raise RuntimeError(f"Request {req_id} resumes with a -1 placeholder among the tokens it re-adds as prompt.")
 
     def _repair_skipped_request_placeholder(self, req_id: str, output_token_ids: list[int]) -> None:
         """Splice the real id over the trailing -1 of a request re-added after a skipped step.

@@ -515,6 +515,20 @@ def test_update_states_async_readded_request_with_placeholder_to_compute_fails(m
         _readd_after_skip(model_runner, "req_0", [5, -1, -1], num_computed_tokens=3)
 
 
+def test_update_states_async_readded_request_with_placeholder_as_prompt_fails(model_runner, dist_init):
+    """The tokens to compute (positions 5 and 6) are real ids, but with more than the input left to compute every
+    known token goes into the penalty prompt tensor, which does not mask the older placeholders."""
+    with pytest.raises(RuntimeError, match="re-adds as prompt"):
+        _readd_after_skip(model_runner, "req_0", [-1, -1, 41, 42], num_computed_tokens=5)
+
+
+def test_update_states_async_readded_request_with_older_placeholders_passes(model_runner, dist_init):
+    """Only the input is left to compute: older placeholders stay outputs, which the penalty kernel masks."""
+    _readd_after_skip(model_runner, "req_0", [-1, -1, 41, 42], num_computed_tokens=6)
+    row = model_runner.input_batch.req_id_to_index["req_0"]
+    assert model_runner.input_batch.num_prompt_tokens[row] == 3
+
+
 def test_get_nans_in_logits(model_runner, dist_init):
     req_ids = ("req_0", "req_1")
 
