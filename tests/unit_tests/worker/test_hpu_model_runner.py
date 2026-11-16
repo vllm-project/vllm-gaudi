@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_planning import (estimate_max_model_len, get_global_k
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
 from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.sample.ops.penalties import apply_all_penalties
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, attn_pad_block_id
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, splice_placeholders
@@ -525,6 +526,32 @@ def test_update_states_async_readded_request_with_older_placeholders_passes(mode
     _readd_after_skip(model_runner, "req_0", [-1, -1, 41, 42], num_computed_tokens=6)
     row = model_runner.input_batch.req_id_to_index["req_0"]
     assert model_runner.input_batch.num_prompt_tokens[row] == 3
+
+
+def test_selective_sampling_metadata_passes_outputs_only_to_penalty_rows(model_runner, dist_init):
+    """A row without penalties gets an empty output list, so its long run of placeholders does not widen the penalty
+    tensor, and the penalized logits stay the same."""
+    req_ids = ("req_0", "req_1", "req_2", "req_3")
+    step = _new_requests_step({req_id: [1, 2, 3] for req_id in req_ids}, SamplingParams())
+    step.scheduled_new_reqs[0].sampling_params = SamplingParams(repetition_penalty=1.5, frequency_penalty=0.5)
+    step.scheduled_new_reqs[2].sampling_params = SamplingParams(presence_penalty=0.3)
+    model_runner._update_states(step)
+    batch = model_runner.input_batch
+    # req_3 has no penalty but bad words, which read its outputs too.
+    batch.bad_words_token_ids[batch.req_id_to_index["req_3"]] = [[9]]
+    for req_id, outputs in zip(req_ids, ([5, 6, -1, 7], [-1] * 50 + [8], [9, 10], [11])):
+        model_runner.requests[req_id].output_token_ids.extend(outputs)
+    selected = [(req_id, model_runner.requests[req_id].output_token_ids) for req_id in req_ids]
+
+    metadata = batch.make_selective_sampling_metadata(selected)
+    assert metadata.output_token_ids == [[5, 6, -1, 7], [], [9, 10], [11]]
+
+    logits = torch.randn(len(req_ids), model_runner.model_config.get_vocab_size(), device=DEVICE)
+    penalties = (metadata.prompt_token_ids, metadata.presence_penalties, metadata.frequency_penalties,
+                 metadata.repetition_penalties)
+    full = apply_all_penalties(logits.clone(), *penalties, [list(ids) for _, ids in selected])
+    filtered = apply_all_penalties(logits.clone(), *penalties, metadata.output_token_ids)
+    assert torch.equal(full.cpu(), filtered.cpu())
 
 
 def test_get_nans_in_logits(model_runner, dist_init):

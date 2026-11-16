@@ -784,8 +784,11 @@ class InputBatch:
                 prompt_token_ids = None
 
         output_token_ids: list[list[int]] = []
-
-        for req_id, output_tokens in req_id_output_token_ids:
+        # Only penalty and bad-words rows read their outputs. The penalty tensor is padded to the longest list, and
+        # under async scheduling a row that decoded with no such consumer in the batch keeps a run of -1s as long as
+        # its output. Every other row gets an empty list: its penalties are neutral, so the result is the same.
+        # A thinking-token budget would read its rows' outputs too, if HPU ever supports it.
+        for (req_id, output_tokens), req_idx in zip(req_id_output_token_ids, req_indices):
             assert req_id is not None
             # Currently we create a tensor for output_token_ids from scratch
             # at each step. However, for the penalties computation what we
@@ -794,7 +797,11 @@ class InputBatch:
             # from scratch at each step.
             # TODO - Replace this with incremental update to output token
             # statistics.
-            output_token_ids.append(output_tokens)
+            if (req_id in self.frequency_penalties_reqs or req_id in self.presence_penalties_reqs
+                    or req_id in self.repetition_penalties_reqs or req_idx in self.bad_words_token_ids):
+                output_token_ids.append(output_tokens)
+            else:
+                output_token_ids.append([])
 
         allowed_token_ids_mask: Optional[torch.Tensor] = None
         if not self.no_allowed_token_ids:
