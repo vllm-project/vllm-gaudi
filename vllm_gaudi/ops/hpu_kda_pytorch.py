@@ -859,7 +859,8 @@ def forward_attn_residual_functional(self, positions, hidden_states, block_resid
     Upstream relies on ``attn_res`` mutating ``prefix_sum`` and ``block_residual`` across layer boundaries; with
     one compiled graph per decoder layer those are graph inputs. Here the updated tensors are rebound and returned:
     ``(prefix_sum, block_residual, mlp_out)`` like upstream, but ``block_residual`` is a new tensor in block-write
-    layers (the bank copy costs ``tokens * bank * hidden`` elements per write layer).
+    layers (the bank copy costs ``tokens * bank * hidden`` elements per write layer). Only Kimi-K3 layers (tagged
+    ``_hpu_kimi_k3``) return the bank as ``(bank, bank_ms)``; a standalone Kimi-Linear returns the plain bank.
     """
     blocks, bank_ms = block_residual if isinstance(block_residual, tuple) else (block_residual, None)
     if bank_ms is None:
@@ -885,6 +886,8 @@ def forward_attn_residual_functional(self, positions, hidden_states, block_resid
                                                                  self.mlp_res_norm, mlp_valid_blocks, prefix_delta,
                                                                  self.post_attention_layernorm, -1)
     hidden_states = self.mlp(hidden_states)
+    if not getattr(self, "_hpu_kimi_k3", False):
+        return prefix_sum, blocks, hidden_states
     return prefix_sum, (blocks, bank_ms), hidden_states
 
 

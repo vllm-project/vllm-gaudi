@@ -313,7 +313,7 @@ def video(monkeypatch, utils):
                 monkeypatch.setitem(sys.modules, parent, pkg)
         monkeypatch.setitem(sys.modules, name, mod)
         if len(parts) > 1:
-            setattr(sys.modules[".".join(parts[:-1])], parts[-1], mod)
+            monkeypatch.setattr(sys.modules[".".join(parts[:-1])], parts[-1], mod, raising=False)
         return mod
 
     class BatchFeature(dict):
@@ -406,6 +406,39 @@ def test_install_touches_only_the_k3_model(video):
     assert video.K3Model.get_placeholder_str("image", 0) == "<|kimi_image_placeholder|>"
     assert video.renderer._K3_MEDIA_IO_DEFAULTS["video"] == {"num_frames": 256, "fps": 8.0}
     assert video.renderer._K3_MEDIA_IO_DEFAULTS["image"] == {"image_mode": None}
+
+
+def _frame_cap_config(video_options):
+    limit = {} if video_options is None else {"video": video_options}
+    return types.SimpleNamespace(multimodal_config=types.SimpleNamespace(limit_per_prompt=limit))
+
+
+def test_loader_frames_are_capped_at_the_limit_mm_per_prompt_video_frames(video):
+    video.mod.install_kimi_k3_video()
+    video.mod.limit_video_loader_frames(_frame_cap_config(types.SimpleNamespace(num_frames=32)))
+
+    assert video.renderer._K3_MEDIA_IO_DEFAULTS["video"]["num_frames"] == 32
+    assert video.renderer._K3_MEDIA_IO_DEFAULTS["video"]["fps"] == 8.0
+
+
+def test_loader_frames_fall_back_to_the_dummy_frame_count(video):
+    video.mod.install_kimi_k3_video()
+    video.mod.limit_video_loader_frames(_frame_cap_config(None))
+
+    assert video.renderer._K3_MEDIA_IO_DEFAULTS["video"]["num_frames"] == video.mod.DUMMY_VIDEO_NUM_FRAMES
+
+
+def test_loader_frames_are_not_raised_above_the_default(video):
+    video.mod.install_kimi_k3_video()
+    video.mod.limit_video_loader_frames(_frame_cap_config(types.SimpleNamespace(num_frames=1000)))
+
+    assert video.renderer._K3_MEDIA_IO_DEFAULTS["video"]["num_frames"] == 256
+
+
+def test_loader_frame_cap_is_a_noop_without_the_video_default(video):
+    video.mod.limit_video_loader_frames(_frame_cap_config(types.SimpleNamespace(num_frames=32)))
+
+    assert "video" not in video.renderer._K3_MEDIA_IO_DEFAULTS
 
 
 def test_other_models_keep_their_behaviour(video):

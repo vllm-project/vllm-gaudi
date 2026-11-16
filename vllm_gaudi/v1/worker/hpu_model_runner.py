@@ -4748,7 +4748,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                prefill_data.logits_requests):
                 metadata = None
                 # Kimi-K3: build the sampling metadata (host-to-device copies) before the forward, not after it
-                if self.is_kimi_k3 and logits_indices.numel() > 0 and not self.use_structured_output:
+                if (self.is_kimi_k3 and logits_indices.numel() > 0 and not self.use_structured_output
+                        and not self.input_batch.needs_output_token_ids):
                     self.input_batch.update_async_output_token_ids()
                     metadata = self._prepare_sampling(batch_changed, req_id, logits_indices.shape[0], logits_requests)
                 prefill_sampling_metadata.append(metadata)
@@ -4856,7 +4857,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             lora_mask, lora_logits_mask = self._configure_lora(decode_data.token_ids, self.requests,
                                                                pd_info.decode_req_ids, False)
             decode_sampling_metadata = None
-            if self.is_kimi_k3 and not self.use_structured_output and decode_data.spec_decode_metadata is None:
+            if (self.is_kimi_k3 and not self.use_structured_output and decode_data.spec_decode_metadata is None
+                    and not self.input_batch.needs_output_token_ids):
                 self.input_batch.update_async_output_token_ids()
                 decode_sampling_metadata = self._prepare_sampling(batch_changed, pd_info.decode_req_ids,
                                                                   decode_data.logits_indices.shape[0], None)

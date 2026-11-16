@@ -1214,6 +1214,8 @@ def _patch_kimi_k3_hybrid_config() -> None:
                 _report_kimi_config_patches(self)
                 if _is_kimi_k3_config(self):
                     mark_kimi_k3_seen()
+                    from vllm_gaudi.models.kimi_k3_video import limit_video_loader_frames
+                    limit_video_loader_frames(self)
                     _log_kimi_k3_settings()
                 # Ensure KimiMoE does not pad moe_intermediate_size from 3072 to 4096 under EP
                 # (saves device memory on every card)

@@ -1927,6 +1927,7 @@ class _ToyLayer(torch.nn.Module):
         self.block_write_idx = idx // block_size
         self.prev_valid_blocks = -(-idx // block_size)
         self.w_attn, self.w_mlp = p["w_attn"], p["w_mlp"]
+        self._hpu_kimi_k3 = True
 
     def _run_self_attn(self, positions, h):
         return _opaque_tanh_matmul(h, self.w_attn)  # a torch.compiler.disable'd call: forces a graph break
@@ -2094,6 +2095,22 @@ def test_install_patches_the_decoder_layer_the_model_calls_and_removes_input_mut
     expected = kda.forward_attn_residual_functional(layer, None, hidden_states, blocks, delta)
     for a, b in zip(layer(None, hidden_states, blocks, delta), expected):
         torch.testing.assert_close(a, b)
+
+
+def test_only_kimi_k3_layers_return_the_bank_with_its_mean_square():
+    _, _, params = _toy_params(2, 16, 140)
+    g = torch.Generator().manual_seed(1)
+    hidden_states, blocks = torch.randn(5, 16, generator=g), torch.randn(5, 3, 16, generator=g)
+    delta = torch.randn(5, 16, generator=g)
+    layer = _ToyLayer(1, 4, params[1])
+
+    k3_residual = kda.forward_attn_residual_functional(layer, None, hidden_states, blocks, delta)[1]
+    assert isinstance(k3_residual, tuple) and len(k3_residual) == 2
+
+    layer._hpu_kimi_k3 = False  # standalone Kimi-Linear: a plain bank like upstream
+    plain = kda.forward_attn_residual_functional(layer, None, hidden_states, blocks, delta)[1]
+    assert isinstance(plain, torch.Tensor)
+    torch.testing.assert_close(plain, k3_residual[0])
 
 
 @pytest.mark.parametrize("class_name", kda.KIMI_DECODER_LAYER_CLASSES)

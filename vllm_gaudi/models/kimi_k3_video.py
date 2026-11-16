@@ -22,7 +22,8 @@ compilation compiles every ``nn.ModuleList`` of the model, including ``vision_to
 the tower runs in an HPU graph. A video chunk (T=4, 36x62 patches for 864x480) is a new input shape, so it creates new
 graphs. The multimodal warmup precompiles them from the video shape of ``--limit-mm-per-prompt``, e.g.
 ``{"video": {"count": 1, "width": 864, "height": 480, "num_frames": 20}}``; a video shape that was not warmed up
-compiles on the first request.
+compiles on the first request. The loader frame count is capped at that ``num_frames`` (the dummy frame count when
+unset), so every request fits the profiled encoder cache budget.
 
 The K3 classes cannot be imported while the plugin loads, so everything that subclasses them is built by
 ``install_kimi_k3_video`` when the K3 patches are applied.
@@ -418,9 +419,23 @@ def install_kimi_k3_video() -> None:
     setattr(model_cls, _INSTALLED_FLAG, True)
 
 
+def limit_video_loader_frames(model_config) -> None:
+    """Caps the loader frame count at the video ``num_frames`` of ``--limit-mm-per-prompt`` (the profiled and warmed
+    shape), or at the dummy frame count when it is not set. Client ``media_io_kwargs`` can still lower it."""
+    import vllm.renderers.kimi_k3 as k3_renderer
+    video_defaults = k3_renderer._K3_MEDIA_IO_DEFAULTS.get("video")
+    if video_defaults is None:
+        return
+    mm_config = getattr(model_config, "multimodal_config", None)
+    options = mm_config.limit_per_prompt.get("video") if mm_config is not None else None
+    num_frames = getattr(options, "num_frames", None) or DUMMY_VIDEO_NUM_FRAMES
+    video_defaults["num_frames"] = min(video_defaults["num_frames"], num_frames)
+
+
 def log_video_settings() -> None:
     """Logs the video input settings when ``install_kimi_k3_video`` has installed the modality."""
     import vllm.models.kimi_k3.amd.model as amd_model
+    import vllm.renderers.kimi_k3 as k3_renderer
     if getattr(amd_model.KimiK3ForConditionalGeneration, _INSTALLED_FLAG, False):
         logger.info("Kimi-K3 video input enabled (loader fps=%s, max frames=%s, %s=%d)", K3_VIDEO_LOADER_FPS,
-                    K3_VIDEO_LOADER_MAX_FRAMES, ENV_VIT_DP, int(_vit_dp_requested()))
+                    k3_renderer._K3_MEDIA_IO_DEFAULTS["video"]["num_frames"], ENV_VIT_DP, int(_vit_dp_requested()))
