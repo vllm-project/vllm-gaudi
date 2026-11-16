@@ -11,8 +11,9 @@ on:
   # A green manual run counts as a PASS and therefore clears an active back-off,
   # restoring the 8h cadence at the next tick; a red manual run is ignored.
   schedule:
-    # Runs at minute 0, every 8th hour (00:00, 08:00, 16:00 UTC)
-    - cron: '0 */8 * * *'
+    # Every 8th hour at minute 17 (00:17, 08:17, 16:17 UTC). GitHub delays
+    # scheduled runs most at the start of the hour, so avoid minute 0.
+    - cron: '17 */8 * * *'
 
   # Allow manual triggering from the GitHub Actions UI
   workflow_dispatch: {}
