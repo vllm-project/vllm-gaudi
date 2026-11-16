@@ -2239,7 +2239,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         row = req_id_to_row.get(req_id)
         if row is not None:
             copy_ready_event.synchronize()
-            splice_placeholders(output_token_ids, sampled_token_ids_cpu[row].tolist(), keep_length=True)
+            splice_placeholders(output_token_ids, sampled_token_ids_cpu[row].tolist())
         if output_token_ids[-1] == -1:
             raise RuntimeError(f"Request {req_id} has no sampled id for its -1 placeholder.")
         self.num_skipped_placeholder_repairs += 1

@@ -432,19 +432,17 @@ def test_update_states_async_skipped_request_keeps_older_placeholders(model_runn
     assert model_runner.input_batch.token_ids_cpu[row, 5] == 42
 
 
-@pytest.mark.parametrize("output_ids, new_ids, keep_length, expected", [
-    ([5, -1], [42], False, [5, 42]),
-    ([5, -1], [42], True, [5, 42]),
-    ([-1, -1, -1], [42], False, [42]),
-    ([-1, -1, -1], [42], True, [-1, -1, 42]),
-    ([5, -1, -1], [42, 43], True, [5, 42, 43]),
-    ([5, -1], [42, -1], True, [5, 42]),
-    ([5, -1], [-1], True, [5, -1]),
-    ([5, -1, -1], [-1], False, [5]),
-    ([5, 6], [42], False, [5, 6]),
+@pytest.mark.parametrize("output_ids, new_ids, expected", [
+    ([5, -1], [42], [5, 42]),
+    ([-1, -1, -1], [42], [-1, -1, 42]),
+    ([5, -1, -1], [42, 43], [5, 42, 43]),
+    ([5, -1], [42, -1], [5, 42]),
+    ([5, -1], [-1], [5, -1]),
+    ([5, -1, -1], [-1], [5, -1, -1]),
+    ([5, 6], [42], [5, 6]),
 ])
-def test_splice_placeholders(output_ids, new_ids, keep_length, expected):
-    splice_placeholders(output_ids, new_ids, keep_length=keep_length)
+def test_splice_placeholders(output_ids, new_ids, expected):
+    splice_placeholders(output_ids, new_ids)
     assert output_ids == expected
 
 
