@@ -33,7 +33,7 @@ def _scenario_blocks(runner, batch_size, num_blocks, longest=None):
     # Context tokens plus the token being decoded.
     runner._add_dummy_request = lambda requests, scheduled, num_computed_tokens, **_: requests.append(
         cdiv(num_computed_tokens + 1, runner.attn_block_size))
-    runner._execute_dummy_scenario = lambda requests, scheduled: built.extend(requests)
+    runner._execute_dummy_scenario = lambda requests, scheduled, spec_decode_tokens=None: built.extend(requests)
     runner._prepare_dummy_scenario(None, (batch_size, 1, num_blocks), decode_longest_blocks=longest)
     return built
 
