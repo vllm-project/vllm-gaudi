@@ -227,6 +227,8 @@ def apply_logits_processors(
     """
     num_seqs = len(metadata.num_draft_tokens)
     rows_per_request = logits.shape[0] // num_seqs
+    assert logits.shape[0] == rows_per_request * num_seqs, \
+        "Speculative decoding needs max_num_draft_tokens rows per request."
     rows_per_seq = [rows_per_request] * num_seqs
     has_penalties = not sampling_metadata.no_penalties
     bad_words_token_ids = sampling_metadata.bad_words_token_ids
