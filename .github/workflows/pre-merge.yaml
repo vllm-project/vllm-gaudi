@@ -26,6 +26,10 @@ on:
       vllm_ref_override:    { description: 'Override upstream vllm checkout ref (branch/tag/SHA; maintainers only)', required: false, type: string, default: '' }
       # Sent only by a trigger that did the draft and behind-base checks. Empty:
       # the build job does those checks and the NIXL Dockerfile is built.
+      # TODO: remove the "Check draft and behind-base state" steps, the empty
+      # case and the is_merge_group input 30 days after this lands on main.
+      # Only older trigger runs need them, and a trigger run can wait for
+      # approval or be re-run for at most 30 days.
       nixl_changed:         { description: 'NIXL Dockerfile changed (true/false); build-tests it unless false', required: false, type: string, default: '' }
 
 # Least-privilege default; post-comment opts into pull-requests: write at the
@@ -46,7 +50,8 @@ env:
 jobs:
   pre-commit:
     # Runs in parallel with the Gaudi jobs. pre_merge_hpu_test requires it, and
-    # pre-merge-trigger.yaml cancels the run when it fails.
+    # pre-merge-trigger.yaml cancels the run when it fails. The trigger finds
+    # this job by its name: do not rename it or give it a name:.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -522,6 +527,7 @@ jobs:
 
   # Final gate: pre-merge-trigger.yaml reports this job's result. It passes only
   # when every listed job has an allowed result, never on "nothing failed".
+  # The trigger finds this job by its name: do not rename it or give it a name:.
   pre_merge_hpu_test:
     if: ${{ !cancelled() }}
     needs: [pre-commit, pre_merge_hpu_test_build, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e, calibration_tests, calibration_arg_parsing_tests, build_nixl_dockerfile]
