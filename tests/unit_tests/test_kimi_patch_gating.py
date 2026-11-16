@@ -284,6 +284,8 @@ def config_patches(monkeypatch):
         module(name)
     module("vllm.platforms", current_platform=types.SimpleNamespace(device_type="hpu"))
     module("vllm_gaudi.attention.oot_mla", _DummyPrefillBackend=dummy_backend)
+    module("vllm_gaudi.models")
+    video = module("vllm_gaudi.models.kimi_k3_video", limit_video_loader_frames=lambda cfg: None)
     monkeypatch.setitem(sys.modules, "vllm.v1.attention.backends.mla.prefill.selector", selector)
     monkeypatch.setitem(sys.modules, "vllm.model_executor.layers.attention.mla_attention", mla_attention)
 
@@ -294,6 +296,7 @@ def config_patches(monkeypatch):
     mod._patch_kimi_k3_hybrid_config()
     mod._patch_mla_prefill_selector()
     mod.test_model_config = ModelConfig
+    mod.test_video = video
     mod.test_selector = selector
     mod.test_dummy = dummy_backend
     yield mod
@@ -318,6 +321,19 @@ def test_k3_config_disables_moe_padding(config_patches, architectures):
     cfg = config_patches.test_model_config(architectures)
 
     assert cfg.hf_config.min_moe_intermediate_per_partition == 1
+
+
+def test_k3_config_build_survives_a_failing_video_frame_cap(config_patches):
+
+    def failing_cap(cfg):
+        raise RuntimeError("no multimodal config")
+
+    config_patches.test_video.limit_video_loader_frames = failing_cap
+
+    cfg = config_patches.test_model_config(["KimiK3ForConditionalGeneration"])
+
+    assert cfg.hf_config.min_moe_intermediate_per_partition == 1
+    assert "RuntimeError" in config_patches._KIMI_PATCHES_FAILED["video_frame_cap"]
 
 
 @pytest.mark.parametrize("architectures", [["Kimi_K25ForConditionalGeneration"], ["DeepseekV3ForCausalLM"]])
@@ -839,9 +855,9 @@ def _wrapper_ctor_args(fused_proj, **modules):
 
 @pytest.fixture
 def ctor(oot_mla, monkeypatch):
-    """Builds an HPU MLA wrapper with the vllm config / HPUMLAAttention stubbed; records info_once calls."""
+    """Builds an HPU MLA wrapper with the vllm config / HPUMLAAttention stubbed; records debug_once calls."""
     logged = []
-    monkeypatch.setattr(oot_mla, "logger", types.SimpleNamespace(info_once=lambda *a, **k: logged.append(a)))
+    monkeypatch.setattr(oot_mla, "logger", types.SimpleNamespace(debug_once=lambda *a, **k: logged.append(a)))
     monkeypatch.setattr(
         oot_mla, "get_current_vllm_config",
         lambda: types.SimpleNamespace(compilation_config=types.SimpleNamespace(static_forward_context={})))
