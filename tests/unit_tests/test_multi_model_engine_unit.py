@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import cloudpickle
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
 import pytest
 import torch
 import yaml
 from vllm.v1.engine import CheckpointState
+from vllm.v1.engine.async_llm import AsyncLLM
 
 from vllm_gaudi.v1.engine.multi_model_async_llm import MultiModelAsyncLLM
 from vllm_gaudi.entrypoints.openai import multi_model_api_server as api_server
@@ -299,6 +300,25 @@ async def test_multi_model_engine_client_delegates_checkpoint_methods():
     engine.checkpoint_prepare.assert_awaited_once_with("wait")
     engine.checkpoint_restore.assert_awaited_once_with()
     engine.checkpoint_state.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_multi_model_engine_client_forwards_sleep_and_pause_arguments():
+    """The adapters forward their arguments to AsyncLLM and return wake_up's result. The autospec rejects any keyword
+    AsyncLLM does not take, as a real engine would."""
+    engine = create_autospec(AsyncLLM, instance=True)
+    engine.wake_up.return_value = True
+    client = api_server.MultiModelEngineClient(SimpleNamespace(engine=engine))
+
+    await client.sleep(level=2, mode="wait", reset_connector=False)
+    await client.release_kv_cache_memory(reset_connector=False)
+    assert await client.wake_up(tags=["weights"]) is True
+    await client.pause_generation(mode="keep", clear_cache=False)
+
+    engine.sleep.assert_awaited_once_with(level=2, mode="wait", reset_connector=False)
+    engine.release_kv_cache_memory.assert_awaited_once_with(reset_connector=False)
+    engine.wake_up.assert_awaited_once_with(tags=["weights"])
+    engine.pause_generation.assert_awaited_once_with(mode="keep", clear_cache=False)
 
 
 def test_deserialize_reconfigure_config_requires_insecure_serialization(monkeypatch):
