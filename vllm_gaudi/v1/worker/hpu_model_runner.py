@@ -1431,8 +1431,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self._preempted_generators: dict[str, torch.Generator] = {}
         # Async scheduling: the last step's sampled ids on CPU, its copy-ready event and the request -> row map.
         self._last_async_copy: Optional[tuple[torch.Tensor, torch.hpu.Event, dict[str, int]]] = None
-        # Async scheduling: that tuple for each running request skipped while its last id was a placeholder.
-        self._pending_placeholder_repair: dict[str, tuple[torch.Tensor, torch.hpu.Event, dict[str, int]]] = {}
+        # Async scheduling: for each running request skipped while its last id was a placeholder, that step's CPU
+        # copy, its event and the request's row in it (None if it had none). Only the row is kept, not the map.
+        self._pending_placeholder_repair: dict[str, tuple[torch.Tensor, torch.hpu.Event, Optional[int]]] = {}
         # Number of placeholders repaired by _repair_skipped_request_placeholder (read by tests).
         self.num_skipped_placeholder_repairs = 0
         self.use_aux_hidden_state_outputs = False
@@ -2036,7 +2037,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             output_token_ids = self.requests[req_id].output_token_ids
             if (self.use_async_scheduling and output_token_ids and output_token_ids[-1] == -1
                     and self._last_async_copy is not None):
-                self._pending_placeholder_repair[req_id] = self._last_async_copy
+                sampled_token_ids_cpu, copy_ready_event, req_id_to_row = self._last_async_copy
+                self._pending_placeholder_repair[req_id] = (sampled_token_ids_cpu, copy_ready_event,
+                                                            req_id_to_row.get(req_id))
 
         # Free GDN compact base-slots for finished requests ONLY.
         # IMPORTANT: Do NOT free slots for unscheduled (temporarily paused
@@ -2235,8 +2238,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if pending is None:
             raise RuntimeError(f"Request {req_id} resumes with a -1 placeholder as its input token and no sampled "
                                "id to repair it from.")
-        sampled_token_ids_cpu, copy_ready_event, req_id_to_row = pending
-        row = req_id_to_row.get(req_id)
+        sampled_token_ids_cpu, copy_ready_event, row = pending
         if row is not None:
             copy_ready_event.synchronize()
             splice_placeholders(output_token_ids, sampled_token_ids_cpu[row].tolist())

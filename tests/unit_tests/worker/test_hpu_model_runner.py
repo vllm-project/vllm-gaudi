@@ -433,6 +433,29 @@ def test_update_states_async_skipped_request_keeps_older_placeholders(model_runn
     assert model_runner.input_batch.token_ids_cpu[row, 5] == 42
 
 
+def test_update_states_async_skipped_request_keeps_only_its_row(model_runner, dist_init):
+    """A skipped request keeps the step's CPU copy and its own row in it, not the step's whole request -> row map."""
+    req_id = "req_0"
+    model_runner.use_async_scheduling = True
+    model_runner._last_async_copy = (torch.tensor([[41], [42]], dtype=torch.int32), _ReadyEvent(), {
+        "req_1": 0,
+        req_id: 1
+    })
+    model_runner._update_states(_new_request_step(req_id, [1, 2, 3], SamplingParams()))
+    model_runner.requests[req_id].output_token_ids.append(-1)
+    model_runner._update_states(_empty_step())
+    assert model_runner._pending_placeholder_repair[req_id][2] == 1
+
+    cached = CachedRequestData(req_ids=[req_id],
+                               new_token_ids=[[]],
+                               new_block_ids=[None],
+                               num_computed_tokens=[3],
+                               num_output_tokens=[1])
+    model_runner._update_states(
+        _empty_step(scheduled_cached_reqs=cached, num_scheduled_tokens={req_id: 1}, total_num_scheduled_tokens=1))
+    assert model_runner.requests[req_id].output_token_ids == [42]
+
+
 @pytest.mark.parametrize("output_ids, new_ids, expected", [
     ([5, -1], [42], [5, 42]),
     ([-1, -1, -1], [42], [-1, -1, 42]),
