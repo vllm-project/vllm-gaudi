@@ -492,10 +492,12 @@ def test_validate_request_rejects_features_the_runner_ignores(field, value):
     assert excinfo.value.parameter == field
 
 
-def test_validate_request_accepts_default_sampling_params():
+def test_validate_request_accepts_prompt_logprobs_start_zero_and_thinking_budget():
     from vllm.sampling_params import SamplingParams
 
     params = SamplingParams(max_tokens=4, prompt_logprobs=1)
+    # Scoring from the first row is the default, so it stays accepted.
+    params.prompt_logprob_start = 0
     # Accepted (and not enforced) on HPU before the Model Runner V1 removal too.
     params.thinking_token_budget = 8
     HpuPlatform.validate_request(None, params)

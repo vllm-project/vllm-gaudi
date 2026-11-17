@@ -429,9 +429,11 @@ class HpuPlatform(Platform):
             "prompt_logprob_start": getattr(params, "prompt_logprob_start", None) not in (None, 0),
             "logprob_token_ids": bool(getattr(params, "logprob_token_ids", None)),
         }
+        # Callers may not have set the field themselves.
+        hints = {"logprob_token_ids": " (beam search allowed_token_ids and generative scoring label_token_ids set it)"}
         for name, is_set in unsupported.items():
             if is_set:
-                raise VLLMValidationError(f"{name} is not supported on HPU.", parameter=name)
+                raise VLLMValidationError(f"{name} is not supported on HPU{hints.get(name, '')}.", parameter=name)
 
     @classmethod
     def _maybe_disable_chunked_mm_input(cls, vllm_config: "VllmConfig") -> None:
