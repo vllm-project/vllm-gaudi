@@ -122,3 +122,53 @@ def test_async_load_slots_follow_the_device_accepted_counts():
 
     assert load.cpu().tolist() == sync_load.tolist()
     assert conv_offsets.cpu().tolist() == sync_conv_offsets.tolist()
+
+
+def _dummy_step(max_num_tokens: int, batch_size: int) -> tuple[dict, dict]:
+    """The scheduled tokens and drafts of the warmup's dummy decode step with one draft per request."""
+    runner = types.SimpleNamespace(max_num_tokens=max_num_tokens,
+                                   use_contiguous_pa=False,
+                                   attn_block_size=128,
+                                   max_model_len=32768,
+                                   speculative_config=types.SimpleNamespace(num_speculative_tokens=NUM_SPEC,
+                                                                            use_eagle=lambda: True))
+    for name in ("_generate_seq_lengths", "_prepare_dummy_scenario"):
+        setattr(runner, name, types.MethodType(getattr(HPUModelRunner, name), runner))
+
+    def add(requests, num_scheduled_tokens, num_computed_tokens, total_tokens, scheduled_tokens, is_prompt, block_id):
+        requests.append(types.SimpleNamespace(req_id=f"r{len(requests)}"))
+        num_scheduled_tokens[requests[-1].req_id] = scheduled_tokens
+
+    step: dict = {}
+    runner._add_dummy_request = add
+    runner._execute_dummy_scenario = lambda requests, scheduled, spec_decode_tokens=None: step.update(
+        scheduled=scheduled, drafts=spec_decode_tokens)
+    runner._prepare_dummy_scenario(None, (batch_size, 1, 8 * batch_size), decode_num_tokens=1 + NUM_SPEC)
+    return step["scheduled"], step["drafts"]
+
+
+def test_spec_decode_warmup_step_fits_max_num_batched_tokens():
+    """A step schedules at most max_num_batched_tokens: with 256 of them, 200 requests leave room for 56 drafts,
+    as the scheduler would give; the padded step keeps 1 + K tokens per request, the shape the warmup compiles."""
+    scheduled, drafts = _dummy_step(256, 200)
+    assert len(scheduled) == 200 and sum(scheduled.values()) == 256
+    assert len(drafts) == 56 and all(len(d) == NUM_SPEC for d in drafts.values())
+    # A budget that fits every draft keeps the step as it was.
+    scheduled, drafts = _dummy_step(4096, 200)
+    assert sum(scheduled.values()) == 200 * (1 + NUM_SPEC) and len(drafts) == 200
+
+
+def test_spec_decode_warmup_skips_shapes_without_room_for_a_draft():
+    """256 requests of 1 + K tokens cannot occur with 256 tokens a step: each request takes at least one."""
+    calls = []
+    runner = types.SimpleNamespace(max_num_tokens=256,
+                                   use_contiguous_pa=False,
+                                   speculative_config=types.SimpleNamespace(num_speculative_tokens=NUM_SPEC),
+                                   bucketing_manager=types.SimpleNamespace(seed_decode_buckets=[(128, 1, 0), (256, 1,
+                                                                                                              0)]))
+    runner._prepare_dummy_scenario = lambda prompt_cfg, decode_cfg, decode_num_tokens=1: calls.append(
+        (decode_cfg[0], decode_num_tokens))
+    HPUModelRunner._warmup_mamba_spec_decode_bucket(runner, (512, 1, 4096))
+    assert calls == []
+    HPUModelRunner._warmup_mamba_spec_decode_bucket(runner, (256, 1, 4096))
+    assert calls == [(256, 1), (128, 1 + NUM_SPEC)]

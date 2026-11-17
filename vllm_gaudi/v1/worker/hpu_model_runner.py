@@ -6996,16 +6996,25 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                     decode_block_size)
                 block_id = 0
 
-            for dsl in decode_seq_lengths:
+            # A step schedules at most max_num_tokens tokens. If drafts for every
+            # request would exceed that, the scheduler gives them to fewer
+            # requests: so does the dummy step, whose padded shape still has
+            # decode_num_tokens tokens per request.
+            num_with_drafts = len(decode_seq_lengths)
+            if decode_num_tokens > 1:
+                num_with_drafts = min(num_with_drafts,
+                                      (self.max_num_tokens - len(decode_seq_lengths)) // (decode_num_tokens - 1))
+            for k, dsl in enumerate(decode_seq_lengths):
+                num_request_tokens = decode_num_tokens if k < num_with_drafts else 1
                 self._add_dummy_request(requests,
                                         scheduled_tokens,
                                         num_computed_tokens=dsl,
                                         total_tokens=dsl,
-                                        scheduled_tokens=decode_num_tokens,
+                                        scheduled_tokens=num_request_tokens,
                                         is_prompt=False,
                                         block_id=block_id)
-                if decode_num_tokens > 1:
-                    spec_decode_tokens[requests[-1].req_id] = [0] * (decode_num_tokens - 1)
+                if num_request_tokens > 1:
+                    spec_decode_tokens[requests[-1].req_id] = [0] * (num_request_tokens - 1)
         self._execute_dummy_scenario(requests, scheduled_tokens, spec_decode_tokens)
 
     def _warmup_mamba_spec_decode_bucket(self, decode_cfg):
@@ -7017,7 +7026,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         tokens each, and the input batch only holds max_num_seqs requests. Warm
         the shapes the runtime uses instead: the batch size as one-token
         requests if it is a seed bucket (steps without drafts), and bs requests
-        of T tokens if it is a seed bucket times T.
+        of T tokens if it is a seed bucket times T. The latter needs room for a
+        draft within max_num_tokens, else a step cannot have that shape.
         """
         batch_size, _, num_blocks = decode_cfg
         num_tokens = 1 + self.speculative_config.num_speculative_tokens
@@ -7026,6 +7036,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self._prepare_dummy_scenario(None, decode_cfg)
         spec_batch_size = batch_size // num_tokens
         if (batch_size % num_tokens == 0 and spec_batch_size in seed_batch_sizes
+                and spec_batch_size < self.max_num_tokens
                 and (self.use_contiguous_pa or num_blocks // num_tokens >= spec_batch_size)):
             self._prepare_dummy_scenario(None, (spec_batch_size, 1, num_blocks), decode_num_tokens=num_tokens)
 
