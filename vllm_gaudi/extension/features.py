@@ -121,6 +121,7 @@ def get_features():
               env_var_type=boolean),
         Value('mamba_split_prefill_graph',
               All(ModelType('granitemoehybrid'), Disabled('fullgraph_compilation'), Not(Lazy()))),
+        Value('prefer_128_kernel_blocks', ModelType('nemotron_h')),
         Value('scale_adjustment', True, env_var='VLLM_SCALE_ADJUSTMENT', env_var_type=boolean),
         Value(
             'flatten_input',

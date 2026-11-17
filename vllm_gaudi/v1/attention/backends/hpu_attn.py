@@ -13,6 +13,7 @@ import torch
 from vllm.v1.attention.backend import AttentionMetadata, AttentionImpl
 from vllm_gaudi.attention.backends.hpu_attn import (HPUAttentionBackend, HPUAttentionImpl, HPUAttentionMetadata)
 from vllm_gaudi.extension.logger import logger as init_logger
+from vllm_gaudi.extension.runtime import get_config
 from vllm.v1.attention.backends.registry import (register_backend, AttentionBackendEnum)
 
 logger = init_logger()
@@ -39,6 +40,14 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
         # kernel block size; 528 is required for Granite 4.0-H
         # (granitemoehybrid) without prefix caching (16-token FA alignment),
         # 768 with prefix caching (chunk-aligned).
+        # vLLM picks the largest listed size that divides the KV-manager block,
+        # e.g. 528 for the 4224-token page of Nemotron-H on 4 cards. With such
+        # large kernel blocks, exact copies from the context (long numbers,
+        # UUIDs) go wrong more often, so models with prefer_128_kernel_blocks
+        # keep 128 whenever it divides the block.
+        if (kv_cache_spec is not None and kv_cache_spec.block_size % 128 == 0
+                and get_config().prefer_128_kernel_blocks):
+            return [128]
         return [16, 128, 528, 768]
 
     @classmethod

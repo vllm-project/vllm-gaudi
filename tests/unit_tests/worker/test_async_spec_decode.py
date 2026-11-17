@@ -19,6 +19,7 @@ from vllm.platforms import current_platform
 from vllm_gaudi.extension.ops import flat_pa
 from vllm_gaudi.extension.runtime import clear_config, get_config
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
+from vllm_gaudi.v1.worker.hpu_input_batch import splice_placeholders
 from vllm_gaudi.v1.worker.hpu_model_runner import (HPUAttentionMetadataProcessor, HPUModelRunner, trim_attn_metadata)
 
 DEVICE = current_platform.device_type
@@ -255,6 +256,38 @@ def test_input_ids_keep_the_drafts_the_engine_took():
     token_ids = torch.tensor([[-1], [-1], [-1], [-1]], dtype=torch.int32, device=DEVICE)
     HPUModelRunner._scatter_async_spec_input_ids(runner, token_ids, ["a", "b"], 2, [2, 2])
     assert token_ids.view(-1).cpu().tolist() == [6, 60, 7, 70]
+
+
+def test_output_ids_drop_the_slots_of_rejected_drafts():
+    """The scheduler counted the step's draft as accepted, so the list ends with two placeholders for that step,
+    after an older one the runner never filled in (a token already in the KV cache, which stays)."""
+    output_token_ids = [5, -1, -1, -1]
+    splice_placeholders(output_token_ids, [7, -1], num_slots=2)  # the draft was rejected
+    assert output_token_ids == [5, -1, 7]
+    output_token_ids = [5, -1, -1, -1]
+    splice_placeholders(output_token_ids, [7, 8], num_slots=2)  # the draft was accepted
+    assert output_token_ids == [5, -1, 7, 8]
+    # One placeholder per step (no drafts): the newest ones only, as before.
+    output_token_ids = [5, -1, -1]
+    splice_placeholders(output_token_ids, [7])
+    assert output_token_ids == [5, -1, 7]
+
+
+def test_skipped_request_resumes_with_its_last_steps_tokens():
+    """A request that sampled 7, 8 in its last step (its draft accepted) was left out of the next one. Its list
+    mirrors the scheduler's count from before that last step: two slots for the step before it, whose draft was
+    rejected. The scheduler now counts 5 real tokens, so the list is rebuilt to 5 with 7, 8 at its end."""
+    copy_ready = types.SimpleNamespace(synchronize=lambda: None)
+    runner = types.SimpleNamespace(
+        _pending_placeholder_repair={"r": (torch.tensor([[9, -1], [7, 8]], dtype=torch.int32), copy_ready, 1)},
+        num_skipped_placeholder_repairs=0)
+    output_token_ids = [1, 2, -1, -1]
+    HPUModelRunner._repair_skipped_spec_request(runner, "r", output_token_ids, 5)
+    assert output_token_ids == [1, 2, -1, 7, 8]
+    assert runner.num_skipped_placeholder_repairs == 1 and "r" not in runner._pending_placeholder_repair
+    # The re-added row: 3 prompt tokens, all but the last output token computed; the input token is real.
+    state = types.SimpleNamespace(num_prompt_tokens=3, output_token_ids=output_token_ids)
+    HPUModelRunner._check_readded_request_inputs("r", state, 3 + 5 - 1)
 
 
 def test_spec_rows_pad_single_tokens():
