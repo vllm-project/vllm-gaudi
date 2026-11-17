@@ -12,6 +12,10 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# The first multi-threaded CPU cos in a process returns wrong values in some
+# threads' chunks; a tiny call first makes the CPU-built RoPE table reproducible.
+torch.cos(torch.zeros(1, dtype=torch.float32, device="cpu"))
+
 _orig_rotary_base_init = RotaryEmbeddingBase.__init__
 
 

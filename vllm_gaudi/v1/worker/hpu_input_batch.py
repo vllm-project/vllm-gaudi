@@ -13,17 +13,39 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils.collection_utils import swap_dict_values
+from vllm_gaudi.v1._vendored._compat import swap_dict_values
 from vllm.utils.math_utils import cdiv
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.block_table import MultiGroupBlockTable
-from vllm.v1.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessors)
+from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.worker.block_table import MultiGroupBlockTable
+from vllm_gaudi.v1._vendored.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessors)
 
 from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
 
 _SAMPLING_EPS = 1e-5
+
+
+def splice_placeholders(output_token_ids: list[int], new_ids: list[int]) -> None:
+    """Replace the newest -1 placeholders of ``output_token_ids`` in place with one step's sampled ids.
+
+    Under async scheduling every step appends a -1 per request, and the real ids are only spliced in while a
+    penalty or bad-words consumer needs them, so a request can also carry older placeholders, for tokens already in
+    the KV cache. Those stay, so the list length keeps matching the tokens in the KV cache.
+
+    Args:
+        output_token_ids: a request's output ids, ending in -1 placeholders.
+        new_ids: that request's row of the step's sampled ids; -1 marks unused (rejected) slots.
+    """
+    if not new_ids:
+        return
+    num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
+    num_placeholders = 0
+    while (num_placeholders < len(output_token_ids) and output_token_ids[-1 - num_placeholders] == -1):
+        num_placeholders += 1
+    num_to_replace = min(num_sampled_ids, num_placeholders)
+    if num_to_replace:
+        output_token_ids[len(output_token_ids) - num_to_replace:] = new_ids[:num_to_replace]
 
 
 class HPUMultiGroupBlockTable(MultiGroupBlockTable):
@@ -258,6 +280,11 @@ class InputBatch:
         # updates. Should reset each step.
         self.batch_update_builder = BatchUpdateBuilder()
 
+        # Set by swap_states, which moves only the CPU copies of the per-row
+        # sampling params. The device copies are re-copied before the next
+        # selective sampling metadata is built (see _resync_moved_rows).
+        self._sampling_rows_moved = False
+
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
         self.logitsprocs = logitsprocs or LogitsProcessors()
@@ -380,7 +407,9 @@ class InputBatch:
 
             if sampling_params.logprobs is not None:
                 self.num_logprobs[req_id] = sampling_params.logprobs
-            if sampling_params.prompt_logprobs is not None:
+            # A request that already has outputs (resumed after preemption, or re-added after a skipped step)
+            # sent its prompt logprobs before; scoring the prompt again would send them twice.
+            if sampling_params.prompt_logprobs is not None and not request.output_token_ids:
                 self.num_prompt_logprobs[req_id] = (sampling_params.prompt_logprobs)
 
             if sampling_params.allowed_token_ids:
@@ -505,6 +534,8 @@ class InputBatch:
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
         self.min_p_cpu[i1], self.min_p_cpu[i2] =\
             self.min_p_cpu[i2], self.min_p_cpu[i1]
+        if i1 != i2:
+            self._sampling_rows_moved = True
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -612,6 +643,7 @@ class InputBatch:
         # TODO: follow upstream PR#16728 for enabling batch_update
         self._invalidate_prompt_token_ids_cache()
         self.sampling_metadata = self._make_sampling_metadata()
+        self._sampling_rows_moved = False
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
@@ -684,11 +716,33 @@ class InputBatch:
         if hasattr(self, '_prompt_token_ids_cache'):
             self._prompt_token_ids_cache = None
 
+    def _resync_moved_rows(self) -> None:
+        """Copy every row's sampling params to the device after swap_states.
+
+        swap_states moves only the CPU copies. The device copies are otherwise
+        refreshed only when skip_copy is False (a request joined or left), so a
+        row that changed owner on any other step would be sampled with the
+        previous owner's temperature, top_p, top_k and penalties. Whole tensors
+        are copied so the shapes stay fixed.
+        """
+        async_h2d_copy(self.temperature_cpu_tensor, self.temperature)
+        async_h2d_copy(self.top_p_cpu_tensor, self.top_p)
+        async_h2d_copy(self.top_k_cpu_tensor, self.top_k)
+        if not self.no_penalties:
+            async_h2d_copy(self.frequency_penalties_cpu_tensor, self.frequency_penalties)
+            async_h2d_copy(self.presence_penalties_cpu_tensor, self.presence_penalties)
+            async_h2d_copy(self.repetition_penalties_cpu_tensor, self.repetition_penalties)
+        # The cached prompt token ids are in row order too.
+        self._invalidate_prompt_token_ids_cache()
+        self._sampling_rows_moved = False
+
     def make_selective_sampling_metadata(
         self,
         req_id_output_token_ids: list[tuple[str, list[int]]],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
+        if self._sampling_rows_moved:
+            self._resync_moved_rows()
         req_indices: list[int] = [self.req_id_to_index[req_id] for req_id, _ in req_id_output_token_ids]
         # One asynchronous copy of the indices for every per-request tensor.
         # Indexing a device tensor with the Python list instead makes each one
@@ -730,8 +784,11 @@ class InputBatch:
                 prompt_token_ids = None
 
         output_token_ids: list[list[int]] = []
-
-        for req_id, output_tokens in req_id_output_token_ids:
+        # Only penalty and bad-words rows read their outputs. The penalty tensor is padded to the longest list, and
+        # under async scheduling a row that decoded with no such consumer in the batch keeps a run of -1s as long as
+        # its output. Every other row gets an empty list: its penalties are neutral, so the result is the same.
+        # A thinking-token budget would read its rows' outputs too, if HPU ever supports it.
+        for (req_id, output_tokens), req_idx in zip(req_id_output_token_ids, req_indices):
             assert req_id is not None
             # Currently we create a tensor for output_token_ids from scratch
             # at each step. However, for the penalties computation what we
@@ -740,7 +797,11 @@ class InputBatch:
             # from scratch at each step.
             # TODO - Replace this with incremental update to output token
             # statistics.
-            output_token_ids.append(output_tokens)
+            if (req_id in self.frequency_penalties_reqs or req_id in self.presence_penalties_reqs
+                    or req_id in self.repetition_penalties_reqs or req_idx in self.bad_words_token_ids):
+                output_token_ids.append(output_tokens)
+            else:
+                output_token_ids.append([])
 
         allowed_token_ids_mask: Optional[torch.Tensor] = None
         if not self.no_allowed_token_ids:
@@ -751,6 +812,15 @@ class InputBatch:
                              req_indices,
                              indices_device=idx)
             allowed_token_ids_mask = self.allowed_token_ids_mask.index_select(0, idx)
+        # Keyed by row in this selection. A padded selection repeats its first
+        # request, so only the first occurrence of each request gets an entry.
+        bad_words_token_ids: dict[int, list[list[int]]] = {}
+        if self.bad_words_token_ids:
+            seen: set[int] = set()
+            for i, req_idx in enumerate(req_indices):
+                if req_idx not in seen and req_idx in self.bad_words_token_ids:
+                    bad_words_token_ids[i] = self.bad_words_token_ids[req_idx]
+                seen.add(req_idx)
         return SamplingMetadata(
             temperature=self.temperature.index_select(0, idx),
             all_greedy=self.all_greedy,
@@ -769,7 +839,7 @@ class InputBatch:
             output_token_ids=cast(list[list[int]], output_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
-            bad_words_token_ids=self.bad_words_token_ids,
+            bad_words_token_ids=bad_words_token_ids,
             logitsprocs=self.logitsprocs,
         )
 
@@ -810,6 +880,11 @@ class InputBatch:
         copy-ready event and replace the placeholders. No-op when no consumer
         reads output_token_ids (sampled_token_ids_cpu left None by
         set_async_sampled_token_ids) or there is no prior step to repair.
+
+        Only the newest placeholders are replaced: a request that decoded
+        while no consumer was in the batch keeps its older -1s, so its list
+        still matches its KV cache when it is re-added after a skipped step.
+        The penalty kernel maps -1 to its pad id.
         """
         if self.sampled_token_ids_cpu is None or self.prev_req_id_to_index is None:
             # Output token ids not needed or not async scheduling.
@@ -829,19 +904,7 @@ class InputBatch:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-            new_ids: list[int] = sampled_token_ids[prev_index]
-            if not new_ids:
-                continue
-            num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
-            # Account for a differing number of placeholders vs sampled ids
-            # (tokens can be discarded after a kv-load failure).
-            first_placeholder = len(req_output_token_ids)
-            while (first_placeholder > 0 and req_output_token_ids[first_placeholder - 1] == -1):
-                first_placeholder -= 1
-            num_placeholders = len(req_output_token_ids) - first_placeholder
-            num_to_replace = min(num_sampled_ids, num_placeholders)
-            del new_ids[num_to_replace:]
-            req_output_token_ids[first_placeholder:] = new_ids
+            splice_placeholders(req_output_token_ids, sampled_token_ids[prev_index])
 
     def get_pooling_params(self) -> list[PoolingParams]:
         assert len(self.req_ids) == len(self.pooling_params)

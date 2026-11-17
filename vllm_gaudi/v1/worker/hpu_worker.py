@@ -36,6 +36,8 @@ from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.host_headroom import host_identity, host_memory_headroom_bytes
+from vllm_gaudi.kimi_k3_gate import is_kimi_k3_vllm_config
+from vllm_gaudi.v1.worker.hpu_affinity import apply_affinity
 from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, _GDN_MAMBA_TYPES, _rebind_moe_expert_weights)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
@@ -378,6 +380,11 @@ class HPUWorker(WorkerBase):
         init_worker_distributed_environment(self.vllm_config, self.rank, self.distributed_init_method, self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
+        # The device is open now (the opened /dev/accel node identifies the card); threads created from here on
+        # inherit the mask and the ones that already exist are pinned explicitly.
+        # Kimi-K3 only; other models keep the upstream behaviour (no affinity handling).
+        if is_kimi_k3_vllm_config(self.vllm_config):
+            apply_affinity(self.rank, self.local_rank)
         with set_current_vllm_config(self.vllm_config):
             self.model_runner = HPUModelRunner(vllm_config=self.vllm_config, is_driver_worker=self.is_driver_worker)
         self.init_profiler()
@@ -637,16 +644,17 @@ class HPUWorker(WorkerBase):
             graph_reserved_mem = 0.0 if self.model_config.enforce_eager else 0.1
             logger.warning("Invalid VLLM_GRAPH_RESERVED_MEM value, using default %s", graph_reserved_mem)
         graph_headroom = 1 - graph_reserved_mem
-        available_hpu_memory = free_hpu_memory * \
-            self.cache_config.gpu_memory_utilization
-        hpu_memory_margin = free_hpu_memory * (1 - self.cache_config.gpu_memory_utilization)
+        # gpu_memory_utilization defaults to None upstream; the resolved value applies the default.
+        gpu_memory_utilization = self.cache_config.resolved_gpu_memory_utilization
+        available_hpu_memory = free_hpu_memory * gpu_memory_utilization
+        hpu_memory_margin = free_hpu_memory * (1 - gpu_memory_utilization)
         self.model_runner.mem_margin = hpu_memory_margin  # type: ignore[union-attr]
         cache_size_bytes = available_hpu_memory * graph_headroom
         graph_headroom_bytes = available_hpu_memory * (1 - graph_headroom)
         dummy_block_headroom = single_kv_block_size_bytes
         msg = (f"Free device memory: {format_bytes(free_hpu_memory)}, "
                f"{format_bytes(available_hpu_memory)} usable "
-               f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
+               f"(gpu_memory_utilization={gpu_memory_utilization}),"
                f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
                f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
                f"{format_bytes(dummy_block_headroom)} reserved for KV cache dummy "
@@ -981,7 +989,9 @@ class HPUWorker(WorkerBase):
                 with HabanaMemoryProfiler() as m:
                     self.model_runner.initialize_kv_cache(self.kv_cache_config)
                     self.model_runner.defragmenter = OnlineDefragmenter(self.model_runner.kv_caches,
-                                                                        self.model_runner.block_size)
+                                                                        self.model_runner.block_size,
+                                                                        hybrid=self.model_runner.is_kimi_k3
+                                                                        and self.model_runner.num_mamba_like_layers > 0)
                     gc.collect()
                     torch.hpu.synchronize()
                 msg = f"Waking up KV cache, reinitializing it took {m.get_summary_string()}"

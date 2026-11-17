@@ -388,7 +388,9 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
 
     caches_data = []
     # With hybrid allocator, layers can share a kv cache tensor.
-    seen_base_addresses = []
+    seen_base_addresses: list[int] = []
+    # Layer names held by each region, in region order (advertised as region_members).
+    region_layers: list[list[str]] = []
     tensor_size_bytes = None
 
     for layer_name, cache_or_caches in xfer_buffers.items():
@@ -425,6 +427,10 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
             base_addr = cache.data_ptr()
             if base_addr in seen_base_addresses:
                 logger.debug("Skipping %s because it's already seen", layer_name)
+                # vLLM #63416 pairs regions by layer: a shared region lists every layer it holds.
+                shared_layers = region_layers[seen_base_addresses.index(base_addr)]
+                if layer_name not in shared_layers:
+                    shared_layers.append(layer_name)
                 continue
             logger.debug("Registering layer %s with cache shape: %s", layer_name, cache.shape)
             seen_base_addresses.append(base_addr)
@@ -458,6 +464,8 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
             self.region_mem_types.append(self.nixl_memory_type)
             self.region_group_ids.append(group_id)
             self.region_names.append(layer_name)
+            # K and V halves each list the layer, so it spans two regions on both sides.
+            region_layers.append([layer_name])
 
             if not is_mla_region:
                 if tensor_size_bytes is None:
@@ -491,7 +499,7 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
 
     self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
     self.num_regions = len(caches_data)
-    self._uses_region_group_mapping = len(set(self.region_group_ids)) > 1
+    self._set_region_layers(region_layers)
     self._mixed_mem_types = len(set(self.region_mem_types)) > 1
     if self._has_mamba:
         # Mirror upstream: every region (including the shared conv/ssm tensor)
@@ -522,7 +530,6 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
     # omits them from its NixlAgentMetadata.
     self.dst_region_num_blocks[self.engine_id] = self.region_num_blocks
     self.dst_region_group_ids[self.engine_id] = self.region_group_ids
-    self.dst_uses_region_group_mapping[self.engine_id] = self._uses_region_group_mapping
     self.dst_region_mem_types[self.engine_id] = self.region_mem_types
 
     if self._has_mamba:
@@ -551,6 +558,13 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         ssm_sizes=self._mamba_ssm_size,
         attn_backend_name=self.backend_name,
         physical_blocks_per_logical_kv_block=self._physical_blocks_per_logical_kv_block,
+        # vLLM #63416: peers pair regions through these; a peer without them fails the handshake.
+        region_members=self.region_members,
+        layer_group_ids={
+            name: self.kv_cache_config.transfer_group_index_by_layer[name]
+            for names in self.region_members
+            for name in names
+        },
     )
     # Wrap metadata in payload with hash for defensive decoding.
     assert self.compat_hash is not None

@@ -35,14 +35,18 @@ class HPUGemmaRMSNorm(GemmaRMSNorm):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         from vllm_gaudi.extension.kernels import rms_norm
         HPUFusedRMSNorm = rms_norm()
-        # GemmaRMSNorm uses (1 + w) instead of w
-        gemma_weight = self.weight + 1.0
+        # Match GemmaRMSNorm.forward_native: add the offset in FP32.
+        # BF16 addition rounds trained weights and can be folded differently
+        # by the HPU compiler when this norm feeds a projection.
+        gemma_weight = self.weight.float() + 1.0
+        orig_dtype = x.dtype
         if residual is not None:
             orig_shape = x.shape
-            residual = residual + x.reshape(residual.shape)
-            # Note: HPUFusedRMSNorm requires 3D tensors as inputs
-            x = HPUFusedRMSNorm.apply(residual, gemma_weight, self.variance_epsilon)
-            return x.reshape(orig_shape), residual
+            # Normalize the FP32 sum before rounding the returned residual,
+            # as in the upstream fused_add_rms_norm implementation.
+            residual_float = residual.float() + x.reshape(residual.shape).float()
+            x = HPUFusedRMSNorm.apply(residual_float, gemma_weight, self.variance_epsilon)
+            return x.to(orig_dtype).reshape(orig_shape), residual_float.to(residual.dtype)
 
-        x = HPUFusedRMSNorm.apply(x, gemma_weight, self.variance_epsilon)
-        return x
+        x = HPUFusedRMSNorm.apply(x.float(), gemma_weight, self.variance_epsilon)
+        return x.to(orig_dtype)

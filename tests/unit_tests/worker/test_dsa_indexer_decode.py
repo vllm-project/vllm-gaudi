@@ -17,6 +17,7 @@ def _runner(use_contiguous_pa=False, max_model_len=131072):
                              use_contiguous_pa=use_contiguous_pa,
                              max_model_len=max_model_len,
                              attn_block_size=128,
+                             _num_attn_blocks=0,
                              interleaved_sliding_window=False,
                              kv_cache_config=SimpleNamespace(num_blocks=1 << 20))
     # The real methods; they also call each other through self.

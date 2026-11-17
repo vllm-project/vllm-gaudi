@@ -20,7 +20,7 @@ def hpu_process_weights_after_loading(model, model_config, target_device):
     for _, module in model.named_modules():
         if isinstance(module, (Attention, MLAAttention)) and hasattr(module, "process_weights_after_loading"):
             #with device_loading_context(module, target_device):
-            module.process_weights_after_loading(model_config.dtype)
+            module.process_weights_after_loading()
 
     if model_config.quantization == "torchao":
         set_torchao_reload_attrs(model, model_config)

@@ -78,10 +78,7 @@ from vllm_gaudi.models.minimax_m3_vision import MiniMaxVLVisionModel
 
 
 def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
-    moe_layer_freq = getattr(config, "moe_layer_freq", None)
-    if moe_layer_freq is None:
-        return True
-    return moe_layer_freq[layer_id] != 0
+    return config.mlp_layer_types[layer_id] == "sparse"
 
 
 class HpuMiniMaxM3MLP(nn.Module):
@@ -112,11 +109,9 @@ class HpuMiniMaxM3MLP(nn.Module):
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
-        if config.hidden_act != "swigluoai":
-            raise ValueError(f"Unsupported activation: {config.hidden_act}. "
-                             "Only swigluoai is supported.")
+        # gate * sigmoid(alpha * gate) * (up + 1), with both halves clamped.
         self.swiglu_alpha = config.swiglu_alpha
-        self.swiglu_beta = getattr(config, "swiglu_beta", 1.0)
+        self.swiglu_beta = 1.0
         self.swiglu_limit = config.swiglu_limit
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -142,14 +137,10 @@ class HpuMiniMaxM3MoE(nn.Module):
                              f"the number of experts {config.num_local_experts}.")
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-        self.n_shared_experts = getattr(config, "n_shared_experts", None)
 
-        self.use_routing_bias = getattr(config, "use_routing_bias", False)
-        if self.use_routing_bias:
-            self.e_score_correction_bias = nn.Parameter(torch.empty(config.num_local_experts, dtype=torch.float32))
-            self.e_score_correction_bias.weight_loader = (HpuMiniMaxM3MoE.ebias_weight_loader)
-        else:
-            self.e_score_correction_bias = None
+        # Sigmoid routing uses a per-expert score-correction bias for selection.
+        self.e_score_correction_bias = nn.Parameter(torch.zeros(config.num_local_experts, dtype=torch.float32))
+        self.e_score_correction_bias.weight_loader = HpuMiniMaxM3MoE.ebias_weight_loader
 
         # fp32 router logits (params + math in fp32), matching the reference.
         self.gate = ReplicatedLinear(
@@ -169,7 +160,7 @@ class HpuMiniMaxM3MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            scoring_func=config.scoring_func,
+            scoring_func="sigmoid",
             e_score_correction_bias=self.e_score_correction_bias,
             use_grouped_topk=True,
             num_expert_group=1,
@@ -181,15 +172,13 @@ class HpuMiniMaxM3MoE(nn.Module):
             prefix=f"{prefix}.experts",
         )
 
-        self.shared_experts: HpuMiniMaxM3MLP | None = None
-        if self.n_shared_experts:
-            self.shared_experts = HpuMiniMaxM3MLP(
-                config=config,
-                intermediate_size=config.intermediate_size * self.n_shared_experts,
-                quant_config=quant_config,
-                reduce_results=True,
-                prefix=f"{prefix}.shared_experts",
-            )
+        self.shared_experts = HpuMiniMaxM3MLP(
+            config=config,
+            intermediate_size=config.intermediate_size,
+            quant_config=quant_config,
+            reduce_results=True,
+            prefix=f"{prefix}.shared_experts",
+        )
 
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
@@ -204,8 +193,7 @@ class HpuMiniMaxM3MoE(nn.Module):
         router_logits, _ = self.gate(hidden_states.to(torch.float32))
         routed = self.experts(hidden_states=hidden_states, router_logits=router_logits)
         routed = routed * self.routed_scaling_factor
-        if self.shared_experts is not None:
-            routed = routed + self.shared_experts(hidden_states)
+        routed = routed + self.shared_experts(hidden_states)
         return routed.view(orig_shape)
 
 
@@ -265,10 +253,7 @@ class HpuMiniMaxM3Attention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=config.max_position_embeddings,
-            rope_parameters={
-                "rope_theta": config.rope_theta,
-                "partial_rotary_factor": config.partial_rotary_factor,
-            },
+            rope_parameters=config.rope_parameters,
         )
 
         self.attn = Attention(
@@ -622,9 +607,8 @@ class HpuMiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal):
         projector_hidden_size = getattr(config, "projector_hidden_size", None)
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            vision_config = config.vision_config
             self.vision_tower = MiniMaxVLVisionModel(
-                config=PretrainedConfig.from_dict(vision_config),
+                config=config.vision_config,
                 text_hidden_size=text_hidden_size,
                 projector_hidden_size=projector_hidden_size,
                 quant_config=self.quant_config,

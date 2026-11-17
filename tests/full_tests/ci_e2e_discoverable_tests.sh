@@ -468,6 +468,7 @@ run_mistral3_test() {
 run_preemption_test() {
     echo "➡️ Testing preemption handling..."
     VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/preemption.py"
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/preemption.py" --async-scheduling
     echo "✅ Test with preemption handling passed."
 }
 
@@ -493,6 +494,22 @@ _run_spec_decode_eagle3_num_spec_2_test() {
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --assert_accept_rate 0.59 --osl 2048 --num_spec_tokens 2
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle3 --accuracy_rate 0.59 --num_spec_tokens 2
     echo "✅ Test with spec decode with eagle3 and num_speculative_tokens = 2 passed."
+}
+
+# Spec decode with eagle (Llama 3 8B + EAGLE-LLaMA3.1)
+_run_spec_decode_eagle_test() {
+    echo "➡️ Testing Spec-decode with eagle..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle --assert_accept_rate 0.39 --osl 2048
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task eagle --accuracy_rate 0.65
+    echo "✅ Test with spec decode with eagle passed."
+}
+
+# Spec decode with the DeepSeek-V3 eagle MTP drafter. Both checkpoints have random weights, so this only checks
+# that the drafter loads and proposes drafts; there is no acceptance or accuracy threshold.
+_run_spec_decode_eaglemtp_test() {
+    echo "➡️ Testing Spec-decode with DeepSeek eagle MTP..."
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python "${VLLM_GAUDI_PREFIX}/tests/full_tests/spec_decode.py" --task deepseek_eaglemtp --osl 2048 --assert_drafts
+    echo "✅ Test with spec decode with DeepSeek eagle MTP passed."
 }
 
 # --- Parallel group runners ---
@@ -587,6 +604,13 @@ run_spec_decode_parallel() {
         _run_spec_decode_eagle3_num_spec_2_test 1 \
         _run_spec_decode_eagle3_test 1 \
         _run_spec_decode_ngram_test 1
+}
+
+# Spec decode: eagle / DeepSeek eagle MTP (1 card each)
+run_spec_decode_extra_parallel() {
+    _run_parallel_on_card_slices spec_decode_extra \
+        _run_spec_decode_eagle_test 1 \
+        _run_spec_decode_eaglemtp_test 1
 }
 
 # --- Other tests ---
@@ -726,6 +750,7 @@ launch_all_tests() {
     run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
     run_preemption_test
     run_spec_decode_parallel
+    run_spec_decode_extra_parallel
     run_embedding_model_test
     # run_pd_disaggregate_nixl_libfabric_test temporarily disabled: see comment above its definition
     run_pd_disaggregate_nixl_ucx_test

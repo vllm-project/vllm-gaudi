@@ -48,6 +48,7 @@ def test_prefill_resume_off_the_chunk_grid(layer, expected):
     runner.num_mamba_like_layers = 1
     runner.pin_memory = False
     runner.mamba_chunk_size = 128
+    runner.mamba_split_prefill_graph = False
     runner.cache_config = SimpleNamespace(mamba_block_size=1152)
     runner.use_prefix_caching = True
     runner._mamba_reads_chunk_grid = mamba_reads_chunk_grid(_kv_cache_config(layer_cls.mamba_type.fget(None)))

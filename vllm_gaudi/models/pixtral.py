@@ -4,11 +4,28 @@ import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.model_executor.models.pixtral import (Attention, VisionEncoderArgs, VisionTransformer, TransformerBlock,
-                                                position_meshgrid, PixtralForConditionalGeneration,
-                                                PixtralProcessingInfo, PixtralMultiModalProcessor,
-                                                PixtralDummyInputsBuilder)
+                                                PixtralForConditionalGeneration, PixtralProcessingInfo,
+                                                PixtralMultiModalProcessor, PixtralDummyInputsBuilder)
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.multimodal import MULTIMODAL_REGISTRY
+
+
+def position_meshgrid(patch_embeds_list: list[torch.Tensor]) -> torch.Tensor:
+    """(row, col) coordinates of every patch, packed as (num_patches, 2).
+
+    Local copy: upstream vLLM (#56277) removed this helper from its pixtral module.
+    """
+    positions = torch.cat([
+        torch.stack(
+            torch.meshgrid(
+                torch.arange(p.shape[-2], device=p.device),
+                torch.arange(p.shape[-1], device=p.device),
+                indexing="ij",
+            ),
+            dim=-1,
+        ).reshape(-1, 2) for p in patch_embeds_list
+    ])
+    return positions
 
 
 def precompute_freqs_real_2d(

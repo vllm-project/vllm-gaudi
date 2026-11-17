@@ -14,6 +14,8 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    DevicePointers,
+    GPULoadStoreSpec,
     LoadStoreSpec,
     TransferResult,
 )
@@ -280,6 +282,11 @@ def CPUOffloadingWorker_init_(
         mmap_region: unused on HPU; accepted for upstream API parity.
     """
     del mmap_region  # HPU offloading does not use a shared mmap region.
+    # Upstream resolves GPU block IDs to device pointers against the first data
+    # ref of each group (vLLM PR #56076); keep its base/stride to invert that.
+    ref_tensor = kv_caches.tensors[kv_caches.group_data_refs[0][0].tensor_idx].tensor
+    self._ref_base_ptr = ref_tensor.data_ptr()
+    self._ref_block_stride = ref_tensor.stride(0)
     pin_memory = is_pin_memory_available()
     logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
     gpu_tensors: list[torch.Tensor] = []
@@ -315,14 +322,44 @@ def CPUOffloadingWorker_init_(
     )
 
 
-def submit_store(self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec) -> bool:
+def _device_ptrs_to_spec(self, device_ptrs: DevicePointers) -> GPULoadStoreSpec:
+    """Recover HPU block IDs from upstream pre-resolved device pointers.
+
+    Since vLLM PR #56076 the connector passes ``DevicePointers`` instead of a
+    ``GPULoadStoreSpec``. The HPU handler copies by block index, so invert
+    ``resolve_device_pointers`` for the first data ref of the single group.
+
+    Args:
+        device_ptrs: pointers built by upstream ``resolve_device_pointers``.
+
+    Returns:
+        The equivalent ``GPULoadStoreSpec``.
+    """
+    assert len(device_ptrs.group_block_counts) == 1
+    num_blocks = device_ptrs.group_block_counts[0]
+    offsets = device_ptrs.ptrs[:num_blocks].astype(np.int64) - self._ref_base_ptr
+    assert not np.any(offsets % self._ref_block_stride)
+    block_ids = offsets // self._ref_block_stride
+    return GPULoadStoreSpec(
+        block_ids.tolist(),
+        group_sizes=device_ptrs.group_block_counts,
+        block_indices=device_ptrs.block_indices,
+    )
+
+
+def submit_store(self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec) -> bool:
     """Async GPU -> CPU transfer."""
-    return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
+    return self._store_handler.transfer_async(job_id, _device_ptrs_to_spec(self, device_ptrs), dst_spec)
 
 
-def submit_load(self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec) -> bool:
-    """Async CPU -> GPU transfer."""
-    return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
+def submit_load(self,
+                job_id: int,
+                src_spec: LoadStoreSpec,
+                device_ptrs: DevicePointers,
+                expedited: bool = False) -> bool:
+    """Async CPU -> GPU transfer; HPU has no expedited queue, so ``expedited`` is ignored."""
+    del expedited
+    return self._load_handler.transfer_async(job_id, src_spec, _device_ptrs_to_spec(self, device_ptrs))
 
 
 def worker_get_finished(self) -> list[TransferResult]:

@@ -121,6 +121,7 @@ def register_ops():
     import vllm_gaudi.ops.hpu_awq  # noqa: F401
     import vllm_gaudi.ops.hpu_conv  # noqa: F401
     import vllm_gaudi.ops.hpu_mm_encoder_attention  # noqa: F401
+    import vllm_gaudi.ops.hpu_mm_input_norm  # noqa: F401
     import vllm_gaudi.ops.hpu_weights  # noqa: F401
 
     # Conditionally register HPURowParallelLinear only when chunking is enabled

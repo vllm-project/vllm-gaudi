@@ -11,6 +11,21 @@ from vllm import envs
 from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.logger import logger as init_logger
+from vllm_gaudi.kimi_k3_gate import is_kimi_k3_vllm_config, kimi_k3_seen, mark_kimi_k3_seen
+
+
+class _KimiK3OnlyList:
+    """Class attribute that reads as ``values`` once a Kimi-K3 config exists in this process and as ``[]`` before."""
+
+    def __init__(self, values):
+        self._values = list(values)
+
+    def __get__(self, obj, owner=None):
+        return list(self._values) if kimi_k3_seen() else []
+
+
+if not hasattr(Platform, "is_hpu"):
+    Platform.is_hpu = lambda self: getattr(self, "device_type", None) == "hpu"
 
 if TYPE_CHECKING:
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -63,11 +78,51 @@ class HpuPlatform(Platform):
     dispatch_key: str = "HPU"
     ray_device_key: str = "HPU"
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
+    # Kimi-K3 only (TP16 Ray: every worker must see the node's HABANA_VISIBLE_MODULES); empty, i.e. the upstream
+    # Platform default, for every other model.
+    ray_noset_device_env_vars = _KimiK3OnlyList([
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_HABANA_VISIBLE_MODULES",
+    ])
     supported_quantization: list[str] = [
-        "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu", "modelopt", "gpt_oss_mxfp4"
+        "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu", "modelopt", "gpt_oss_mxfp4", "mxfp4"
     ]
     simple_compile_backend = "hpu_backend"
     additional_env_vars = [k for k, v in os.environ.items() if retain_envs(k)]
+
+    # VLLM_* variables read by vllm-gaudi itself. Only used by the fallback below, when the vLLM Platform has no
+    # validate_environ. vLLM calls it in EngineArgs.create_engine_config before any ModelConfig exists, so it cannot
+    # be gated per model: every model takes the upstream check, and a Kimi-K3 run may log 'Unknown vLLM environment
+    # variable' warnings for these names (log only).
+    gaudi_env_vars: tuple[str, ...] = (
+        "VLLM_BUCKETING_FROM_FILE",
+        "VLLM_EXPONENTIAL_BUCKETING",
+        "VLLM_FULL_WARMUP",
+        "VLLM_GRAPH_RESERVED_MEM",
+        "VLLM_HPU_BIND_NUMA",
+        "VLLM_MOE_CHUNK",
+        "VLLM_MOE_TOKEN_BOUNDARY",
+        "VLLM_MULTIMODAL_RESOLUTIONS",
+        "VLLM_SKIP_WARMUP",
+        "VLLM_WEIGHT_LOAD_FORCE_SYNC",
+    )
+
+    @classmethod
+    def validate_environ(cls, hard_fail: bool) -> None:
+        upstream = getattr(super(), "validate_environ", None)
+        if upstream is not None:
+            return upstream(hard_fail)
+        import vllm_gaudi.envs as gaudi_envs
+        known = set(envs.environment_variables) | set(gaudi_envs.environment_variables) | set(cls.gaudi_env_vars)
+        for env in os.environ:
+            if env.startswith("VLLM_") and env not in known:
+                if hard_fail:
+                    raise ValueError(f"Unknown vLLM environment variable detected: {env}")
+                logger.warning("Unknown vLLM environment variable detected: %s", env)
+
+    @classmethod
+    def is_hpu(cls) -> bool:
+        return True
 
     @classmethod
     def get_attn_backend_cls(
@@ -146,6 +201,8 @@ class HpuPlatform(Platform):
         # a lazy-mode subprocess (GAUDISW-248809) and always respect values the
         # user set explicitly (GAUDISW-249135).
         cls.set_compile_env_defaults()
+        if is_kimi_k3_vllm_config(vllm_config):
+            mark_kimi_k3_seen()
         cls._maybe_disable_synapse_input_reuse(vllm_config)
         parallel_config = vllm_config.parallel_config
 
