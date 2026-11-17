@@ -7,9 +7,9 @@
 #   TORCHAUDIO_VERSION - CPU torchaudio wheel; set separately because no torchaudio
 #                        release exists past 2.11.0 (move it to PT_VERSION once one does)
 
-ARG PT_VERSION=2.13.0
+ARG PT_VERSION=2.14.1
 ARG TORCHAUDIO_VERSION=2.11.0
-ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.24.2/ubuntu24.04/habanalabs/pytorch-upstream-installer-${PT_VERSION}:latest
+ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.24.3/ubuntu24.04/habanalabs/pytorch-upstream-installer-${PT_VERSION}:latest
 FROM ${BASE_IMAGE}
 
 ARG VLLM_COMMIT_ARG

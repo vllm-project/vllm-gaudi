@@ -2,6 +2,20 @@
 
 This document provides an overview of the features, changes, and fixes introduced in each release of the vLLM Hardware Plugin for Intel® Gaudi®.
 
+## 0.33.0
+
+This release is based on [vLLM 0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and supports [Intel® Gaudi® Software v1.24.3](https://docs.habana.ai/en/v1.24.3/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.14. Key updates include:
+
+- Enabled the plugin on upstream [vLLM v0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and upgraded the platform to Intel® Gaudi® Software v1.24.3 with PyTorch 2.14.
+- Added an opt-in native int4 WNA16 MoE path for compressed-tensors models, including non-gated experts for Nemotron-H.
+- Reduced the DeepSeek Sparse Attention decode indexer cost with per-request top-k selection.
+- Validated Phi-4 and Phi-4-mini, with a LongRoPE rotary embedding fix for Phi-3 and Phi-4-mini.
+- Fixed output correctness for Qwen2.5-VL image inputs, Granite 4.0-H, FP8 KV cache decode on Gaudi 2, sliced FusedSDPA, GDN prefill, structured output sampling, and sliding-window prefill with cached context.
+- Released host memory on worker shutdown and guarded sleep mode against host OOM in multi-model swap flows.
+- Added Ubuntu 22.04 with Python 3.11 Dockerfiles and restored the tcmalloc preload in the RHEL UBI Dockerfiles.
+
+For a full list of changes, see the [Detailed Release Notes](release_notes_v0.33.0.md).
+
 ## 0.30.0
 
 This release is based on [vLLM 0.30.0](https://github.com/vllm-project/vllm/releases/tag/v0.30.0) and supports [Intel® Gaudi® Software v1.24.2](https://docs.habana.ai/en/v1.24.2/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.13. Key updates include:
