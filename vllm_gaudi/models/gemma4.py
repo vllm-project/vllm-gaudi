@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""HPU Gemma4 PLE fix: dynamic indexing to reduce graph specialization.
+"""HPU Gemma4 fixes for PLE indexing and vision GELU precision.
 
 Gemma4 E-series models use Per-Layer Embedding (PLE), where different hidden
 dimensions are used per layer. The upstream implementation slices
@@ -10,12 +10,14 @@ This module:
 1. Defines HpuGemma4Model that overrides forward() with dynamic PLE indexing
 2. Defines HpuGemma4ForConditionalGeneration that swaps the model class
 3. Registers it via ModelRegistry to override the upstream Gemma4
+4. Preserves eager BF16 GELU precision in compiled vision MLPs
 """
 
 from itertools import islice
 
 import torch
 import torch.nn as nn
+from transformers.activations import GELUTanh
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
@@ -26,6 +28,39 @@ from vllm.model_executor.models.gemma4_mm import (
 from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
+
+
+class HpuGemma4VisionGELU(GELUTanh):
+    """Preserve the HPU eager BF16 GELU rounding boundaries under fusion."""
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if input.device.type != "hpu" or input.dtype != torch.bfloat16:
+            return super().forward(input)
+
+        # Fused BF16 GELU lowers the polynomial and final MAC to BF16.
+        # The eager kernel uses FP32 for these stages, but BF16 for tanh.
+        # Explicit casts and addcmul preserve both precision and MAC rounding
+        # while allowing the surrounding vision MLP to remain compiled.
+        x = input.float()
+        square = x * x
+        polynomial = torch.addcmul(
+            torch.full_like(x, 0.7978845834732056),
+            square,
+            torch.full_like(x, 0.035677406936883926),
+        )
+        argument = (x * polynomial).bfloat16()
+        tanh = torch.tanh(argument).float()
+        half = x * 0.5
+        return torch.addcmul(half, half, tanh).bfloat16()
+
+
+def _apply_hpu_gemma4_vision_patches(vision_tower: nn.Module | None) -> None:
+    """Replace only tanh GELU activations in Gemma4 vision encoder MLPs."""
+    if vision_tower is None:
+        return
+    for layer in vision_tower.encoder.layers:
+        if isinstance(layer.mlp.act_fn, GELUTanh):
+            layer.mlp.act_fn = HpuGemma4VisionGELU()
 
 
 class HpuGemma4Model(UpstreamGemma4Model):
@@ -181,7 +216,7 @@ def _apply_hpu_gemma4_patches(language_model: nn.Module) -> None:
 
 
 class HpuGemma4ForConditionalGeneration(UpstreamGemma4ForConditionalGeneration):
-    """HPU-optimized Gemma4 multimodal model with PLE fix.
+    """HPU Gemma4 multimodal model with PLE and vision GELU fixes.
 
     Applies HPU patches during __init__ after the model is constructed.
     """
@@ -189,3 +224,4 @@ class HpuGemma4ForConditionalGeneration(UpstreamGemma4ForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         _apply_hpu_gemma4_patches(self.language_model)
+        _apply_hpu_gemma4_vision_patches(self.vision_tower)
