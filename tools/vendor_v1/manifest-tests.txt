@@ -1,0 +1,6 @@
+# Upstream vLLM V1 tests vendored into tests/unit_tests/vendored_v1/upstream/ by tools/vendor_v1/vendor_v1.py --tests-out.
+# Each line: <path in the vLLM repo> <file name in that directory>.
+tests/v1/sample/utils.py utils.py
+tests/v1/sample/test_sampler.py test_sampler.py
+tests/v1/sample/test_thinking_budget_state.py test_thinking_budget_state.py
+tests/v1/spec_decode/test_ngram.py test_ngram.py

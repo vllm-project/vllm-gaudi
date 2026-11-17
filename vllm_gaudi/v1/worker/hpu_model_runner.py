@@ -86,11 +86,11 @@ from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     iter_layer_specs,
 )
-from vllm.v1.worker.kv_connector_model_runner_mixin import (KVConnectorModelRunnerMixin)
+from vllm.v1.worker.gpu.kv_connector import KVConnector, NO_OP_KV_CONNECTOR, get_kv_connector
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists, LogprobsTensors, DraftTokenIds,
                              ModelRunnerOutput, AsyncModelRunnerOutput, KVConnectorOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cache_groups
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
@@ -99,12 +99,12 @@ from vllm.model_executor.models.interfaces import (supports_eagle3, supports_tra
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.v1.worker.utils import (AttentionGroup, prepare_kernel_block_sizes, sanity_check_mm_encoder_outputs)
-from vllm.v1.sample.rejection_sampler import RejectionSampler
-from vllm.v1.spec_decode.eagle import EagleProposer
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.sample.sampler import Sampler
-from vllm.v1.sample.logits_processor import build_logitsprocs
+from vllm_gaudi.v1._vendored.sample.rejection_sampler import RejectionSampler
+from vllm_gaudi.v1._vendored.spec_decode.eagle import EagleProposer
+from vllm_gaudi.v1._vendored.spec_decode.metadata import SpecDecodeMetadata
+from vllm_gaudi.v1._vendored.spec_decode.ngram_proposer import NgramProposer
+from vllm_gaudi.v1._vendored.sample.sampler import Sampler
+from vllm_gaudi.v1._vendored.sample.logits_processor import build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.sampling_params import SamplingParams
@@ -114,7 +114,6 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm_gaudi.extension.ops import LoraMask as LoraMask
-from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import OffloadingConnectorMetadata
@@ -1064,7 +1063,7 @@ def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num
     )
 
 
-class HpuKVConnectorModelRunnerMixin(KVConnectorModelRunnerMixin):
+class HpuKVConnectorModelRunnerMixin:
 
     def __init__(self):
         super().__init__()
@@ -1410,6 +1409,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
         self.is_driver_worker = is_driver_worker
+        # Replaced by an active connector once the KV caches exist (initialize_kv_cache).
+        self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
         self.use_aux_hidden_state_outputs = False
         self.supports_mm_inputs = False
 
@@ -4472,7 +4473,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
             # For D case, wait until kv finish load here
-            return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+            return self.kv_connector.no_forward(scheduler_output)
 
         if self.is_pooling_model:
             # 1. padding input_ids and positions 2. fill attn_metadata
@@ -6460,6 +6461,61 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     batch_size = candidates[idx] if is_batch_based else count
                     self.log_warmup_multimodal(phase, idx, len(candidates), batch_size, 0, width, height)
 
+    @staticmethod
+    def _validation_prompt_buckets(prompt_buckets, all_buckets: bool) -> list:
+        """The prompt buckets the validation warmup runs again, in warmup order.
+
+        The warmup processes the largest seq_len FIRST, creating recipes in early
+        compilations. Later, smaller seq_lens cause guard failures -> NEW
+        compilations with symbolic guards that shadow the earlier ones at
+        inference. By default this re-runs the largest seq_len (all num_blocks
+        variants); with all_buckets every bucket, since a bucket warmed before any
+        such recompilation is shadowed too, e.g. (1, 3072, 0) by the graphs that
+        (1, 2048, 0) compiles.
+        """
+        if all_buckets or not prompt_buckets:
+            return list(prompt_buckets)
+        max_seq_len = max(b[1] for b in prompt_buckets)
+        return [b for b in prompt_buckets if b[1] == max_seq_len]
+
+    def _validation_warmup(self, kv_caches, compile_only_mode_context) -> None:
+        """Validation warmup: run buckets again at the end of warmup.
+
+        Heterogeneous layers (e.g. Llama4 mix of MoE/MLP feed_forward types) run
+        the largest prompt buckets and the smallest decode bucket again outside
+        compile-only mode, to trigger torch.compile guard specializations. With
+        prompt_validation_warmup the pass covers every prompt bucket, in
+        compile-only mode unless the layers are heterogeneous.
+        """
+        validate_all_prompts = get_config().prompt_validation_warmup
+        if (self.model_config.enforce_eager or self.is_pooling_model
+                or not (self._has_heterogeneous_layers or validate_all_prompts)):
+            return
+        logger.info("Running validation warmup to trigger guard specializations...")
+        saved_graphed = self.graphed_buckets.copy()
+        self.graphed_buckets.clear()
+
+        # Re-run prompt buckets at the END of warmup, so that the NEWEST
+        # dynamo compilations (which will be selected first at inference)
+        # have Synapse recipes for their shapes (see _validation_prompt_buckets).
+        prompt_buckets = self._validation_prompt_buckets(self.bucketing_manager.prompt_buckets, validate_all_prompts)
+        if prompt_buckets:
+            logger.info("Validation warmup: %s prompt buckets (seq_len %s)", len(prompt_buckets),
+                        sorted({b[1]
+                                for b in prompt_buckets}))
+            # Shadowed graphs only lack the Synapse recipes for these shapes,
+            # which compile-only mode builds without running the forwards;
+            # heterogeneous layers specialize their guards in real runs.
+            with (compile_only_mode_context()
+                  if validate_all_prompts and not self._has_heterogeneous_layers else contextlib.nullcontext()):
+                self.warmup_graphs(prompt_buckets, True, kv_caches)
+
+        if self.bucketing_manager.decode_buckets:
+            self.warmup_graphs([self.bucketing_manager.decode_buckets[0]], False, kv_caches)
+
+        self.graphed_buckets = saved_graphed
+        logger.info("Validation warmup complete.")
+
     @torch.inference_mode()
     def warmup_model(self) -> None:
         if not self.enable_bucketing:
@@ -6611,36 +6667,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                           self.bucketing_manager.decode_buckets, False, kv_caches)
                     self.log_graph_warmup_summary(self.bucketing_manager.decode_buckets, False, mem_post_decode)
 
-        # Validation warmup: run smallest buckets outside compile-only mode
-        # to trigger torch.compile guard specializations for heterogeneous layers
-        # (e.g. Llama4 mix of MoE/MLP feed_forward types).
-        if (can_use_compile_only_mode and not self.model_config.enforce_eager and not self.is_pooling_model
-                and self._has_heterogeneous_layers):
-            logger.info("Running validation warmup to trigger guard specializations...")
-            saved_graphed = self.graphed_buckets.copy()
-            self.graphed_buckets.clear()
-
-            # Re-run only the LARGEST seq_len buckets (all num_blocks variants).
-            # During initial warmup, max seq_len  is processed FIRST, creating
-            # recipes in early compilations. Later, smaller seq_lens cause guard
-            # failures → NEW compilations with symbolic guards that shadow the
-            # earlier ones at inference.
-            #
-            # By re-running max seq_len buckets at the END of warmup, we ensure
-            # the NEWEST dynamo compilations (which will be selected first at
-            # inference) have Synapse recipes for the max seq_len shapes.
-            prompt_buckets = self.bucketing_manager.prompt_buckets
-            if prompt_buckets:
-                max_seq_len = max(b[1] for b in prompt_buckets)
-                max_seq_buckets = [b for b in prompt_buckets if b[1] == max_seq_len]
-                logger.info("Validation warmup: %s prompt buckets (seq_len=%s)", len(max_seq_buckets), max_seq_len)
-                self.warmup_graphs(max_seq_buckets, True, kv_caches)
-
-            if self.bucketing_manager.decode_buckets:
-                self.warmup_graphs([self.bucketing_manager.decode_buckets[0]], False, kv_caches)
-
-            self.graphed_buckets = saved_graphed
-            logger.info("Validation warmup complete.")
+        if can_use_compile_only_mode:
+            self._validation_warmup(kv_caches, compile_only_mode_context)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
@@ -7279,9 +7307,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         len(self._gdn_slot_free_list))
 
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(self.get_kv_caches_4D(kv_caches))
-            if self.vllm_config.kv_transfer_config.kv_buffer_device == "cpu":
-                get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
+            # Registers the caches with the KV transfer group.
+            self.kv_connector = get_kv_connector(self.vllm_config, self.get_kv_caches_4D(kv_caches))
 
         # TODO: check if this one is needed; for now seems that not
         # if has_mamba:

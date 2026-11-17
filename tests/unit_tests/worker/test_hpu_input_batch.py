@@ -12,12 +12,12 @@ import habana_frameworks.torch  # noqa: F401
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import make_tensor_with_pad
+from vllm_gaudi.v1._vendored._compat import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.sample.logits_processor import LogitsProcessors
-from vllm.v1.sample.metadata import SamplingMetadata
+from vllm_gaudi.v1._vendored.sample.logits_processor import LogitsProcessors
+from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
+from vllm_gaudi.v1._vendored.worker.block_table import BlockTable, MultiGroupBlockTable
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
 
 VOCAB_SIZE = 1024

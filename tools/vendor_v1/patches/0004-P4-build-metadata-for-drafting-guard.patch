@@ -1,0 +1,14 @@
+diff --git a/spec_decode/llm_base_proposer.py b/spec_decode/llm_base_proposer.py
+index 11f556dc..dfa0be16 100644
+--- a/spec_decode/llm_base_proposer.py
++++ b/spec_decode/llm_base_proposer.py
+@@ -988,6 +988,9 @@ class SpecDecodeBaseProposer:
+         per_group_attn_metadata: list[object] = []
+         per_layer_attn_metadata: dict[str, object] = {}
+         for attn_group in self.draft_attn_groups:
++            # vllm-gaudi local change [P4]: the method is gone after aac1b2a4f3.
++            if not hasattr(attn_group, "build_metadata_for_drafting"):
++                raise NotImplementedError("GPU drafting path, not used on HPU")
+             attn_metadata = attn_group.build_metadata_for_drafting(
+                 common_attn_metadata=common_attn_metadata, draft_index=draft_index
+             )
