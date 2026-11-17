@@ -93,7 +93,7 @@ from vllm.v1.pool.metadata import PoolingMetadata
 from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cache_groups
 from vllm.v1.utils import CpuGpuBuffer
-from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState
+from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState, splice_placeholders
 from vllm.distributed.parallel_state import get_pp_group, get_dp_group
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -236,6 +236,19 @@ def attn_pad_block_id(num_blocks: int, attn_block_size: int, kv_cache_groups: li
                 raise RuntimeError(f"Layer {layer_name}: pad slots {pad_slots.start}-{pad_slots.stop - 1} must "
                                    f"follow its {num_real_slots} real slots within its {num_slots} allocated ones.")
     return pad_block_id
+
+
+def bucket_ctx_to_kernel_blocks(num_blocks: int, block_size: int, kernel_block_size: int) -> int:
+    """Return the attention kernel blocks that cover num_blocks bucketing blocks.
+
+    Prompt buckets count context in block_size units and block tables address
+    kernel blocks. Either can be the larger one: hybrid models split KV-manager
+    blocks into smaller kernel blocks, but the 128-token bucketing unit can also
+    sit under larger kernel blocks (e.g. 528 tokens). Convert through tokens.
+    An integer block ratio is 0 in the second case, and a prefill chunk with
+    context would then get no context blocks at all.
+    """
+    return cdiv(num_blocks * block_size, kernel_block_size)
 
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
@@ -1063,6 +1076,22 @@ def compute_prefix_caching_block_indices(num_reqs: int, num_computed_tokens, num
     )
 
 
+def assert_output_rows(req_ids: list[str], num_rows: int, batch_req_ids: Optional[list[str]] = None) -> None:
+    """Check that ModelRunnerOutput rows line up with ``req_ids``.
+
+    vLLM maps output row i to ``req_ids[i]`` (``req_id_to_index`` was removed in aac1b2a4f3), so a mismatch would
+    hand one request's tokens to another. CPU list compare only, no device sync.
+
+    Args:
+        req_ids: the output's request ids.
+        num_rows: number of per-request rows in the output.
+        batch_req_ids: if given, the persistent batch order the rows were built in.
+    """
+    assert num_rows == len(req_ids), f"{num_rows} output rows for {len(req_ids)} requests"
+    assert batch_req_ids is None or req_ids == batch_req_ids[:len(req_ids)], (
+        f"output order {req_ids} differs from batch order {batch_req_ids}")
+
+
 class HpuKVConnectorModelRunnerMixin:
 
     def __init__(self):
@@ -1411,6 +1440,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.is_driver_worker = is_driver_worker
         # Replaced by an active connector once the KV caches exist (initialize_kv_cache).
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+        # Seeded generators of preempted requests, restored when they resume as new requests.
+        self._preempted_generators: dict[str, torch.Generator] = {}
+        # Async scheduling: the last step's sampled ids on CPU, its copy-ready event and the request -> row map.
+        self._last_async_copy: Optional[tuple[torch.Tensor, torch.hpu.Event, dict[str, int]]] = None
+        # Async scheduling: for each running request skipped while its last id was a placeholder, that step's CPU
+        # copy, its event and the request's row in it (None if it had none). Only the row is kept, not the map.
+        self._pending_placeholder_repair: dict[str, tuple[torch.Tensor, torch.hpu.Event, Optional[int]]] = {}
+        # Number of placeholders repaired by _repair_skipped_request_placeholder (read by tests).
+        self.num_skipped_placeholder_repairs = 0
         self.use_aux_hidden_state_outputs = False
         self.supports_mm_inputs = False
 
@@ -1954,9 +1992,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
-        # Remove finished requests from the cached states.
-        for req_id in scheduler_output.finished_req_ids:
-            self.requests.pop(req_id, None)
+        # A preempted request is dropped like a finished one and comes back as a new request whose
+        # prefill_token_ids carry its outputs so far (the Model Runner V2 contract). Keep its seeded
+        # generator so the resumed request continues the same random stream.
+        preempted_req_ids = scheduler_output.preempted_req_ids or set()
+        dropped_req_ids = scheduler_output.finished_req_ids | preempted_req_ids
+        for req_id in dropped_req_ids:
+            req_state = self.requests.pop(req_id, None)
+            self._pending_placeholder_repair.pop(req_id, None)
+            # A request both preempted and finished in this step (e.g. aborted after a cache reset) is finished.
+            if req_id in scheduler_output.finished_req_ids:
+                self._preempted_generators.pop(req_id, None)
+            elif req_state is not None and req_state.generator is not None:
+                self._preempted_generators[req_id] = req_state.generator
+        # A dropped request may come back in this same step; its previous-step row must not be scattered into it.
+        if self.input_batch.prev_req_id_to_index is not None:
+            for req_id in dropped_req_ids:
+                self.input_batch.prev_req_id_to_index.pop(req_id, None)
 
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
@@ -1965,7 +2017,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # distinct requests - clearing the cached states for the first request
         # and handling the second as a new request.
         removed_req_indices: list[int] = []
-        for req_id in scheduler_output.finished_req_ids:
+        for req_id in dropped_req_ids:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
                 removed_req_indices.append(req_index)
@@ -1992,6 +2044,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_index = self.input_batch.remove_request(req_id)
             assert req_index is not None
             removed_req_indices.append(req_index)
+            # Async scheduling: the request's last sampled id is still a -1 placeholder. Keep the step's CPU
+            # copy to splice it in when the request is scheduled again; do not sync here, the copy may be
+            # in flight.
+            output_token_ids = self.requests[req_id].output_token_ids
+            if (self.use_async_scheduling and output_token_ids and output_token_ids[-1] == -1
+                    and self._last_async_copy is not None):
+                sampled_token_ids_cpu, copy_ready_event, req_id_to_row = self._last_async_copy
+                self._pending_placeholder_repair[req_id] = (sampled_token_ids_cpu, copy_ready_event,
+                                                            req_id_to_row.get(req_id))
 
         # Free GDN compact base-slots for finished requests ONLY.
         # IMPORTANT: Do NOT free slots for unscheduled (temporarily paused
@@ -2019,12 +2080,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
             pooling_params = new_req_data.pooling_params
-            if sampling_params and \
+            # A request preempted and re-admitted in the same step (reset_prefix_cache) was removed above; this
+            # only guards against a stale row left by anything else.
+            if req_id in self.input_batch.req_id_to_index:
+                req_index = self.input_batch.remove_request(req_id)
+                assert req_index is not None
+                removed_req_indices.append(req_index)
+            generator = self._preempted_generators.pop(req_id, None)
+            if generator is None and sampling_params and \
                 sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
-            else:
-                generator = None
             if pooling_params:
                 assert (task := pooling_params.task) is not None, ("You did not set `task` in the API")
 
@@ -2042,7 +2108,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
+                # Non-empty only for a request resumed after preemption.
+                output_token_ids=list(new_req_data.prefill_token_ids[new_req_data.prompt_len:]),
                 lora_request=new_req_data.lora_request,
             )
 
@@ -2063,8 +2130,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
-            resumed_from_preemption = req_id in getattr(req_data, "resumed_req_ids", set())
-            num_output_tokens = req_data.num_output_tokens[i]
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
@@ -2082,29 +2147,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     req_state.output_token_ids.extend(new_token_ids[-num_new_tokens:])
 
             # Update the block IDs.
-            if not resumed_from_preemption:
-                if new_block_ids is not None:
-                    # Append the new blocks to the existing block IDs.
-                    for block_ids, new_ids in zip(req_state.block_ids, new_block_ids):
-                        block_ids.extend(new_ids)
-            else:
-                assert new_block_ids is not None
-                # The request is resumed from preemption.
-                # Replace the existing block IDs with the new ones.
-                req_state.block_ids = new_block_ids
+            if new_block_ids is not None:
+                # Append the new blocks to the existing block IDs.
+                for block_ids, new_ids in zip(req_state.block_ids, new_block_ids):
+                    block_ids.extend(new_ids)
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
-                # The request is not in the persistent batch.
-                # The request was either preempted and resumed later, or was not
-                # scheduled in the previous step and needs to be added again.
-
-                if self.use_async_scheduling and num_output_tokens > 0:
-                    # We must recover the output token ids for resumed requests in the
-                    # async scheduling case, so that correct input_ids are obtained.
-                    resumed_token_ids = req_data.all_token_ids[req_id]
-                    req_state.output_token_ids = resumed_token_ids[-num_output_tokens:]
-
+                # The request is running but was not scheduled in the previous step, so it must be added again.
+                # Under async scheduling its last sampled id may still be a -1 placeholder: it is this step's
+                # input token, so splice in the real id from that step's CPU copy.
+                self._repair_skipped_request_placeholder(req_id, req_state.output_token_ids)
+                if self.use_async_scheduling and is_last_rank:
+                    self._check_readded_request_inputs(req_id, req_state, num_computed_tokens)
                 req_ids_to_add.append(req_id)
                 continue
 
@@ -2163,6 +2218,46 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
         return batch_changed
+
+    @staticmethod
+    def _check_readded_request_inputs(req_id: str, req_state: CachedRequestState, num_computed_tokens: int) -> None:
+        """Refuse a re-added request whose tokens to compute are not all known.
+
+        Under async scheduling the re-added row is built from the output list, which must reach past
+        num_computed_tokens with real ids. A KV-load failure that rolled num_computed_tokens back over older -1
+        placeholders breaks that, and a list shorter than the KV cache would read past the row. The scheduler no
+        longer sends all_token_ids, so neither can be repaired here, and the row would feed a stale or -1 token.
+        With more than the next input left to compute, add_request counts every known token as prompt, and the
+        penalty prompt tensor does not mask -1, so then no output may be a placeholder at all.
+        """
+        num_tokens = req_state.num_prompt_tokens + len(req_state.output_token_ids)
+        if num_tokens <= num_computed_tokens:
+            raise RuntimeError(f"Request {req_id} resumes at position {num_computed_tokens}, past its {num_tokens} "
+                               "known tokens.")
+        if -1 in req_state.output_token_ids[max(num_computed_tokens - req_state.num_prompt_tokens, 0):]:
+            raise RuntimeError(f"Request {req_id} resumes with a -1 placeholder inside the tokens to compute.")
+        if num_computed_tokens < num_tokens - 1 and -1 in req_state.output_token_ids:
+            raise RuntimeError(f"Request {req_id} resumes with a -1 placeholder among the tokens it re-adds as prompt.")
+
+    def _repair_skipped_request_placeholder(self, req_id: str, output_token_ids: list[int]) -> None:
+        """Splice the real id over the trailing -1 of a request re-added after a skipped step.
+
+        Rare path (a running request left out of a step), so the sync on the copy-ready event is acceptable;
+        the copy has normally finished long before.
+        """
+        pending = self._pending_placeholder_repair.pop(req_id, None)
+        if not output_token_ids or output_token_ids[-1] != -1:
+            return
+        if pending is None:
+            raise RuntimeError(f"Request {req_id} resumes with a -1 placeholder as its input token and no sampled "
+                               "id to repair it from.")
+        sampled_token_ids_cpu, copy_ready_event, row = pending
+        if row is not None:
+            copy_ready_event.synchronize()
+            splice_placeholders(output_token_ids, sampled_token_ids_cpu[row].tolist())
+        if output_token_ids[-1] == -1:
+            raise RuntimeError(f"Request {req_id} has no sampled id for its -1 placeholder.")
+        self.num_skipped_placeholder_repairs += 1
 
     def _extract_mm_kwargs(
         self,
@@ -2800,22 +2895,18 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     raise RuntimeError(f"MROPE needs extension beyond prompt but mrope_position_delta is None: "
                                        f"req_id={req_id} cl={cl} qsl={qsl} mp_total={mp_total} remain={remain}")
 
-                # generate mrope positions for the extra using delta.
+                # generate mrope positions for the extra using delta. They start at the first scheduled token past
+                # the prompt: a resumed request's computed tokens can already reach past it.
                 extra_pos = MRotaryEmbedding.get_next_input_positions(
                     mrope_position_delta=int(delta),
-                    context_len=mp_total,
-                    seq_len=mp_total + extra,
+                    context_len=max(cl, mp_total),
+                    seq_len=cl + qsl,
                 )
 
+                # One list per axis, so the shape is already (3, extra). Never transpose: with extra == 3 the
+                # shape alone cannot tell the layouts apart.
                 extra_part = torch.as_tensor(extra_pos, dtype=torch.int32, device=prompt_part.device)
-
-                # normalize shapes to (3, extra)
-                if extra_part.ndim == 1:  # repeat for 3 axes
-                    extra_part = extra_part.unsqueeze(0).repeat(3, 1)
-                elif extra_part.ndim == 2:  # (3, extra) or (extra, 3)
-                    if extra_part.shape[0] == extra and extra_part.shape[1] == 3:
-                        extra_part = extra_part.transpose(0, 1).contiguous()
-                else:
+                if tuple(extra_part.shape) != (3, extra):
                     raise RuntimeError(f"Unexpected extra_part shape: {tuple(extra_part.shape)}")
 
                 input_mrope_position = torch.cat([prompt_part, extra_part], dim=1)
@@ -3043,7 +3134,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Scale to attn_block_size units so context_blocks padding matches the
         # block_table entries which use kernel_block_size = attn_block_size.
         if self.attn_block_size != self.block_size:
-            target_blocks = target_blocks * (self.block_size // self.attn_block_size)
+            target_blocks = bucket_ctx_to_kernel_blocks(target_blocks, self.block_size, self.attn_block_size)
 
         target_bs += self.get_dp_padding(target_bs)
         target_seq += self.get_dp_padding(target_seq)
@@ -4369,7 +4460,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return ModelRunnerOutput(
             req_ids=[self.input_batch.req_ids],
-            req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=[],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -4480,7 +4570,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             prefillInputData_list = self._prepare_inputs_for_pooling(scheduler_output)
             flattened = None
             req_ids_list = []
-            req_id_to_index_dict = {}
             pooler_output_list = []
             pooling_params = self.input_batch.pooling_params
             pooling_states = self.input_batch.pooling_states
@@ -4514,13 +4603,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                       device=hidden_states.device)
                 pooled_output = self.model.pooler(hidden_states=flattened, pooling_metadata=pooling_metadata)
                 req_ids_list.append(req_id)
-                req_id_to_index_dict[req_id] = self.input_batch.req_id_to_index[req_id]
                 pooler_output_list.append(pooled_output[0])
             htorch.core.mark_step()
             pooler_output_list_cpu = [tensor.cpu() for tensor in pooler_output_list]
+            assert_output_rows(req_ids_list, len(pooler_output_list_cpu))
             pooled_output = ModelRunnerOutput(
                 req_ids=req_ids_list,
-                req_id_to_index=req_id_to_index_dict,
                 pooler_output=pooler_output_list_cpu,
                 sampled_token_ids=[],
                 logprobs=None,
@@ -4961,8 +5049,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
         req_ids_output_copy = self.input_batch.req_ids.copy()
-        req_id_to_index_output_copy = \
-            self.input_batch.req_id_to_index.copy()
 
         max_req_index = max(self.input_batch.req_id_to_index.values())
         postprocessed_sampled_token_ids: list[list[int]] = [[] for _ in range(max_req_index + 1)]
@@ -5080,9 +5166,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)  # type: ignore
 
         if self.use_async_scheduling:
+            assert_output_rows(all_req_ids, len(postprocessed_sampled_token_ids), req_ids_output_copy)
             model_runner_output = ModelRunnerOutput(
-                req_ids=req_ids_output_copy,  # CHECK
-                req_id_to_index=req_id_to_index_output_copy,
+                req_ids=req_ids_output_copy,
                 sampled_token_ids=postprocessed_sampled_token_ids,
                 logprobs=logprobs,
                 prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
@@ -5103,10 +5189,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 async_output._sampled_token_ids_cpu,
                 async_output._async_copy_ready_event,
             )
+            # Kept always: a request skipped next step needs it to repair its placeholder when it returns.
+            assert self.input_batch.prev_req_id_to_index is not None
+            self._last_async_copy = (async_output._sampled_token_ids_cpu, async_output._async_copy_ready_event,
+                                     self.input_batch.prev_req_id_to_index)
             return async_output
+        assert_output_rows(all_req_ids, len(postprocessed_sampled_token_ids), self.input_batch.req_ids)
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=postprocessed_sampled_token_ids,
             logprobs=logprobs,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
@@ -5810,6 +5900,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 block_ids=block_ids,
                 num_computed_tokens=num_computed_tokens,
                 lora_request=None,
+                prefill_token_ids=prompt_token_ids,
             )
         else:
             sampling_params = SamplingParams(temperature=0.0)
@@ -5823,6 +5914,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 block_ids=block_ids,
                 num_computed_tokens=num_computed_tokens,
                 lora_request=None,
+                prefill_token_ids=prompt_token_ids,
             )
         requests.append(req)
         if is_prompt:
