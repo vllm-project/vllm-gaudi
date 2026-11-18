@@ -20,7 +20,7 @@ vLLM Hardware Plugin for Intel® Gaudi®
 *Latest News* 🔥
 - [2026/11] Version 0.33.0 is now available, built on [vLLM 0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and fully compatible with [Intel® Gaudi® v1.24.3](https://docs.habana.ai/en/v1.24.3/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.14.
 
-  This release enables the plugin on upstream vLLM 0.33.0 and upgrades the platform to Intel® Gaudi® Software v1.24.3 with PyTorch 2.14. It adds an opt-in native int4 WNA16 MoE path including Nemotron-H, speeds up the DeepSeek Sparse Attention decode indexer, validates Phi-4 and Phi-4-mini, fixes output correctness for Qwen2.5-VL images, Granite 4.0-H, FP8 KV cache decode on Gaudi 2, and structured output sampling, and adds Ubuntu 22.04 with Python 3.11 Dockerfiles. See the [release notes](docs/release_notes_v0.33.0.md) for details.
+  This release enables the plugin on upstream vLLM 0.33.0 and upgrades the platform to Intel® Gaudi® Software v1.24.3 with PyTorch 2.14. It adds an opt-in native int4 WNA16 MoE path including Nemotron-H, speeds up the DeepSeek Sparse Attention decode indexer, validates Phi-4, Phi-4-mini, Nemotron-3-Ultra W4A16, and Granite 4.1 8B, fixes output correctness for Qwen2.5-VL images, Granite 4.0-H, FP8 KV cache decode on Gaudi 2, and structured output sampling, and adds Ubuntu 22.04 with Python 3.11 Dockerfiles. See the [release notes](docs/release_notes_v0.33.0.md) for details.
 
 - [2026/10] Version 0.30.0 is now available, built on [vLLM 0.30.0](https://github.com/vllm-project/vllm/releases/tag/v0.30.0) and fully compatible with [Intel® Gaudi® v1.24.2](https://docs.habana.ai/en/v1.24.2/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.13.
 

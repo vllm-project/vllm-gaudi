@@ -9,7 +9,7 @@ This release is based on [vLLM v0.33.0](https://github.com/vllm-project/vllm/rel
 - Enabled the plugin on upstream [vLLM v0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and upgraded the platform to Intel® Gaudi® Software v1.24.3 with PyTorch 2.14.
 - Added an opt-in native int4 WNA16 MoE path for compressed-tensors models, including non-gated experts for Nemotron-H.
 - Reduced the DeepSeek Sparse Attention decode indexer cost with per-request top-k selection (2.18 ms to 0.30 ms per indexer layer at batch size 32).
-- Validated Phi-4 and Phi-4-mini, with a LongRoPE rotary embedding fix for Phi-3 and Phi-4-mini.
+- Validated Phi-4, Phi-4-mini, Nemotron-3-Ultra W4A16, and Granite 4.1 8B, with a LongRoPE rotary embedding fix for Phi-3 and Phi-4-mini.
 - Fixed output correctness for Qwen2.5-VL image inputs, Granite 4.0-H, FP8 KV cache decode on Gaudi 2, sliced FusedSDPA, GDN prefill, structured output sampling, and sliding-window prefill with cached context.
 - Released host memory on worker shutdown and guarded sleep mode against host OOM in multi-model swap flows.
 - Added Ubuntu 22.04 with Python 3.11 Dockerfiles and restored the tcmalloc preload in the RHEL UBI Dockerfiles.
@@ -20,6 +20,7 @@ This release is based on [vLLM v0.33.0](https://github.com/vllm-project/vllm/rel
 
 - Enabled Nemotron-H WNA16 on HPU with non-gated MoE experts on the native int4 kernel. ([#1808](https://github.com/vllm-project/vllm-gaudi/pull/1808), [#1874](https://github.com/vllm-project/vllm-gaudi/pull/1874))
 - Fixed the HPU LongRoPE rotary embedding for Phi-3 and Phi-4-mini, and validated Phi-4 and Phi-4-mini. ([#1820](https://github.com/vllm-project/vllm-gaudi/pull/1820), [#1821](https://github.com/vllm-project/vllm-gaudi/pull/1821))
+- Validated Nemotron-3-Ultra W4A16 (`RedHatAI/NVIDIA-Nemotron-3-Ultra-550B-A55B-quantized.w4a16`) on 4 and 8 cards, and Granite 4.1 8B in BF16 on one card. ([#1999](https://github.com/vllm-project/vllm-gaudi/pull/1999))
 
 ---
 
@@ -77,6 +78,7 @@ This release is based on [vLLM v0.33.0](https://github.com/vllm-project/vllm/rel
 ## Fixes
 
 - Fixed Qwen2.5-VL ignoring image content and an `mmmu_val` crash on HPU. ([#1852](https://github.com/vllm-project/vllm-gaudi/pull/1852))
+- Matched processor-side BF16 rounding in HPU device image normalization (`--mm-device-do-normalize`) for `uint8` image inputs, which could otherwise change vision embeddings and generated text. ([#1994](https://github.com/vllm-project/vllm-gaudi/pull/1994))
 - Fixed a zeroed convolution state in the HPU graph for Granite 4.0-H, which broke multi-turn tool calling. ([#1915](https://github.com/vllm-project/vllm-gaudi/pull/1915))
 - Sampled structured output rows with their own request parameters, and re-keyed `bad_words` to the rows of the selective sampling metadata. ([#1916](https://github.com/vllm-project/vllm-gaudi/pull/1916), [#1917](https://github.com/vllm-project/vllm-gaudi/pull/1917))
 - Restored the batch dimension of prefill hidden states for prompt logprobs, preventing an engine core crash. ([#1839](https://github.com/vllm-project/vllm-gaudi/pull/1839))
@@ -96,6 +98,8 @@ This release is based on [vLLM v0.33.0](https://github.com/vllm-project/vllm/rel
 
 | PR | Title | Author |
 | --- | --- | --- |
+| [#1999](https://github.com/vllm-project/vllm-gaudi/pull/1999) | Add Nemotron-3-Ultra W4A16 and Granite 4.1 8B to the validated models | @rsmyrek |
+| [#1994](https://github.com/vllm-project/vllm-gaudi/pull/1994) | Fix BF16 rounding in HPU device image normalization | @shepark |
 | [#1986](https://github.com/vllm-project/vllm-gaudi/pull/1986) | Keep the prompt context when the attention kernel block is larger than the bucketing unit | @rsmyrek |
 | [#1987](https://github.com/vllm-project/vllm-gaudi/pull/1987) | Keep 128-token attention kernel blocks for Nemotron-H when they fit | @rsmyrek |
 | [#1983](https://github.com/vllm-project/vllm-gaudi/pull/1983) | Port of: Update numba requirement from >=0.68.0 to >=0.68.1-#1951 | @iboiko-habana |
