@@ -346,7 +346,14 @@ class HpuPlatform(Platform):
                 cls._async_spec_decode_enabled(vllm_config) and spec_config.use_eagle()
                 and spec_config.num_speculative_tokens == 1):
             vllm_config.scheduler_config.async_scheduling = False
+        # Since the Model Runner V1 removal (vLLM aac1b2a4f3) vLLM enables async scheduling for pipeline
+        # parallelism too; the HPU runner does not support that combination.
+        if vllm_config.scheduler_config.async_scheduling and vllm_config.parallel_config.pipeline_parallel_size > 1:
+            logger.warning("[HPU] Async scheduling is not supported with pipeline parallelism; disabling it.")
+            vllm_config.scheduler_config.async_scheduling = False
+        # Runs after the async scheduling decisions above, which it depends on.
         cls._maybe_use_hpu_scheduler(vllm_config)
+        cls._reject_unsupported_engine_features(vllm_config)
 
         cls._maybe_disable_chunked_mm_input(vllm_config)
 
@@ -384,6 +391,92 @@ class HpuPlatform(Platform):
             return explicit
         return (model_config is not None and getattr(model_config.hf_config, 'model_type', None) == 'nemotron_h'
                 and not get_config().VLLM_CONTIGUOUS_PA)
+
+    @classmethod
+    def _reject_unsupported_engine_features(cls, vllm_config: "VllmConfig") -> None:
+        """Fail at startup on features the HPU model runner would silently ignore.
+
+        Model Runner V1 refused the same features at startup; that check went with it in vLLM aac1b2a4f3.
+        """
+        unsupported = cls._unsupported_engine_features(vllm_config)
+        if unsupported:
+            raise ValueError(f"HPU does not support: {', '.join(unsupported)}.")
+
+    @staticmethod
+    def _unsupported_engine_features(vllm_config: "VllmConfig") -> list[str]:
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+        spec = vllm_config.speculative_config
+        unsupported: list[str] = []
+        # model_config may be None in tests; getattr then yields the default.
+        for option in ("return_sampling_mask", "enable_trace_replay"):
+            if getattr(model_config, option, False):
+                unsupported.append(option)
+        if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
+            unsupported.append("HiSparse")
+        if getattr(vllm_config, "watermark_config", None) is not None:
+            unsupported.append("watermarking")
+        if getattr(parallel_config, "prefill_context_parallel_size", 1) > 1:
+            unsupported.append("prefill context parallel")
+        if spec is not None:
+            from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
+
+            if spec.custom_method is not None:
+                unsupported.append(f"custom speculative method '{spec.custom_method}'")
+            if spec.method == "dspark":
+                unsupported.append("dspark speculative decoding")
+            elif isinstance(spec.speculator_config, XPressSpeculatorConfig):
+                unsupported.append("xpress speculative decoding")
+            if spec.enable_adaptive_verification:
+                unsupported.append("adaptive draft verification")
+            if spec.draft_lm_head_quantization is not None:
+                unsupported.append("draft lm_head quantization")
+            draft_config = spec.draft_model_config
+            draft_archs = set(getattr(draft_config, "architectures", None) or [])
+            if "ParseAuxMTPModel" in draft_archs:
+                unsupported.append("Parse 3.5 MTP")
+            if spec.method == "dflash" and draft_config is not None:
+                layer_types = getattr(draft_config.hf_config, "layer_types", None) or []
+                num_sliding = sum(lt == "sliding_attention" for lt in layer_types)
+                if 0 < num_sliding < len(layer_types):
+                    unsupported.append("mixed sliding/full dflash drafts")
+                candidate_head_archs = {
+                    "DFlash2DraftModel", "DFlash2BeamDraftModel", "DFlash2RicursiveDraftModel", "LiLiCorrDraftModel"
+                }
+                if draft_archs & candidate_head_archs:
+                    unsupported.append("DFlash candidate-head drafts")
+        if getattr(model_config, "is_diffusion", False):
+            unsupported.append("diffusion models")
+        if getattr(parallel_config, "enable_batch_sharded_sampling", False):
+            unsupported.append("batch-sharded sampling")
+        if getattr(model_config, "architecture", None) in ("Step5ForCausalLM", "Step5ForConditionalGeneration"):
+            unsupported.append("Step5")
+        return unsupported
+
+    @classmethod
+    def validate_request(cls, processed_inputs, params) -> None:
+        """Reject per-request logprob features the HPU model runner does not implement.
+
+        vLLM refused the prompt-logprob ones and beam search allowlists for Model Runner V1 itself; without it,
+        they would be accepted and ignored. Exact-ID sample logprobs (``logprob_token_ids``) were never read on
+        HPU: such a request gets an empty or partial logprobs list. Beam search allowlists set that field for each
+        step, so this check covers them too.
+        """
+        from vllm.exceptions import VLLMValidationError
+        from vllm.sampling_params import SamplingParams
+
+        if not isinstance(params, SamplingParams):
+            return
+        unsupported = {
+            "prompt_logprob_token_ids": getattr(params, "prompt_logprob_token_ids", None) is not None,
+            "prompt_logprob_start": getattr(params, "prompt_logprob_start", None) not in (None, 0),
+            "logprob_token_ids": bool(getattr(params, "logprob_token_ids", None)),
+        }
+        # Callers may not have set the field themselves.
+        hints = {"logprob_token_ids": " (beam search allowed_token_ids and generative scoring label_token_ids set it)"}
+        for name, is_set in unsupported.items():
+            if is_set:
+                raise VLLMValidationError(f"{name} is not supported on HPU{hints.get(name, '')}.", parameter=name)
 
     @classmethod
     def _maybe_disable_chunked_mm_input(cls, vllm_config: "VllmConfig") -> None:
