@@ -10,6 +10,10 @@ Covers:
   ``update_block_size_for_backend`` must produce consistent KV-cache page sizes
   for granitemoehybrid models across cold-start, deserialization, and
   reconfigure paths.
+* Compact-GDN gating: auto-detection stays active with prefix caching (the
+  state rows mirror the shared block table), stays disabled for PD
+  disaggregation, excludes granitemoehybrid, and always honors an explicit
+  VLLM_COMPACT_GDN override.
 """
 import os
 import re
@@ -179,9 +183,10 @@ def test_compact_gdn_disabled_for_pd_disaggregation():
     assert HpuPlatform._compact_gdn_active(cfg) is False
 
 
-def test_compact_gdn_disabled_for_prefix_caching():
+def test_compact_gdn_active_with_prefix_caching():
+    """Prefix caching is compatible: the state rows mirror the shared block table."""
     cfg = _fake_vllm_config(gdn_layers=4, prefix_caching=True)
-    assert HpuPlatform._compact_gdn_active(cfg) is False
+    assert HpuPlatform._compact_gdn_active(cfg) is True
 
 
 def test_compact_gdn_active_when_prefix_caching_off():
