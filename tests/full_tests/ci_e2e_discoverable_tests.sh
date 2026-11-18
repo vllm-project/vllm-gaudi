@@ -331,7 +331,7 @@ run_gpqa_kimi_k26_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only (baseline, no fsdpa_slicing)
 # Requires: pip install 'lm_eval[longbench]'
-_run_longbench_qwen3_30b_fp8_static_test() {
+run_longbench_qwen3_30b_fp8_static_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
@@ -342,7 +342,7 @@ _run_longbench_qwen3_30b_fp8_static_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache and fsdpa slicing in torch.compile mode
 # Requires: pip install 'lm_eval[longbench]'
-_run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
+run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
@@ -355,7 +355,7 @@ _run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with FP8 KV cache and fsdpa slicing in torch.compile mode
 # Requires: pip install 'lm_eval[longbench]'
-_run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
+run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 KV_CACHE_DTYPE=fp8_inc \
@@ -613,18 +613,17 @@ run_spec_decode_extra_parallel() {
         _run_spec_decode_eaglemtp_test 1
 }
 
-# LongBench on Qwen3-30B-A3B FP8 static (TP=2 each). lm_eval is installed once here,
-# so the members' own pip install finds it and does nothing.
-run_longbench_qwen3_30b_fp8_parallel() {
-    pip install 'lm_eval[longbench]' --quiet
-    _run_parallel_on_card_slices longbench_qwen3_30b \
-        _run_longbench_qwen3_30b_fp8_static_test 2 \
-        _run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test 2 \
-        _run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test 2
+# Multimodal members load vLLM's default test image when they start. vLLM writes it
+# into its cache in place, so a member could read it while another one is still
+# downloading it. Fetch it once before the members start (they then find it ready).
+_fetch_default_image_asset() {
+    python -P -c "from vllm.assets.image import ImageAsset; ImageAsset('cherry_blossom').pil_image.load()" \
+        || echo "⚠️  Could not pre-fetch the default test image; members will fetch it themselves."
 }
 
 # Load and generate, the longest single-card tests (1 card each)
 run_load_generate_a_parallel() {
+    _fetch_default_image_asset
     _run_parallel_on_card_slices load_generate_a \
         _run_gemma3_load_generate_test 1 \
         _run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test 1 \
@@ -638,6 +637,7 @@ run_load_generate_a_parallel() {
 
 # Load and generate, single-card tests (1 card each)
 run_load_generate_b_parallel() {
+    _fetch_default_image_asset
     _run_parallel_on_card_slices load_generate_b \
         _run_ernie4.5_vl_test 1 \
         _run_awq_load_generate_test 1 \
@@ -811,9 +811,9 @@ launch_all_tests() {
     _run_gsm8k_deepseek_test
     _run_gsm8k_qwen3_30b_test
     run_gpqa_kimi_k26_test
-    _run_longbench_qwen3_30b_fp8_static_test
-    _run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
-    _run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
+    run_longbench_qwen3_30b_fp8_static_test
+    run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
+    run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
     run_preemption_test
     run_spec_decode_parallel
     run_spec_decode_extra_parallel
