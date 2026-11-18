@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """HPU sparse-attn indexer (DSA) decode forward with FP32 weighted-ReLU scoring and physical-slot top-k.
 
-Scoring runs in the bf16 BMM domain (HPU's native GEMM accumulates in fp32 internally); the per-head weighted
-scores are accumulated in fp32. All HPU index arithmetic uses 1-D flat int32 ``index_select`` (2-D int64 gathers
-fail HPU torch.compile), and the per-shape index constants (block-row offsets, -inf pad row) are cached across steps.
+Scoring (bf16 BMM, then FP32 ReLU weighted-sum) keeps the previous FP32 score values; the decode path
+removes the per-step index work instead. All HPU index arithmetic uses 1-D flat int32 ``index_select``
+(2-D int64 gathers fail HPU torch.compile), and the per-shape index constants (block-row offsets, -inf pad
+row) are cached across steps.
 """
 
 import torch
@@ -82,7 +83,7 @@ def forward_hpu(self, hidden_states, q, k, weights):
     keys = kv_cache.index_select(0, slots_flat).reshape(block_count, block_size, -1)
 
     owners = block_groups.clamp(0, batch_size - 1)
-    # bf16 BMM (HPU native GEMM fp32-accumulates); keep the logits in the BMM dtype for the weighted sum.
+    # Scoring matches the previous implementation bit-for-bit: bf16 BMM, then fp32 ReLU weighted-sum.
     logits = torch.bmm(q[owners], keys.transpose(1, 2))
     scores = (logits.float().relu() * weights[owners].float()[:, :, None]).sum(1)
 
