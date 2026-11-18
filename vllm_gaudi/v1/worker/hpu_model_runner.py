@@ -2306,7 +2306,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         return {}
 
-    # source: vllm/v1/worker/gpu_model_runner.py
+    # source: vllm/v1/worker/gpu_model_runner.py at vLLM b46907cce0 (file removed upstream)
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput", req_ids: list[str]):
         # Batch the multi-modal inputs.
         mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
@@ -2417,7 +2417,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
             self.encoder_cache[mm_hash] = scattered_output
 
-    # modified from: vllm/v1/worker/gpu_model_runner.py
+    # modified from: vllm/v1/worker/gpu_model_runner.py at vLLM b46907cce0 (file removed upstream)
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
@@ -4277,7 +4277,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
         return (self.model_config.quantization == "inc" or quant_config)
 
-    # Copied from vllm/v1/worker/gpu_model_runner.py
+    # Copied from vllm/v1/worker/gpu_model_runner.py at vLLM 19b927e52d (file removed upstream)
     def apply_grammar_bitmask(
         self,
         scheduler_output: "SchedulerOutput",

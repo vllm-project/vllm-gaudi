@@ -183,7 +183,7 @@ class HpuPlatform(Platform):
         # The correct implementation of the method in this place should look as follows:
         # total_hpu_memory = torch.hpu.mem_get_info()[1]
         # A value of 0 is returned to preserve the current logic in
-        # vllm/vllm/engine/arg_utils.py → get_batch_defaults() →
+        # vllm/engine/arg_utils.py → get_batch_defaults() →
         # default_max_num_batched_tokens, in order to avoid the
         # error in hpu_perf_test, while also preventing a
         # NotImplementedError in test_defaults_with_usage_context.
