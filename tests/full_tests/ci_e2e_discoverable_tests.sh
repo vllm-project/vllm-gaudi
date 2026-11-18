@@ -631,7 +631,10 @@ run_pd_disaggregate_nixl_libfabric_test() {
     # The wheel cache is keyed by NIXL version only; keep 1.5 OFI wheels apart from the 0.6 ones.
     cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi_1.5 python install_nixl.py; cd ..
     rm -rf nixl
-    cd ${VLLM_GAUDI_PREFIX}/tests/unit_tests; DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
+    (
+        cd "${VLLM_GAUDI_PREFIX}/tests/unit_tests"
+        DECODER_TP_SIZE=1 NIXL_BUFFER_DEVICE=hpu VLLM_NIXL_BACKEND=OFI bash run_accuracy_test.sh
+    )
     echo "✅ PD disaggregate through NIXL libfabric."
 }
 
