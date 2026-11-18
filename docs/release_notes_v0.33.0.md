@@ -2,11 +2,11 @@
 
 ## Overview
 
-This release is based on [vLLM v0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and supports [Intel® Gaudi® Software v1.24.3](https://docs.habana.ai/en/v1.24.3/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.14.
+This release is based on [vLLM v0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and supports [Intel® Gaudi® Software v1.24.3](https://docs.habana.ai/en/v1.24.3/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.14.1.
 
 ## Highlights
 
-- Enabled the plugin on upstream [vLLM v0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and upgraded the platform to Intel® Gaudi® Software v1.24.3 with PyTorch 2.14.
+- Enabled the plugin on upstream [vLLM v0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and upgraded the platform to Intel® Gaudi® Software v1.24.3 with PyTorch 2.14.1.
 - Added an opt-in native int4 WNA16 MoE path for compressed-tensors models, including non-gated experts for Nemotron-H.
 - Reduced the DeepSeek Sparse Attention decode indexer cost with per-request top-k selection (2.18 ms to 0.30 ms per indexer layer at batch size 32).
 - Validated Phi-4, Phi-4-mini, Nemotron-3-Ultra W4A16, and Granite 4.1 8B, with a LongRoPE rotary embedding fix for Phi-3 and Phi-4-mini.
@@ -88,7 +88,7 @@ This release is based on [vLLM v0.33.0](https://github.com/vllm-project/vllm/rel
 
 ## Deprecation and Breaking Changes
 
-- The platform now requires Intel® Gaudi® Software v1.24.3 with PyTorch 2.14.
+- The platform now requires Intel® Gaudi® Software v1.24.3 with PyTorch 2.14.1.
 - The HPU Seed-OSS model override was removed after upstream vLLM removed the module it extended. ([#1880](https://github.com/vllm-project/vllm-gaudi/pull/1880))
 - NIXL-based KV transfer requires NIXL 1.5.0 or later. The libfabric (OFI) prefill/decode disaggregation path is not validated in this release until an OFI-enabled NIXL 1.5 build is available. ([#1900](https://github.com/vllm-project/vllm-gaudi/pull/1900))
 

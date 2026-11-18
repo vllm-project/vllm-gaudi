@@ -4,9 +4,9 @@ This document provides an overview of the features, changes, and fixes introduce
 
 ## 0.33.0
 
-This release is based on [vLLM 0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and supports [Intel® Gaudi® Software v1.24.3](https://docs.habana.ai/en/v1.24.3/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.14. Key updates include:
+This release is based on [vLLM 0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and supports [Intel® Gaudi® Software v1.24.3](https://docs.habana.ai/en/v1.24.3/Release_Notes/GAUDI_Release_Notes.html) with PyTorch 2.14.1. Key updates include:
 
-- Enabled the plugin on upstream [vLLM v0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and upgraded the platform to Intel® Gaudi® Software v1.24.3 with PyTorch 2.14.
+- Enabled the plugin on upstream [vLLM v0.33.0](https://github.com/vllm-project/vllm/releases/tag/v0.33.0) and upgraded the platform to Intel® Gaudi® Software v1.24.3 with PyTorch 2.14.1.
 - Added an opt-in native int4 WNA16 MoE path for compressed-tensors models, including non-gated experts for Nemotron-H.
 - Reduced the DeepSeek Sparse Attention decode indexer cost with per-request top-k selection.
 - Validated Phi-4, Phi-4-mini, Nemotron-3-Ultra W4A16, and Granite 4.1 8B, with a LongRoPE rotary embedding fix for Phi-3 and Phi-4-mini.
