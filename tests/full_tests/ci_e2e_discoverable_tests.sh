@@ -646,14 +646,14 @@ run_pd_disaggregate_nixl_ucx_test() {
 # CPU Offloading connector
 run_cpu_offloading_test() {
     echo "➡️ Testing CPU offlading."
-    VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 \
+    VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/kv_offload/test_cpu_offloading.py"
     echo "✅ Test CPU offlading passed."
 }
 
 run_offloading_connector_test() {
     echo "➡️ Testing OffloadingConnector."
-    VLLM_SKIP_WARMUP=True VLLM_USE_V1=1 \
+    VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/unit_tests/kv_offload/offloading_connector"
     echo "✅ Test OffloadingConnector passed."
 }
