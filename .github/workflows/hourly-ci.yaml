@@ -11,8 +11,9 @@ on:
   # A green manual run counts as a PASS and therefore clears an active back-off,
   # restoring the 8h cadence at the next tick; a red manual run is ignored.
   schedule:
-    # Runs at minute 0, every 8th hour (00:00, 08:00, 16:00 UTC)
-    - cron: '0 */8 * * *'
+    # Every 8th hour at minute 17 (00:17, 08:17, 16:17 UTC). GitHub delays
+    # scheduled runs most at the start of the hour, so avoid minute 0.
+    - cron: '17 */8 * * *'
 
   # Allow manual triggering from the GitHub Actions UI
   workflow_dispatch: {}
@@ -31,6 +32,7 @@ jobs:
   gate:
     # Runs on a cheap GitHub-hosted runner so a "skip" never locks an HPU runner.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       actions: read # Required to query this workflow's previous runs and their jobs
     outputs:
@@ -163,6 +165,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.should_run == 'true'
     runs-on: hourly-ci # Picks any available runner from the 'hourly-ci' pool
+    timeout-minutes: 15
     outputs:
       runner_name: ${{ steps.get_name.outputs.name }}
     steps:
@@ -183,6 +186,7 @@ jobs:
     needs: [gate, discover_tests, discover_runner]
     # <-- UPDATED: Runs on the specific runner from the discover_runner job
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 90
     permissions:
       contents: read # Required to checkout code and read history
     outputs:
@@ -258,6 +262,7 @@ jobs:
     needs: [setup_and_build, discover_runner]
     # <-- UPDATED: Runs on the specific runner
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 45
     environment: approved-workflow
     steps:
       - name: Run pytest in tests/unit_tests
@@ -266,6 +271,9 @@ jobs:
           remove_docker_containers() { docker rm -f hpu-plugin-v1-test-unit-tests-hourly-ci || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
+          # Also remove leftovers of timed-out jobs: the fixed -hourly-ci names
+          # and this run's e2e names, which end in the run id.
+          docker ps -aq --filter "name=-hourly-ci" --filter "name=-${GITHUB_RUN_ID:?}" | xargs -r docker rm -f || true
 
           echo "Running HPU plugin v1 unit tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-unit-tests-hourly-ci --network=host \
@@ -285,6 +293,7 @@ jobs:
     needs: discover_runner
     # <-- UPDATED: Runs on the specific runner
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 15
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -315,6 +324,7 @@ jobs:
     needs: [setup_and_build, discover_tests, discover_runner]
     # <-- UPDATED: Runs on the specific runner
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 60
     environment: approved-workflow
     strategy:
       fail-fast: false
@@ -331,6 +341,9 @@ jobs:
           remove_docker_containers() { docker rm -f $CONTAINER_NAME || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
+          # Also remove leftovers of timed-out jobs: the fixed -hourly-ci names
+          # and this run's e2e names, which end in the run id.
+          docker ps -aq --filter "name=-hourly-ci" --filter "name=-${GITHUB_RUN_ID:?}" | xargs -r docker rm -f || true
 
           echo "Running HPU plugin test: ${{ matrix.test_function }}"
           docker run --rm --runtime=habana --name=$CONTAINER_NAME --network=host \
@@ -351,6 +364,7 @@ jobs:
     needs: [setup_and_build, discover_runner]
     # <-- UPDATED: Runs on the specific runner
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 30
     environment: approved-workflow
     steps:
       - name: Run Data Parallel test
@@ -359,6 +373,9 @@ jobs:
           remove_docker_containers() { docker rm -f hpu-plugin-v1-test-dp-tests-hourly-ci || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
+          # Also remove leftovers of timed-out jobs: the fixed -hourly-ci names
+          # and this run's e2e names, which end in the run id.
+          docker ps -aq --filter "name=-hourly-ci" --filter "name=-${GITHUB_RUN_ID:?}" | xargs -r docker rm -f || true
 
           echo "Running HPU plugin v1 dp tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-dp-tests-hourly-ci --network=host \
@@ -380,6 +397,7 @@ jobs:
     needs: [setup_and_build, discover_runner]
     # <-- UPDATED: Runs on the specific runner
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 60
     environment: approved-workflow
     steps:
       - name: Run PD disaggregate test
@@ -388,6 +406,9 @@ jobs:
           remove_docker_containers() { docker rm -f hpu-plugin-v1-test-pd-tests-hourly-ci || true; }
           trap 'remove_docker_containers; exit $EXITCODE;' EXIT
           remove_docker_containers
+          # Also remove leftovers of timed-out jobs: the fixed -hourly-ci names
+          # and this run's e2e names, which end in the run id.
+          docker ps -aq --filter "name=-hourly-ci" --filter "name=-${GITHUB_RUN_ID:?}" | xargs -r docker rm -f || true
 
           echo "Running HPU plugin v1 nixl pd tests"
           docker run --rm --runtime=habana --name=hpu-plugin-v1-test-pd-tests-hourly-ci --network=host \
@@ -412,6 +433,7 @@ jobs:
     needs: [setup_and_build, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test, discover_runner]
     # <-- UPDATED: Runs on the specific runner
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 15
     permissions:
       contents: write # Permission is required to push a commit
     steps:
@@ -461,8 +483,11 @@ jobs:
     if: always() && needs.discover_runner.result == 'success'
     needs: [discover_runner, run_unit_tests, e2e, run_data_parallel_test, run_pd_disaggregate_test]
     runs-on: ${{ needs.discover_runner.outputs.runner_name }}
+    timeout-minutes: 15
     steps:
       - name: Remove Docker image to free up space
         run: |
+          echo "Removing leftover hourly-ci containers..."
+          docker ps -aq --filter "name=-hourly-ci" --filter "name=-${GITHUB_RUN_ID:?}" | xargs -r docker rm -f || true
           echo "Cleaning up Docker images created by this workflow run..."
           docker rmi -f hpu-plugin-v1-test-env-hourly-ci || true
