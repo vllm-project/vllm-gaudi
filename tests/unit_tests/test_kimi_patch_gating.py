@@ -688,6 +688,75 @@ def test_k3_tagged_decoder_layer_returns_the_bank_state_and_a_standalone_one_a_p
         kda.forward_attn_residual_functional(standalone_layer, None, hidden, blocks, delta)[1], torch.Tensor)
 
 
+def _install_with_loader(arch_modules):
+    """Gives the stub KimiLinearModel a recording load_weights, then runs _patch_kimi_k3_arch."""
+    loaded = []
+
+    def load_weights(self, weights):
+        loaded.extend(weights)
+        return {name for name, _ in loaded}
+
+    arch_modules.test_linear.KimiLinearModel.load_weights = load_weights
+    arch_modules._patch_kimi_k3_arch()
+    return loaded
+
+
+_WEIGHTS = [("model.layers.0.self_attn.q_proj.weight", torch.zeros(1)),
+            ("model.layers.0.self_attn.indexer.wq_b.weight", torch.ones(1)),
+            ("model.layers.1.mlp.up_proj.weight", torch.zeros(2)),
+            ("model.layers.1.self_attn.indexer.k_norm.weight", torch.ones(2))]
+
+
+def test_k3_load_weights_skips_the_dsa_indexer_tensors_and_warns_once(arch_modules, monkeypatch):
+    warnings = _capture_kimi_warnings(arch_modules, monkeypatch)
+    loaded = _install_with_loader(arch_modules)
+
+    model = arch_modules.test_k3_model().model
+    model.load_weights(iter(_WEIGHTS))
+
+    assert [name for name, _ in loaded] == [_WEIGHTS[0][0], _WEIGHTS[2][0]]
+    assert loaded[0][1] is _WEIGHTS[0][1] and loaded[1][1] is _WEIGHTS[2][1]
+    assert len(warnings) == 1 and "DSA indexer" in warnings[0]
+
+
+def test_k3_load_weights_without_indexer_tensors_does_not_warn(arch_modules, monkeypatch):
+    warnings = _capture_kimi_warnings(arch_modules, monkeypatch)
+    loaded = _install_with_loader(arch_modules)
+
+    arch_modules.test_k3_model().model.load_weights(iter([_WEIGHTS[0], _WEIGHTS[2]]))
+
+    assert [name for name, _ in loaded] == [_WEIGHTS[0][0], _WEIGHTS[2][0]]
+    assert warnings == []
+
+
+def test_standalone_kimi_linear_load_weights_gets_the_untouched_iterable(arch_modules, monkeypatch):
+    warnings = _capture_kimi_warnings(arch_modules, monkeypatch)
+    received = []
+
+    def load_weights(self, weights):
+        received.append(weights)
+        return set()
+
+    arch_modules.test_linear.KimiLinearModel.load_weights = load_weights
+    arch_modules._patch_kimi_k3_arch()
+    weights = iter(_WEIGHTS)
+
+    arch_modules.test_linear.KimiLinearModel().load_weights(weights)
+
+    assert received == [weights] and received[0] is weights
+    assert list(weights) == _WEIGHTS
+    assert warnings == []
+
+
+def test_patching_twice_wraps_load_weights_once(arch_modules):
+    _install_with_loader(arch_modules)
+    wrapped = arch_modules.test_linear.KimiLinearModel.load_weights
+    arch_modules._patch_kimi_k3_arch()
+
+    assert arch_modules.test_linear.KimiLinearModel.load_weights is wrapped
+    assert arch_modules.test_linear.KimiLinearModel._patched_skip_indexer
+
+
 def test_kimi_moe_forward_flattens_only_for_k3_layers(arch_modules):
     _forward_wrapper(arch_modules)
     x = torch.zeros(2, 3, 4)
