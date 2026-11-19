@@ -38,6 +38,11 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
+            // GitHub ends a hosted-runner job after 6 h whatever timeout-minutes
+            // says, and the cleanup step would then cancel the test run. Stop
+            // waiting before that and leave the run going, so its results stay.
+            const POLL_DEADLINE = Date.now() + 345 * 60 * 1000;  // 5 h 45 min
+
             const pr = context.payload.pull_request;
 
             if (!pr) {
@@ -107,9 +112,18 @@ jobs:
               core.setFailed(`CI blocked: ${reason}`);
             }
 
+            // Fails the check without cancelling the run; the cleanup step
+            // skips the cancel when left_running is set.
+            function leaveRunning(id, what) {
+              core.setOutput('left_running', 'true');
+              core.setFailed(`Stopped waiting for ${what} before the 6 h job limit. ` +
+                `The test run goes on; see its result at ` +
+                `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${id}`);
+            }
+
             // Legacy pre-merge.yaml: the result is the whole run's conclusion.
             async function waitForRun(id) {
-              for (let i = 0; i < 4320; i++) {
+              for (let i = 1; Date.now() < POLL_DEADLINE; i++) {
                 try {
                   const { data: run } = await github.rest.actions.getWorkflowRun({
                     owner: context.repo.owner, repo: context.repo.repo, run_id: id,
@@ -119,14 +133,13 @@ jobs:
                       core.setFailed(`pre-merge ${run.conclusion}: ${run.html_url}`);
                     return;
                   }
-                  core.info(`Status: ${run.status} (${i + 1}/4320)`);
+                  core.info(`Status: ${run.status} (poll ${i})`);
                 } catch (e) {
                   core.warning(`getWorkflowRun transient error: ${e.message}`);
                 }
                 await new Promise(r => setTimeout(r, 10000));
               }
-              await cancelDispatchedRun(id, 'trigger poll timeout (12 h)');
-              core.setFailed('Timed out (12 h) waiting for pre-merge.yaml');
+              leaveRunning(id, 'pre-merge.yaml');
             }
 
             // Contract 2: the result is the pre_merge_hpu_test job alone, so the
@@ -136,7 +149,7 @@ jobs:
             // the run.
             async function waitForGate(id) {
               const GATE = 'pre_merge_hpu_test';
-              for (let i = 0; i < 1440; i++) {
+              for (let i = 1; Date.now() < POLL_DEADLINE; i++) {
                 try {
                   // Read the run first: if it had already ended, the job list
                   // below is final.
@@ -171,14 +184,13 @@ jobs:
                     core.setFailed(`pre-merge ${run.conclusion} without a ${GATE} result: ${run.html_url}`);
                     return;
                   }
-                  core.info(`Status: ${run.status}, ${GATE}: ${gates[0]?.status ?? 'not started'} (${i + 1}/1440)`);
+                  core.info(`Status: ${run.status}, ${GATE}: ${gates[0]?.status ?? 'not started'} (poll ${i})`);
                 } catch (e) {
                   core.warning(`Transient error while polling: ${e.message}`);
                 }
                 await new Promise(r => setTimeout(r, 30000));
               }
-              await cancelDispatchedRun(id, 'trigger poll timeout (12 h)');
-              core.setFailed(`Timed out (12 h) waiting for ${GATE}`);
+              leaveRunning(id, GATE);
             }
 
             const headSha   = pr.head.sha;
@@ -338,13 +350,14 @@ jobs:
             core.info(`Dispatched run ${runId}: ${dispatched.html_url}`);
             core.setOutput('run_id', String(runId));
 
-            // 3. Wait for the result (12 h max).
+            // 3. Wait for the result (until POLL_DEADLINE).
             if (contract2) await waitForGate(runId);
             else await waitForRun(runId);
 
       - name: Cancel dispatched run if trigger was cancelled or failed
-        # Not after a finished gate: the run is then done apart from cleanup.
-        if: always() && steps.dispatch.outputs.run_id != '' && steps.dispatch.outputs.gate_done != 'true'
+        # Not after a finished gate (the run is then done apart from cleanup),
+        # and not when the poller stopped before the job limit (left_running).
+        if: always() && steps.dispatch.outputs.run_id != '' && steps.dispatch.outputs.gate_done != 'true' && steps.dispatch.outputs.left_running != 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           RUN_ID: ${{ steps.dispatch.outputs.run_id }}
