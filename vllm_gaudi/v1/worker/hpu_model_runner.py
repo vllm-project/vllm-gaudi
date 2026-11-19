@@ -2174,6 +2174,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     block_ids.extend(new_ids)
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
+            # After a sync KV-load failure the scheduler discards the failed step's sampled token; drop it here too,
+            # or it becomes the next input token and stays in the output.
+            num_output_tokens = req_data.num_output_tokens[i]
+            if is_last_rank and num_output_tokens < len(req_state.output_token_ids):
+                del req_state.output_token_ids[num_output_tokens:]
+                if req_index is not None:
+                    # The request's own prompt length: the row's num_prompt_tokens may already include outputs.
+                    num_tokens = req_state.num_prompt_tokens + num_output_tokens
+                    self.input_batch.num_tokens_no_spec[req_index] = num_tokens
+                    self.input_batch.num_tokens[req_index] = num_tokens
+            # The failure also rolled num_computed_tokens back. As add_request does for a resumed request, count the
+            # known outputs as prompt, so that only the chunk reaching the end samples a token. Sync only: under async
+            # scheduling the scheduler keeps the discarded token as a placeholder.
+            if (req_index is not None and not self.use_async_scheduling
+                    and num_computed_tokens < req_state.num_tokens - 1
+                    and self.input_batch.num_prompt_tokens[req_index] < req_state.num_tokens):
+                self.input_batch.num_prompt_tokens[req_index] = req_state.num_tokens
+                self.input_batch._invalidate_prompt_token_ids_cache()
             if req_index is None:
                 # The request is running but was not scheduled in the previous step, so it must be added again.
                 # Under async scheduling its last sampled id may still be a -1 placeholder: it is this step's
@@ -3066,10 +3084,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_output_logits = seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1
             else:
                 num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
-            # Cap to scheduled tokens (needed when decode recomputation
-            # requests are routed through the prefill path).
-            num_output_logits = min(num_output_logits, seq_num_scheduled_tokens)
-            logits_positions = list(range(seq_num_scheduled_tokens - num_output_logits, seq_num_scheduled_tokens))
+            # Sample only the last position. A request recomputing past its prompt would otherwise get a row per
+            # position: appended to its output, or, under async scheduling, shifting every later request's row.
+            num_output_logits = min(num_output_logits, 1)
+            # Drafts scheduled with a recompute are not verified on this path: sample after the last real token, so
+            # the scheduler counts every draft as rejected.
+            num_spec_tokens = int(self.input_batch.num_tokens[batch_idx] -
+                                  self.input_batch.num_tokens_no_spec[batch_idx])
+            last_position = seq_num_scheduled_tokens - num_spec_tokens
+            logits_positions = list(range(last_position - num_output_logits, last_position))
 
             new_batch_contents = BatchContents(
                 req_ids=[req_id],
