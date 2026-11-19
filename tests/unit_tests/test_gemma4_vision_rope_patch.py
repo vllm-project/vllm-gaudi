@@ -1,4 +1,5 @@
-"""Tests for the Gemma4 vision RoPE patch."""
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 import torch
