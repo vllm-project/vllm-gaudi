@@ -4915,10 +4915,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 prompt_hidden_states = non_flattened_hidden_states
                 if prompt_hidden_states.dim() == 2:
                     prompt_hidden_states = prompt_hidden_states.view(*token_ids.shape, -1)
+                merged_starts = None
                 for i, rid in enumerate(req_id):
                     if rid in self.input_batch.num_prompt_logprobs:
-                        prefill_hidden_states_for_logprobs[rid] = \
-                            prompt_hidden_states[i]
+                        if self.use_merged_prefill:
+                            # Merged prefill packs the batch into one row, one request after another. Offsets come
+                            # from host-side lengths: prompt_len is a device tensor.
+                            if merged_starts is None:
+                                lens = [scheduler_output.num_scheduled_tokens[r] for r in req_id]
+                                merged_starts = [0, *itertools.accumulate(lens)]
+                            prefill_hidden_states_for_logprobs[rid] = \
+                                prompt_hidden_states[0, merged_starts[i]:merged_starts[i + 1]]
+                        else:
+                            prefill_hidden_states_for_logprobs[rid] = \
+                                prompt_hidden_states[i]
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
