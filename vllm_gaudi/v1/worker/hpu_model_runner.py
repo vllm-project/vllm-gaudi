@@ -2729,19 +2729,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 continue
 
             if self.use_async_spec_decode and is_last_rank:
-                # The scheduler counts outputs it has not seen yet as
-                # placeholders, and the last step's drafts as accepted. Mirror
-                # its count; update_async_output_token_ids splices the real ids
-                # over the placeholders when penalties need them.
-                num_output_tokens = req_data.num_output_tokens[i]
-                output_token_ids = req_state.output_token_ids
-                if len(output_token_ids) > num_output_tokens:
-                    del output_token_ids[num_output_tokens:]
-                else:
-                    output_token_ids.extend([-1] * (num_output_tokens - len(output_token_ids)))
-                end_token_index = self.input_batch.num_prompt_tokens[req_index] + num_output_tokens
-                self.input_batch.num_tokens_no_spec[req_index] = end_token_index
-                self.input_batch.num_tokens[req_index] = end_token_index
+                self._mirror_scheduled_output_count(req_state, req_index, req_data.num_output_tokens[i])
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (num_computed_tokens)
@@ -2845,6 +2833,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not self.use_async_spec_decode or self._async_spec_prev_num_drafts is None:
             return None
         return (self._async_spec_prev_num_drafts + 1).tolist()
+
+    def _mirror_scheduled_output_count(self, req_state: CachedRequestState, req_index: int,
+                                       num_output_tokens: int) -> None:
+        """Async speculative decoding: give a running request as many outputs as the scheduler counts.
+
+        The scheduler counts outputs it has not seen yet as placeholders, and
+        the last step's drafts as accepted; update_async_output_token_ids
+        splices the real ids over the placeholders when penalties need them.
+        The row then holds the request's own prompt and those outputs. Its
+        num_prompt_tokens is no base for that: for a request resumed after
+        preemption it also counts the outputs from before (see
+        InputBatch.add_request).
+        """
+        output_token_ids = req_state.output_token_ids
+        if len(output_token_ids) > num_output_tokens:
+            del output_token_ids[num_output_tokens:]
+        else:
+            output_token_ids.extend([-1] * (num_output_tokens - len(output_token_ids)))
+        num_tokens = req_state.num_prompt_tokens + num_output_tokens
+        self.input_batch.num_tokens_no_spec[req_index] = num_tokens
+        self.input_batch.num_tokens[req_index] = num_tokens
 
     def _repair_skipped_spec_request(self, req_id: str, output_token_ids: list[int], num_output_tokens: int) -> None:
         """_repair_skipped_request_placeholder for async speculative decoding.

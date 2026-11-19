@@ -290,6 +290,24 @@ def test_skipped_request_resumes_with_its_last_steps_tokens():
     HPUModelRunner._check_readded_request_inputs("r", state, 3 + 5 - 1)
 
 
+def test_resumed_request_counts_its_earlier_outputs_once():
+    """A request resumed after preemption with 3 prompt tokens and 2 outputs: add_request counts the outputs as
+    prompt in its row (num_prompt_tokens 5), so that the recompute samples only at the end. The scheduler now counts
+    4 outputs, 2 of them placeholders for a step whose draft it counts as accepted: the row holds 3 + 4 tokens."""
+    input_batch = types.SimpleNamespace(num_prompt_tokens=np.array([5], dtype=np.int32),
+                                        num_tokens=np.zeros(1, dtype=np.int32),
+                                        num_tokens_no_spec=np.zeros(1, dtype=np.int32))
+    runner = types.SimpleNamespace(input_batch=input_batch)
+    state = types.SimpleNamespace(num_prompt_tokens=3, output_token_ids=[7, 8])
+    HPUModelRunner._mirror_scheduled_output_count(runner, state, 0, 4)
+    assert state.output_token_ids == [7, 8, -1, -1]
+    assert input_batch.num_tokens.tolist() == [7] and input_batch.num_tokens_no_spec.tolist() == [7]
+    # The draft was rejected: the scheduler's count drops by one, and so do the list and the row.
+    HPUModelRunner._mirror_scheduled_output_count(runner, state, 0, 3)
+    assert state.output_token_ids == [7, 8, -1]
+    assert input_batch.num_tokens.tolist() == [6] and input_batch.num_tokens_no_spec.tolist() == [6]
+
+
 def test_spec_rows_pad_single_tokens():
     spec = torch.tensor([[1, 2], [3, -1], [9, 9]], dtype=torch.int32)
     assert HPUModelRunner._as_spec_rows(spec, 2, 2).tolist() == [[1, 2], [3, -1]]
