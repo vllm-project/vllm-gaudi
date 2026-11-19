@@ -1125,6 +1125,8 @@ class HpuKVConnectorModelRunnerMixin:
             kv_connector = get_kv_transfer_group()
             assert isinstance(kv_connector, KVConnectorBase)
             assert scheduler_output.kv_connector_metadata is not None
+            # Finish async saves from blocks this step reuses before the forward overwrites them.
+            kv_connector.handle_preemptions(scheduler_output.kv_connector_metadata)
             kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
 
             # Background KV cache transfers happen here.

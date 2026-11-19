@@ -4,6 +4,7 @@
 import pytest
 import torch
 from types import SimpleNamespace
+from unittest.mock import call, create_autospec
 import habana_frameworks.torch  # noqa: F401
 from habana_frameworks.torch.utils.internal import is_lazy
 from vllm.model_executor.model_loader import get_model
@@ -594,6 +595,27 @@ def test_update_states_kv_load_failure_drops_discarded_output(model_runner, dist
     assert model_runner.requests[req_id].output_token_ids == [4, 5]
     assert batch.num_tokens_no_spec[row] == batch.num_tokens[row] == batch.num_prompt_tokens[row] == 5
     assert recompute_chunk(4, 1) == [[[0]]]
+
+
+def test_maybe_setup_kv_connector_handles_preemptions_before_load(monkeypatch):
+    """The connector flushes saves from reused blocks before this step's metadata is bound and its loads start."""
+    import vllm_gaudi.v1.worker.hpu_model_runner as runner_module
+    from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+
+    connector = create_autospec(KVConnectorBase_V1, instance=True)
+    monkeypatch.setattr(runner_module, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(runner_module, "get_kv_transfer_group", lambda: connector)
+    monkeypatch.setattr(runner_module, "get_forward_context", lambda: None)
+    metadata = object()
+
+    runner_module.HpuKVConnectorModelRunnerMixin.maybe_setup_kv_connector(
+        SimpleNamespace(kv_connector_metadata=metadata))
+
+    assert connector.mock_calls == [
+        call.handle_preemptions(metadata),
+        call.bind_connector_metadata(metadata),
+        call.start_load_kv(None),
+    ]
 
 
 def test_selective_sampling_metadata_passes_outputs_only_to_penalty_rows(model_runner, dist_init):
