@@ -30,7 +30,8 @@ def _blk_constants(batch_size: int, width: int, block_size: int, device) -> _Blk
     The dict is capped at ``_BLK_CACHE_MAX`` entries with FIFO eviction, so memory stays bounded no
     matter how many shapes appear. Keys are (batch, width, block_size, torch.device) tuples: device is
     hashable and compares by (type, index), so an equal device object always hits. No lock: CPython dict
-    get/set are GIL-atomic, and a torn concurrent first insert only rebuilds the constants once more.
+    get/set are GIL-atomic, a torn concurrent first insert only rebuilds the constants once more, and the
+    eviction pop uses a default so a concurrent evict can never raise.
     """
     key = (batch_size, width, block_size, device)
     hit = _BLK_CACHE.get(key)
@@ -40,7 +41,7 @@ def _blk_constants(batch_size: int, width: int, block_size: int, device) -> _Blk
         pad_row = torch.full((1, block_size), -torch.inf, dtype=torch.float32, device=device)
         hit = (rows_int, pad_block_row, pad_row)
         if len(_BLK_CACHE) >= _BLK_CACHE_MAX:
-            del _BLK_CACHE[next(iter(_BLK_CACHE))]  # FIFO: drop the oldest shape
+            _BLK_CACHE.pop(next(iter(_BLK_CACHE)), None)  # FIFO: drop oldest; default makes concurrent evict safe
         _BLK_CACHE[key] = hit
     return hit
 
@@ -122,7 +123,7 @@ def forward_hpu(self, hidden_states, q, k, weights):
     scores = torch.where(mask, scores[None, :, :], -torch.inf)
     topk = min(self.topk_tokens, slots.numel())
     selected_scores, indices = scores.flatten(1).topk(topk, dim=-1)
-    selected_slots = slots_flat[indices.int()].masked_fill(selected_scores == -torch.inf, -1)
+    selected_slots = slots_flat[indices].masked_fill(selected_scores == -torch.inf, -1)
 
     self.topk_indices_buffer[:batch_size, :topk] = selected_slots
     if topk < self.topk_tokens:

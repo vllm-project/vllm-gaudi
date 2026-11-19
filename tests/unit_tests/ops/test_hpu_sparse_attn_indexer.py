@@ -250,21 +250,22 @@ def test_shape_constant_cache(monkeypatch):
     indexer._reset_block_cache()
     monkeypatch.setattr(indexer, "_BLK_CACHE_MAX", 3)
     try:
-        dev0 = torch.device("cpu", 0)
-        dev1 = torch.device("cpu", 1)
-        t0 = indexer._blk_constants(2, 64, 128, dev0)
-        t1 = indexer._blk_constants(4, 64, 128, dev1)
-        # a fresh but equal device object (same type and index) must hit the same entry
-        assert indexer._blk_constants(2, 64, 128, torch.device("cpu", 0)) is t0
+        cpu = torch.device("cpu")
+        meta = torch.device("meta")  # distinct, zero-allocation device available in any build
+        t0 = indexer._blk_constants(2, 64, 128, cpu)
+        t1 = indexer._blk_constants(4, 64, 128, meta)
+        # a fresh but equal device object (same type) must hit the same entry
+        assert indexer._blk_constants(2, 64, 128, torch.device("cpu")) is t0
         assert len(indexer._BLK_CACHE) == 2
         # at the cap, FIFO eviction drops the oldest entry before the new one is stored
-        indexer._blk_constants(8, 64, 128, dev1)
-        indexer._blk_constants(16, 64, 128, dev1)
+        indexer._blk_constants(8, 64, 128, cpu)
+        indexer._blk_constants(16, 64, 128, cpu)
         assert len(indexer._BLK_CACHE) <= 3
-        assert (4, 64, 128, dev1) in indexer._BLK_CACHE
-        assert (2, 64, 128, dev0) not in indexer._BLK_CACHE
-        rows_int, pad_block_row, pad_row = t1
-        assert rows_int.tolist() == [[i * 64] for i in range(4)]  # shape (B, 1)
+        assert (4, 64, 128, meta) in indexer._BLK_CACHE
+        assert (2, 64, 128, cpu) not in indexer._BLK_CACHE
+        rows_int, pad_block_row, pad_row = t0
+        assert rows_int.tolist() == [[i * 64] for i in range(2)]  # shape (B, 1)
+        assert rows_int.device == cpu
         assert rows_int.dtype == torch.int32
         assert pad_block_row.tolist() == [0] and pad_block_row.dtype == torch.int32
         assert bool((pad_row == float("-inf")).all()) and pad_row.dtype == torch.float32
