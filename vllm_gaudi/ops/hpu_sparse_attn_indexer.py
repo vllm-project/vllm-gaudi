@@ -3,15 +3,21 @@
 
 Scoring (bf16 BMM, then FP32 ReLU weighted-sum) keeps the previous FP32 score values; the decode path
 removes the per-step index work instead. All HPU index arithmetic uses 1-D flat int32 ``index_select``
-(2-D int64 gathers fail HPU torch.compile), and the per-shape index constants (block-row offsets, -inf pad
-row) are cached across steps.
+(2-D int64 gathers fail HPU torch.compile). The per-shape index constants (block-row offsets, -inf pad row)
+are cached across steps in a small bounded dict keyed by (batch, width, block_size, device).
 """
 
 import torch
 from vllm.forward_context import get_forward_context
 
 _BlkTriple = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-_BLK_CACHE: dict[tuple[int, int, int, str], _BlkTriple] = {}
+_BLK_CACHE: dict[tuple[int, int, int, torch.device], _BlkTriple] = {}
+_BLK_CACHE_MAX = 32
+
+
+def _reset_block_cache() -> None:
+    """Drop all cached per-shape index constants (test/ops hook; also frees their device memory)."""
+    _BLK_CACHE.clear()
 
 
 def _blk_constants(batch_size: int, width: int, block_size: int, device) -> _BlkTriple:
@@ -20,14 +26,21 @@ def _blk_constants(batch_size: int, width: int, block_size: int, device) -> _Blk
     ``rows_int`` = arange(batch_size, int32)[:, None] * width  (per-request flat-index base, shape (B, 1)).
     ``pad_block_row`` = one int32 zero block id appended so ``block_index`` entries equal to block_count stay valid.
     ``pad_row`` = one -inf score row (the padding candidate every short request sees).
+
+    The dict is capped at ``_BLK_CACHE_MAX`` entries with FIFO eviction, so memory stays bounded no
+    matter how many shapes appear. Keys are (batch, width, block_size, torch.device) tuples: device is
+    hashable and compares by (type, index), so an equal device object always hits. No lock: CPython dict
+    get/set are GIL-atomic, and a torn concurrent first insert only rebuilds the constants once more.
     """
-    key = (batch_size, width, block_size, str(device))
+    key = (batch_size, width, block_size, device)
     hit = _BLK_CACHE.get(key)
     if hit is None:
         rows_int = torch.arange(batch_size, dtype=torch.int32, device=device)[:, None] * width
         pad_block_row = torch.zeros(1, dtype=torch.int32, device=device)
         pad_row = torch.full((1, block_size), -torch.inf, dtype=torch.float32, device=device)
         hit = (rows_int, pad_block_row, pad_row)
+        if len(_BLK_CACHE) >= _BLK_CACHE_MAX:
+            del _BLK_CACHE[next(iter(_BLK_CACHE))]  # FIFO: drop the oldest shape
         _BLK_CACHE[key] = hit
     return hit
 
