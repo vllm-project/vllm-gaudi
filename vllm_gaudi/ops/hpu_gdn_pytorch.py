@@ -832,7 +832,7 @@ def hpu_chunk_gated_delta_rule(
     requires a device-to-host sync) and constructs uniform seq_ranges
     directly.  This makes the function fully compilable with torch.compile.
     """
-    # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py#L132
+    # https://github.com/vllm-project/vllm/blob/34b780fe66bdf3df173358774eb4f29f684b8368/vllm/third_party/flash_linear_attention/ops/chunk_scaled_dot_kkt.py#L149
     B, T, H, Kdim = q.shape
     _, _, HV, Vdim = v.shape
     device = q.device

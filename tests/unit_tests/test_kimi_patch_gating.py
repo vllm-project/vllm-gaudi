@@ -284,6 +284,8 @@ def config_patches(monkeypatch):
         module(name)
     module("vllm.platforms", current_platform=types.SimpleNamespace(device_type="hpu"))
     module("vllm_gaudi.attention.oot_mla", _DummyPrefillBackend=dummy_backend)
+    module("vllm_gaudi.models")
+    video = module("vllm_gaudi.models.kimi_k3_video", limit_video_loader_frames=lambda cfg: None)
     monkeypatch.setitem(sys.modules, "vllm.v1.attention.backends.mla.prefill.selector", selector)
     monkeypatch.setitem(sys.modules, "vllm.model_executor.layers.attention.mla_attention", mla_attention)
 
@@ -294,6 +296,7 @@ def config_patches(monkeypatch):
     mod._patch_kimi_k3_hybrid_config()
     mod._patch_mla_prefill_selector()
     mod.test_model_config = ModelConfig
+    mod.test_video = video
     mod.test_selector = selector
     mod.test_dummy = dummy_backend
     yield mod
@@ -318,6 +321,51 @@ def test_k3_config_disables_moe_padding(config_patches, architectures):
     cfg = config_patches.test_model_config(architectures)
 
     assert cfg.hf_config.min_moe_intermediate_per_partition == 1
+
+
+def _capture_kimi_warnings(config_patches, monkeypatch):
+    warnings = []
+    stub = types.SimpleNamespace(warning=lambda msg, *args: warnings.append(msg % args), debug=lambda *a, **k: None)
+    monkeypatch.setattr(config_patches, "_kimi_patch_logger", lambda: stub)
+    return warnings
+
+
+def test_k3_config_build_survives_a_failing_video_frame_cap(config_patches, monkeypatch):
+
+    def failing_cap(cfg):
+        raise RuntimeError("no multimodal config")
+
+    config_patches.test_video.limit_video_loader_frames = failing_cap
+    warnings = _capture_kimi_warnings(config_patches, monkeypatch)
+
+    cfg = config_patches.test_model_config(["KimiK3ForConditionalGeneration"])
+
+    assert cfg.hf_config.min_moe_intermediate_per_partition == 1
+    assert "RuntimeError" in config_patches._KIMI_PATCHES_FAILED["video_frame_cap"]
+    assert any("'video_frame_cap' was not installed" in w for w in warnings)
+
+
+def test_k3_config_build_applies_the_video_frame_cap_and_reports_nothing(config_patches, monkeypatch):
+    capped = []
+    config_patches.test_video.limit_video_loader_frames = capped.append
+    warnings = _capture_kimi_warnings(config_patches, monkeypatch)
+
+    cfg = config_patches.test_model_config(["KimiK3ForConditionalGeneration"])
+
+    assert capped == [cfg]
+    assert "video_frame_cap" not in config_patches._KIMI_PATCHES_FAILED
+    assert not warnings
+
+
+def test_non_k3_config_build_does_not_apply_the_video_frame_cap(config_patches, monkeypatch):
+    capped = []
+    config_patches.test_video.limit_video_loader_frames = capped.append
+    warnings = _capture_kimi_warnings(config_patches, monkeypatch)
+
+    config_patches.test_model_config(["Llama4ForConditionalGeneration"])
+
+    assert not capped
+    assert not warnings
 
 
 @pytest.mark.parametrize("architectures", [["Kimi_K25ForConditionalGeneration"], ["DeepseekV3ForCausalLM"]])
@@ -520,12 +568,16 @@ def arch_modules(kda_modules, monkeypatch):
         def forward(self, hidden_states):
             return hidden_states
 
+    class KimiDecoderLayer(torch.nn.Module):
+        pass
+
     class KimiK3ForConditionalGeneration(torch.nn.Module):
 
         def __init__(self, *args, **kwargs):
             super().__init__()
             self.model = KimiLinearModel()
             self.moe = KimiMoE()
+            self.layer = KimiDecoderLayer()
 
     class KimiK3MTP(KimiK3ForConditionalGeneration):
         pass
@@ -539,6 +591,7 @@ def arch_modules(kda_modules, monkeypatch):
     linear = module("vllm.models.kimi_k3.amd.linear",
                     KimiLinearModel=KimiLinearModel,
                     KimiMoE=KimiMoE,
+                    KimiDecoderLayer=KimiDecoderLayer,
                     KimiLinearForCausalLM=object,
                     KimiK3MultiHeadLatentAttentionWrapper=object)
     module("vllm.models.kimi_k3.amd.mla", KimiK3MultiHeadLatentAttentionWrapper=object)
@@ -605,8 +658,29 @@ def test_k3_construction_tags_shared_layers_and_runs_in_the_build_context(arch_m
 
     assert k3_cls.__init__ is wrapped
     assert seen == [True] and not building_kimi_k3()
-    assert model.model._hpu_kimi_k3 and model.moe._hpu_kimi_k3
+    assert model.model._hpu_kimi_k3 and model.moe._hpu_kimi_k3 and model.layer._hpu_kimi_k3
     assert not hasattr(arch_modules.test_linear.KimiMoE(), "_hpu_kimi_k3")
+    assert not hasattr(arch_modules.test_linear.KimiDecoderLayer(), "_hpu_kimi_k3")
+
+
+def test_k3_tagged_decoder_layer_returns_the_bank_state_and_a_standalone_one_a_plain_bank(arch_modules):
+    from vllm_gaudi.ops import hpu_kda_pytorch as kda
+    _forward_wrapper(arch_modules)
+    k3_layer = arch_modules.test_k3_model().layer
+    standalone_layer = arch_modules.test_linear.KimiDecoderLayer()
+    for layer in (k3_layer, standalone_layer):
+        layer.is_block_write_layer, layer.block_write_idx, layer.prev_valid_blocks = False, -1, 1
+        layer.self_attention_res_proj = layer.mlp_res_proj = types.SimpleNamespace(weight=torch.ones(1, 4))
+        layer.self_attention_res_norm = layer.mlp_res_norm = types.SimpleNamespace(weight=torch.ones(4),
+                                                                                   variance_epsilon=1e-6)
+        layer.input_layernorm = layer.post_attention_layernorm = None
+        layer._run_self_attn = lambda positions, h: h
+        layer.mlp = lambda h: h
+    hidden, blocks, delta = torch.randn(3, 4), torch.randn(3, 2, 4), torch.randn(3, 4)
+
+    assert isinstance(kda.forward_attn_residual_functional(k3_layer, None, hidden, blocks, delta)[1], tuple)
+    assert isinstance(
+        kda.forward_attn_residual_functional(standalone_layer, None, hidden, blocks, delta)[1], torch.Tensor)
 
 
 def test_kimi_moe_forward_flattens_only_for_k3_layers(arch_modules):
@@ -813,9 +887,9 @@ def _wrapper_ctor_args(fused_proj, **modules):
 
 @pytest.fixture
 def ctor(oot_mla, monkeypatch):
-    """Builds an HPU MLA wrapper with the vllm config / HPUMLAAttention stubbed; records info_once calls."""
+    """Builds an HPU MLA wrapper with the vllm config / HPUMLAAttention stubbed; records debug_once calls."""
     logged = []
-    monkeypatch.setattr(oot_mla, "logger", types.SimpleNamespace(info_once=lambda *a, **k: logged.append(a)))
+    monkeypatch.setattr(oot_mla, "logger", types.SimpleNamespace(debug_once=lambda *a, **k: logged.append(a)))
     monkeypatch.setattr(
         oot_mla, "get_current_vllm_config",
         lambda: types.SimpleNamespace(compilation_config=types.SimpleNamespace(static_forward_context={})))
