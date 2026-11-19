@@ -2697,6 +2697,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     block_ids.extend(new_ids)
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
+            # After a sync KV-load failure the scheduler discards the failed step's sampled token; drop it here too,
+            # or it becomes the next input token and stays in the output.
+            num_output_tokens = req_data.num_output_tokens[i]
+            if is_last_rank and num_output_tokens < len(req_state.output_token_ids):
+                del req_state.output_token_ids[num_output_tokens:]
+                if req_index is not None:
+                    # The request's own prompt length: the row's num_prompt_tokens may already include outputs.
+                    num_tokens = req_state.num_prompt_tokens + num_output_tokens
+                    self.input_batch.num_tokens_no_spec[req_index] = num_tokens
+                    self.input_batch.num_tokens[req_index] = num_tokens
+            # The failure also rolled num_computed_tokens back. As add_request does for a resumed request, count the
+            # known outputs as prompt, so that only the chunk reaching the end samples a token. Sync only: under async
+            # scheduling the scheduler keeps the discarded token as a placeholder.
+            if (req_index is not None and not self.use_async_scheduling
+                    and num_computed_tokens < req_state.num_tokens - 1
+                    and self.input_batch.num_prompt_tokens[req_index] < req_state.num_tokens):
+                self.input_batch.num_prompt_tokens[req_index] = req_state.num_tokens
+                self.input_batch._invalidate_prompt_token_ids_cache()
             if req_index is None:
                 # The request is running but was not scheduled in the previous step, so it must be added again.
                 # Under async scheduling its last sampled id may still be a -1 placeholder: it is this step's
@@ -2890,31 +2908,35 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         if self.is_kimi_k3:
-            # Encode only the items the scheduler placed in this step. Encoding every
-            # item of the request that is missing from the encoder cache would
-            # re-encode items already consumed by earlier prefill chunks (the scheduler
-            # frees their cache entries) and would change the number of items per
-            # encoder call from step to step.
-            scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-            for req_id in req_ids:
-                encoder_input_ids = scheduled_encoder_inputs.get(req_id)
-                if not encoder_input_ids:
+            # The scheduler dedups identical mm_hash values within a step, so the payload of an item may be
+            # held by another request of the step. Encode only items overlapping the tokens scheduled here.
+            payloads: dict[str, Any] = {}
+            for req_id, input_ids in scheduler_output.scheduled_encoder_inputs.items():
+                req_state = self.requests.get(req_id)
+                if req_state is None:
                     continue
+                for input_id in input_ids:
+                    feature = req_state.mm_features[input_id]
+                    if feature.data is not None:
+                        payloads.setdefault(feature.identifier, feature)
+            step_items = {}
+            for req_id in req_ids:
                 req_state = self.requests[req_id]
-
-                for mm_input_id in encoder_input_ids:
-                    mm_feature = req_state.mm_features[mm_input_id]
+                computed = req_state.num_computed_tokens
+                end = computed + scheduler_output.num_scheduled_tokens[req_id]
+                for mm_feature in req_state.mm_features:
                     mm_hash = mm_feature.identifier
-                    if mm_feature.data is None or mm_hash in self.encoder_cache:
+                    if mm_hash in self.encoder_cache or mm_hash in step_items:
                         continue
-                    # A span fully covered by computed (e.g. prefix-cached) tokens is
-                    # never gathered, and the scheduler strips its pixel payload
-                    # (strip_covered_mm_data), so there is nothing to encode.
                     pos_info = mm_feature.mm_position
-                    if pos_info.offset + pos_info.length <= req_state.num_computed_tokens:
+                    if pos_info.offset >= end or pos_info.offset + pos_info.length <= computed:
                         continue
-                    mm_kwargs.append((mm_feature.modality, mm_feature.data))
-                    mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
+                    source = mm_feature if mm_feature.data is not None else payloads.get(mm_hash)
+                    if source is not None:
+                        step_items[mm_hash] = source
+            for mm_hash, mm_feature in step_items.items():
+                mm_kwargs.append((mm_feature.modality, mm_feature.data))
+                mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
         else:
             for req_id in req_ids:
                 req_state = self.requests[req_id]
@@ -2979,6 +3001,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 encoder_outputs,
         ):
             is_embed = pos_info.is_embed
+            if is_embed is not None and self.is_kimi_k3:
+                # Device bool-mask indexing has a data-dependent shape the graph compiler cannot build.
+                positions = torch.nonzero(is_embed.cpu(), as_tuple=True)[0]
+                if output.shape[0] != positions.numel():
+                    raise ValueError(f"Encoder output has {output.shape[0]} rows but is_embed selects "
+                                     f"{positions.numel()} positions (mm_hash={mm_hash}).")
+                positions = positions.to(output.device)
+                placeholders = output.new_full((is_embed.shape[0], output.shape[-1]), fill_value=torch.nan)
+                self.encoder_cache[mm_hash] = placeholders.index_copy_(0, positions, output)
+                continue
             if is_embed is not None:
                 is_embed = is_embed.to(device=output.device)
 
@@ -3053,7 +3085,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 sliced_output = encoder_output[start_idx:end_idx]
-                mm_embeds_item = sliced_output if is_embed is None else sliced_output[is_embed]
+                if is_embed is not None and self.is_kimi_k3:
+                    positions = torch.nonzero(is_embed.cpu(), as_tuple=True)[0].to(sliced_output.device)
+                    mm_embeds_item = sliced_output.index_select(0, positions)
+                else:
+                    mm_embeds_item = sliced_output if is_embed is None else sliced_output[is_embed]
 
                 # For 2D padded batches, compute position in the
                 # flattened [batch_size * padded_seq_len] layout.
@@ -3534,6 +3570,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             return self._bucketize_2d_prompt
 
+    def _kimi_prefill_merge_enabled(self) -> bool:
+        # Kimi-K3 KDA/MLA prefill supports padded [bs, T] batches when there is no history;
+        # merged prefill flattens to bs=1 while state indices stay per request.
+        return bool(gaudi_envs.HPU_KIMI_PREFILL_MERGE and self.is_kimi_k3 and not self.use_prefix_caching
+                    and not self.use_merged_prefill)
+
     def _can_merge_prefill_contents(self, lhs, rhs):
         # Mamba/hybrid models require single-request prefill batches on HPU: the
         # mamba2 prefill path is built around single-sequence chunks (see the
@@ -3547,7 +3589,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Neither is prefix-caching-specific, so gate on the model type, not on
         # use_prefix_caching (which would also wrongly block merges for plain
         # attention models that CAN merge under prefix caching).
-        if self.num_mamba_like_layers > 0:
+        # Exception: Kimi-K3 without prefix caching and merged prefill, behind HPU_KIMI_PREFILL_MERGE.
+        if self.num_mamba_like_layers > 0 and not self._kimi_prefill_merge_enabled():
             return False
         # --- Logic to handle chunked prefill/prefix caching for HPU ---
         # 1. Check basic states of LHS (accumulated batch) and RHS (incoming request).
@@ -3628,10 +3671,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     num_output_logits = seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1
             else:
                 num_output_logits = max(0, seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1)
-            # Cap to scheduled tokens (needed when decode recomputation
-            # requests are routed through the prefill path).
-            num_output_logits = min(num_output_logits, seq_num_scheduled_tokens)
-            logits_positions = list(range(seq_num_scheduled_tokens - num_output_logits, seq_num_scheduled_tokens))
+            # Sample only the last position. A request recomputing past its prompt would otherwise get a row per
+            # position: appended to its output, or, under async scheduling, shifting every later request's row.
+            num_output_logits = min(num_output_logits, 1)
+            # Drafts scheduled with a recompute are not verified on this path: sample after the last real token, so
+            # the scheduler counts every draft as rejected.
+            num_spec_tokens = int(self.input_batch.num_tokens[batch_idx] -
+                                  self.input_batch.num_tokens_no_spec[batch_idx])
+            last_position = seq_num_scheduled_tokens - num_spec_tokens
+            logits_positions = list(range(last_position - num_output_logits, last_position))
 
             new_batch_contents = BatchContents(
                 req_ids=[req_id],
@@ -7191,6 +7239,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # resize (smart_resize / navit_resize / ...) pick the exact
                 # same grid as real traffic, guaranteeing a warmup cache hit.
                 processor_inputs = self._build_raw_image_processor_inputs(processor, modality, count, width, height)
+            elif self.is_kimi_k3:
+                # Kimi-K3 dummy builders have no get_dummy_processor_inputs
+                processor_inputs = processor.get_dummy_inputs(
+                    seq_len=self.model_config_copy.max_model_len,
+                    mm_counts={modality: count},
+                    mm_options=mm_options,
+                )
             else:
                 processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
                     seq_len=self.model_config_copy.max_model_len,

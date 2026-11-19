@@ -12,7 +12,9 @@ read from and written to a single slot per request.
 
 import torch
 
-from vllm_gaudi.ops.hpu_kda_pytorch import (gated_rmsnorm_sigmoid, kda_decode_step, kda_prefill_step,
+from vllm_gaudi.extension.logger import logger
+from vllm_gaudi.ops.hpu_kda_pytorch import (effective_intra_sub_chunk, gated_rmsnorm_sigmoid, kda_decode_step,
+                                            kda_prefill_step, parse_intra_sub_chunk, parse_prefill_settings,
                                             write_kda_decode_state)
 
 
@@ -92,7 +94,32 @@ def run_with_deferred_kda_state(model, forward, *args, **kwargs):
 # together. assume_constant_result makes dynamo treat the result as a constant without a graph break.
 @torch.compiler.assume_constant_result
 def _prefill_settings() -> tuple[int, int]:
-    return 64, 16
+    from vllm_gaudi import envs as gaudi_envs
+    return parse_prefill_settings(gaudi_envs.HPU_KIMI_KDA_PREFILL_CHUNK)
+
+
+@torch.compiler.assume_constant_result
+def _intra_sub_chunk() -> int:
+    from vllm_gaudi import envs as gaudi_envs
+    return effective_intra_sub_chunk(_prefill_settings()[0],
+                                     parse_intra_sub_chunk(gaudi_envs.HPU_KIMI_KDA_INTRA_SUB_CHUNK))
+
+
+def log_prefill_settings() -> None:
+    """Logs the effective KDA prefill settings, or why they are invalid."""
+    from vllm_gaudi import envs as gaudi_envs
+    try:
+        chunk_size, vec_chunks = _prefill_settings()
+        sub_chunk = parse_intra_sub_chunk(gaudi_envs.HPU_KIMI_KDA_INTRA_SUB_CHUNK)
+    except ValueError as e:
+        logger().warning("Kimi-K3 KDA prefill settings: %s", e)
+        return
+    effective = effective_intra_sub_chunk(chunk_size, sub_chunk)
+    if sub_chunk != effective:
+        logger().warning(
+            "HPU_KIMI_KDA_INTRA_SUB_CHUNK=%d ignored: it must divide the KDA prefill chunk %d into "
+            "at least two blocks; using the full pairwise path", sub_chunk, chunk_size)
+    logger().debug("Kimi-K3 KDA prefill: chunk %d,%d, intra sub-chunk %d", chunk_size, vec_chunks, effective)
 
 
 def _state_indices(self, attn_metadata) -> torch.Tensor:
@@ -162,6 +189,7 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                 if mask is not None:
                     mask = mask.reshape(num_seqs, seq_len)
                 chunk_size, vec_chunks = _prefill_settings()
+                sub_chunk = _intra_sub_chunk()
                 # gate_proj is a strided slice of ``projected`` and is used after the graph break below; the resume
                 # graph would receive it as a view with storage offset (strided_view fails in Synapse)
                 gate_proj = gate_proj.contiguous()
@@ -174,6 +202,7 @@ def hpu_kda_forward(self, hidden_states: torch.Tensor, positions: torch.Tensor =
                                                                     token_mask=mask,
                                                                     chunk_size=chunk_size,
                                                                     vec_chunks=vec_chunks,
+                                                                    sub_chunk=sub_chunk,
                                                                     **common)
                 core = _write_state(core, conv_cache, ssm_cache, slots, conv_rows, ssm_rows)
                 # Keep post-processing out of the statement that calls the disabled write: ops chained on its last
