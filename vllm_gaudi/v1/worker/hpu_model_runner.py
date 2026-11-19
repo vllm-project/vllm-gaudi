@@ -3115,11 +3115,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_pad_across_dp = self.get_dp_padding(num_real_prefill_batches)
         return all_batch_contents, num_pad_across_dp
 
-    def _make_attn_bias(self, context_groups, token_groups):
+    def _make_attn_bias(self, context_slot_groups, token_groups):
+        """Merged-prefill attention bias. ``context_slot_groups`` holds one group id per context slot (-1 = not
+        context of any request), so a context that ends inside a block hides the rest of that block."""
         dtype = self.dtype
         is_causal = True  # TODO: add support for non-causal tasks
-        context_groups = torch.tensor(context_groups, device='cpu', dtype=torch.int16)
-        context_groups = context_groups.repeat_interleave(self.attn_block_size, dim=-1)
+        context_groups = torch.tensor(context_slot_groups, device='cpu', dtype=torch.int16)
         context_len = context_groups.size(-1)
         token_groups = torch.tensor(token_groups, device='cpu', dtype=torch.int16)
         num_queries = token_groups.size(-1)
@@ -3208,6 +3209,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
         token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
         token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
+        if self.use_merged_prefill:
+            # Context slots per request, in block order; slots past the context length belong to no request.
+            context_slot_groups = []
+            for i, (ctx_len, blocks) in enumerate(zip(context_lens, context_blocks)):
+                num_slots = len(blocks) * self.attn_block_size
+                valid = min(ctx_len, num_slots)
+                context_slot_groups.append([i] * valid + [-1] * (num_slots - valid))
+            context_slot_groups = align_and_pad(context_slot_groups, (target_bs, target_blocks * self.attn_block_size),
+                                                itertools.repeat(-1))
         context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
         context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
 
@@ -3230,7 +3240,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         attn_bias = None
         if self.use_merged_prefill:
-            attn_bias = self._make_attn_bias(context_groups, token_groups)
+            attn_bias = self._make_attn_bias(context_slot_groups, token_groups)
             attn_bias = attn_bias.to('hpu', non_blocking=True)
         else:
             attn_bias = None
