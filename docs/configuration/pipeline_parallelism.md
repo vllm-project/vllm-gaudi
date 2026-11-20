@@ -14,3 +14,8 @@ vllm serve <model_path> --device hpu --tensor-parallel-size 8 --pipeline-paralle
 Since pipeline parallelism runs a `pp_size` number of virtual engines on each device, you have to lower `max_num_seqs` accordingly, as it acts as a micro batch for each virtual engine.
 
 Currently, pipeline parallelism on the lazy mode requires the `PT_HPUGRAPH_DISABLE_TENSOR_CACHE=0` flag.
+
+Limitations:
+
+- Async scheduling is not supported with pipeline parallelism. vLLM enables it by default, so on HPU it is turned off when `pipeline_parallel_size` is greater than 1.
+- vLLM rejects pipeline parallelism with the `external_launcher` distributed executor backend on every platform. Use the default `mp` or `ray` backend instead.

@@ -850,12 +850,13 @@ class InputBatch:
     ) -> None:
         """Stash the prior step's sampled tokens for async penalty repair.
 
-        Ported from the identically named method in vLLM's GPU runner
-        (vllm/v1/worker/gpu_input_batch.py). Async scheduling copies the
-        sampled ids to CPU without a blocking sync; keep the CPU tensor and its
-        copy-ready event so update_async_output_token_ids can splice the real
-        ids in later. Cleared when no consumer reads output_token_ids (no
-        penalties and no bad_words), so the fast path skips the per-step sync.
+        Ported from the identically named method in vLLM's V1 GPU runner
+        (vendored as vllm_gaudi/v1/_vendored/worker/gpu_input_batch.py). Async
+        scheduling copies the sampled ids to CPU without a blocking sync; keep
+        the CPU tensor and its copy-ready event so update_async_output_token_ids
+        can splice the real ids in later. Cleared when no consumer reads
+        output_token_ids (no penalties and no bad_words), so the fast path skips
+        the per-step sync.
 
         Args:
             sampled_token_ids_cpu: prior step's sampled ids, shape (num_reqs, 1).
@@ -872,14 +873,15 @@ class InputBatch:
     def update_async_output_token_ids(self) -> None:
         """Splice the prior step's real sampled ids over the -1 placeholders.
 
-        Ported from the identically named method in vLLM's GPU runner
-        (vllm/v1/worker/gpu_input_batch.py). Under async scheduling the runner
-        appends a -1 to each request's output_token_ids after sampling, because
-        the real id is still being copied to CPU. Called right before the
-        sampler reads output_token_ids for penalties: synchronize on the
-        copy-ready event and replace the placeholders. No-op when no consumer
-        reads output_token_ids (sampled_token_ids_cpu left None by
-        set_async_sampled_token_ids) or there is no prior step to repair.
+        Ported from the identically named method in vLLM's V1 GPU runner
+        (vendored as vllm_gaudi/v1/_vendored/worker/gpu_input_batch.py). Under
+        async scheduling the runner appends a -1 to each request's
+        output_token_ids after sampling, because the real id is still being
+        copied to CPU. Called right before the sampler reads output_token_ids
+        for penalties: synchronize on the copy-ready event and replace the
+        placeholders. No-op when no consumer reads output_token_ids
+        (sampled_token_ids_cpu left None by set_async_sampled_token_ids) or
+        there is no prior step to repair.
 
         Only the newest placeholders are replaced: a request that decoded
         while no consumer was in the batch keeps its older -1s, so its list
