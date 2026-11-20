@@ -14,7 +14,8 @@ SEEN_ENV = "HPU_KIMI_K3_SEEN"
 
 # KimiLinearForCausalLM is deliberately absent: a standalone Kimi-Linear model also uses that architecture name
 # and must keep the upstream paths. K3 checkpoints are recognised by the K3 architectures above.
-KIMI_K3_ARCHITECTURES = ("KimiK3ForConditionalGeneration", "KimiK3MTPModel", "K3DSparkModel")
+KIMI_K3_ARCHITECTURES = ("KimiK3ForConditionalGeneration", "KimiK31ForConditionalGeneration", "KimiK3MTPModel",
+                         "K3DSparkModel")
 
 
 def is_kimi_k3_model_config(model_config) -> bool:

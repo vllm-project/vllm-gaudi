@@ -1559,6 +1559,11 @@ def _patch_kimi_k3_arch() -> None:
         _patch_kimi_attn_res()
         _patch_kimi_linear_weights()
         _patch_mla_bind_kv_cache()
+        from vllm.model_executor.models import config as _model_config
+        k3_config_cls = getattr(_model_config, "KimiK3ForConditionalGenerationConfig", None)
+        if k3_config_cls is not None:
+            # K3.1 shares the K3 quantization hook (MXFP4 experts instead of compressed-tensors)
+            _model_config.MODELS_CONFIG_MAP.setdefault("KimiK31ForConditionalGeneration", k3_config_cls)
         import vllm.models.kimi_k3 as k3_pkg
         import vllm.models.kimi_k3.amd.linear as _amd_linear
         import vllm.models.kimi_k3.amd.mla as _amd_mla
@@ -1576,6 +1581,7 @@ def _patch_kimi_k3_arch() -> None:
         from vllm.model_executor.models.registry import ModelRegistry
         ModelRegistry.register_model("KimiLinearForCausalLM", _amd_linear.KimiLinearForCausalLM)
         ModelRegistry.register_model("KimiK3ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
+        ModelRegistry.register_model("KimiK31ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
         ModelRegistry.register_model("KimiK3MTP", _amd_mtp.KimiK3MTP)
         _kimi_patch_installed("model_registration")
 
@@ -1645,6 +1651,33 @@ def _patch_kimi_k3_arch() -> None:
             _amd_linear.KimiLinearModel.forward = _safe_kimi_linear_model_forward
             _amd_linear.KimiLinearModel._patched_hpu_tokens = True
         _kimi_patch_installed("linear_model_tokens_1d")
+
+        # Kimi-K3.1 checkpoints carry DSA indexer tensors that the dense MLA built on HPU has no parameters for.
+        orig_linear_load_weights = getattr(_amd_linear.KimiLinearModel, "load_weights", None)
+        if orig_linear_load_weights is not None and not getattr(_amd_linear.KimiLinearModel, "_patched_skip_indexer",
+                                                                False):
+
+            def _load_weights_skip_indexer(self, weights):
+                if not getattr(self, "_hpu_kimi_k3", False):  # standalone Kimi-Linear: upstream loader
+                    return orig_linear_load_weights(self, weights)
+
+                def _without_indexer():
+                    warned = False
+                    for item in weights:
+                        if ".self_attn.indexer." in item[0]:
+                            if not warned:
+                                warned = True
+                                _kimi_patch_logger().warning(
+                                    "Kimi-K3: DSA is not supported on HPU, skipping the DSA indexer weights "
+                                    "(dense MLA attention is used)")
+                            continue
+                        yield item
+
+                return orig_linear_load_weights(self, _without_indexer())
+
+            _amd_linear.KimiLinearModel.load_weights = _load_weights_skip_indexer
+            _amd_linear.KimiLinearModel._patched_skip_indexer = True
+        _kimi_patch_installed("skip_dsa_indexer_weights")
 
         # out-of-place attn_res on the decoder layer (2D inputs, bank shape check): the in-place updates of the
         # upstream version do not survive the per-layer graph boundaries of torch.compile mode
