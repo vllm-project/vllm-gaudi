@@ -1,7 +1,49 @@
 # SPDX-License-Identifier: Apache-2.0
+"""HPU sparse-attn indexer (DSA) decode forward with FP32 weighted-ReLU scoring and physical-slot top-k.
+
+Scoring (bf16 BMM, then FP32 ReLU weighted-sum) keeps the previous FP32 score values; the decode path
+removes the per-step index work instead. All HPU index arithmetic uses 1-D flat int32 ``index_select``
+(2-D int64 gathers fail HPU torch.compile). The per-shape index constants (block-row offsets, -inf pad row)
+are cached across steps in a small bounded dict keyed by (batch, width, block_size, device).
+"""
 
 import torch
 from vllm.forward_context import get_forward_context
+
+_BlkTriple = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+_BLK_CACHE: dict[tuple[int, int, int, torch.device], _BlkTriple] = {}
+_BLK_CACHE_MAX = 32
+
+
+def _reset_block_cache() -> None:
+    """Drop all cached per-shape index constants (test/ops hook; also frees their device memory)."""
+    _BLK_CACHE.clear()
+
+
+def _blk_constants(batch_size: int, width: int, block_size: int, device) -> _BlkTriple:
+    """Per-shape int32 index constants, reused across decode steps.
+
+    ``rows_int`` = arange(batch_size, int32)[:, None] * width  (per-request flat-index base, shape (B, 1)).
+    ``pad_block_row`` = one int32 zero block id appended so ``block_index`` entries equal to block_count stay valid.
+    ``pad_row`` = one -inf score row (the padding candidate every short request sees).
+
+    The dict is capped at ``_BLK_CACHE_MAX`` entries with FIFO eviction, so memory stays bounded no
+    matter how many shapes appear. Keys are (batch, width, block_size, torch.device) tuples: device is
+    hashable and compares by (type, index), so an equal device object always hits. No lock: CPython dict
+    get/set are GIL-atomic, a torn concurrent first insert only rebuilds the constants once more, and the
+    eviction pop uses a default so a concurrent evict can never raise.
+    """
+    key = (batch_size, width, block_size, device)
+    hit = _BLK_CACHE.get(key)
+    if hit is None:
+        rows_int = torch.arange(batch_size, dtype=torch.int32, device=device)[:, None] * width
+        pad_block_row = torch.zeros(1, dtype=torch.int32, device=device)
+        pad_row = torch.full((1, block_size), -torch.inf, dtype=torch.float32, device=device)
+        hit = (rows_int, pad_block_row, pad_row)
+        if len(_BLK_CACHE) >= _BLK_CACHE_MAX:
+            _BLK_CACHE.pop(next(iter(_BLK_CACHE)), None)  # FIFO: drop oldest; default makes concurrent evict safe
+        _BLK_CACHE[key] = hit
+    return hit
 
 
 def _fill_invalid(buf, n):
@@ -47,28 +89,30 @@ def forward_hpu(self, hidden_states, q, k, weights):
         _fill_invalid(self.topk_indices_buffer, batch_size)
         return self.topk_indices_buffer
 
-    positions = torch.arange(block_size, device=block_list.device)
-    slots = block_list[:, None] * block_size + positions[None, :]
+    # int32 physical slots per block; flat int32 index_select (1-D) instead of a 2-D int64 gather.
+    positions = torch.arange(block_size, device=block_list.device, dtype=torch.int32)
+    slots = block_list.reshape(-1, 1).int() * block_size + positions[None, :]
+    slots_flat = slots.reshape(-1)
     valid = positions[None, :] < block_usage.round().long()[:, None]
-    keys = kv_cache[slots.reshape(-1)].reshape(block_count, block_size, -1)
+    keys = kv_cache.index_select(0, slots_flat).reshape(block_count, block_size, -1)
+
     owners = block_groups.clamp(0, batch_size - 1)
-    # bf16 GEMM; scores only rank slots, and upstream CUDA computes them from FP8 inputs.
-    logits = torch.bmm(q[owners], keys.transpose(1, 2)).float()
-    scores = (logits.relu() * weights[owners].float()[:, :, None]).sum(1)
+    # Scoring matches the previous implementation bit-for-bit: bf16 BMM, then fp32 ReLU weighted-sum.
+    logits = torch.bmm(q[owners], keys.transpose(1, 2))
+    scores = (logits.float().relu() * weights[owners].float()[:, :, None]).sum(1)
 
     block_index = getattr(attn_metadata, "indexer_block_index", None)
     if block_index is not None:
         # Rank each request over only its own blocks; the appended row pads short requests.
         # Flat int32 index_select: 2-D int64 gathers fail to compile on HPU.
-        pad_row = torch.full((1, block_size), -torch.inf, device=scores.device)
-        scores = torch.cat((scores.masked_fill(~valid, -torch.inf), pad_row))
-        flat_index = block_index.flatten()
-        candidates = scores.index_select(0, flat_index).view(batch_size, -1)
+        rows_int, pad_block_row, pad_row = _blk_constants(batch_size, block_index.shape[1], block_size, scores.device)
+        flat_index = block_index.flatten().int()
+        padded_scores = torch.cat((scores.masked_fill(~valid, -torch.inf), pad_row))
+        candidates = padded_scores.index_select(0, flat_index).view(batch_size, -1)
         selected_scores, indices = candidates.topk(self.topk_tokens, dim=-1)
         indices = indices.int()
-        rows = torch.arange(batch_size, device=indices.device, dtype=torch.int32)[:, None] * block_index.shape[1]
-        positions = flat_index.index_select(0, (rows + indices // block_size).flatten())
-        padded_blocks = torch.cat((block_list.int(), block_list.new_zeros(1, dtype=torch.int32)))
+        positions = flat_index.index_select(0, (rows_int + indices // block_size).flatten())
+        padded_blocks = torch.cat((block_list.int(), pad_block_row))
         selected_slots = padded_blocks.index_select(0, positions).view(batch_size, -1) * block_size \
             + indices % block_size
         self.topk_indices_buffer[:batch_size] = selected_slots.masked_fill(selected_scores == -torch.inf, -1)
@@ -79,7 +123,7 @@ def forward_hpu(self, hidden_states, q, k, weights):
     scores = torch.where(mask, scores[None, :, :], -torch.inf)
     topk = min(self.topk_tokens, slots.numel())
     selected_scores, indices = scores.flatten(1).topk(topk, dim=-1)
-    selected_slots = slots.flatten()[indices].masked_fill(selected_scores == -torch.inf, -1)
+    selected_slots = slots_flat[indices].masked_fill(selected_scores == -torch.inf, -1)
 
     self.topk_indices_buffer[:batch_size, :topk] = selected_slots
     if topk < self.topk_tokens:
