@@ -22,7 +22,7 @@ def _kv_cache_config(mamba_type):
 
     spec = MambaSpec(block_size=1152, shapes=((1, ), ), dtypes=(torch.float32, ), mamba_type=mamba_type)
     attention = object()
-    return SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=s) for s in (attention, spec)])
+    return SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_specs={"layer": s}) for s in (attention, spec)])
 
 
 @pytest.mark.parametrize("layer, expected", [("gdn", _PastAlignmentCheck), ("mamba2", AssertionError)])

@@ -18,8 +18,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm_gaudi.platform import logger
 import habana_frameworks.torch.utils.experimental as htexp
@@ -400,9 +398,6 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
                 "Skipping layer %s as no KVCache spec is present. "
                 "This is likely because the layer is sharing its KV cache", layer_name)
             continue
-        if isinstance(layer_spec, UniformTypeKVCacheSpecs):
-            # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs.
-            layer_spec = layer_spec.kv_cache_specs[layer_name]
 
         # HPU deviation: expand K/V into separate blocks-first regions.
         cache_list = _hpu_transfer_cache_regions(self.transfer_topo, cache_or_caches, layer_spec)
@@ -445,7 +440,7 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
             # region is a dense blocks-first tensor whose blocks abut, so the stride between
             # consecutive blocks equals the block length.
             self.block_stride_per_layer.append(block_len)
-            is_mla_region = isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            is_mla_region = isinstance(layer_spec, MLAAttentionSpec)
             self._region_is_mla.append(is_mla_region)
             # Upstream vLLM (base_worker.py:register_kv_caches) now tracks the
             # per-region block count separately from block_len/block_stride so
