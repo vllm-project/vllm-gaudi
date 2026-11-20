@@ -22,7 +22,7 @@ echo $VLLM_GAUDI_PREFIX
 #   tests/models/language/generation/generation_mm_multi.py
 
 # Gemma3 with image input
-run_gemma3_load_generate_test() {
+_run_gemma3_load_generate_test() {
     echo "➡️ Testing gemma-3-4b-it..."
     VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/gemma-3-4b-it.yaml"
     echo "✅ Test with multimodal-support with gemma-3-4b-it passed."
@@ -32,108 +32,108 @@ run_gemma3_load_generate_test() {
 }
 
 # Basic model test
-run_basic_load_generate_test() {
+_run_basic_load_generate_test() {
     echo "➡️ Testing basic model with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model facebook/opt-125m
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model facebook/opt-125m
     echo "✅ Test with basic model passed."
 }
 
 # Tensor parallel size 2
-run_tp2_load_generate_test() {
+_run_tp2_load_generate_test() {
     echo "➡️ Testing tensor parallel size 2 with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model facebook/opt-125m --tensor-parallel-size 2
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model facebook/opt-125m --tensor-parallel-size 2
     echo "✅ Test with tensor parallel size 2 passed."
 }
 
 # MLA and MoE test
-run_mla_moe_load_generate_test() {
+_run_mla_moe_load_generate_test() {
     echo "➡️ Testing MLA and MoE with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code
     echo "✅ Test with deepseek v2 lite passed."
 }
 
 # Granite + INC test
-run_granite_inc_load_generate_test() {
+_run_granite_inc_load_generate_test() {
     echo "➡️ Testing granite-8b + inc with vllm-hpu plugin v1..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_unit_scale_quant.json" \
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model ibm-granite/granite-3.3-2b-instruct --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
     echo "✅ Test with granite + inc passed."
 }
 
 # Deepseek v2 + INC test
-run_deepseek_v2_inc_load_generate_test() {
+_run_deepseek_v2_inc_load_generate_test() {
     echo "➡️ Testing deepseek_v2 + inc with vllm-hpu plugin v1..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_unit_scale_quant.json" \
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --kv_cache_dtype fp8_inc
     echo "✅ Test with deepseek_v2 + inc passed."
 }
 
 # Deepseek v2 + INC + dynamic quantization + TP2
-run_deepseek_v2_inc_dynamic_tp2_load_generate_test() {
+_run_deepseek_v2_inc_dynamic_tp2_load_generate_test() {
     echo "➡️ Testing deepseek_v2 + inc dynamic quantization + tp2..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_dynamic_quant.json" \
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true RUNTIME_SCALE_PATCHING=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
+    VLLM_SKIP_WARMUP=true RUNTIME_SCALE_PATCHING=0 python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model deepseek-ai/DeepSeek-V2-Lite-Chat --trust-remote-code --quantization inc --tensor-parallel-size 2
     echo "✅ Test with deepseek_v2 + inc dynamic quantization + tp2 successful."
 }
 
 # Qwen3-8B-FP8 + INC requant
-run_qwen3_inc_dynamic_load_generate_test() {
+_run_qwen3_inc_dynamic_load_generate_test() {
     echo "➡️ Testing Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/tests/models/language/generation/inc_dynamic_quant.json" VLLM_HPU_FORCE_CHANNEL_FP8=false \
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true RUNTIME_SCALE_PATCHING=0 \
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true RUNTIME_SCALE_PATCHING=0 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-8B-FP8 --trust-remote-code
     echo "✅ Test with Qwen3-8B-FP8 + inc requant FP8 model + dynamic quant passed."
 }
 
 # DS + blockfp8 + static scaling + FP8 KV
 # The lazy mode works on 1.24.0-272
-run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test() {
+_run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test() {
     echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-KV-TEST-ONLY --trust-remote-code
     echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 KV successful."
 }
 
 # QWEN3 + FP8 Attn(FP8 QGA test)
 # The lazy mode works on 1.24.0-272
-run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test() {
+_run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test() {
     echo "➡️ Testing Qwen3-8B + static scaling + FP8 Attn..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/Qwen3-8B-FP8_STATIC-FP8-Attn-LLMC-Test-Only --trust-remote-code --kv_cache_dtype fp8_inc
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model INC4AI/Qwen3-8B-FP8_STATIC-FP8-Attn-LLMC-Test-Only --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with Qwen3-8B + static scaling + FP8 Attn successful."
 }
 
 # DS + blockfp8 + static scaling + FP8 QKV
 # The lazy mode works on 1.24.0-272
-run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test() {
+_run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test() {
     echo "➡️ Testing Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 QKV..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-QKV-TEST-ONLY --trust-remote-code --kv_cache_dtype fp8_inc
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Intel/DeepSeek-V2-Lite-Chat-BF16-FP8-STATIC-FP8-QKV-TEST-ONLY --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with Deepseek-V2-Lite-Chat-FP8 + blockfp8 + static scaling + FP8 QKV successful."
 }
 
 # QWEN3 + blockfp8 + dynamic scaling
-run_qwen3_blockfp8_dynamic_scaling_load_generate_test() {
+_run_qwen3_blockfp8_dynamic_scaling_load_generate_test() {
     echo "➡️ Testing Qwen3-8B-FP8 + blockfp8 + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-8B-FP8 --trust-remote-code
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model Qwen/Qwen3-8B-FP8 --trust-remote-code
     echo "✅ Test with Qwen3-8B-FP8 + blockfp8 + dynamic scaling successful."
 }
 
 # QWEN3 compressed tensor + dynamic scaling
-run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test() {
+_run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test() {
     echo "➡️ Testing Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Qwen3-8B-FP8-dynamic --trust-remote-code
     echo "✅ Test with Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling successful."
 }
 
 # RedHatAI/Meta-Llama-3-8B-Instruct-FP8 Per-tensor F8 static scales
-run_llama3_per_tensor_scaling_load_generate_test() {
+_run_llama3_per_tensor_scaling_load_generate_test() {
     echo "➡️ Testing RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Meta-Llama-3-8B-Instruct-FP8 --trust-remote-code
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Meta-Llama-3-8B-Instruct-FP8 --trust-remote-code
     echo "✅ Test with RedHatAI/Meta-Llama-3-8B-Instruct-FP8 + per tensor scaling successful."
 }
 
 # nvidia/Llama-3.1-8B-Instruct-FP8 Per-tensor F8 static scales
-run_llama3_modelopt_per_tensor_scaling_load_generate_test() {
+_run_llama3_modelopt_per_tensor_scaling_load_generate_test() {
     echo "➡️ Testing nvidia/Llama-3.1-8B-Instruct-FP8 + per tensor scaling..."
-    HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nvidia/Llama-3.1-8B-Instruct-FP8 --trust-remote-code --kv_cache_dtype fp8_inc
+    VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nvidia/Llama-3.1-8B-Instruct-FP8 --trust-remote-code --kv_cache_dtype fp8_inc
     echo "✅ Test with nvidia/Llama-3.1-8B-Instruct-FP8 + per tensor scaling successful."
 }
 
@@ -160,7 +160,7 @@ run_granite_inc_calibration_and_quantization_load_generate_test() {
     echo "Test with inc calibration and quantization with hw aligned scales on granite passed"
 }
 
-run_granite_4_h_load_generate_test() {
+_run_granite_4_h_load_generate_test() {
     echo "➡️ Testing granite-4.0-h-small..."
     RUNTIME_SCALE_PATCHING=1 \
     VLLM_SKIP_WARMUP=true \
@@ -181,23 +181,23 @@ run_granite_4_h_load_generate_test() {
 }
 
 # AWQ test
-run_awq_load_generate_test() {
+_run_awq_load_generate_test() {
     echo "➡️ Testing awq inference with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model TheBloke/Llama-2-7B-Chat-AWQ --dtype bfloat16 --quantization awq_hpu
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model TheBloke/Llama-2-7B-Chat-AWQ --dtype bfloat16 --quantization awq_hpu
     echo "✅ Test with awq passed."
 }
 
 # GPTQ test
-run_gptq_load_generate_test() {
+_run_gptq_load_generate_test() {
     echo "➡️ Testing gptq inference with vllm-hpu plugin v1..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model TheBloke/Llama-2-7B-Chat-GPTQ --dtype bfloat16 --quantization gptq_hpu
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model TheBloke/Llama-2-7B-Chat-GPTQ --dtype bfloat16 --quantization gptq_hpu
     echo "✅ Test with gptq passed."
 }
 
 # Compressed w4a16 channelwise
-run_compressed_w4a16_channelwise_load_generate_test() {
+_run_compressed_w4a16_channelwise_load_generate_test() {
     echo "➡️ Testing compressed w4a16 (channelwise) inference..."
-    HABANA_VISIBLE_DEVICES=all VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nm-testing/tinyllama-oneshot-w4a16-channel-v2 --dtype bfloat16
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model nm-testing/tinyllama-oneshot-w4a16-channel-v2 --dtype bfloat16
     echo "✅ Test with compressed w4a16 (channelwise) passed."
 }
 
@@ -209,17 +209,17 @@ run_compressed_w4a16_channelwise_load_generate_test() {
 # test can no longer pass on CUDA either. No HPU-side fix is possible.
 
 # Llama-3.3-70B-Instruct-FP8-dynamic + INC dynamic quant
-run_llama3_70b_inc_dynamic_quant_load_generate_test() {
+_run_llama3_70b_inc_dynamic_quant_load_generate_test() {
     echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/calibration/quantization_config/maxabs_quant_dynamic_quantization_weight_pcs_pow2.json" \
-    HABANA_VISIBLE_DEVICES=all RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true VLLM_DYNAMIC_KV_QUANT=1 \
+    RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true VLLM_DYNAMIC_KV_QUANT=1 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
     echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode passed."
 }
 
 
 # Multimodal-support with qwen2.5-vl
-run_qwen2_5_vl_load_generate_test() {
+_run_qwen2_5_vl_load_generate_test() {
     echo "➡️ Testing Qwen2.5-VL-7B..."
     VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b.yaml"
@@ -228,7 +228,7 @@ run_qwen2_5_vl_load_generate_test() {
 
 
 # Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and torch.compile
-run_qwen2_5_vl_compile_warmup_test() {
+_run_qwen2_5_vl_compile_warmup_test() {
     echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and torch.compile..."
     VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PAs=False \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
@@ -236,7 +236,7 @@ run_qwen2_5_vl_compile_warmup_test() {
 }
 
 # Multimodal-support with qwen3-vl
-run_qwen3_vl_load_generate_test() {
+_run_qwen3_vl_load_generate_test() {
     echo "➡️ Testing Qwen3-VL-32B..."
     VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen3-vl-32b.yaml"
@@ -244,7 +244,7 @@ run_qwen3_vl_load_generate_test() {
 }
 
 # Multimodal-support with ernie4.5-vl
-run_ernie4.5_vl_test() {
+_run_ernie4.5_vl_test() {
     echo "➡️ Testing Ernie4.5-VL-28B-A3B..."
     VLLM_SKIP_WARMUP=true \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/ernie4.5-vl-28b.yaml"
@@ -252,7 +252,7 @@ run_ernie4.5_vl_test() {
 }
 
 # Multimodal-support with mistral-small-3
-run_mistral3_load_generate_test() {
+_run_mistral3_load_generate_test() {
     echo "➡️ Testing Mistral-Small-3.1-24B..."
     VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/mistral3-small.yaml"
@@ -268,10 +268,10 @@ run_mistral3_load_generate_test() {
 #     echo "✅ Test with multimodal-support with deepseek-ocr passed."
 # }
 
-run_llama3_70b_inc_dynamic_quant_test() {
+_run_llama3_70b_inc_dynamic_quant_test() {
     echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
     QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/calibration/quantization_config/maxabs_quant_dynamic_quantization_weight_pcs_pow2.json" \
-    HABANA_VISIBLE_DEVICES=all RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true VLLM_DYNAMIC_KV_QUANT=1 \
+    RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true VLLM_DYNAMIC_KV_QUANT=1 \
     python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
     echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode passed."
 }
@@ -283,7 +283,7 @@ run_llama3_70b_inc_dynamic_quant_test() {
 #   tests/models/language/generation/test_common.py
 
 # GSM8K on granite-8b
-run_gsm8k_granite_test() {
+_run_gsm8k_granite_test() {
     echo "➡️ Testing GSM8K on granite-8b..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
@@ -291,7 +291,7 @@ run_gsm8k_granite_test() {
 }
 
 # GSM8K on granite-8b with async scheduling
-run_gsm8k_granite_async_test() {
+_run_gsm8k_granite_async_test() {
     echo "➡️ Testing GSM8K on granite-8b with async scheduling..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True ASYNC_SCHEDULING=1 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/granite-8b.yaml"
@@ -299,7 +299,7 @@ run_gsm8k_granite_async_test() {
 }
 
 # GSM8K on deepseek v2 lite
-run_gsm8k_deepseek_test() {
+_run_gsm8k_deepseek_test() {
     echo "➡️ Testing GSM8K on deepseek v2 lite..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/DeepSeek-V2-Lite-chat.yaml"
@@ -308,7 +308,7 @@ run_gsm8k_deepseek_test() {
 
 
 # GSM8K on QWEN3-30B-A3B
-run_gsm8k_qwen3_30b_test() {
+_run_gsm8k_qwen3_30b_test() {
     echo "➡️ Testing GSM8K on QWEN3-30B-A3B..."
     VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True TP_SIZE=2 \
     pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/test_common.py" --model_card_path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/Qwen3-30B-A3B.yaml"
@@ -457,7 +457,7 @@ _run_gsm8k_phi4_mini_16k_test() {
 #   tests/full_tests/spec_decode.py
 
 # Multimodal-support with mistral-small-3
-run_mistral3_test() {
+_run_mistral3_test() {
     echo "➡️ Testing Mistral-Small-3.1-24B..."
     VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/mistral3-small.yaml"
@@ -613,6 +613,72 @@ run_spec_decode_extra_parallel() {
         _run_spec_decode_eaglemtp_test 1
 }
 
+# Multimodal members load vLLM's default test image when they start. vLLM writes it
+# into its cache in place, so a member could read it while another one is still
+# downloading it. Fetch it once before the members start (they then find it ready).
+_fetch_default_image_asset() {
+    python -P -c "from vllm.assets.image import ImageAsset; ImageAsset('cherry_blossom').pil_image.load()" \
+        || echo "⚠️  Could not pre-fetch the default test image; members will fetch it themselves."
+}
+
+# Load and generate, the longest single-card tests (1 card each)
+run_load_generate_a_parallel() {
+    _fetch_default_image_asset
+    _run_parallel_on_card_slices load_generate_a \
+        _run_gemma3_load_generate_test 1 \
+        _run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test 1 \
+        _run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test 1 \
+        _run_llama3_70b_inc_dynamic_quant_test 1 \
+        _run_llama3_70b_inc_dynamic_quant_load_generate_test 1 \
+        _run_gptq_load_generate_test 1 \
+        _run_deepseek_v2_inc_load_generate_test 1 \
+        _run_qwen2_5_vl_load_generate_test 1
+}
+
+# Load and generate, single-card tests (1 card each)
+run_load_generate_b_parallel() {
+    _fetch_default_image_asset
+    _run_parallel_on_card_slices load_generate_b \
+        _run_ernie4.5_vl_test 1 \
+        _run_awq_load_generate_test 1 \
+        _run_qwen2_5_vl_compile_warmup_test 1 \
+        _run_qwen3_vl_load_generate_test 1 \
+        _run_mistral3_test 1 \
+        _run_mistral3_load_generate_test 1 \
+        _run_granite_4_h_load_generate_test 1 \
+        _run_qwen3_inc_dynamic_load_generate_test 1
+}
+
+# Load and generate, the shortest single-card tests (1 card each)
+run_load_generate_c_parallel() {
+    _run_parallel_on_card_slices load_generate_c \
+        _run_llama3_per_tensor_scaling_load_generate_test 1 \
+        _run_llama3_modelopt_per_tensor_scaling_load_generate_test 1 \
+        _run_mla_moe_load_generate_test 1 \
+        _run_qwen3_blockfp8_dynamic_scaling_load_generate_test 1 \
+        _run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test 1 \
+        _run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test 1 \
+        _run_granite_inc_load_generate_test 1 \
+        _run_basic_load_generate_test 1
+}
+
+# Load and generate: w4a16 (1 card), TP=2 (2 cards), DeepSeek-V2 INC dynamic TP=2 (2 cards)
+run_load_generate_tp_parallel() {
+    _run_parallel_on_card_slices load_generate_tp \
+        _run_compressed_w4a16_channelwise_load_generate_test 1 \
+        _run_tp2_load_generate_test 2 \
+        _run_deepseek_v2_inc_dynamic_tp2_load_generate_test 2
+}
+
+# GSM8K on DeepSeek-V2-Lite (1 card), Qwen3-30B-A3B (TP=2), granite and granite async (1 card each)
+run_gsm8k_small_models_parallel() {
+    _run_parallel_on_card_slices gsm8k_small_models \
+        _run_gsm8k_deepseek_test 1 \
+        _run_gsm8k_qwen3_30b_test 2 \
+        _run_gsm8k_granite_test 1 \
+        _run_gsm8k_granite_async_test 1
+}
+
 # --- Other tests ---
 
 
@@ -712,38 +778,38 @@ run_structured_output_test() {
 # Function to run all tests sequentially
 launch_all_tests() {
     echo "🚀 Starting all test suites..."
-    # run_gemma3_load_generate_test
-    run_basic_load_generate_test
-    run_tp2_load_generate_test
-    run_mla_moe_load_generate_test
-    run_granite_inc_load_generate_test
-    run_deepseek_v2_inc_load_generate_test
-    run_deepseek_v2_inc_dynamic_tp2_load_generate_test
-    run_qwen3_inc_dynamic_load_generate_test
-    run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test
-    run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test
-    run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
-    run_qwen3_blockfp8_dynamic_scaling_load_generate_test
-    run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test
-    run_llama3_per_tensor_scaling_load_generate_test
-    run_llama3_modelopt_per_tensor_scaling_load_generate_test
+    # _run_gemma3_load_generate_test
+    _run_basic_load_generate_test
+    _run_tp2_load_generate_test
+    _run_mla_moe_load_generate_test
+    _run_granite_inc_load_generate_test
+    _run_deepseek_v2_inc_load_generate_test
+    _run_deepseek_v2_inc_dynamic_tp2_load_generate_test
+    _run_qwen3_inc_dynamic_load_generate_test
+    _run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test
+    _run_qwen3_8b_fp8_attn_static_scaling_fp8kv_test
+    _run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test
+    _run_qwen3_blockfp8_dynamic_scaling_load_generate_test
+    _run_qwen3_compressed_tensor_dynamic_scaling_load_generate_test
+    _run_llama3_per_tensor_scaling_load_generate_test
+    _run_llama3_modelopt_per_tensor_scaling_load_generate_test
     run_granite_inc_calibration_and_quantization_load_generate_test
-    run_granite_4_h_load_generate_test
-    run_awq_load_generate_test
-    run_gptq_load_generate_test
-    run_compressed_w4a16_channelwise_load_generate_test
+    _run_granite_4_h_load_generate_test
+    _run_awq_load_generate_test
+    _run_gptq_load_generate_test
+    _run_compressed_w4a16_channelwise_load_generate_test
     # run_compressed_w4a16_moe_gidx_load_generate_test retired: see comment above
     # its (removed) definition -- vllm#54809 killed actorder=group upstream.
-    run_llama3_70b_inc_dynamic_quant_load_generate_test
-    run_qwen2_5_vl_load_generate_test
-    run_qwen2_5_vl_compile_warmup_test
-    run_qwen3_vl_load_generate_test
-    run_mistral3_load_generate_test
-    run_llama3_70b_inc_dynamic_quant_test
-    run_gsm8k_granite_test
-    run_gsm8k_granite_async_test
-    run_gsm8k_deepseek_test
-    run_gsm8k_qwen3_30b_test
+    _run_llama3_70b_inc_dynamic_quant_load_generate_test
+    _run_qwen2_5_vl_load_generate_test
+    _run_qwen2_5_vl_compile_warmup_test
+    _run_qwen3_vl_load_generate_test
+    _run_mistral3_load_generate_test
+    _run_llama3_70b_inc_dynamic_quant_test
+    _run_gsm8k_granite_test
+    _run_gsm8k_granite_async_test
+    _run_gsm8k_deepseek_test
+    _run_gsm8k_qwen3_30b_test
     run_gpqa_kimi_k26_test
     run_longbench_qwen3_30b_fp8_static_test
     run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
