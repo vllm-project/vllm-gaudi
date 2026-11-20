@@ -70,7 +70,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.jsontree import json_map_leaves
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy, getattr_nested, setattr_nested)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
@@ -125,7 +124,7 @@ if TYPE_CHECKING:
     import xgrammar as xgr
     import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
     import xgrammar.kernels.apply_token_bitmask_inplace_cpu as xgr_cpu
-    from vllm.v1.core.scheduler import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
     xgr_cpu = LazyLoader("xgr_cpu", globals(), "xgrammar.kernels.apply_token_bitmask_inplace_cpu")
@@ -1125,6 +1124,8 @@ class HpuKVConnectorModelRunnerMixin:
             kv_connector = get_kv_transfer_group()
             assert isinstance(kv_connector, KVConnectorBase)
             assert scheduler_output.kv_connector_metadata is not None
+            # Finish async saves from blocks this step reuses before the forward overwrites them.
+            kv_connector.handle_preemptions(scheduler_output.kv_connector_metadata)
             kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
 
             # Background KV cache transfers happen here.
@@ -3115,11 +3116,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_pad_across_dp = self.get_dp_padding(num_real_prefill_batches)
         return all_batch_contents, num_pad_across_dp
 
-    def _make_attn_bias(self, context_groups, token_groups):
+    def _make_attn_bias(self, context_slot_groups, token_groups):
+        """Merged-prefill attention bias. ``context_slot_groups`` holds one group id per context slot (-1 = not
+        context of any request), so a context that ends inside a block hides the rest of that block."""
         dtype = self.dtype
         is_causal = True  # TODO: add support for non-causal tasks
-        context_groups = torch.tensor(context_groups, device='cpu', dtype=torch.int16)
-        context_groups = context_groups.repeat_interleave(self.attn_block_size, dim=-1)
+        context_groups = torch.tensor(context_slot_groups, device='cpu', dtype=torch.int16)
         context_len = context_groups.size(-1)
         token_groups = torch.tensor(token_groups, device='cpu', dtype=torch.int16)
         num_queries = token_groups.size(-1)
@@ -3208,6 +3210,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             token_positions = align_and_pad(token_positions, (target_bs, target_seq), itertools.repeat(-1))
         token_slots = align_and_pad(token_slots, (target_bs, target_seq), itertools.repeat(-1))
         token_groups = align_and_pad(token_groups, (target_bs, target_seq), itertools.repeat(-1))
+        if self.use_merged_prefill:
+            # Context slots per request, in block order; slots past the context length belong to no request.
+            context_slot_groups = []
+            for i, (ctx_len, blocks) in enumerate(zip(context_lens, context_blocks)):
+                num_slots = len(blocks) * self.attn_block_size
+                valid = min(ctx_len, num_slots)
+                context_slot_groups.append([i] * valid + [-1] * (num_slots - valid))
+            context_slot_groups = align_and_pad(context_slot_groups, (target_bs, target_blocks * self.attn_block_size),
+                                                itertools.repeat(-1))
         context_blocks = align_and_pad(context_blocks, (target_bs, target_blocks), itertools.repeat(-1))
         context_groups = align_and_pad(context_groups, (target_bs, target_blocks), itertools.repeat(-1))
 
@@ -3230,7 +3241,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         attn_bias = None
         if self.use_merged_prefill:
-            attn_bias = self._make_attn_bias(context_groups, token_groups)
+            attn_bias = self._make_attn_bias(context_slot_groups, token_groups)
             attn_bias = attn_bias.to('hpu', non_blocking=True)
         else:
             attn_bias = None
@@ -4467,50 +4478,6 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         htorch.core.mark_step()
         return sampler_output, sampling_metadata
 
-    def _pool(
-        self,
-        hidden_states: torch.Tensor,
-        num_scheduled_tokens: int,
-        num_scheduled_tokens_np: np.ndarray,
-    ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs ==\
-            len(self.input_batch.pooling_params), \
-        "Either all or none of the requests in" \
-        " a batch must be pooling request"
-        hidden_states = hidden_states[:num_scheduled_tokens]
-
-        pooling_metadata = self.input_batch.get_pooling_metadata()
-        seq_lens_cpu = self.seq_lens.cpu[:self.input_batch.num_reqs]
-        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np, seq_lens_cpu, device=hidden_states.device)
-
-        num_reqs = self.input_batch.num_reqs
-
-        seq_lens = (
-            torch.tensor(self.input_batch.num_prompt_tokens[:num_reqs], dtype=torch.int32, device=self.device) +
-            torch.tensor(self.input_batch.num_computed_tokens_cpu[:num_reqs], dtype=torch.int32, device=self.device))
-        raw_pooler_output = self.model.pooler(hidden_states=hidden_states, pooling_metadata=pooling_metadata)
-        raw_pooler_output = json_map_leaves(
-            lambda x: x.to("cpu", non_blocking=True),
-            raw_pooler_output,
-        )
-
-        pooler_output: list[Optional[torch.Tensor]] = []
-        for raw_output, seq_len, prompt_len in zip(raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
-
-            if seq_len == prompt_len:
-                pooler_output.append(raw_output)
-            else:
-                pooler_output.append(None)
-
-        return ModelRunnerOutput(
-            req_ids=[self.input_batch.req_ids],
-            sampled_token_ids=[],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=pooler_output,
-            kv_connector_output=None,
-        )
-
     def _prepare_inputs_for_pooling(self, scheduler_output):
         """Gather inputs, positions, slot mapping, and build attn_metadata"""
         prefillInputData_list = []
@@ -4915,10 +4882,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 prompt_hidden_states = non_flattened_hidden_states
                 if prompt_hidden_states.dim() == 2:
                     prompt_hidden_states = prompt_hidden_states.view(*token_ids.shape, -1)
+                merged_starts = None
                 for i, rid in enumerate(req_id):
                     if rid in self.input_batch.num_prompt_logprobs:
-                        prefill_hidden_states_for_logprobs[rid] = \
-                            prompt_hidden_states[i]
+                        if self.use_merged_prefill:
+                            # Merged prefill packs the batch into one row, one request after another. Offsets come
+                            # from host-side lengths: prompt_len is a device tensor.
+                            if merged_starts is None:
+                                lens = [scheduler_output.num_scheduled_tokens[r] for r in req_id]
+                                merged_starts = [0, *itertools.accumulate(lens)]
+                            prefill_hidden_states_for_logprobs[rid] = \
+                                prompt_hidden_states[0, merged_starts[i]:merged_starts[i + 1]]
+                        else:
+                            prefill_hidden_states_for_logprobs[rid] = \
+                                prompt_hidden_states[i]
                 if self.use_aux_hidden_state_outputs:
                     aux_hidden_states_prefills.append(aux_hidden_states)
                 sample_hidden_states_prefills.append(sample_hidden_states)
