@@ -30,7 +30,7 @@ HPU tests consist of the following tests:
 - Feature tests
 - E2E tests
 
-All of these tests are mandatory. The unit tests run first; if they fail, the HPU tests that depend on them are not started. The pre-commit check runs in parallel with the HPU tests; if it fails, the whole HPU test run is cancelled. The required check turns green as soon as all HPU tests have passed. If the HPU tests have not finished after about 6 hours (for example after waiting for a free Gaudi machine), the required check fails with a link to the test run. The test run is not cancelled: it keeps going and shows its own result.
+All of these tests are mandatory. The unit tests run first; if they fail, the HPU tests that depend on them are not started. The pre-commit check runs in parallel with the HPU tests; if it fails, the whole HPU test run is cancelled. The required check turns green as soon as all HPU tests have passed. At most two HPU test runs start at a time, one per Gaudi machine; a PR approved while both are busy waits for its turn, in approval order. If a run would no longer finish in time, the required check fails without starting it, and the check can be re-run later. If the HPU tests have not finished after about 6 hours (for example after waiting for a free Gaudi machine), the required check fails with a link to the test run. The test run is not cancelled: it keeps going and shows its own result.
 
 ### HPU Intel® Gaudi® Tests
 

@@ -41,7 +41,16 @@ jobs:
             // GitHub ends a hosted-runner job after 6 h whatever timeout-minutes
             // says, and the cleanup step would then cancel the test run. Stop
             // waiting before that and leave the run going, so its results stay.
-            const POLL_DEADLINE = Date.now() + 345 * 60 * 1000;  // 5 h 45 min
+            const JOB_START = Date.now();
+            const POLL_DEADLINE = JOB_START + 345 * 60 * 1000;  // 5 h 45 min
+
+            // Test runs on one Gaudi machine share it job by job, so several at
+            // once all finish late. Start at most this many, in approval order;
+            // later ones wait here, but only while a run still fits before the
+            // deadline.
+            const MAX_ACTIVE_RUNS = 2;                                   // Gaudi machines
+            const DISPATCH_BY = POLL_DEADLINE - 210 * 60 * 1000;         // 3 h 30 min per run
+            const SLOT_POLL_MS = 5 * 60 * 1000;
 
             const pr = context.payload.pull_request;
 
@@ -119,6 +128,103 @@ jobs:
               core.setFailed(`Stopped waiting for ${what} before the 6 h job limit. ` +
                 `The test run goes on; see its result at ` +
                 `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${id}`);
+            }
+
+            // Runs that hold a Gaudi machine (the hourly run counts as one), and
+            // triggers approved before this one that have not dispatched yet.
+            // Approval time = start of the trigger job's first step; the job
+            // itself is listed as started while it waits for review.
+            const approvedAt = new Map();  // run id/attempt -> approval time; it never changes
+            async function gaudiQueue(skipIds) {
+              const { owner, repo } = context.repo;
+              const now = Date.now();
+              const MIN = 60 * 1000;
+              const allRunsOf = async (workflow_id, extra) => (await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id, per_page: 100, ...extra,
+              })).data.workflow_runs;
+              const runsOf = async (workflow_id, extra) =>
+                (await allRunsOf(workflow_id, extra)).filter(r => r.status !== 'completed');
+              const jobsOf = run_id => github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner, repo, run_id, filter: 'latest', per_page: 100,
+              });
+              // A run holds a machine while one of its Gaudi jobs runs, ended in
+              // the last 5 min (next jobs not queued yet), or has been queued for
+              // under 30 min. A job queued longer waits behind another counted run
+              // or for a machine that is offline.
+              const holdsMachine = (r, jobs) => (jobs.length === 0 && now - Date.parse(r.created_at) < 30 * MIN) ||
+                jobs.some(j => !(j.labels ?? []).includes('ubuntu-latest') && j.conclusion !== 'skipped' && (
+                  j.status === 'in_progress' ||
+                  (j.status === 'completed' && now - Date.parse(j.completed_at) < 5 * MIN) ||
+                  (j.status !== 'completed' && now - Date.parse(j.created_at) < 30 * MIN)));
+
+              const blocking = [];
+              const allTestRuns = await allRunsOf('pre-merge.yaml', { event: 'workflow_dispatch' });
+              const testRuns = allTestRuns.filter(r => r.status !== 'completed');
+              for (const r of testRuns) {
+                if (skipIds.has(r.id) || now - Date.parse(r.created_at) > 24 * 60 * MIN) continue;
+                const jobs = await jobsOf(r.id);
+                // On main a run past its gate only has comment and cleanup jobs left.
+                if (r.head_branch === 'main' &&
+                    jobs.some(j => j.name === 'pre_merge_hpu_test' && j.status === 'completed')) continue;
+                if (holdsMachine(r, jobs)) blocking.push(r.html_url);
+              }
+              for (const r of await runsOf('hourly-ci.yaml', {})) {
+                if (now - Date.parse(r.created_at) > 24 * 60 * MIN) continue;
+                if (holdsMachine(r, await jobsOf(r.id))) { blocking.push(r.html_url); break; }
+              }
+
+              // Triggers live at most 6 h after approval: no age filter here.
+              let mine = JOB_START;
+              const others = [];
+              for (const t of await runsOf('pre-merge-trigger.yaml', { status: 'in_progress' })) {
+                const m = /^Pre-merge for #(\d+) at ([0-9a-f]{40}):/.exec(t.display_title ?? '');
+                if (!m) continue;
+                const child = `PR #${m[1]} [${m[2]}]`;
+                // Dispatched (its run may have ended while the trigger finishes).
+                if (t.id !== context.runId && allTestRuns.some(r => r.display_title === child &&
+                    Date.parse(r.created_at) >= Date.parse(t.run_started_at))) continue;
+                const key = `${t.id}/${t.run_attempt}`;
+                if (!approvedAt.has(key)) {
+                  const job = (await jobsOf(t.id)).find(j => j.name === 'execute_pre_merge');
+                  const at = Date.parse(job?.steps?.[0]?.started_at ?? '');
+                  if (!Number.isFinite(at)) continue;  // not approved yet
+                  approvedAt.set(key, at);
+                }
+                if (t.id === context.runId) mine = approvedAt.get(key);
+                else others.push({ id: t.id, approved: approvedAt.get(key) });
+              }
+              const ahead = others.filter(o => o.approved < mine ||
+                (o.approved === mine && o.id < context.runId)).length;
+              return { active: blocking.length, ahead, blocking };
+            }
+
+            // Wait until fewer than MAX_ACTIVE_RUNS runs are ahead. Give up
+            // without dispatching once a run would no longer fit before the
+            // deadline. If the queue cannot be read, dispatch as before.
+            async function waitForGaudiSlot(skipIds) {
+              let errors = 0;
+              for (let i = 1; ; i++) {
+                try {
+                  const { active, ahead, blocking } = await gaudiQueue(skipIds);
+                  errors = 0;
+                  if (active + ahead < MAX_ACTIVE_RUNS) return true;
+                  core.info(`Waiting for a free Gaudi machine: ${active} test runs active, ` +
+                    `${ahead} approved earlier (check ${i}) ${blocking.join(' ')}`.trimEnd());
+                } catch (e) {
+                  if (++errors >= 3) {
+                    core.warning(`Could not read the Gaudi queue (${e.message}); dispatching without waiting`);
+                    return true;
+                  }
+                  core.warning(`Gaudi queue check failed: ${e.message}`);
+                }
+                const pause = errors ? 30000 : SLOT_POLL_MS;
+                if (Date.now() + pause > DISPATCH_BY) {
+                  core.setFailed('No test run was started: the Gaudi machines stayed busy with runs approved ' +
+                    'earlier, and a new run would not finish before the 6 h job limit. Re-run this check later.');
+                  return false;
+                }
+                await new Promise(r => setTimeout(r, pause));
+              }
             }
 
             // Legacy pre-merge.yaml: the result is the whole run's conclusion.
@@ -245,6 +351,7 @@ jobs:
             // 0. Sweep any previous in-flight pre-merge.yaml runs for this PR.
             //    A prior trigger may have been killed by cancel-in-progress
             //    before it could clean up its own dispatched run.
+            const superseded = new Set();
             try {
               const { data: prev } = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner, repo: context.repo.repo,
@@ -254,7 +361,7 @@ jobs:
               for (const r of prev.workflow_runs) {
                 if (['completed', 'cancelled'].includes(r.status)) continue;
                 if (r.display_title?.includes(`#${prNumber} `)) {
-                  await cancelDispatchedRun(r.id, 'superseded by new push');
+                  if (await cancelDispatchedRun(r.id, 'superseded by new push')) superseded.add(r.id);
                 }
               }
             } catch (e) {
@@ -301,6 +408,9 @@ jobs:
               );
               core.info(`nixl_changed=${inputs.nixl_changed}`);
             }
+
+            // Skip-label runs use no Gaudi machine, so they do not wait.
+            if (skipTests !== 'true' && !(await waitForGaudiSlot(superseded))) return;
 
             // 1. Dispatch to base branch. return_run_details makes the API
             //    answer 200 with the new run's id instead of an empty 204.
