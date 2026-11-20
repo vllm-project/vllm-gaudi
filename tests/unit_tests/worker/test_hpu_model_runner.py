@@ -19,7 +19,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCach
 from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm_gaudi.v1._vendored.sample.ops.penalties import apply_all_penalties
 import vllm_gaudi.extension.environment as environment
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, attn_pad_block_id, bucket_ctx_to_kernel_blocks
+from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, assert_output_rows, attn_pad_block_id,
+                                                   bucket_ctx_to_kernel_blocks)
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, splice_placeholders
 
 BLOCK_SIZE = 128
@@ -468,6 +469,23 @@ def test_update_states_async_skipped_request_keeps_only_its_row(model_runner, di
 def test_splice_placeholders(output_ids, new_ids, expected):
     splice_placeholders(output_ids, new_ids)
     assert output_ids == expected
+
+
+def test_assert_output_rows_accepts_rows_in_batch_order():
+    assert_output_rows(["a", "b"], 2)
+    # Only the first len(req_ids) batch entries are compared.
+    assert_output_rows(["a", "b"], 2, ["a", "b", "c"])
+
+
+@pytest.mark.parametrize("req_ids, num_rows, batch_req_ids", [
+    (["a", "b"], 3, None),
+    (["a", "b"], 1, None),
+    (["b", "a"], 2, ["a", "b"]),
+    (["a", "c"], 2, ["a", "b", "c"]),
+])
+def test_assert_output_rows_rejects_mismatch(req_ids, num_rows, batch_req_ids):
+    with pytest.raises(AssertionError):
+        assert_output_rows(req_ids, num_rows, batch_req_ids)
 
 
 def test_update_states_async_skipped_request_without_copy_fails(model_runner, dist_init):
