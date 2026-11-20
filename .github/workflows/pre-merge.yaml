@@ -531,8 +531,9 @@ jobs:
   pre_merge_hpu_test:
     if: ${{ !cancelled() }}
     needs: [pre-commit, pre_merge_hpu_test_build, hpu_unit_tests, hpu_pd_tests, hpu_perf_tests, hpu_dp_tests, e2e, calibration_tests, calibration_arg_parsing_tests, build_nixl_dockerfile]
-    # Same Gaudi machine as the tests; hosted when no build ran (skip-gaudi-tests).
-    runs-on: ${{ needs.pre_merge_hpu_test_build.outputs.runner_name || 'ubuntu-latest' }}
+    # Hosted: it only reads job results. On the Gaudi machine it would wait
+    # behind other runs' tests after this run's tests have finished.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Check the result of every required job
