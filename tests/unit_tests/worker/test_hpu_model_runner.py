@@ -4,6 +4,7 @@
 import pytest
 import torch
 from types import SimpleNamespace
+from unittest.mock import call, create_autospec
 import habana_frameworks.torch  # noqa: F401
 from habana_frameworks.torch.utils.internal import is_lazy
 from vllm.model_executor.model_loader import get_model
@@ -19,7 +20,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCach
 from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm_gaudi.v1._vendored.sample.ops.penalties import apply_all_penalties
 import vllm_gaudi.extension.environment as environment
-from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner, attn_pad_block_id, bucket_ctx_to_kernel_blocks
+from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, assert_output_rows, attn_pad_block_id,
+                                                   bucket_ctx_to_kernel_blocks)
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, splice_placeholders
 
 BLOCK_SIZE = 128
@@ -470,6 +472,23 @@ def test_splice_placeholders(output_ids, new_ids, expected):
     assert output_ids == expected
 
 
+def test_assert_output_rows_accepts_rows_in_batch_order():
+    assert_output_rows(["a", "b"], 2)
+    # Only the first len(req_ids) batch entries are compared.
+    assert_output_rows(["a", "b"], 2, ["a", "b", "c"])
+
+
+@pytest.mark.parametrize("req_ids, num_rows, batch_req_ids", [
+    (["a", "b"], 3, None),
+    (["a", "b"], 1, None),
+    (["b", "a"], 2, ["a", "b"]),
+    (["a", "c"], 2, ["a", "b", "c"]),
+])
+def test_assert_output_rows_rejects_mismatch(req_ids, num_rows, batch_req_ids):
+    with pytest.raises(AssertionError):
+        assert_output_rows(req_ids, num_rows, batch_req_ids)
+
+
 def test_update_states_async_skipped_request_without_copy_fails(model_runner, dist_init):
     model_runner._last_async_copy = None
     with pytest.raises(RuntimeError, match="placeholder"):
@@ -594,6 +613,27 @@ def test_update_states_kv_load_failure_drops_discarded_output(model_runner, dist
     assert model_runner.requests[req_id].output_token_ids == [4, 5]
     assert batch.num_tokens_no_spec[row] == batch.num_tokens[row] == batch.num_prompt_tokens[row] == 5
     assert recompute_chunk(4, 1) == [[[0]]]
+
+
+def test_maybe_setup_kv_connector_handles_preemptions_before_load(monkeypatch):
+    """The connector flushes saves from reused blocks before this step's metadata is bound and its loads start."""
+    import vllm_gaudi.v1.worker.hpu_model_runner as runner_module
+    from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+
+    connector = create_autospec(KVConnectorBase_V1, instance=True)
+    monkeypatch.setattr(runner_module, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(runner_module, "get_kv_transfer_group", lambda: connector)
+    monkeypatch.setattr(runner_module, "get_forward_context", lambda: None)
+    metadata = object()
+
+    runner_module.HpuKVConnectorModelRunnerMixin.maybe_setup_kv_connector(
+        SimpleNamespace(kv_connector_metadata=metadata))
+
+    assert connector.mock_calls == [
+        call.handle_preemptions(metadata),
+        call.bind_connector_metadata(metadata),
+        call.start_load_kv(None),
+    ]
 
 
 def test_selective_sampling_metadata_passes_outputs_only_to_penalty_rows(model_runner, dist_init):
