@@ -1653,14 +1653,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Compact GDN/linear_attention state slot allocator.
         # GDN recurrent states are fixed-size per request (independent of
         # sequence length), so we can allocate fewer slots than num_blocks.
-        # IMPORTANT: all GDN groups share the same underlying state tensor,
-        # so each request needs num_gdn_groups distinct slot indices.
+        # The HPU backend cannot as_strided-split one raw state buffer
+        # across GDN groups, so every GDN group owns its own state tensor
+        # (one per kv_cache tensor the group's layers are coalesced into).
         # Without prefix caching, request `req` with base_slot `s` in group
         # `g` uses tensor index `s * num_gdn_groups + g + 1` (1-based, slot 0
         # unused); tensor size max_num_reqs * num_gdn_groups + 2 (last row is
         # the dead pad that torch.remainder(-1, total) must land on).
         # With prefix caching the slot bookkeeping is bypassed entirely and
-        # the rows mirror the shared block table instead (prepare_mamba_state_idxs).
+        # the rows mirror the shared block table directly (row b == block b),
+        # so each group's tensor holds num_blocks + 1 rows exactly like the
+        # non-compact layout (prepare_mamba_state_idxs).
         self._compact_gdn_enabled = os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() in ("1", "true")
         self._compact_gdn_group_ids: set[int] = set()
         self._compact_gdn_group_offset: dict[int, int] = {}  # {group_idx: g_offset}
@@ -1841,23 +1844,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             else:
                 block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
                 state_indices_cpu = block_table_cpu_tensor[req_indices, block_table_offsets].clone()
-                if group_idx in self._compact_gdn_group_ids:
-                    # Compact GDN with prefix caching: the state rows mirror
-                    # the shared block table, interleaved per GDN group.
-                    # Block value b (b=0 is the engine null block) maps to
-                    # row b * num_gdn_groups + g_offset, so block 0 of every
-                    # group aliases the shared row 0 (the kernels'
-                    # state_indices == 0 zero guard). Rows of real blocks
-                    # occupy [num_gdn_groups, num_blocks * num_gdn_groups);
-                    # the tensor's final row (num_blocks * num_gdn_groups)
-                    # stays dead and is the pad target of remainder(-1, total).
-                    # For a single GDN group this degenerates exactly to the
-                    # non-compact layout (row == block id).
-                    num_gdn_groups = self._num_gdn_groups
-                    state_indices_cpu = torch.where(
-                        state_indices_cpu == 0,
-                        torch.zeros_like(state_indices_cpu),
-                        state_indices_cpu * num_gdn_groups + self._compact_gdn_group_offset[group_idx])
+                # Compact GDN with prefix caching reuses this mapping
+                # directly: state rows are block-identical to the
+                # non-compact layout (row b == block b) because each GDN
+                # group owns its own state tensor, so no cross-group offset
+                # arithmetic is needed. Row 0 is the engine null block
+                # (the kernels' state_indices == 0 zero guard); row
+                # num_blocks is the dead pad that remainder(-1,
+                # num_blocks + 1) lands on for -1 pad lanes.
 
             if num_indices < target_bs:
                 pad_val = -1 if group_idx in self._compact_gdn_group_ids else self._MAMBA_PAD_BLOCK_ID
@@ -7201,25 +7195,29 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES and \
                             self._compact_gdn_enabled:
                         # GDN/linear_attention: compact allocation.
-                        # All GDN groups share the same state tensor.
+                        # The HPU backend cannot as_strided-split one raw
+                        # state buffer across GDN groups, so every group
+                        # owns its own state tensor (this function's
+                        # layer-position keying realizes one tensor per
+                        # kv_cache tensor per group).
                         # Without prefix caching each request owns private
                         # per-group slots (max_num_reqs * num_gdn_groups + 2,
                         # slot 0 unused, last slot for -1 padding).
-                        # With prefix caching the rows mirror the shared block
-                        # table interleaved per group: block b of group g maps
-                        # to row b * num_gdn_groups + g_offset, so
-                        # num_blocks * num_gdn_groups + 1 slots suffice (row 0
-                        # aliases the null block for every group, the final
-                        # row is the dead -1 pad).
+                        # With prefix caching the rows mirror the shared
+                        # block table directly (row b == block b), so
+                        # num_blocks + 1 rows per group suffice — identical
+                        # to the non-compact layout (row 0 is the null
+                        # block's kernel zero guard, the final row is the
+                        # dead -1 pad reached by remainder(-1, total)).
                         self._compact_gdn_group_ids.add(group_idx)
                         if self.use_prefix_caching:
-                            compact_total = num_blocks * self._num_gdn_groups + 1
+                            compact_total = num_blocks + 1
                         else:
                             compact_total = self._gdn_max_reqs * self._num_gdn_groups + 2
-                        logger.debug("GDN compact tensor: %d slots (groups=%d, prefix_caching=%s, max_reqs=%d) "
-                                     "vs baseline %d", compact_total, self._num_gdn_groups,
-                                     self.use_prefix_caching, self._gdn_max_reqs,
-                                     num_blocks + 1 + (num_blocks * (self._num_gdn_groups - 1)))
+                        logger.debug(
+                            "GDN compact tensor: %d rows (groups=%d, prefix_caching=%s, max_reqs=%d) "
+                            "vs non-compact per-layer %d rows", compact_total, self._num_gdn_groups,
+                            self.use_prefix_caching, self._gdn_max_reqs, num_blocks + 1)
                         kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, compact_total)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
@@ -7291,7 +7289,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         # hybrid loop above for the row layout).
                         self._compact_gdn_group_ids.add(group_idx)
                         if self.use_prefix_caching:
-                            compact_total = num_blocks * self._num_gdn_groups + 1
+                            compact_total = num_blocks + 1
                         else:
                             compact_total = self._gdn_max_reqs * self._num_gdn_groups + 2
                         kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, compact_total)
@@ -7422,18 +7420,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             gdn_max_reqs = self._gdn_max_reqs
             if self.use_prefix_caching:
                 # Block-mirror layout: state rows derive from the shared
-                # block table on every step, so per-request slot
-                # bookkeeping is bypassed (_update_states skips it in this
-                # mode) and only the group offsets are needed.
+                # block table on every step (row b == block b), so
+                # per-request slot bookkeeping is bypassed (_update_states
+                # skips it in this mode) and only the group offsets are
+                # needed. Every GDN group owns its own num_blocks + 1
+                # rows (see the allocation above).
                 self._gdn_slot_free_list = []
-                compact_total = num_blocks * self._num_gdn_groups + 1
+                compact_total = num_blocks + 1
             else:
                 self._gdn_slot_free_list = list(range(gdn_max_reqs - 1, -1, -1))
                 compact_total = gdn_max_reqs * self._num_gdn_groups + 2
             self._gdn_req_to_base_slot.clear()
-            baseline = num_blocks + 1 + (num_blocks * (self._num_gdn_groups - 1))
-            logger.info("GDN compact: %d groups, prefix_caching=%s, tensor_dim0=%d vs baseline=%d, free_list_len=%d",
-                        len(self._compact_gdn_group_ids), self.use_prefix_caching, compact_total, baseline,
+            logger.info("GDN compact: %d groups, prefix_caching=%s, rows_per_group_tensor=%d, free_list_len=%d",
+                        len(self._compact_gdn_group_ids), self.use_prefix_caching, compact_total,
                         len(self._gdn_slot_free_list))
 
         if has_kv_transfer_group():

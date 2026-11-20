@@ -2,18 +2,22 @@
 """CPU-only unit tests for compact GDN with prefix caching.
 
 The compact layout with prefix caching mirrors the shared block table
-instead of allocating private per-request slots:
+instead of allocating private per-request slots, and is byte-identical
+to the non-compact layout:
 
-* Total state rows: ``S = num_blocks * num_gdn_groups + 1``.
-* Block-table value ``b`` maps to row ``0 if b == 0 else b * G + g_offset``:
+* Total state rows per GDN group tensor: ``S = num_blocks + 1`` (every
+  GDN group owns its own state tensor, so the size is independent of the
+  group count).
+* Block-table value ``b`` maps to row ``0 if b == 0 else b``:
   - ``b == 0`` is the engine null block (BlockPool pops it first, so real
     block ids are 1..num_blocks - 1) and aliases the shared row 0, which
     the kernels' ``state_indices == 0`` zero-guard treats as "no state".
-  - Row ``S - 1 == num_blocks * num_gdn_groups`` is never produced by the
-    mapping; it is the dead pad that ``torch.remainder(-1, S)`` lands on
-    when pad lanes carry ``-1``.
-* For a single GDN group (``G == 1``) the mapping degenerates to the
-  production non-compact layout (row == block id, ``S == num_blocks + 1``).
+  - Row ``S - 1 == num_blocks`` is never produced by the mapping; it is
+    the dead pad that ``torch.remainder(-1, S)`` lands on when pad lanes
+    carry ``-1``.
+
+Without prefix caching the compact layout keeps private per-request
+slots (row = s * G + g + 1, tensor size max_reqs * G + 2).
 
 The scheduler tests cover the state-grid split gate: Qwen3.5 hybrids with
 prefix caching must align chunked-prefill ends to the mamba state grid in
@@ -27,27 +31,33 @@ import pytest
 
 
 def _compact_row(block_id, group_offset, num_gdn_groups):
-    """Row a block-table value maps to for one GDN group (pure Python)."""
-    return 0 if block_id == 0 else block_id * num_gdn_groups + group_offset
+    """Row a block-table value maps to for one GDN group (pure Python).
+
+    With prefix caching the row depends only on the block id: every GDN
+    group owns its own state tensor, so no cross-group offset arithmetic
+    is involved (the group arguments are kept for signature parity with
+    the non-PC layout).
+    """
+    return 0 if block_id == 0 else block_id
 
 
 def _compact_total(num_blocks, num_gdn_groups):
-    return num_blocks * num_gdn_groups + 1
+    """Rows per GDN group tensor: identical to the non-compact layout."""
+    return num_blocks + 1
 
 
-def test_g1_degenerates_to_noncompact_layout():
-    """Single GDN group: row == block id, exactly the non-compact layout."""
+def test_total_matches_noncompact_for_all_group_counts():
+    """S == num_blocks + 1 for every group count (per-group tensors)."""
     num_blocks = 1234
-    total = _compact_total(num_blocks, 1)
-    assert total == num_blocks + 1  # non-compact size
-    for b in range(num_blocks):  # 0 = null, 1..num_blocks-1 = real blocks
-        assert _compact_row(b, 0, 1) == b
+    for groups in (1, 2, 3, 5):
+        assert _compact_total(num_blocks, groups) == num_blocks + 1
 
 
-def test_null_block_maps_to_shared_row0():
+def test_null_block_maps_to_row0():
     """Every group's null entry aliases row 0 (the kernel zero-guard row)."""
-    for g in range(4):
-        assert _compact_row(0, g, 4) == 0
+    for groups in (1, 2, 3, 4):
+        for g in range(groups):
+            assert _compact_row(0, g, groups) == 0
 
 
 def test_real_rows_stay_in_range():
@@ -57,22 +67,27 @@ def test_real_rows_stay_in_range():
     for g in range(groups):
         rows = {_compact_row(b, g, groups) for b in range(1, num_blocks)}
         assert len(rows) == num_blocks - 1  # distinct
-        assert min(rows) == groups + g  # first real block
+        assert min(rows) == 1  # first real block
+        assert max(rows) == num_blocks - 1
         assert max(rows) < total - 1  # never the dead pad
 
 
-def test_groups_are_disjoint_and_interleaved():
-    """Group g owns exactly the rows b*G + g for real blocks b."""
+def test_rows_are_group_independent():
+    """Block b is row b in every group's tensor, for every group count.
+
+    This is what makes the compact PC layout byte-identical to the
+    non-compact layout (which also maps row == block id per group
+    tensor).
+    """
     num_blocks, groups = 50, 3
     total = _compact_total(num_blocks, groups)
     for g in range(groups):
-        expected = {b * groups + g for b in range(1, num_blocks)}
-        # b=0 (null) is checked separately: it aliases the shared row 0.
-        assert {_compact_row(b, g, groups) for b in range(1, num_blocks)} == expected
-        assert _compact_row(0, g, groups) == 0
-    all_rows = {_compact_row(b, g, groups) for g in range(groups) for b in range(1, num_blocks)}
-    assert len(all_rows) == (num_blocks - 1) * groups
-    assert all(row < total for row in all_rows)
+        for b in range(num_blocks):
+            assert _compact_row(b, g, groups) == (0 if b == 0 else b)
+            assert _compact_row(b, g, groups) < total
+    # and the mapping does not depend on the group count at all
+    for b in range(num_blocks):
+        assert _compact_row(b, 0, 3) == _compact_row(b, 1, 7)
 
 
 def test_dead_pad_is_remainder_minus_one_target():
@@ -104,9 +119,7 @@ def _stub_scheduler(prefix_caching, arch):
     # Bypass AsyncScheduler.__init__ (needs a full vllm_config + KV pool);
     # the cached property under test only reads vllm_config.
     sched = HPUAsyncScheduler.__new__(HPUAsyncScheduler)
-    model_config = SimpleNamespace(is_hybrid=True,
-                                   architecture=arch,
-                                   hf_config=SimpleNamespace(architectures=[arch]))
+    model_config = SimpleNamespace(is_hybrid=True, architecture=arch, hf_config=SimpleNamespace(architectures=[arch]))
     sched.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(enable_prefix_caching=prefix_caching),
         model_config=model_config,
