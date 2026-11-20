@@ -472,6 +472,16 @@ run_preemption_test() {
     echo "✅ Test with preemption handling passed."
 }
 
+# Output row order and logprobs with prefills and decodes sharing steps
+run_row_order_test() {
+    echo "➡️ Testing output row order and logprobs..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/row_order.py"
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/row_order.py" --async-scheduling
+    VLLM_MERGED_PREFILL=true VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/row_order.py"
+    VLLM_MERGED_PREFILL=true VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/row_order.py" --async-scheduling
+    echo "✅ Test with output row order and logprobs passed."
+}
+
 # Spec decode with ngram
 _run_spec_decode_ngram_test() {
     echo "➡️ Testing Spec-decode with ngram..."
@@ -815,6 +825,7 @@ launch_all_tests() {
     run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
     run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
     run_preemption_test
+    run_row_order_test
     run_spec_decode_parallel
     run_spec_decode_extra_parallel
     run_embedding_model_test
