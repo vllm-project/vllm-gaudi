@@ -658,6 +658,11 @@ class HpuPlatform(Platform):
         in the worker process (via init_device) and therefore cannot inform env
         defaults applied here at engine-construction time. An explicitly set
         VLLM_COMPACT_GDN always takes precedence over auto-detection.
+
+        Prefix caching is compatible: under prefix caching the compact GDN
+        state rows mirror the shared block table instead of per-request
+        private slots (see HPUModelRunner.prepare_mamba_state_idxs). Only
+        PD disaggregated serving remains an auto-disable.
         """
         explicit = os.environ.get('VLLM_COMPACT_GDN')
         if explicit is not None:
@@ -677,11 +682,10 @@ class HpuPlatform(Platform):
             return False
         if num_gdn <= 0:
             return False
-        # Compact-GDN is auto-disabled for PD-disaggregated serving and prefix caching.
-        if getattr(vllm_config, 'kv_transfer_config', None) is not None:
-            return False
-        cache_config = getattr(vllm_config, 'cache_config', None)
-        return not getattr(cache_config, 'enable_prefix_caching', False)
+        # Compact-GDN is auto-disabled for PD-disaggregated serving only;
+        # prefix caching is compatible (the state rows mirror the shared
+        # block table instead of per-request private slots).
+        return getattr(vllm_config, 'kv_transfer_config', None) is None
 
     @classmethod
     def _maybe_disable_synapse_input_reuse(cls, vllm_config: VllmConfig) -> None:

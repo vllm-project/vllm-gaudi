@@ -10,7 +10,7 @@ import vllm_gaudi.envs as gaudi_envs
 
 class HPUAsyncScheduler(AsyncScheduler):
 
-    def schedule(self, throttle_prefills: bool = False):
+    def schedule(self, *args, **kwargs):
         """HPU override: fix stale cached-token accounting after preemption.
 
         After preemption a request is requeued with num_computed_tokens reset.
@@ -28,13 +28,13 @@ class HPUAsyncScheduler(AsyncScheduler):
         until it is picked up. The Prometheus clamp in vllm_gaudi/utils.py
         guards the metrics path during that window.
 
-        Args:
-            throttle_prefills: Forwarded verbatim to the base scheduler. Added
-                upstream by vllm-project/vllm#44558, which made EngineCore call
-                ``schedule(self._should_throttle_prefills())`` positionally.
+        Any arguments (none on v0.19; ``throttle_prefills`` added upstream by
+        vllm-project/vllm#44558, which made EngineCore call
+        ``schedule(self._should_throttle_prefills())`` positionally) are
+        forwarded verbatim to the base scheduler.
         """
         self._step_prefill_req_ids: set[str] = set()
-        output = super().schedule(throttle_prefills)
+        output = super().schedule(*args, **kwargs)
         for request in self.running:
             # vLLM Request no longer exposes num_cached_tokens on newer
             # branches. Keep the old fix only when the field exists.
@@ -176,15 +176,18 @@ class HPUAsyncScheduler(AsyncScheduler):
 
     @cached_property
     def _align_to_mamba_block(self) -> bool:
-        """Qwen3.5 hybrid on non-compact GDN with prefix caching: in "align" mode an SSM
-        state is only checkpointed when a step ends on a state-block boundary.
+        """Qwen3.5 hybrid with prefix caching: in "align" mode an SSM state is
+        only checkpointed when a step ends on a state-block boundary.
+
+        Applies to both compact and non-compact GDN: a chunked-prefill split
+        that ends mid-state-block would leave the load row holding an
+        incomplete boundary state that the next chunk resumes from, so every
+        split must land on a mamba state-grid multiple.
         """
-        from vllm_gaudi.platform import HpuPlatform, is_qwen3_5_hybrid_model
+        from vllm_gaudi.platform import is_qwen3_5_hybrid_model
         if not self.vllm_config.cache_config.enable_prefix_caching:
             return False
-        if not is_qwen3_5_hybrid_model(self.vllm_config.model_config):
-            return False
-        return not HpuPlatform._compact_gdn_active(self.vllm_config)
+        return is_qwen3_5_hybrid_model(self.vllm_config.model_config)
 
     @cached_property
     def _mamba_state_block_size(self) -> int:
@@ -235,10 +238,10 @@ class HPUAsyncScheduler(AsyncScheduler):
         own logic exactly (see the cached properties above); a mismatch makes
         the runner assert on an unaligned context_lens.
 
-        For Qwen3.5 hybrids on non-compact GDN with prefix caching
-        (``_align_to_mamba_block``), chunk ends are additionally placed on the
-        mamba state grid (``_mamba_state_block_size``), so the state slot a
-        step writes holds exactly the tokens its block hash claims.
+        For Qwen3.5 hybrids with prefix caching (``_align_to_mamba_block``,
+        both compact and non-compact GDN), chunk ends are additionally placed
+        on the mamba state grid (``_mamba_state_block_size``), so the state
+        row a chunk reads from holds exactly the tokens its block hash claims.
         """
         chunk_size = self._mamba_align_chunk_size
         num_mamba_layers = self._num_mamba_like_layers
