@@ -7,6 +7,69 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm_gaudi.v1._vendored.spec_decode.eagle import EagleProposer
 from vllm_gaudi.v1._vendored.spec_decode.metadata import SpecDecodeMetadata
 
+# HPU shim for Qwen3_5 MTP draft head (crash at qwen3_5_mtp.py:164
+# torch.cat([inputs_embeds 2D, hidden_states 3D]) on HPU). On HPU the runner
+# keeps [B,S,H] while on CUDA it flattens to [tokens,H]; the core MTP cat
+# assumes matching ndim. Patch at import so any image baking this file gets
+# the fix without touching the installed core vllm tree.
+try:
+    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
+
+    _orig_mtp_forward = Qwen3_5MultiTokenPredictor.forward
+
+    def _hpu_mtp_forward(self, input_ids, positions, hidden_states, intermediate_tensors=None, inputs_embeds=None, spec_step_idx=0):
+        if intermediate_tensors is None:
+            if inputs_embeds is None:
+                inputs_embeds = self.embed_input_ids(input_ids)
+            # HPU reshape guard: align ndim before cat(dim=-1).
+            # HPU may pass 3D [B,S,H] hidden_states vs 2D [tokens,H] embeds
+            # (or vice-versa depending on prefill vs decode path). Flatten
+            # leading dims to 2D for the cat/fc, then let the MTP layer handle
+            # the 2D flat convention (it already does via positions mapping).
+            if inputs_embeds.dim() != hidden_states.dim():
+                # flatten all but last dim to 2D
+                inputs_embeds = inputs_embeds.reshape(-1, inputs_embeds.shape[-1])
+                hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+            assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
+            inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+            hidden_states = self.pre_fc_norm_hidden(hidden_states)
+            hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+            hidden_states = self.fc(hidden_states)
+            residual = None
+        else:
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+        # Remainder mirrors upstream (kept in sync with core at patch time):
+        from vllm.model_executor.models.utils import sequence_parallel_chunk
+        from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        mtp_layer = self.layers[current_step_idx]
+        if mtp_layer.use_attn_reduce_scatter_for_moe:
+            assert hidden_states.shape[0] == positions.shape[-1]
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            assert residual is None
+        hidden_states, residual = mtp_layer(positions=positions, hidden_states=hidden_states, residual=residual)
+        if not get_pp_group().is_last_rank:
+            from vllm.sequence import IntermediateTensors
+            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+        hidden_states, _ = self.norm(hidden_states, residual)
+        if mtp_layer.use_attn_reduce_scatter_for_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[: positions.shape[-1]]
+        return hidden_states
+
+    Qwen3_5MultiTokenPredictor.forward = _hpu_mtp_forward
+    # Also patch MoE variant (inherits but may be separately imported)
+    try:
+        from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MoeMTP
+        # Qwen3_5MoeMTP uses same model attribute; its forward goes via parent.
+        # No separate patch needed, but ensure the class is loaded.
+        pass
+    except Exception:
+        pass
+except Exception:
+    pass
+
 
 class HpuEagleProposer(EagleProposer):
 
