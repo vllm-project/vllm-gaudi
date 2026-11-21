@@ -14,9 +14,20 @@ import torch
 
 from vllm_gaudi.ops import hpu_sparse_attn_indexer as indexer
 
-def _build(batch_size, per_request, block_size, n_head, head_dim, topk, seed,
-           interleaved=True, width_extra=0, neg_weights=False, block_ids=None,
-           partial_frac=0.0, pad_blocks=0):
+
+def _build(batch_size,
+           per_request,
+           block_size,
+           n_head,
+           head_dim,
+           topk,
+           seed,
+           interleaved=True,
+           width_extra=0,
+           neg_weights=False,
+           block_ids=None,
+           partial_frac=0.0,
+           pad_blocks=0):
     """Build decode metadata + tensors for the indexer. Returns (state, metadata, q, k, weights, cache, ref)."""
     g = torch.Generator().manual_seed(seed)
     num_blocks = batch_size * per_request
@@ -30,13 +41,13 @@ def _build(batch_size, per_request, block_size, n_head, head_dim, topk, seed,
     blocks = torch.tensor(block_ids, dtype=torch.long) if block_ids is not None else \
         torch.randperm(max_block * 8, generator=g)[:num_blocks]
     if pad_blocks:
-        blocks = torch.cat([blocks, torch.full((pad_blocks,), max_block + 999, dtype=torch.long)])
-        groups = torch.cat([groups, torch.full((pad_blocks,), -1, dtype=torch.long)])
+        blocks = torch.cat([blocks, torch.full((pad_blocks, ), max_block + 999, dtype=torch.long)])
+        groups = torch.cat([groups, torch.full((pad_blocks, ), -1, dtype=torch.long)])
         num_blocks_total = blocks.shape[0]
     else:
         num_blocks_total = num_blocks
 
-    usage = torch.full((num_blocks_total,), float(block_size))
+    usage = torch.full((num_blocks_total, ), float(block_size))
     if partial_frac > 0:
         n_partial = max(1, int(num_blocks_total * partial_frac))
         usage[torch.randperm(num_blocks_total, generator=g)[:n_partial]] = \
@@ -49,13 +60,13 @@ def _build(batch_size, per_request, block_size, n_head, head_dim, topk, seed,
     k = torch.randn(batch_size, head_dim, generator=g, dtype=torch.bfloat16) * 0.2
     weights = torch.randn(batch_size, n_head, generator=g, dtype=torch.bfloat16) * 0.5
     if neg_weights:
-        weights = torch.cat([weights[: batch_size // 2], -weights[batch_size // 2:]], dim=0)
+        weights = torch.cat([weights[:batch_size // 2], -weights[batch_size // 2:]], dim=0)
 
     width = per_request + width_extra
     index = torch.full((batch_size, width), num_blocks_total, dtype=torch.int32)
     for b in range(batch_size):
         pos = (groups == b).nonzero().flatten()
-        index[b, : pos.numel()] = pos.int()
+        index[b, :pos.numel()] = pos.int()
 
     state = SimpleNamespace(topk_tokens=topk,
                             topk_indices_buffer=torch.empty(batch_size, topk, dtype=torch.int32),
@@ -68,16 +79,24 @@ def _build(batch_size, per_request, block_size, n_head, head_dim, topk, seed,
                                block_groups=groups,
                                block_usage=usage,
                                indexer_block_index=index)
-    ref = dict(blocks=blocks, groups=groups, usage=usage, cache=cache, q=q, weights=weights,
-               block_size=block_size, n_head=n_head, head_dim=head_dim, batch_size=batch_size,
+    ref = dict(blocks=blocks,
+               groups=groups,
+               usage=usage,
+               cache=cache,
+               q=q,
+               weights=weights,
+               block_size=block_size,
+               n_head=n_head,
+               head_dim=head_dim,
+               batch_size=batch_size,
                num_blocks_total=num_blocks_total)
     return state, metadata, q, k, weights, cache, ref
 
 
 def _ref_scores_for(ref, b):
     """Naive fp32 scores {slot: score} for request ``b`` over owned, valid slots (contract 5, 8, 9)."""
-    blocks, groups, usage, cache, q, weights = (ref['blocks'], ref['groups'], ref['usage'],
-                                                ref['cache'], ref['q'], ref['weights'])
+    blocks, groups, usage, cache, q, weights = (ref['blocks'], ref['groups'], ref['usage'], ref['cache'], ref['q'],
+                                                ref['weights'])
     bs = ref['block_size']
     out = {}
     for i in range(blocks.shape[0]):
@@ -87,7 +106,7 @@ def _ref_scores_for(ref, b):
         for p in range(n_valid):
             slot = int(blocks[i]) * bs + p
             key = cache[slot].float()
-            logits = (q[b].float() * key).sum(-1)          # (n_head,) == bmm row
+            logits = (q[b].float() * key).sum(-1)  # (n_head,) == bmm row
             out[slot] = float((logits.relu() * weights[b].float()).sum())
     return out
 
@@ -101,8 +120,16 @@ def _run(indexer_mod, monkeypatch, state, metadata, q, k, weights):
 def test_fast_and_fallback_select_same_slots(monkeypatch):
     """The per-request fast path and the broadcast-mask fallback must pick identical slot sets."""
     for seed in (1, 2, 3):
-        state, meta, q, k, w, cache, ref = _build(4, 6, 16, 8, 32, 24, seed,
-                                                interleaved=True, width_extra=2, partial_frac=0.5)
+        state, meta, q, k, w, cache, ref = _build(4,
+                                                  6,
+                                                  16,
+                                                  8,
+                                                  32,
+                                                  24,
+                                                  seed,
+                                                  interleaved=True,
+                                                  width_extra=2,
+                                                  partial_frac=0.5)
         fast = _run(indexer, monkeypatch, state, meta, q, k, w)
         meta_fb = SimpleNamespace(**{**meta.__dict__, 'indexer_block_index': None})
         state_fb = SimpleNamespace(topk_tokens=24,
@@ -147,26 +174,27 @@ def test_negative_weights_rank_by_score_not_magnitude(monkeypatch):
         sel = sorted(int(s) for s in fast[b].tolist() if s >= 0)
         sc = _ref_scores_for(ref, b)
         ranked = sorted(sc.items(), key=lambda kv: -kv[1])
-        expected = sorted(s for s, _ in ranked[: min(5, len(ranked))])
+        expected = sorted(s for s, _ in ranked[:min(5, len(ranked))])
         assert sel == expected, f"req {b}: {sel} != {expected}"
+
 
 def test_deterministic_topk_exact(monkeypatch):
     """With crafted strictly-ordered scores the selected slots are exactly the largest owned valid slots."""
     batch_size, per_request, block_size, n_head, head_dim, topk = 2, 2, 4, 4, 8, 4
-    block_ids = [10, 20, 30, 40]          # block0->req0, block1->req1, block2->req0, block3->req1
+    block_ids = [10, 20, 30, 40]  # block0->req0, block1->req1, block2->req0, block3->req1
     groups = torch.tensor([0, 1, 0, 1], dtype=torch.long)
     blocks = torch.tensor(block_ids, dtype=torch.long)
-    usage = torch.full((4,), float(block_size))
+    usage = torch.full((4, ), float(block_size))
     num_blocks = 4
     width = per_request
     index = torch.full((batch_size, width), num_blocks, dtype=torch.int32)
     for b in range(batch_size):
         pos = (groups == b).nonzero().flatten()
-        index[b, : pos.numel()] = pos.int()
+        index[b, :pos.numel()] = pos.int()
     max_slot = max(block_ids) * block_size + block_size
     cache = torch.empty(max_slot, head_dim, dtype=torch.bfloat16)
     for s in range(max_slot):
-        cache[s] = torch.full((head_dim,), float(s + 1), dtype=torch.bfloat16)   # score = 32 * (s + 1)
+        cache[s] = torch.full((head_dim, ), float(s + 1), dtype=torch.bfloat16)  # score = 32 * (s + 1)
     q = torch.ones(batch_size, n_head, head_dim, dtype=torch.bfloat16)
     weights = torch.ones(batch_size, n_head, dtype=torch.bfloat16)
     k = torch.zeros(batch_size, head_dim, dtype=torch.bfloat16)
@@ -174,9 +202,12 @@ def test_deterministic_topk_exact(monkeypatch):
                             topk_indices_buffer=torch.empty(batch_size, topk, dtype=torch.int32),
                             k_cache=SimpleNamespace(kv_cache=cache),
                             skip_k_cache_insert=True)
-    meta = SimpleNamespace(is_prompt=False, block_size=block_size,
+    meta = SimpleNamespace(is_prompt=False,
+                           block_size=block_size,
                            slot_mapping=torch.zeros(batch_size, dtype=torch.long),
-                           block_list=blocks, block_groups=groups, block_usage=usage,
+                           block_list=blocks,
+                           block_groups=groups,
+                           block_usage=usage,
                            indexer_block_index=index)
     out = _run(indexer, monkeypatch, state, meta, q, k, weights)
     # req0 owns physical blocks 10,30 -> slots 40..43,120..123 ; topk=4 largest -> 120..123
@@ -227,8 +258,15 @@ def test_pad_blocks_group_minus_one_never_selected(monkeypatch):
 def test_topk_larger_than_candidates_pads_minus_one(monkeypatch):
     """When a request has fewer valid owned slots than topk, the remainder is filled with -1."""
     batch_size, per_request, block_size, topk = 2, 1, 16, 10
-    state, meta, q, k, w, cache, ref = _build(batch_size, per_request, block_size, 4, 16, topk, 51,
-                                              width_extra=0, partial_frac=1.0)
+    state, meta, q, k, w, cache, ref = _build(batch_size,
+                                              per_request,
+                                              block_size,
+                                              4,
+                                              16,
+                                              topk,
+                                              51,
+                                              width_extra=0,
+                                              partial_frac=1.0)
     for b in range(batch_size):
         i = int((ref['groups'] == b).nonzero().flatten()[0])
         ref['usage'][i] = 3.0
@@ -253,7 +291,7 @@ def test_shape_constant_cache(monkeypatch):
         cpu = torch.device("cpu")
         meta = torch.device("meta")  # distinct, zero-allocation device available in any build
         t0 = indexer._blk_constants(2, 64, 128, cpu)
-        t1 = indexer._blk_constants(4, 64, 128, meta)
+        indexer._blk_constants(4, 64, 128, meta)  # registers the meta-keyed entry; only the key is asserted
         # a fresh but equal device object (same type) must hit the same entry
         assert indexer._blk_constants(2, 64, 128, torch.device("cpu")) is t0
         assert len(indexer._BLK_CACHE) == 2

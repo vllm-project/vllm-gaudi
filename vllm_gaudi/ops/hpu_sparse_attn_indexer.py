@@ -4,7 +4,8 @@
 Scoring (bf16 BMM, then FP32 ReLU weighted-sum) keeps the previous FP32 score values; the decode path
 removes the per-step index work instead. All HPU index arithmetic uses 1-D flat int32 ``index_select``
 (2-D int64 gathers fail HPU torch.compile). The per-shape index constants (block-row offsets, -inf pad row)
-are cached across steps in a small bounded dict keyed by (batch, width, block_size, device).
+are cached across steps in a small bounded dict keyed by (batch, width, block_size, device) in
+eager mode; under torch.compile they are built in-graph instead.
 """
 
 import torch
@@ -27,12 +28,24 @@ def _blk_constants(batch_size: int, width: int, block_size: int, device) -> _Blk
     ``pad_block_row`` = one int32 zero block id appended so ``block_index`` entries equal to block_count stay valid.
     ``pad_row`` = one -inf score row (the padding candidate every short request sees).
 
-    The dict is capped at ``_BLK_CACHE_MAX`` entries with FIFO eviction, so memory stays bounded no
-    matter how many shapes appear. Keys are (batch, width, block_size, torch.device) tuples: device is
-    hashable and compares by (type, index), so an equal device object always hits. No lock: CPython dict
-    get/set are GIL-atomic, a torn concurrent first insert only rebuilds the constants once more, and the
-    eviction pop uses a default so a concurrent evict can never raise.
+    Under ``torch.compile`` the constants are built inside the traced graph (as the previous
+    implementation did), so the compiled graph is guarded on shapes only, not on the dict. In
+    eager/lazy mode they are cached in ``_BLK_CACHE``: capped at ``_BLK_CACHE_MAX`` entries with FIFO
+    eviction, so memory stays bounded no matter how many shapes appear. Keys are (batch, width, block_size,
+    torch.device) tuples: device is hashable and compares by (type, index), so an equal device object
+    always hits. No lock: CPython dict get/set are GIL-atomic, a torn concurrent first insert only
+    rebuilds the constants once more, and the eviction pop uses a default so a concurrent evict can never
+    raise.
     """
+    if torch.compiler.is_compiling():
+        # In-graph: static-shape constants the graph builds itself (as the previous implementation did).
+        # Touching _BLK_CACHE inside the compiled region makes Dynamo guard on the dict, so every new
+        # (batch, width, block_size, device) key would trace a second graph and evicted keys would
+        # recompile at serving time.
+        rows_int = torch.arange(batch_size, dtype=torch.int32, device=device)[:, None] * width
+        pad_block_row = torch.zeros(1, dtype=torch.int32, device=device)
+        pad_row = torch.full((1, block_size), -torch.inf, dtype=torch.float32, device=device)
+        return rows_int, pad_block_row, pad_row
     key = (batch_size, width, block_size, device)
     hit = _BLK_CACHE.get(key)
     if hit is None:
