@@ -230,7 +230,7 @@ _run_qwen2_5_vl_load_generate_test() {
 # Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and torch.compile
 _run_qwen2_5_vl_compile_warmup_test() {
     echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and torch.compile..."
-    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PAs=False \
+    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PA=False \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
     echo "✅ Test Qwen2.5-VL-7B with full restricted warmup and torch.compile passed."
 }
@@ -267,14 +267,6 @@ _run_mistral3_load_generate_test() {
 #     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/deepseek-ocr.yaml"
 #     echo "✅ Test with multimodal-support with deepseek-ocr passed."
 # }
-
-_run_llama3_70b_inc_dynamic_quant_test() {
-    echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
-    QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/calibration/quantization_config/maxabs_quant_dynamic_quantization_weight_pcs_pow2.json" \
-    RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true VLLM_DYNAMIC_KV_QUANT=1 \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
-    echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode passed."
-}
 
 # --- LM-eval tests ---
 # Tests below score models on lmeval tasks, usually gsm8k
@@ -319,8 +311,9 @@ _run_gsm8k_qwen3_30b_test() {
 # Launches a vLLM OpenAI server, runs lm-eval as a local-chat-completions
 # client, and gates on the accuracy thresholds in the config yaml.
 # Requires HF_TOKEN with access to the gated Idavidrein/gpqa dataset.
-# TODO: Enable kimi2.6 test later
-run_gpqa_kimi_k26_test() {
+# Disabled: without the run_ prefix CI does not discover it. Rename it back to
+# run_gpqa_kimi_k26_test and restore the commands below to enable it.
+_run_gpqa_kimi_k26_test() {
     echo "⏭️  Skipping GPQA-diamond on Kimi-K2.6 (disabled)."
     # echo "➡️ Testing GPQA-diamond on Kimi-K2.6..."
     # cd "${VLLM_GAUDI_PREFIX}/tests/full_tests/gpqa_eval" && \
@@ -455,14 +448,6 @@ _run_gsm8k_phi4_mini_16k_test() {
 # If the accept rate is below the threshold, the test will fail. The same applies for accuracy rate.
 # For implementation details see:
 #   tests/full_tests/spec_decode.py
-
-# Multimodal-support with mistral-small-3
-_run_mistral3_test() {
-    echo "➡️ Testing Mistral-Small-3.1-24B..."
-    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/mistral3-small.yaml"
-    echo "✅ Test with multimodal-support with Mistral-Small-3.1-24B passed."
-}
 
 # Preemption test
 run_preemption_test() {
@@ -638,7 +623,6 @@ run_load_generate_a_parallel() {
         _run_gemma3_load_generate_test 1 \
         _run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test 1 \
         _run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test 1 \
-        _run_llama3_70b_inc_dynamic_quant_test 1 \
         _run_llama3_70b_inc_dynamic_quant_load_generate_test 1 \
         _run_gptq_load_generate_test 1 \
         _run_deepseek_v2_inc_load_generate_test 1 \
@@ -653,7 +637,6 @@ run_load_generate_b_parallel() {
         _run_awq_load_generate_test 1 \
         _run_qwen2_5_vl_compile_warmup_test 1 \
         _run_qwen3_vl_load_generate_test 1 \
-        _run_mistral3_test 1 \
         _run_mistral3_load_generate_test 1 \
         _run_granite_4_h_load_generate_test 1 \
         _run_qwen3_inc_dynamic_load_generate_test 1
@@ -815,12 +798,11 @@ launch_all_tests() {
     _run_qwen2_5_vl_compile_warmup_test
     _run_qwen3_vl_load_generate_test
     _run_mistral3_load_generate_test
-    _run_llama3_70b_inc_dynamic_quant_test
     _run_gsm8k_granite_test
     _run_gsm8k_granite_async_test
     _run_gsm8k_deepseek_test
     _run_gsm8k_qwen3_30b_test
-    run_gpqa_kimi_k26_test
+    _run_gpqa_kimi_k26_test
     run_longbench_qwen3_30b_fp8_static_test
     run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
     run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test

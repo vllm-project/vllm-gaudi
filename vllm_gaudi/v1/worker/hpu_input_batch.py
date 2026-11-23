@@ -26,16 +26,22 @@ from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
 _SAMPLING_EPS = 1e-5
 
 
-def splice_placeholders(output_token_ids: list[int], new_ids: list[int]) -> None:
+def splice_placeholders(output_token_ids: list[int], new_ids: list[int], num_slots: Optional[int] = None) -> None:
     """Replace the newest -1 placeholders of ``output_token_ids`` in place with one step's sampled ids.
 
     Under async scheduling every step appends a -1 per request, and the real ids are only spliced in while a
     penalty or bad-words consumer needs them, so a request can also carry older placeholders, for tokens already in
     the KV cache. Those stay, so the list length keeps matching the tokens in the KV cache.
 
+    With async speculative decoding the scheduler counts a placeholder for each of the step's tokens, its drafts
+    included, as if all were accepted, and the runner mirrors that count. Then num_slots is the step's count for the
+    request (1 + its drafts): its valid ids replace all of those newest placeholders, so the slots of rejected drafts
+    go, and older placeholders stay.
+
     Args:
         output_token_ids: a request's output ids, ending in -1 placeholders.
         new_ids: that request's row of the step's sampled ids; -1 marks unused (rejected) slots.
+        num_slots: the newest placeholders the step's valid ids replace; default as many as there are valid ids.
     """
     if not new_ids:
         return
@@ -43,9 +49,9 @@ def splice_placeholders(output_token_ids: list[int], new_ids: list[int]) -> None
     num_placeholders = 0
     while (num_placeholders < len(output_token_ids) and output_token_ids[-1 - num_placeholders] == -1):
         num_placeholders += 1
-    num_to_replace = min(num_sampled_ids, num_placeholders)
+    num_to_replace = min(num_sampled_ids if num_slots is None else num_slots, num_placeholders)
     if num_to_replace:
-        output_token_ids[len(output_token_ids) - num_to_replace:] = new_ids[:num_to_replace]
+        output_token_ids[len(output_token_ids) - num_to_replace:] = new_ids[:min(num_sampled_ids, num_to_replace)]
 
 
 class HPUMultiGroupBlockTable(MultiGroupBlockTable):
@@ -153,6 +159,7 @@ class InputBatch:
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
+        max_num_blocks_per_req: Optional[list[int]] = None,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -193,8 +200,16 @@ class InputBatch:
         # vLLM #40996 dropped max_model_len from MultiGroupBlockTable and now
         # requires the caller to pass the per-group block count. HPU does not
         # use DCP (cp_world_size == 1), so max_num_blocks reduces to
-        # cdiv(max_model_len, block_size) per KV cache group.
-        max_num_blocks = [cdiv(max_model_len, block_size) for block_size in block_sizes]
+        # cdiv(max_model_len, block_size) per KV cache group, unless the
+        # caller passes the KV cache specs' max_num_blocks_per_req (Mamba
+        # groups need 1 + num_speculative_tokens state blocks per request).
+        # Both are in KV-manager blocks; HPUMultiGroupBlockTable converts
+        # them to kernel blocks.
+        if max_num_blocks_per_req is not None:
+            assert len(max_num_blocks_per_req) == len(block_sizes)
+            max_num_blocks = list(max_num_blocks_per_req)
+        else:
+            max_num_blocks = [cdiv(max_model_len, block_size) for block_size in block_sizes]
         self.block_table = HPUMultiGroupBlockTable(max_num_reqs=max_num_reqs,
                                                    max_num_batched_tokens=max_num_batched_tokens,
                                                    pin_memory=pin_memory,
@@ -870,8 +885,12 @@ class InputBatch:
             self.sampled_token_ids_cpu = None
             self.async_copy_ready_event = None
 
-    def update_async_output_token_ids(self) -> None:
+    def update_async_output_token_ids(self, num_slots: Optional[Sequence[int]] = None) -> None:
         """Splice the prior step's real sampled ids over the -1 placeholders.
+
+        num_slots: async speculative decoding, per row of the prior step: the
+        placeholders the scheduler counted for it (1 + its drafts), see
+        splice_placeholders.
 
         Ported from the identically named method in vLLM's V1 GPU runner
         (vendored as vllm_gaudi/v1/_vendored/worker/gpu_input_batch.py). Under
@@ -906,7 +925,8 @@ class InputBatch:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-            splice_placeholders(req_output_token_ids, sampled_token_ids[prev_index])
+            splice_placeholders(req_output_token_ids, sampled_token_ids[prev_index],
+                                None if num_slots is None else num_slots[prev_index])
 
     def get_pooling_params(self) -> list[PoolingParams]:
         assert len(self.req_ids) == len(self.pooling_params)
