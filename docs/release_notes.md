@@ -10,7 +10,7 @@ This release is based on [vLLM 0.33.0](https://github.com/vllm-project/vllm/rele
 - Added an opt-in native int4 WNA16 MoE path for compressed-tensors models, including non-gated experts for Nemotron-H.
 - Reduced the DeepSeek Sparse Attention decode indexer cost with per-request top-k selection.
 - Validated Phi-4, Phi-4-mini, Nemotron-3-Ultra W4A16, and Granite 4.1 8B, with a LongRoPE rotary embedding fix for Phi-3 and Phi-4-mini.
-- Fixed output correctness for Qwen2.5-VL image inputs, Granite 4.0-H, FP8 KV cache decode on Gaudi 2, sliced FusedSDPA, GDN prefill, structured output sampling, and sliding-window prefill with cached context.
+- Fixed output correctness for Qwen2.5-VL image inputs, Gemma 4 vision with transformers 5.19 and later, Granite 4.0-H, FP8 KV cache decode on Gaudi 2, sliced FusedSDPA, GDN prefill, structured output sampling, and sliding-window prefill with cached context.
 - Released host memory on worker shutdown and guarded sleep mode against host OOM in multi-model swap flows.
 - Added Ubuntu 22.04 with Python 3.11 Dockerfiles and restored the tcmalloc preload in the RHEL UBI Dockerfiles.
 

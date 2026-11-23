@@ -10,7 +10,7 @@ This release is based on [vLLM v0.33.0](https://github.com/vllm-project/vllm/rel
 - Added an opt-in native int4 WNA16 MoE path for compressed-tensors models, including non-gated experts for Nemotron-H.
 - Reduced the DeepSeek Sparse Attention decode indexer cost with per-request top-k selection.
 - Validated Phi-4, Phi-4-mini, Nemotron-3-Ultra W4A16, and Granite 4.1 8B, with a LongRoPE rotary embedding fix for Phi-3 and Phi-4-mini.
-- Fixed output correctness for Qwen2.5-VL image inputs, Granite 4.0-H, FP8 KV cache decode on Gaudi 2, sliced FusedSDPA, GDN prefill, structured output sampling, and sliding-window prefill with cached context.
+- Fixed output correctness for Qwen2.5-VL image inputs, Gemma 4 vision with transformers 5.19 and later, Granite 4.0-H, FP8 KV cache decode on Gaudi 2, sliced FusedSDPA, GDN prefill, structured output sampling, and sliding-window prefill with cached context.
 - Released host memory on worker shutdown and guarded sleep mode against host OOM in multi-model swap flows.
 - Added Ubuntu 22.04 with Python 3.11 Dockerfiles and restored the tcmalloc preload in the RHEL UBI Dockerfiles.
 
@@ -79,6 +79,7 @@ This release is based on [vLLM v0.33.0](https://github.com/vllm-project/vllm/rel
 
 - Fixed Qwen2.5-VL ignoring image content and an `mmmu_val` crash on HPU. ([#1852](https://github.com/vllm-project/vllm-gaudi/pull/1852))
 - Matched processor-side BF16 rounding in HPU device image normalization (`--mm-device-do-normalize`) for `uint8` image inputs, which could otherwise change vision embeddings and generated text. ([#1994](https://github.com/vllm-project/vllm-gaudi/pull/1994))
+- Restored the FP32 matmul in the Gemma 4 vision rotary embedding on HPU, fixing an OCR accuracy regression (OmniDocBench) with transformers 5.19 and later. ([#2000](https://github.com/vllm-project/vllm-gaudi/pull/2000))
 - Fixed a zeroed convolution state in the HPU graph for Granite 4.0-H, which broke multi-turn tool calling. ([#1915](https://github.com/vllm-project/vllm-gaudi/pull/1915))
 - Sampled structured output rows with their own request parameters, and re-keyed `bad_words` to the rows of the selective sampling metadata. ([#1916](https://github.com/vllm-project/vllm-gaudi/pull/1916), [#1917](https://github.com/vllm-project/vllm-gaudi/pull/1917))
 - Restored the batch dimension of prefill hidden states for prompt logprobs, preventing an engine core crash. ([#1839](https://github.com/vllm-project/vllm-gaudi/pull/1839))
@@ -98,6 +99,7 @@ This release is based on [vLLM v0.33.0](https://github.com/vllm-project/vllm/rel
 
 | PR | Title | Author |
 | --- | --- | --- |
+| [#2000](https://github.com/vllm-project/vllm-gaudi/pull/2000) | Restore FP32 matmul Gemma4 vision RoPE on HPU (fix transformers 5.19 OmniDocBench regression) | @slokesha |
 | [#1994](https://github.com/vllm-project/vllm-gaudi/pull/1994) | Fix BF16 rounding in HPU device image normalization | @shepark |
 | [#1986](https://github.com/vllm-project/vllm-gaudi/pull/1986) | Keep the prompt context when the attention kernel block is larger than the bucketing unit | @rsmyrek |
 | [#1987](https://github.com/vllm-project/vllm-gaudi/pull/1987) | Keep 128-token attention kernel blocks for Nemotron-H when they fit | @rsmyrek |
