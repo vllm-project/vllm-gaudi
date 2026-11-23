@@ -395,13 +395,13 @@ def _non_hybrid_vllm_config(block_size, user_specified):
     )
 
 
-def test_update_block_size_restores_hpu_default_after_multi_backend_selection():
-    """Llama-4 keeps two backends, so upstream selection returns the default
-    block size of 16 and the HPU guard must put 128 back.
+def test_update_block_size_keeps_128_for_llama4_multi_backend_selection():
+    """Llama-4 keeps two backends that both prefer 128.
 
-    Only the backend list is patched. The real Platform selection runs, and
-    the restore log must fire. A pin that never selects 16 leaves the
-    preferred 128 in place without logging, and this test fails.
+    Only the backend list is patched and the real Platform selection runs.
+    vLLM before vllm-project/vllm#60892 returns the default block size and
+    the HPU guard puts 128 back. Later vLLM selects 128 directly. Either way
+    the KV cache must use 128.
     """
     from vllm.platforms import Platform
     from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionBackendV1
@@ -425,7 +425,23 @@ def test_update_block_size_restores_hpu_default_after_multi_backend_selection():
             Platform,
             "_find_non_ssm_backends",
             return_value=[HPUAttentionBackendV1, _ChunkedLocalHPUAttentionBackendV1],
-    ), patch("vllm_gaudi.platform.logger") as log:
+    ):
+        HpuPlatform.update_block_size_for_backend(vllm_config)
+
+    assert vllm_config.cache_config.block_size == 128
+
+
+def test_update_block_size_restores_hpu_default_after_multi_backend_selection():
+    from vllm.config.cache import CacheConfig
+    from vllm.platforms import Platform
+
+    vllm_config = _non_hybrid_vllm_config(block_size=128, user_specified=False)
+
+    def _select_default_block_size(vllm_config):
+        vllm_config.cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+
+    with patch.object(Platform, "update_block_size_for_backend",
+                      _select_default_block_size), patch("vllm_gaudi.platform.logger") as log:
         HpuPlatform.update_block_size_for_backend(vllm_config)
 
     assert vllm_config.cache_config.block_size == 128
