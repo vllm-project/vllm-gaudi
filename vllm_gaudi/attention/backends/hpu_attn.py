@@ -655,7 +655,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 key = zeros if key is None else key
                 value = zeros if value is None else value
 
-            attn_bias = attn_metadata.attn_bias
+            attn_bias = attn_metadata.attn_bias if attn_metadata.is_prompt else None
             position_bias = None
             # If we have alibi_slopes, incorporate them with
             if (attn_metadata.block_list is None and self.prompt_position_bias is not None
