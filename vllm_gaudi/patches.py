@@ -97,6 +97,9 @@ Currently:
   version that uses FusedSDPA when the ``fsdpa_impl`` attention implementation
   is configured, providing 1.4-2x performance improvement for models that use
   transformers SDPA attention (e.g., vision encoders in Gemma4 models).
+
+* ``Gemma4VisionRotaryEmbedding.forward`` — restore the FP32 matmul vision RoPE
+  from transformers <= 5.18 (huggingface/transformers#49265 changed it).
 """
 
 import functools
@@ -913,6 +916,31 @@ def _hpu_sdpa_attention_forward(
 
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, None
+
+
+@torch.no_grad()
+def _hpu_gemma4_vision_rope_forward(self, x: torch.Tensor, position_ids: torch.Tensor):
+    """Gemma4 vision RoPE as in transformers <= 5.18."""
+    inv_freq_expanded = self.inv_freq[None, ...].to(device=x.device, dtype=torch.float32)
+    position_ids_expanded = position_ids[..., None].float()
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        freqs = position_ids_expanded @ inv_freq_expanded
+        cos = freqs.cos() * self.attention_scaling
+        sin = freqs.sin() * self.attention_scaling
+    cos = self.recomposition_frequencies(cos)
+    sin = self.recomposition_frequencies(sin)
+    return cos.to(x.dtype), sin.to(x.dtype)
+
+
+def _patch_gemma4_vision_rotary_embedding() -> None:
+    try:
+        from transformers.models.gemma4 import modeling_gemma4
+    except ImportError:
+        return
+    rope_cls = getattr(modeling_gemma4, "Gemma4VisionRotaryEmbedding", None)
+    if rope_cls is None or not hasattr(rope_cls, "recomposition_frequencies"):
+        return
+    rope_cls.forward = _hpu_gemma4_vision_rope_forward
 
 
 def _patch_sdpa_attention_forward() -> None:
@@ -1976,6 +2004,7 @@ def apply() -> None:
         _patch_mla_bind_kv_cache()
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
+        _patch_gemma4_vision_rotary_embedding()
         _patch_inc_quantization_config()
         _patch_engine_core_sleep_host_guard()
         _patch_mla_prefill_selector()

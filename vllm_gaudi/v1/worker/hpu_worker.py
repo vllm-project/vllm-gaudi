@@ -47,7 +47,7 @@ logger = init_logger()
 _QUANT_CONFIG_UNCHANGED = object()
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler import GrammarOutput, SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 
 def setup_step_profiler(steps):

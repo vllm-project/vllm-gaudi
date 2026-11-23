@@ -35,6 +35,7 @@ nav:
     - features/floating_point_8.md
     - features/warmup.md
     - features/row_parallel_chunking.md
+    - features/image_normalization.md
   - Design:
     - design/single_process_model_swap_arch_overview.md
   - Developer Guides:
