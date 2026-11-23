@@ -627,7 +627,6 @@ run_embedding_model_test() {
 run_pd_disaggregate_nixl_libfabric_test() {
     echo "➡️ Testing PD disaggregate through NIXL libfabric."
     git clone https://github.com/intel-staging/nixl.git -b v1.5.0_OFI
-    cp -r nixl /tmp/nixl_source
     # The wheel cache is keyed by NIXL version only; keep 1.5 OFI wheels apart from the 0.6 ones.
     cd nixl; WHEELS_CACHE_HOME=/workspace/hf_cache/wheels_cache_ofi_1.5 python install_nixl.py; cd ..
     rm -rf nixl
