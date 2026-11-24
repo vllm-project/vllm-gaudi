@@ -682,9 +682,12 @@ class HPUWorker(WorkerBase):
         has_gdn = any(isinstance(s, MambaSpec) and s.mamba_type in _GDN_MAMBA_TYPES for s in kv_cache_spec.values())
         has_standard_mamba = any(
             isinstance(s, MambaSpec) and s.mamba_type not in _GDN_MAMBA_TYPES for s in kv_cache_spec.values())
-        # Default matches the model runner's auto-detection: the runner
-        # may set VLLM_COMPACT_GDN only after this method has run.
-        compact_gdn = os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() in ("1", "true")
+        # HPUModelRunner.__init__ runs before determine_available_memory
+        # in this process and sets VLLM_COMPACT_GDN whenever the model has
+        # GDN layers (auto-enabled, or auto-disabled for PD disaggregated
+        # serving). The "0" fallback is therefore only reached by non-GDN
+        # models, where this flag never applies.
+        compact_gdn = os.environ.get("VLLM_COMPACT_GDN", "0").strip().lower() in ("1", "true")
         # With prefix caching the compact GDN rows mirror the block table,
         # so the GDN region scales with num_blocks and the block-scaled
         # adjustment below applies to it as well.

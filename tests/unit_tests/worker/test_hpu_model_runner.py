@@ -16,13 +16,14 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (estimate_max_model_len, get_global_kv_cache_groups, get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, MambaSpec)
+from vllm.v1.worker.utils import AttentionGroup
 from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm_gaudi.v1._vendored.sample.ops.penalties import apply_all_penalties
 import vllm_gaudi.extension.environment as environment
 from vllm_gaudi.v1.worker.hpu_model_runner import (HPUModelRunner, assert_output_rows, attn_pad_block_id,
                                                    bucket_ctx_to_kernel_blocks)
-from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, splice_placeholders
+from vllm_gaudi.v1.worker.hpu_input_batch import CachedRequestState, InputBatch, splice_placeholders
 
 BLOCK_SIZE = 128
 NUM_BLOCKS = 10
@@ -66,7 +67,7 @@ def initialize_kv_cache(runner: HPUModelRunner):
 #    runner.initialize_attn_backend(kv_cache_config)
 
 
-def get_vllm_config():
+def get_vllm_config(enable_prefix_caching: bool = False) -> VllmConfig:
     model_config = ModelConfig(
         model="facebook/opt-125m",
         tokenizer="facebook/opt-125m",
@@ -85,6 +86,7 @@ def get_vllm_config():
         block_size=BLOCK_SIZE,
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
+        enable_prefix_caching=enable_prefix_caching,
     )
     # PR #51718: get_kv_cache_configs now calls get_resolved_kv_cache_layout(),
     # which raises "KV cache layout has not been resolved yet" unless the layout
@@ -1196,3 +1198,182 @@ def test_bucket_ctx_to_kernel_blocks_covers_the_context(num_blocks, block_size, 
     # Every token of the bucket's context fits, with less than one kernel block to spare.
     assert kernel_blocks * kernel_block_size >= num_blocks * block_size
     assert (kernel_blocks - 1) * kernel_block_size < num_blocks * block_size
+
+
+def _build_compact_gdn_kv_cache_config():
+    """3-group config: one attention group plus two GDN groups sharing one spec.
+
+    The equal spec objects are what make initialize_kv_cache bind both GDN
+    layers to a single shared state tensor; block_size 256 (a multiple of the
+    128 attention block size) is what forces the per-group block table
+    rebuild in may_reinitialize_input_batch.
+    """
+    attn_spec = FullAttentionSpec(block_size=BLOCK_SIZE, num_kv_heads=8, head_size=64, dtype=torch.bfloat16)
+    mamba_spec = MambaSpec(block_size=BLOCK_SIZE * 2,
+                           shapes=((4, 4), (2, 8)),
+                           dtypes=(torch.bfloat16, torch.bfloat16),
+                           mamba_type="linear_attention")
+    attn_page = attn_spec.page_size_bytes
+    mamba_page = mamba_spec.page_size_bytes
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(size=attn_page * NUM_BLOCKS,
+                          layers=["layer.0"],
+                          layer_stride=attn_page,
+                          block_stride=attn_page),
+            KVCacheTensor(size=mamba_page * NUM_BLOCKS,
+                          layers=["mamba.1", "mamba.2"],
+                          layer_stride=mamba_page,
+                          block_stride=mamba_page),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec),
+            KVCacheGroupSpec(layer_names=["mamba.1"], kv_cache_spec=mamba_spec),
+            KVCacheGroupSpec(layer_names=["mamba.2"], kv_cache_spec=mamba_spec),
+        ],
+    )
+    return kv_cache_config, attn_spec, mamba_spec
+
+
+def _make_compact_gdn_runner(monkeypatch, enable_prefix_caching: bool) -> HPUModelRunner:
+    # The runner captures the GDN envs at construction; the auto-enable block
+    # only fires for model-derived GDN layers (OPT has none), so set them here.
+    for key in ("VLLM_PROFILE_PROMPT", "VLLM_PROFILE_DECODE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("VLLM_USE_HYBRID_CACHE", "1")
+    monkeypatch.setenv("VLLM_USE_NAIVE_MAMBA_CACHE_SHARING", "0")
+    monkeypatch.setenv("VLLM_COMPACT_GDN", "1")
+    vllm_config = get_vllm_config(enable_prefix_caching=enable_prefix_caching)
+    environment.set_vllm_config(vllm_config)
+    with set_current_vllm_config(vllm_config):
+        vllm_ctx = vllm_config.compilation_config.static_forward_context
+        vllm_ctx["layer.0"] = Attention(num_heads=8, head_size=64, scale=1.0, prefix="layer.0")
+        # GDN layers bind state-tuple caches, not Attention modules: a writable
+        # kv_cache attribute is all bind_kv_cache needs.
+        vllm_ctx["mamba.1"] = SimpleNamespace(kv_cache=None)
+        vllm_ctx["mamba.2"] = SimpleNamespace(kv_cache=None)
+        kv_cache_config, attn_spec, _ = _build_compact_gdn_kv_cache_config()
+        runner = HPUModelRunner(vllm_config, DEVICE)
+        # Emulate a 2-group GDN model on the OPT-125M config.
+        runner.num_mamba_like_layers = 2
+        runner.num_gdn = 2
+        runner.model = SimpleNamespace(config=SimpleNamespace(architectures=["OPTForCausalLM"]))
+        # Pre-populated: initialize_attn_backend early-returns, and prepare
+        # kernel block sizes only needs the attention group.
+        runner.attn_groups = [
+            [
+                AttentionGroup(backend=runner.attn_backend,
+                               layer_names=["layer.0"],
+                               kv_cache_spec=attn_spec,
+                               kv_cache_group_id=0)
+            ],
+            [],
+            [],
+        ]
+        runner.initialize_kv_cache(kv_cache_config)
+    return runner
+
+
+def _add_compact_gdn_requests(runner: HPUModelRunner, req_a: str, req_b: str) -> None:
+    # Two requests, distinct block ids per group, two blocks each.
+    runner.input_batch.add_request(
+        CachedRequestState(req_id=req_a,
+                           prompt_token_ids=[1, 2, 3],
+                           mm_features=[],
+                           sampling_params=SamplingParams(),
+                           generator=None,
+                           block_ids=[[5, 3], [7, 6], [8, 9]],
+                           num_computed_tokens=0,
+                           output_token_ids=[]))
+    runner.input_batch.add_request(
+        CachedRequestState(req_id=req_b,
+                           prompt_token_ids=[1, 2, 3],
+                           mm_features=[],
+                           sampling_params=SamplingParams(),
+                           generator=None,
+                           block_ids=[[4, 2], [9, 1], [2, 5]],
+                           num_computed_tokens=0,
+                           output_token_ids=[]))
+
+
+def test_compact_gdn_prefix_caching_allocation(monkeypatch):
+    """With prefix caching the compact GDN state mirrors the block table:
+    num_blocks + 1 shared rows, no per-request free list."""
+    runner = _make_compact_gdn_runner(monkeypatch, enable_prefix_caching=True)
+    fwd_context = runner.vllm_config.compilation_config.static_forward_context
+    assert runner.use_prefix_caching is True
+    assert runner._compact_gdn_group_ids == {1, 2}
+    assert runner._compact_gdn_group_offset == {1: 0, 2: 1}
+    assert runner._num_gdn_groups == 2
+    assert runner._gdn_slot_free_list == []
+    assert runner._MAMBA_PAD_BLOCK_ID == NUM_BLOCKS
+    assert runner._PAD_BLOCK_ID == NUM_BLOCKS
+    assert runner.attn_block_size == BLOCK_SIZE
+    # The 256-token mamba groups force one block table per KV cache group.
+    assert len(runner.input_batch.block_table.block_tables) == 3
+    attn_kv = fwd_context["layer.0"].kv_cache
+    assert attn_kv[0].shape == ((NUM_BLOCKS + 1) * BLOCK_SIZE, 8, 64)
+    assert attn_kv[0].data_ptr() != attn_kv[1].data_ptr()
+    m1 = fwd_context["mamba.1"].kv_cache
+    m2 = fwd_context["mamba.2"].kv_cache
+    # Same-position layers with equal specs share one state tensor per tensor
+    # in the tuple.
+    assert m1 is m2
+    assert m1[0].shape == (NUM_BLOCKS + 1, 4, 4)
+    assert m1[1].shape == (NUM_BLOCKS + 1, 2, 8)
+    assert m1[0].data_ptr() == m2[0].data_ptr()
+    assert m1[1].data_ptr() == m2[1].data_ptr()
+
+
+def test_compact_gdn_no_prefix_caching_allocation(monkeypatch):
+    """Without prefix caching each request owns private base slots:
+    max_num_reqs * num_gdn_groups + 2 shared rows and a full free list."""
+    runner = _make_compact_gdn_runner(monkeypatch, enable_prefix_caching=False)
+    fwd_context = runner.vllm_config.compilation_config.static_forward_context
+    assert runner.use_prefix_caching is False
+    assert runner._compact_gdn_group_ids == {1, 2}
+    assert runner._compact_gdn_group_offset == {1: 0, 2: 1}
+    assert runner._num_gdn_groups == 2
+    assert runner._gdn_max_reqs == 10
+    assert runner._gdn_slot_free_list == list(range(runner._gdn_max_reqs - 1, -1, -1))
+    assert runner._MAMBA_PAD_BLOCK_ID == NUM_BLOCKS
+    rows = runner._gdn_max_reqs * runner._num_gdn_groups + 2
+    m1 = fwd_context["mamba.1"].kv_cache
+    m2 = fwd_context["mamba.2"].kv_cache
+    assert m1 is m2
+    assert m1[0].shape == (rows, 4, 4)
+    assert m1[1].shape == (rows, 2, 8)
+
+
+def test_compact_gdn_state_idxs_mirror_blocks(monkeypatch):
+    """PC: state rows are the block-table entries themselves (row b == block b);
+    the compact groups pad with -1 (its rows are never 0), non-compact groups
+    with the mamba pad id."""
+    runner = _make_compact_gdn_runner(monkeypatch, enable_prefix_caching=True)
+    _add_compact_gdn_requests(runner, "req_a", "req_b")
+    idxs = runner.prepare_mamba_state_idxs([0, 1], [0, 1], 4)
+    assert idxs.shape == (3, 4)
+    assert idxs[0].tolist() == [5, 4, NUM_BLOCKS, NUM_BLOCKS]  # attention group reads its table
+    assert idxs[1].tolist() == [7, 9, -1, -1]  # GDN group 1: block ids as rows
+    assert idxs[2].tolist() == [8, 2, -1, -1]  # GDN group 2: block ids as rows
+    # Spec-decode style group_ids: only the listed groups read tables, the
+    # others take the mamba pad id even though they are compact GDN groups.
+    idxs = runner.prepare_mamba_state_idxs([0, 1], [0, 1], 4, group_ids={0, 1})
+    assert idxs.tolist() == [[5, 4, NUM_BLOCKS, NUM_BLOCKS], [7, 9, -1, -1],
+                             [NUM_BLOCKS, NUM_BLOCKS, NUM_BLOCKS, NUM_BLOCKS]]
+
+
+def test_compact_gdn_state_idxs_private_slots(monkeypatch):
+    """Non-PC: row = base_slot * num_gdn_groups + g_offset + 1, so the shared
+    tensor's rows stay collision-free across the GDN groups."""
+    runner = _make_compact_gdn_runner(monkeypatch, enable_prefix_caching=False)
+    _add_compact_gdn_requests(runner, "req_a", "req_b")
+    runner._gdn_req_to_base_slot.clear()
+    runner._gdn_req_to_base_slot["req_a"] = 2
+    runner._gdn_req_to_base_slot["req_b"] = 7
+    idxs = runner.prepare_mamba_state_idxs([0, 1], [0, 1], 4)
+    assert idxs.shape == (3, 4)
+    assert idxs[0].tolist() == [5, 4, NUM_BLOCKS, NUM_BLOCKS]  # attention group reads its table
+    assert idxs[1].tolist() == [2 * 2 + 0 + 1, 7 * 2 + 0 + 1, -1, -1]  # group offset 0
+    assert idxs[2].tolist() == [2 * 2 + 1 + 1, 7 * 2 + 1 + 1, -1, -1]  # group offset 1

@@ -5,9 +5,10 @@ The compact layout with prefix caching mirrors the shared block table
 instead of allocating private per-request slots, and is byte-identical
 to the non-compact layout:
 
-* Total state rows per GDN group tensor: ``S = num_blocks + 1`` (every
-  GDN group owns its own state tensor, so the size is independent of the
-  group count).
+* Total state rows per state tensor: ``S = num_blocks + 1``. Tensors are
+  keyed by (spec, layer_pos, num_slots), so layers at the same position in
+  different GDN groups share one tensor; the size is nevertheless
+  independent of the group count.
 * Block-table value ``b`` maps to row ``0 if b == 0 else b``:
   - ``b == 0`` is the engine null block (BlockPool pops it first, so real
     block ids are 1..num_blocks - 1) and aliases the shared row 0, which
@@ -33,10 +34,12 @@ import pytest
 def _compact_row(block_id, group_offset, num_gdn_groups):
     """Row a block-table value maps to for one GDN group (pure Python).
 
-    With prefix caching the row depends only on the block id: every GDN
-    group owns its own state tensor, so no cross-group offset arithmetic
-    is involved (the group arguments are kept for signature parity with
-    the non-PC layout).
+    With prefix caching the row depends only on the block id, so no
+    cross-group offset arithmetic is involved (the group arguments are
+    kept for signature parity with the non-PC layout). This stays
+    collision-free even when the row lives in a state tensor shared by
+    layers of several GDN groups, because the single BlockPool issues
+    block ids unique across KV cache groups.
     """
     return 0 if block_id == 0 else block_id
 
@@ -47,7 +50,7 @@ def _compact_total(num_blocks, num_gdn_groups):
 
 
 def test_total_matches_noncompact_for_all_group_counts():
-    """S == num_blocks + 1 for every group count (per-group tensors)."""
+    """S == num_blocks + 1 for every group count (rows per state tensor)."""
     num_blocks = 1234
     for groups in (1, 2, 3, 5):
         assert _compact_total(num_blocks, groups) == num_blocks + 1
@@ -76,8 +79,7 @@ def test_rows_are_group_independent():
     """Block b is row b in every group's tensor, for every group count.
 
     This is what makes the compact PC layout byte-identical to the
-    non-compact layout (which also maps row == block id per group
-    tensor).
+    non-compact layout (which also maps row == block id).
     """
     num_blocks, groups = 50, 3
     total = _compact_total(num_blocks, groups)

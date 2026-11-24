@@ -1679,16 +1679,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Compact GDN/linear_attention state slot allocator.
         # GDN recurrent states are fixed-size per request (independent of
         # sequence length), so we can allocate fewer slots than num_blocks.
-        # The HPU backend cannot as_strided-split one raw state buffer
-        # across GDN groups, so every GDN group owns its own state tensor
-        # (one per kv_cache tensor the group's layers are coalesced into).
+        # GDN layers cannot as_strided-split one raw state buffer
+        # (aot_autograd rejects in-place mutation of mixed-dtype views), so
+        # each GDN layer gets a contiguous state tensor. Tensors are keyed
+        # by (spec, layer_pos, num_slots) in initialize_kv_cache, so layers
+        # at the same position with equal specs share one tensor across GDN
+        # groups. Cross-group writes to that shared tensor never alias:
+        # under prefix caching each row mirrors a block id, and the single
+        # BlockPool issues block ids unique across KV cache groups; without
+        # prefix caching the base-slot formula below gives each group a
+        # disjoint row range inside the shared tensor.
         # Without prefix caching, request `req` with base_slot `s` in group
         # `g` uses tensor index `s * num_gdn_groups + g + 1` (1-based, slot 0
         # unused); tensor size max_num_reqs * num_gdn_groups + 2 (last row is
         # the dead pad that torch.remainder(-1, total) must land on).
         # With prefix caching the slot bookkeeping is bypassed entirely and
         # the rows mirror the shared block table directly (row b == block b),
-        # so each group's tensor holds num_blocks + 1 rows exactly like the
+        # so the tensor holds num_blocks + 1 rows exactly like the
         # non-compact layout (prepare_mamba_state_idxs).
         self._compact_gdn_enabled = os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() in ("1", "true")
         self._compact_gdn_group_ids: set[int] = set()
@@ -1916,11 +1923,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 state_indices_cpu = block_table_cpu_tensor[req_indices, block_table_offsets].clone()
                 # Compact GDN with prefix caching reuses this mapping
                 # directly: state rows are block-identical to the
-                # non-compact layout (row b == block b) because each GDN
-                # group owns its own state tensor, so no cross-group offset
-                # arithmetic is needed. Row 0 is the engine null block
-                # (the kernels' state_indices == 0 zero guard); row
-                # num_blocks is the dead pad that remainder(-1,
+                # non-compact layout (row b == block b), so no cross-group
+                # offset arithmetic is needed. This is collision-free even
+                # when layers at the same position in different GDN groups
+                # share one state tensor (see the allocation in
+                # initialize_kv_cache), because the single BlockPool issues
+                # block ids unique across KV cache groups. Row 0 is the
+                # engine null block (the kernels' state_indices == 0 zero
+                # guard); row num_blocks is the dead pad that remainder(-1,
                 # num_blocks + 1) lands on for -1 pad lanes.
 
             if num_indices < target_bs:
@@ -8171,20 +8181,27 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES and \
                             self._compact_gdn_enabled:
                         # GDN/linear_attention: compact allocation.
-                        # The HPU backend cannot as_strided-split one raw
-                        # state buffer across GDN groups, so every group
-                        # owns its own state tensor (this function's
-                        # layer-position keying realizes one tensor per
-                        # kv_cache tensor per group).
+                        # GDN layers cannot as_strided-split one raw state
+                        # buffer (aot_autograd rejects in-place mutation of
+                        # mixed-dtype views), so each layer gets a
+                        # contiguous state tensor. The (spec, layer_pos,
+                        # num_slots) keying means layers at the same
+                        # position with equal specs share one tensor across
+                        # GDN groups; the row mapping stays collision-free
+                        # because block ids are unique across KV cache
+                        # groups (single BlockPool) under prefix caching,
+                        # and the base-slot formula gives each group a
+                        # disjoint row range inside the shared tensor
+                        # otherwise.
                         # Without prefix caching each request owns private
                         # per-group slots (max_num_reqs * num_gdn_groups + 2,
                         # slot 0 unused, last slot for -1 padding).
                         # With prefix caching the rows mirror the shared
                         # block table directly (row b == block b), so
-                        # num_blocks + 1 rows per group suffice — identical
-                        # to the non-compact layout (row 0 is the null
-                        # block's kernel zero guard, the final row is the
-                        # dead -1 pad reached by remainder(-1, total)).
+                        # num_blocks + 1 rows suffice — identical to the
+                        # non-compact layout (row 0 is the null block's
+                        # kernel zero guard, the final row is the dead -1
+                        # pad reached by remainder(-1, total)).
                         self._compact_gdn_group_ids.add(group_idx)
                         if self.use_prefix_caching:
                             compact_total = num_blocks + 1
@@ -8399,8 +8416,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 # block table on every step (row b == block b), so
                 # per-request slot bookkeeping is bypassed (_update_states
                 # skips it in this mode) and only the group offsets are
-                # needed. Every GDN group owns its own num_blocks + 1
-                # rows (see the allocation above).
+                # needed. Each tensor holds num_blocks + 1 rows (see the
+                # allocation above); layers at the same position with equal
+                # specs share one tensor across GDN groups, and the shared
+                # BlockPool issues block ids unique across KV cache groups,
+                # so the row mapping is collision-free.
                 self._gdn_slot_free_list = []
                 compact_total = num_blocks + 1
             else:
