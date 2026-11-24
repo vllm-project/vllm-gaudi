@@ -16,7 +16,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (estimate_max_model_len, get_global_kv_cache_groups, get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig, KVCacheGroup, KVCacheTensor)
 from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm_gaudi.v1._vendored.sample.ops.penalties import apply_all_penalties
 import vllm_gaudi.extension.environment as environment
@@ -33,7 +34,7 @@ def initialize_kv_cache(runner: HPUModelRunner):
     """
     Only perform necessary steps in HPUModelRunner.initialize_kv_cache()
     """
-    attn_spec = FullAttentionSpec(
+    attn_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
@@ -48,7 +49,7 @@ def initialize_kv_cache(runner: HPUModelRunner):
                           layer_stride=tensor_size,
                           block_stride=attn_spec.page_size_bytes),
         ],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)],
+        kv_cache_groups=[KVCacheGroup.from_layers({"layer.0": FullAttentionManager.layer_config(attn_spec)})],
     )
     runner.kv_cache_config = kv_cache_config
     runner.input_batch = InputBatch(
@@ -58,8 +59,8 @@ def initialize_kv_cache(runner: HPUModelRunner):
         device=runner.device,
         pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
-        block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
-        kernel_block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
+        block_sizes=[kv_cache_config.kv_cache_groups[0].block_size],
+        kernel_block_sizes=[kv_cache_config.kv_cache_groups[0].block_size],
     )
 
 
@@ -901,19 +902,19 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     vllm_config.model_config.max_model_len = 3_000_000
     vllm_ctx = vllm_config.compilation_config.static_forward_context
     runner = HPUModelRunner(vllm_config, DEVICE)
-    kv_cache_spec = runner.get_kv_cache_spec()
-    assert len(kv_cache_spec) == 2
+    layer_configs = runner.get_kv_cache_layer_configs()
+    assert len(layer_configs) == 2
     #assert len(runner.shared_kv_cache_layers) == 0
 
     available_memory = 20 * GiB_bytes
     # page size for layer 0's kv_cache_spec *should be* 256KB:
     # block_size*num_heads*head_size*dtype_size*coeff = 128*8*64*2*2 = 262144
-    page_size = kv_cache_spec[layer_0].page_size_bytes
+    page_size = layer_configs[layer_0].spec.page_size_bytes
     assert page_size == 262144
     num_expected_blocks = 40960  # 20GB / 256KB (page_size) / 2 (num layers)
     assert num_expected_blocks == available_memory // page_size // 2
-    global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, [kv_cache_spec])
-    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory], global_kv_cache_groups)[0]
+    global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, [layer_configs])
+    kv_cache_config = get_kv_cache_configs(vllm_config, [layer_configs], [available_memory], global_kv_cache_groups)[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     # PR #51718 coalesces same-spec layers into ONE backing KVCacheTensor
     # (layers=[layer_0, layer_1]) whose size spans the full allocation.
@@ -921,7 +922,7 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len =\
-        estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
+        estimate_max_model_len(vllm_config, layer_configs, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 1310720
 
@@ -929,7 +930,7 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     # this will only allocate one block worth of memory per layer
     kv_cache_config.num_blocks = 1
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        page_size = kv_cache_spec[kv_cache_tensor.layers[0]].page_size_bytes
+        page_size = layer_configs[kv_cache_tensor.layers[0]].spec.page_size_bytes
         kv_cache_tensor.size = page_size * len(kv_cache_tensor.layers)
         kv_cache_tensor.layer_stride = page_size
         kv_cache_tensor.block_stride = page_size
@@ -978,9 +979,9 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     vllm_config.model_config.max_model_len = 3_000_000
     vllm_ctx = vllm_config.compilation_config.static_forward_context
     runner = HPUModelRunner(vllm_config, DEVICE)
-    kv_cache_spec = runner.get_kv_cache_spec()
-    assert len(kv_cache_spec) == 1
-    assert layer_0 in kv_cache_spec
+    layer_configs = runner.get_kv_cache_layer_configs()
+    assert len(layer_configs) == 1
+    assert layer_0 in layer_configs
     assert runner.shared_kv_cache_layers[layer_1] == layer_0
 
     available_memory = 20 * GiB_bytes
@@ -989,8 +990,8 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     # which is twice as many as without KV sharing
     page_size = 128 * 8 * 64 * 2 * 2  # 128 for block_size, 2 for K+V, 2 for bfloat16
     num_expected_blocks = available_memory / page_size  # 20GB / 256KB
-    global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, [kv_cache_spec])
-    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec], [available_memory], global_kv_cache_groups)[0]
+    global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, [layer_configs])
+    kv_cache_config = get_kv_cache_configs(vllm_config, [layer_configs], [available_memory], global_kv_cache_groups)[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
     # Each layer now has twice the available memory for KV cache
@@ -998,7 +999,7 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len =\
-        estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
+        estimate_max_model_len(vllm_config, layer_configs, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 2 * 1310720
 
@@ -1006,7 +1007,7 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     # this will only allocate 1 block worth of memory (32kb)
     kv_cache_config.num_blocks = 1
     kv_cache_config.kv_cache_tensors[0].size =\
-        kv_cache_spec[layer_0].page_size_bytes
+        layer_configs[layer_0].spec.page_size_bytes
 
     runner.initialize_kv_cache(kv_cache_config)
 
@@ -1114,8 +1115,8 @@ def _attn_kv_layout(num_blocks, spec_block_sizes, kernel_block_size, hybrid_cach
     blocks, the other layouts in KV-manager blocks."""
     kv_cache_groups, kv_caches = [], {}
     for gid, spec_block_size in enumerate(spec_block_sizes):
-        spec = FullAttentionSpec(block_size=spec_block_size, num_kv_heads=1, head_size=1, dtype=torch.bfloat16)
-        kv_cache_groups.append(KVCacheGroupSpec(layer_names=[f"layer.{gid}"], kv_cache_spec=spec))
+        spec = AttentionSpec(block_size=spec_block_size, num_kv_heads=1, head_size=1, dtype=torch.bfloat16)
+        kv_cache_groups.append(KVCacheGroup.from_layers({f"layer.{gid}": FullAttentionManager.layer_config(spec)}))
         if hybrid_cache:
             num_slots = (num_blocks * (spec_block_size // kernel_block_size) + 1) * kernel_block_size
         else:

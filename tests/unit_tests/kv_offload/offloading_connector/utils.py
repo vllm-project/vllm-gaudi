@@ -31,10 +31,11 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
@@ -212,15 +213,16 @@ class RequestRunner:
             num_blocks=num_gpu_blocks,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
-                    ["layer"],
-                    FullAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=1,
-                        head_size=1,
-                        dtype=torch.float32,
-                    ),
-                )
+                KVCacheGroup.from_layers({
+                    "layer":
+                    FullAttentionManager.layer_config(
+                        AttentionSpec(
+                            block_size=block_size,
+                            num_kv_heads=1,
+                            head_size=1,
+                            dtype=torch.float32,
+                        ))
+                })
             ],
         )
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -243,8 +245,7 @@ class RequestRunner:
         # layers internally. set_current_vllm_config enables get_kv_cache_layout().
         kv_caches: dict[str, torch.Tensor] = {}
         for group in kv_cache_config.kv_cache_groups:
-            spec = group.kv_cache_spec
-            for layer_name in group.layer_names:
+            for layer_name, spec in group.kv_cache_specs.items():
                 kv_caches[layer_name] = torch.empty(
                     num_gpu_blocks,
                     2,
@@ -397,7 +398,7 @@ class RequestRunner:
             # the worker may still have a deferred store queued. In production
             # the next request's step drains it; in single-request tests we
             # must keep stepping until the scheduler sees no in-flight jobs.
-            if not self.scheduler.requests and not self.connector_scheduler._jobs:
+            if not self.scheduler.requests and not self.connector_scheduler._job_statuses:
                 break
 
             scheduler_output = self.scheduler.schedule()
@@ -445,7 +446,7 @@ class RequestRunner:
                 self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
             if (prev_token_id == EOS_TOKEN_ID and prev_token_id != token_id
-                    and (self.scheduler.requests or self.connector_scheduler._jobs)):
+                    and (self.scheduler.requests or self.connector_scheduler._job_statuses)):
                 # continue for one more step to allow offloading to kick off
                 continue
 

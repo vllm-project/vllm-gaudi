@@ -223,7 +223,7 @@ def _unify_attention_types(layers):
     """Change ChunkedLocalAttention instances to Attention type.
 
     Since ChunkedLocalAttention does NOT override forward(), the __class__
-    swap is behaviorally identical. get_kv_cache_spec is preserved as instance method.
+    swap is behaviorally identical. get_kv_cache_config is preserved as instance method.
 
     WARNING: After this swap, isinstance(x, ChunkedLocalAttention) returns False.
     Currently safe because maybe_set_chunked_attention_layers uses string matching
@@ -234,7 +234,7 @@ def _unify_attention_types(layers):
     from vllm.model_executor.layers.attention.chunked_local_attention import (
         ChunkedLocalAttention, )
 
-    chunked_get_kv_cache_spec = ChunkedLocalAttention.get_kv_cache_spec
+    chunked_get_kv_cache_config = ChunkedLocalAttention.get_kv_cache_config
     unified_count = 0
 
     for layer in layers:
@@ -242,7 +242,7 @@ def _unify_attention_types(layers):
         if type(attn_inner) is ChunkedLocalAttention:
             attn_inner._was_chunked_local = True
             attn_inner.__class__ = Attention
-            attn_inner.get_kv_cache_spec = types.MethodType(chunked_get_kv_cache_spec, attn_inner)
+            attn_inner.get_kv_cache_config = types.MethodType(chunked_get_kv_cache_config, attn_inner)
             unified_count += 1
 
     return unified_count

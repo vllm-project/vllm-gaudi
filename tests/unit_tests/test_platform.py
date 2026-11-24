@@ -328,7 +328,7 @@ def test_update_block_size_for_backend_realigns_mamba_page_size(monkeypatch):
 
     # attn_1tok = 2 (K+V) * num_kv_heads=1 * head_size=1 * 2 bytes (bf16) * block_size
     # => page_size_bytes(block_size=1) = 4
-    class _FakeFullAttentionSpec:
+    class _FakeAttentionSpec:
 
         def __init__(self, block_size=1, **_kw):
             self.page_size_bytes = block_size * 4
@@ -372,7 +372,7 @@ def test_update_block_size_for_backend_realigns_mamba_page_size(monkeypatch):
         parallel_config=SimpleNamespace(),
     )
 
-    monkeypatch.setattr("vllm.v1.kv_cache_interface.FullAttentionSpec", _FakeFullAttentionSpec)
+    monkeypatch.setattr("vllm.v1.kv_cache_interface.AttentionSpec", _FakeAttentionSpec)
     monkeypatch.setattr("vllm.v1.kv_cache_interface.MambaSpec", _FakeMambaSpec)
     monkeypatch.setattr(
         "vllm.model_executor.models.ModelRegistry.resolve_model_cls",

@@ -30,7 +30,7 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, set_random_seed)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec)
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig, KVCacheLayerConfig, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
@@ -404,8 +404,8 @@ class HPUWorker(WorkerBase):
         self._loaded_model_ref = None
         _trim_host_python_allocator(release_hpu_device=True)
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return self.model_runner.get_kv_cache_spec()  # type: ignore[union-attr]
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
+        return self.model_runner.get_kv_cache_layer_configs()  # type: ignore[union-attr]
 
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()  # type: ignore[union-attr]
@@ -565,10 +565,13 @@ class HPUWorker(WorkerBase):
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         kv_caches: dict[str, torch.Tensor] = {}
-        kv_cache_spec = self.model_runner.get_kv_cache_spec()  # type: ignore[union-attr]
+        kv_cache_spec = {
+            name: layer_config.spec
+            for name, layer_config in self.model_runner.get_kv_cache_layer_configs().items()  # type: ignore[union-attr]
+        }
         single_kv_block_size_bytes = 0
         for layer_name, layer_spec in kv_cache_spec.items():
-            if isinstance(layer_spec, FullAttentionSpec):
+            if isinstance(layer_spec, AttentionSpec):
                 dtype = layer_spec.dtype
                 if dtype == torch.float8_e4m3fn and os.environ.get('QUANT_CONFIG', None) is not None and \
                     os.environ.get('VLLM_DYNAMIC_KV_QUANT', None) is not None and not self.model_config.use_mla:
@@ -678,7 +681,7 @@ class HPUWorker(WorkerBase):
         # (torch.compile can't handle as_strided mixed-dtype views).
         # Reduce reported memory so the scheduler computes fewer
         # num_blocks that fit the HPU separate-allocation model.
-        has_attn = any(isinstance(s, FullAttentionSpec) for s in kv_cache_spec.values())
+        has_attn = any(isinstance(s, AttentionSpec) for s in kv_cache_spec.values())
         has_gdn = any(isinstance(s, MambaSpec) and s.mamba_type in _GDN_MAMBA_TYPES for s in kv_cache_spec.values())
         has_standard_mamba = any(
             isinstance(s, MambaSpec) and s.mamba_type not in _GDN_MAMBA_TYPES for s in kv_cache_spec.values())
@@ -694,7 +697,7 @@ class HPUWorker(WorkerBase):
             # allocation (max_reqs * num_groups + 2), independent of
             # num_blocks, so no adjustment is needed.
             padded_page = next(iter(kv_cache_spec.values())).page_size_bytes
-            real_attn = next(s.real_page_size_bytes for s in kv_cache_spec.values() if isinstance(s, FullAttentionSpec))
+            real_attn = next(s.real_page_size_bytes for s in kv_cache_spec.values() if isinstance(s, AttentionSpec))
             real_mamba = next(
                 sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
                 for s in kv_cache_spec.values() if isinstance(s, MambaSpec) and s.mamba_type in _GDN_MAMBA_TYPES)
@@ -715,7 +718,7 @@ class HPUWorker(WorkerBase):
             # naive_mamba_cache_sharing path allocates independent
             # tensors per layer type, so the real per-block cost is
             # attn_page + mamba_state (not max(attn, mamba)).
-            attn_page_size = next(s.page_size_bytes for s in kv_cache_spec.values() if isinstance(s, FullAttentionSpec))
+            attn_page_size = next(s.page_size_bytes for s in kv_cache_spec.values() if isinstance(s, AttentionSpec))
             mamba_state_per_block = next(
                 sum(math.prod(sh) * get_dtype_size(dt) for sh, dt in zip(s.shapes, s.dtypes))
                 for s in kv_cache_spec.values() if isinstance(s, MambaSpec) and s.mamba_type not in _GDN_MAMBA_TYPES)
@@ -733,7 +736,7 @@ class HPUWorker(WorkerBase):
         # (bytes). Most models route through get_num_blocks() which casts to
         # int, but gemma4's heterogeneous KV layout (interleaved sliding/full
         # layers with different page_size_bytes) collapses into a single
-        # UniformTypeKVCacheSpecs group whose num_blocks math
+        # heterogeneous KV cache group whose num_blocks math
         # (`available_memory // page_size_bytes`) does NOT cast. A float
         # available_memory then yields a float num_blocks, which the
         # scheduler's BlockPool rejects via `isinstance(num_gpu_blocks, int)`.
