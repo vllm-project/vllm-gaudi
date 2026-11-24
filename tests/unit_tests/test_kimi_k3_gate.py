@@ -56,6 +56,12 @@ def test_standalone_kimi_linear_config_is_not_k3(gate):
     assert not gate.is_kimi_k3_vllm_config(types.SimpleNamespace(model_config=model_config))
 
 
+@pytest.mark.parametrize("arch",
+                         ["KimiK3ForConditionalGeneration", "KimiK31ForConditionalGeneration", "KimiK3MTPModel"])
+def test_predicate_true_for_k3_family(gate, arch):
+    assert gate.is_kimi_k3_vllm_config(_cfg([arch]))
+
+
 def test_predicate_true_for_k3_and_none_safe(gate):
     assert gate.is_kimi_k3_vllm_config(_cfg(K3))
     assert not gate.is_kimi_k3_vllm_config(None)
