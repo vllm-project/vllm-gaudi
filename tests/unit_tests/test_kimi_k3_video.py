@@ -326,6 +326,12 @@ def video(monkeypatch, utils):
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
+    class KimiK3MultiModalDataParser(MultiModalDataParser):
+
+        def __init__(self, media_proc_cfg, **kwargs):  # media_proc_cfg is required upstream too
+            super().__init__(**kwargs)
+            self.media_proc_cfg = media_proc_cfg
+
     class VideoProcessorItems:
         pass
 
@@ -359,6 +365,7 @@ def video(monkeypatch, utils):
          cached_encode=lambda tok, text, add_special_tokens=False: ("enc", text))
     stub("vllm.models.kimi_k3.common.mm_preprocess",
          KimiK3DummyInputsBuilder=BaseDummy,
+         KimiK3MultiModalDataParser=KimiK3MultiModalDataParser,
          KimiK3MultiModalProcessor=BaseProcessor,
          KimiK3ProcessingInfo=_Info)
 
@@ -502,7 +509,11 @@ def test_dummy_video_defaults_to_the_ibm_shape(video):
 
 def test_data_parser_asks_for_video_metadata(video):
     video.mod.install_kimi_k3_video()
-    assert video.registrations[0][2]().get_data_parser().kwargs["video_needs_metadata"] is True
+    parser = video.registrations[0][2]().get_data_parser()
+    assert parser.kwargs["video_needs_metadata"] is True
+    # upstream's K3 parser (image embeds / metadata-only image inputs), fed the checkpoint's media config
+    assert type(parser).__name__ == "KimiK3MultiModalDataParser"
+    assert parser.media_proc_cfg is K3_CFG
     assert video.registrations[0][2]().get_supported_mm_limits() == {"image": None, "video": None}
 
 
