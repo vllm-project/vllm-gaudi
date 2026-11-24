@@ -77,6 +77,9 @@ def register_model():
     # Gaudi (e.g. StarCoder, granite-*-code).
     ModelRegistry.register_model("GPTBigCodeForCausalLM", "vllm_gaudi.models.gpt_bigcode:GPTBigCodeForCausalLM")
     ModelRegistry.register_model("Starcoder2ForCausalLM", "vllm_gaudi.models.starcoder2:Starcoder2ForCausalLM")
+    # Same for Phi3 (vllm-project/vllm#66559): the Transformers backend attention
+    # reshape assumes flattened tokens, so warmup fails on HPU's [batch, seq] layout.
+    ModelRegistry.register_model("Phi3ForCausalLM", "vllm_gaudi.models.phi3:Phi3ForCausalLM")
 
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
     import vllm_gaudi.models.qwen3_next  # noqa: F401

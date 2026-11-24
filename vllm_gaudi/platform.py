@@ -524,14 +524,14 @@ class HpuPlatform(Platform):
         if is_granite_hybrid:
             # Compute the correct block_size using the PC-aware formula.
             from vllm.utils.math_utils import cdiv
-            from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+            from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
             from vllm.model_executor.models import ModelRegistry
             if cache_config.cache_dtype == "auto":
                 kv_dtype = model_config.dtype
             else:
                 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
                 kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-            attn_1tok = FullAttentionSpec(
+            attn_1tok = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
                 head_size=model_config.get_head_size(),

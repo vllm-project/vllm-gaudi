@@ -48,17 +48,14 @@ class HPUScheduler(Scheduler):
 
     @cached_property
     def _mamba_state_block_size(self) -> int:
-        """Tokens per mamba state slot, from MambaSpec in the KV cache config.
+        """Tokens per mamba state slot, from the mamba groups of the KV cache config.
 
         Not cache_config.block_size: for these models that is reset to the 128-token HPU
         kernel block, so it is not the state grid (upstream's splitter uses it and would
         align to 128 here). 0 if the mamba groups disagree.
         """
-        from vllm.v1.kv_cache_interface import MambaSpec
-        sizes = {
-            g.kv_cache_spec.block_size
-            for g in self.kv_cache_config.kv_cache_groups if isinstance(g.kv_cache_spec, MambaSpec)
-        }
+        from vllm.v1.core.kv_cache_utils import is_mamba_group
+        sizes = {g.block_size for g in self.kv_cache_config.kv_cache_groups if is_mamba_group(g)}
         return sizes.pop() if len(sizes) == 1 else 0
 
     @cached_property

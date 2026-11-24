@@ -18,7 +18,8 @@ import habana_frameworks.torch  # noqa: F401
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheGroup, MambaSpec
 
 from vllm_gaudi.v1.worker.hpu_input_batch import CachedRequestState, InputBatch
 from vllm_gaudi.v1.worker.hpu_model_runner import HPUModelRunner
@@ -64,22 +65,24 @@ def _make_runner_stub(rows: dict[str, list[int]], num_computed: list[int]):
     batch.num_computed_tokens_cpu[:len(num_computed)] = num_computed
     mamba_spec = MambaSpec(block_size=BLOCK_SIZE,
                            shapes=((STATE_LEN + NUM_SPEC, 1), (1, )),
-                           dtypes=(torch.float32, torch.float32),
-                           mamba_cache_mode="align",
-                           num_speculative_blocks=NUM_SPEC)
-    attn_spec = FullAttentionSpec(block_size=BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.bfloat16)
-    runner = types.SimpleNamespace(input_batch=batch,
-                                   cache_config=types.SimpleNamespace(mamba_block_size=BLOCK_SIZE),
-                                   kv_cache_config=types.SimpleNamespace(kv_cache_groups=[
-                                       types.SimpleNamespace(kv_cache_spec=attn_spec, layer_names=["attn"]),
-                                       types.SimpleNamespace(kv_cache_spec=mamba_spec, layer_names=["mixer"]),
-                                   ]),
-                                   device=torch.device("hpu"),
-                                   _mamba_num_accepted={},
-                                   _mamba_state_col={},
-                                   _compact_gdn_group_ids=set(),
-                                   _mamba_spec_group_ids=frozenset({1}),
-                                   _MAMBA_PAD_BLOCK_ID=PAD_BLOCK_ID)
+                           dtypes=(torch.float32, torch.float32))
+    attn_spec = AttentionSpec(block_size=BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.bfloat16)
+    runner = types.SimpleNamespace(
+        input_batch=batch,
+        cache_config=types.SimpleNamespace(mamba_block_size=BLOCK_SIZE),
+        kv_cache_config=types.SimpleNamespace(kv_cache_groups=[
+            KVCacheGroup.from_layers({"attn": FullAttentionManager.layer_config(attn_spec)}),
+            KVCacheGroup.from_layers({
+                "mixer":
+                MambaManager.layer_config(mamba_spec, mamba_cache_mode="align", num_speculative_blocks=NUM_SPEC)
+            }),
+        ]),
+        device=torch.device("hpu"),
+        _mamba_num_accepted={},
+        _mamba_state_col={},
+        _compact_gdn_group_ids=set(),
+        _mamba_spec_group_ids=frozenset({1}),
+        _MAMBA_PAD_BLOCK_ID=PAD_BLOCK_ID)
     for name in ("prepare_mamba_state_idxs", "_mamba_spec_window_cols", "_prepare_mamba_spec_decode_idxs",
                  "_copy_mamba_spec_boundary_states", "_drop_stale_mamba_blocks"):
         setattr(runner, name, types.MethodType(getattr(HPUModelRunner, name), runner))

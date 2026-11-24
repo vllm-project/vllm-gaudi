@@ -8,7 +8,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
@@ -410,14 +410,7 @@ def register_kv_caches(
     page_size_bytes: dict[str, int] = {}
 
     for kv_cache_group in self.kv_cache_config.kv_cache_groups:
-        group_layer_names = kv_cache_group.layer_names
-        group_kv_cache_spec = kv_cache_group.kv_cache_spec
-        if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
-            per_layer_specs = group_kv_cache_spec.kv_cache_specs
-        else:
-            per_layer_specs = {}
-        for layer_name in group_layer_names:
-            layer_kv_cache_spec = per_layer_specs.get(layer_name, group_kv_cache_spec)
+        for layer_name, layer_kv_cache_spec in kv_cache_group.kv_cache_specs.items():
             if not isinstance(layer_kv_cache_spec, AttentionSpec):
                 raise NotImplementedError(f"HPU offloading does not support {type(layer_kv_cache_spec)}")
 

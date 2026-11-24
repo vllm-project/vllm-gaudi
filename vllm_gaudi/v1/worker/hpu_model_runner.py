@@ -74,17 +74,16 @@ from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy, get
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
 from vllm_gaudi.v1.sample import hpu_rejection_sampler
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
+from vllm.v1.core.kv_cache_utils import is_mamba_group
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
     KVCacheSpec,
     MLAAttentionSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
-    EncoderOnlyAttentionSpec,
-    iter_layer_specs,
 )
 from vllm.v1.worker.gpu.kv_connector import KVConnector, NO_OP_KV_CONNECTOR, get_kv_connector
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists, LogprobsTensors, DraftTokenIds,
@@ -174,13 +173,32 @@ except (ImportError, AttributeError):
     pass
 
 
+@dataclass(frozen=True, kw_only=True)
+class HPUEncoderOnlyAttentionSpec(AttentionSpec):
+    """Runner-only marker for the encoder-only group the HPU runner appends.
+
+    Upstream removed EncoderOnlyAttentionSpec (vLLM #61452) and keeps
+    encoder-only layers out of kv_cache_groups; the HPU runner still adds them
+    as a group, so the marker tells that group apart from full attention.
+    """
+
+
+def _is_encoder_only_group(group: KVCacheGroup) -> bool:
+    specs = group.distinct_specs
+    return bool(specs) and isinstance(specs[0], HPUEncoderOnlyAttentionSpec)
+
+
+def _is_full_attn_group(group: KVCacheGroup) -> bool:
+    return issubclass(group.manager_cls, FullAttentionManager) and not _is_encoder_only_group(group)
+
+
 def mamba_reads_chunk_grid(kv_cache_config: KVCacheConfig) -> bool:
     """Whether a mamba layer other than GDN is present. GDN writes one state per
     request and never reads mamba_chunks_to_block_mapping, so only it may resume
     a prefill off the chunk grid."""
     return any(
         isinstance(spec, MambaSpec) and spec.mamba_type not in _GDN_ATTN_TYPES
-        for group in kv_cache_config.kv_cache_groups for spec in iter_layer_specs(group.kv_cache_spec))
+        for group in kv_cache_config.kv_cache_groups for spec in group.kv_cache_specs.values())
 
 
 def mamba_prep_initial_states(has_initial_states: torch.Tensor, split_prefill_graph: bool) -> Union[bool, torch.Tensor]:
@@ -198,7 +216,7 @@ def mamba_prep_initial_states(has_initial_states: torch.Tensor, split_prefill_gr
     return prep_initial_states if split_prefill_graph else bool(prep_initial_states)
 
 
-def attn_pad_block_id(num_blocks: int, attn_block_size: int, kv_cache_groups: list[KVCacheGroupSpec],
+def attn_pad_block_id(num_blocks: int, attn_block_size: int, kv_cache_groups: list[KVCacheGroup],
                       kernel_block_size_by_gid: dict[int, int], kv_caches: dict[str, Any]) -> int:
     """Return the attention kernel block that padded decode lanes write to.
 
@@ -211,10 +229,9 @@ def attn_pad_block_id(num_blocks: int, attn_block_size: int, kv_cache_groups: li
     Counted in manager blocks, the pad block would be a real one, and padded
     lanes would overwrite its KV.
     """
-    full_attn_groups = [(gid, group) for gid, group in enumerate(kv_cache_groups)
-                        if isinstance(group.kv_cache_spec, FullAttentionSpec)]
+    full_attn_groups = [(gid, group) for gid, group in enumerate(kv_cache_groups) if _is_full_attn_group(group)]
     splits = {
-        group.kv_cache_spec.block_size // kernel_block_size_by_gid.get(gid, group.kv_cache_spec.block_size)
+        group.block_size // kernel_block_size_by_gid.get(gid, group.block_size)
         for gid, group in full_attn_groups
     }
     if len(splits) > 1:
@@ -226,7 +243,7 @@ def attn_pad_block_id(num_blocks: int, attn_block_size: int, kv_cache_groups: li
     # slots of every attention layer and inside its tensor.
     pad_slots = range(pad_block_id * attn_block_size, (pad_block_id + 1) * attn_block_size)
     for _, group in full_attn_groups:
-        num_real_slots = num_blocks * group.kv_cache_spec.block_size
+        num_real_slots = num_blocks * group.block_size
         for layer_name in group.layer_names:
             if layer_name not in kv_caches:
                 continue
@@ -1014,7 +1031,7 @@ def maybe_tag_kda_cache_groups(model, kv_cache_config: KVCacheConfig):
     if isinstance(model, HpuModelAdapter):
         model = model.model
     tagged, untagged, unmatched = tag_kda_cache_groups(model.named_modules(), kv_cache_config.kv_cache_groups,
-                                                       lambda group: isinstance(group.kv_cache_spec, MambaSpec),
+                                                       is_mamba_group,
                                                        lambda gid: torch.tensor(gid, dtype=torch.long, device="hpu"))
     if not (tagged or untagged):
         return
@@ -1503,8 +1520,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.enable_bucketing = get_config().use_bucketing
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.skip_warmup = get_config().skip_warmup
-        # DSA indexer top-k width; None for models without a sparse attention indexer.
-        self.dsa_index_topk = getattr(self.model_config.hf_text_config, "index_topk", None)
+        # DSA indexer top-k width; None for models without a sparse attention indexer. Kimi-K3.x runs dense MLA.
+        self.dsa_index_topk = None if self.is_kimi_k3 else getattr(self.model_config.hf_text_config, "index_topk", None)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -2039,7 +2056,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         biases_t = torch.tensor(biases)
         bias_t = biases_t.to(torch.int32).to(self.device).view(-1, 1, 1)
         for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            if not isinstance(group.kv_cache_spec, MambaSpec):
+            if not is_mamba_group(group):
                 continue
             block_table = self.input_batch.block_table[group_idx].get_cpu_tensor()
             ssm_src = block_table[rows_t, src_cols_t + biases_t].long().to(self.device)
@@ -2125,7 +2142,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             torch.tensor(host_running).view(-1, 1) - pair_delta, pair_valid.expand(len(rows), -1), src, block_size)
         rows_cpu = torch.tensor(rows).view(-1, 1)
         mamba_groups = [(group_idx, group) for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups)
-                        if isinstance(group.kv_cache_spec, MambaSpec)]
+                        if is_mamba_group(group)]
         plan_fields = []
         for group_idx, _ in mamba_groups:
             table = self.input_batch.block_table[group_idx].get_cpu_tensor()
@@ -2474,19 +2491,30 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.remove_all_adapters()
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         """
-        Generates the KVCacheSpec by parsing the kv cache format from each
-        Attention module in the static forward context.
+        Generates the KV cache layer config (allocation manager and cache
+        layout) of each Attention module in the static forward context.
         Returns:
-            KVCacheSpec: A dictionary mapping layer names to their KV cache
-            format. Layers that do not need KV cache are not included.
+            A dictionary mapping layer names to their KVCacheLayerConfig.
+            Layers that do not need KV cache are not included.
+        Raises:
+            NotImplementedError: If a layer asks for an allocation policy
+                other than full attention or mamba.
         """
 
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
-        kv_cache_spec: dict[str, KVCacheSpec] = {}
+        layer_configs: dict[str, KVCacheLayerConfig] = {}
         cache_dtype_str = self.vllm_config.cache_config.cache_dtype
+
+        def _supported(layer_name: str, layer_config: KVCacheLayerConfig) -> KVCacheLayerConfig:
+            # The HPU runner allocates full-attention and mamba caches only.
+            if not issubclass(layer_config.manager_cls, (FullAttentionManager, MambaManager)):
+                raise NotImplementedError(f"Layer {layer_name} needs a {layer_config.manager_cls.__name__} KV cache "
+                                          "manager; the HPU model runner supports only full attention and mamba.")
+            return layer_config
+
         for layer_name, attn_module in forward_ctx.items():
             kv_sharing_target_layer_name = getattr(attn_module, 'kv_sharing_target_layer_name', None)
             if kv_sharing_target_layer_name is not None:
@@ -2508,13 +2536,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention
             if isinstance(attn_module, MambaBase):
-                kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(self.vllm_config)
+                layer_config = attn_module.get_kv_cache_config(self.vllm_config)
+                if layer_config is not None:
+                    layer_configs[layer_name] = _supported(layer_name, layer_config)
             elif isinstance(attn_module, Attention):
                 if attn_module.attn_type == AttentionType.DECODER:
-                    kv_cache_spec[layer_name] = FullAttentionSpec(block_size=block_size,
-                                                                  num_kv_heads=attn_module.num_kv_heads,
-                                                                  head_size=attn_module.head_size,
-                                                                  dtype=self.kv_cache_dtype)
+                    layer_configs[layer_name] = FullAttentionManager.layer_config(
+                        AttentionSpec(block_size=block_size,
+                                      num_kv_heads=attn_module.num_kv_heads,
+                                      head_size=attn_module.head_size,
+                                      dtype=self.kv_cache_dtype))
                 elif attn_module.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
                     # encoder-only attention does not need KV cache.
                     continue
@@ -2523,21 +2554,22 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 else:
                     raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
             elif isinstance(attn_module, MLAAttention):
-                if layer_name in kv_cache_spec:
+                if layer_name in layer_configs:
                     continue
-                kv_cache_spec[layer_name] = MLAAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype,
-                    cache_dtype_str=cache_dtype_str,
-                )
+                layer_configs[layer_name] = FullAttentionManager.layer_config(
+                    MLAAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        cache_dtype_str=cache_dtype_str,
+                    ))
             elif isinstance(attn_module, AttentionLayerBase):
-                spec = attn_module.get_kv_cache_spec(self.vllm_config)
-                if spec is not None:
-                    kv_cache_spec[layer_name] = spec
+                layer_config = attn_module.get_kv_cache_config(self.vllm_config)
+                if layer_config is not None:
+                    layer_configs[layer_name] = _supported(layer_name, layer_config)
 
-        return kv_cache_spec
+        return layer_configs
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
@@ -3667,7 +3699,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             return 0
 
         for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, AttentionSpec):
+            if isinstance(group.distinct_specs[0], AttentionSpec):
                 return gid
 
     def _extract_prefill_batch_contents(self, num_prefills, num_decodes, num_scheduled_tokens, warmup=False):
@@ -3961,8 +3993,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     last = block_idx_last_scheduled_token_cpu[0]
                     blocks_caching_range = block_table_cpu_tensor[req_indices[0], first:last + 1].clone()
                     n_blocks = blocks_caching_range.shape[0]
-                    if self._mamba_spec_decode and isinstance(
-                            self.kv_cache_config.kv_cache_groups[group_idx].kv_cache_spec, MambaSpec):
+                    if self._mamba_spec_decode and is_mamba_group(self.kv_cache_config.kv_cache_groups[group_idx]):
                         self._drop_stale_mamba_blocks(blocks_caching_range, group_idx, req_indices[0], int(first))
 
                     # Compute scheduled-chunk index for each block's last chunk;
@@ -6826,10 +6857,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         req_id = f'{len(requests)}'
         # With speculative decoding, Mamba2 groups get one extra state block per
         # speculative token, as the scheduler allocates them.
-        block_ids = [[block_id] *
-                     (round_up(total_tokens_for_blocks, g.kv_cache_spec.block_size) // g.kv_cache_spec.block_size +
-                      (g.kv_cache_spec.num_speculative_blocks if
-                       (self._mamba_spec_decode and isinstance(g.kv_cache_spec, MambaSpec)) else 0))
+        block_ids = [[block_id] * (round_up(total_tokens_for_blocks, g.block_size) // g.block_size +
+                                   (g.manager_config.params.num_speculative_blocks if
+                                    (self._mamba_spec_decode and is_mamba_group(g)) else 0))
                      for g in self.kv_cache_config.kv_cache_groups] if self.num_mamba_like_layers > 0 else [[block_id] *
                                                                                                             num_blocks]
         if self.is_pooling_model:
@@ -7804,7 +7834,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if initialize_only:
             return
 
-        if any(map(lambda v: isinstance(v, MambaSpec), list(self.get_kv_cache_spec().values()))):
+        if any(isinstance(lc.spec, MambaSpec) for lc in self.get_kv_cache_layer_configs().values()):
             # dummy preparation is not working for hybrid models
             return
 
@@ -7867,7 +7897,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             kv_cache_spec: KVCacheSpec
 
         def get_attn_backends_for_group(
-            kv_cache_group_spec: KVCacheGroupSpec,
+            kv_cache_group_spec: KVCacheGroup,
         ) -> tuple[dict[AttentionGroupKey, list[str]], set[type[AttentionBackend]]]:
             layer_type = cast(type[Any], AttentionLayerBase)
             layers = get_layers_from_vllm_config(self.vllm_config, layer_type, kv_cache_group_spec.layer_names)
@@ -7888,16 +7918,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     )
 
                 full_cls_name = attn_backend.full_cls_name()
-                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-                if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                    if layer_name in layer_kv_cache_spec.kv_cache_specs:
-                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-                    elif layer_name in self.shared_kv_cache_layers:
-                        # Shared layer: use the target layer's spec
-                        target = self.shared_kv_cache_layers[layer_name]
-                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[target]
-                    else:
-                        raise KeyError(f"No KV cache spec for layer {layer_name}")
+                # Shared layers carry their target's spec (add_kv_sharing_layers_to_kv_cache_groups).
+                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_specs[layer_name]
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
@@ -8020,20 +8042,19 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # split into kernel blocks.
         kernel_block_size_by_gid: dict[int, int] = {}
         if self.num_gdn > 0 or self.num_mamba_like_layers > 0:
+            # One entry per group, also for the runner-only encoder-only group,
+            # which the input batch does not hold: drop it.
             kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, self.attn_groups)
-            self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
-
-            kernel_idx = 0
-            for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-                kv_cache_spec = kv_cache_group.kv_cache_spec
-                if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-                    continue
-                kernel_block_size_by_gid[gid] = kernel_block_sizes[kernel_idx]
-                kernel_idx += 1
+            kernel_block_size_by_gid = {
+                gid: kernel_block_sizes[gid]
+                for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
+                if not _is_encoder_only_group(kv_cache_group)
+            }
+            self.may_reinitialize_input_batch(kv_cache_config, list(kernel_block_size_by_gid.values()))
 
             selected_attn_kernel_sizes = [
                 kernel_block_size_by_gid[gid] for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
-                if isinstance(kv_cache_group.kv_cache_spec, FullAttentionSpec)
+                if _is_full_attn_group(kv_cache_group)
             ]
             if selected_attn_kernel_sizes:
                 self.attn_block_size = selected_attn_kernel_sizes[0]
@@ -8054,9 +8075,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Pre-count GDN groups for compact allocation (shared by both
         # hybrid and naive_mamba_cache_sharing paths).
         if self.num_mamba_like_layers > 0 and self._compact_gdn_enabled:
-            self._num_gdn_groups = sum(
-                1 for g in kv_cache_config.kv_cache_groups
-                if isinstance(g.kv_cache_spec, MambaSpec) and g.kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES)
+            self._num_gdn_groups = sum(1 for g in kv_cache_config.kv_cache_groups
+                                       if is_mamba_group(g) and g.distinct_specs[0].mamba_type in _GDN_MAMBA_TYPES)
         # Profiling may request more sequences than max_num_seqs
         # (e.g. VLLM_PROFILE_DECODE=16,64 with max_num_seqs=1).
         # Ensure GDN compact tensors and free-list are large enough.
@@ -8099,12 +8119,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # contiguous tensors instead).
             _layer_spec: dict[str, KVCacheSpec] = {}
             for group in kv_cache_config.kv_cache_groups:
-                for ln in group.layer_names:
-                    _layer_spec[ln] = group.kv_cache_spec
+                _layer_spec.update(group.kv_cache_specs)
 
             def _needs_raw_buffer(kv_cache_tensor) -> bool:
                 """Return False when every layer in this tensor will allocate
-                its own storage (FullAttentionSpec creates separate kc/vc;
+                its own storage (AttentionSpec creates separate kc/vc;
                 GDN/linear_attention MambaSpec uses contiguous tensors).
                 Only standard Mamba2 MambaSpec needs the raw shared buffer
                 for as_strided views.
@@ -8114,7 +8133,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 GDN states may be float32)."""
                 for ln in kv_cache_tensor.layers:
                     spec = _layer_spec.get(ln)
-                    if isinstance(spec, FullAttentionSpec):
+                    if isinstance(spec, AttentionSpec):
                         continue
                     if isinstance(spec, MambaSpec) and \
                             spec.mamba_type in _GDN_MAMBA_TYPES:
@@ -8145,14 +8164,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     kv_caches[layer_name] = tensor
 
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
-                kv_cache_spec = group.kv_cache_spec
-                for layer_pos, layer_name in enumerate(group.layer_names):
-                    kv_cache_spec = group.kv_cache_spec
+                is_full_attn = _is_full_attn_group(group)
+                for layer_pos, (layer_name, kv_cache_spec) in enumerate(group.kv_cache_specs.items()):
                     # PR #51718: KVCacheTensor.size is now the total backing
                     # allocation across all layers (num_blocks * bytes_per_block),
                     # not a per-layer size. Use the engine block count directly.
                     num_blocks = kv_cache_config.num_blocks
-                    if isinstance(kv_cache_spec, FullAttentionSpec):
+                    if is_full_attn:
                         attn_kernel_block_size = kernel_block_size_by_gid[group_idx]
                         # Virtual block splitting: each scheduler block of
                         # spec.block_size tokens is split into
@@ -8258,14 +8276,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         pass
         elif self.use_naive_mamba_cache_sharing and self.num_mamba_like_layers > 0:
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
-                kv_cache_spec = group.kv_cache_spec
-                for layer_pos, layer_name in enumerate(group.layer_names):
-                    kv_cache_spec = group.kv_cache_spec
+                is_full_attn = _is_full_attn_group(group)
+                for layer_pos, (layer_name, kv_cache_spec) in enumerate(group.kv_cache_specs.items()):
                     # PR #51718: KVCacheTensor.size is now the total backing
                     # allocation across all layers (num_blocks * bytes_per_block),
                     # not a per-layer size. Use the engine block count directly.
                     num_blocks = kv_cache_config.num_blocks
-                    if isinstance(kv_cache_spec, FullAttentionSpec):
+                    if is_full_attn:
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
@@ -8297,28 +8314,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:  # non-hybrid scenario
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                 for layer_name in kv_cache_tensor.layers:
-                    # Get the correct spec for this layer
-                    kv_cache_spec = None
-                    for group in kv_cache_config.kv_cache_groups:
-                        if layer_name in group.layer_names:
-                            kv_cache_spec = group.kv_cache_spec
-                            break
+                    # Per-layer spec: heterogeneous groups (e.g. Gemma4 with
+                    # head_dim 256/512 and kv_heads 8/2) size each layer's KV
+                    # storage from its own spec.
+                    kv_cache_spec = next((g.kv_cache_specs[layer_name]
+                                          for g in kv_cache_config.kv_cache_groups if layer_name in g.kv_cache_specs),
+                                         None)
                     assert kv_cache_spec is not None, f"No spec found for {layer_name}"
-
-                    # Heterogeneous models (e.g. Gemma4 with interleaved
-                    # sliding/full attention, asymmetric head_dim 256/512 and
-                    # kv_heads 8/2) are grouped by core vLLM under a single
-                    # UniformTypeKVCacheSpecs wrapper rather than one spec per
-                    # group.  Unwrap it to the concrete per-layer spec so each
-                    # layer allocates KV storage sized to its OWN head_size /
-                    # num_kv_heads / page_size_bytes.  Symmetric siblings
-                    # (gemma3/qwen) never produce this wrapper type, so this
-                    # branch is inert for them.
-                    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                        per_layer_spec = kv_cache_spec.kv_cache_specs.get(layer_name)
-                        assert per_layer_spec is not None, (
-                            f"UniformTypeKVCacheSpecs has no per-layer spec for {layer_name}")
-                        kv_cache_spec = per_layer_spec
 
                     # PR #51718: KVCacheTensor.size is now the total backing
                     # allocation across all layers, so the old per-tensor
@@ -8327,7 +8329,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     # the authoritative per-layer block count for every model
                     # (including heterogeneous ones like Gemma4).
                     num_blocks = kv_cache_config.num_blocks
-                    if isinstance(kv_cache_spec, FullAttentionSpec):
+                    if isinstance(kv_cache_spec, AttentionSpec):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks + 1, kv_cache_spec.block_size,
                                                                               kv_cache_spec.num_kv_heads,
                                                                               kv_cache_spec.head_size)
@@ -8450,7 +8452,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for layer_name, attn_module in attn_layers.items():
             if attn_module.attn_type == AttentionType.ENCODER_ONLY:
-                attn_spec: AttentionSpec = EncoderOnlyAttentionSpec(
+                attn_spec: AttentionSpec = HPUEncoderOnlyAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
@@ -8461,7 +8463,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if len(encoder_only_attn_specs) > 0:
             assert len(encoder_only_attn_specs) == 1, ("Only support one encoder-only attention spec now")
             spec, layer_names = encoder_only_attn_specs.popitem()
-            self.kv_cache_config.kv_cache_groups.append(KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec))
+            # Runner-only group, never seen by the scheduler; any manager works.
+            self.kv_cache_config.kv_cache_groups.append(
+                KVCacheGroup.from_layers({name: FullAttentionManager.layer_config(spec)
+                                          for name in layer_names}))
             self.is_encoder_only_attn = True
 
     def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]) -> None:
@@ -8474,24 +8479,20 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             kv_cache_config: The KV cache configuration.
             kernel_block_sizes: The kernel block sizes for each KV cache group.
         """
-        kv_cache_specs = [
-            kv_cache_group.kv_cache_spec for kv_cache_group in kv_cache_config.kv_cache_groups
-            if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
-        ]
-        block_sizes = [spec.block_size for spec in kv_cache_specs]
+        groups = [g for g in kv_cache_config.kv_cache_groups if not _is_encoder_only_group(g)]
+        block_sizes = [g.block_size for g in groups]
         max_model_len = max(self.max_model_len, self.max_encoder_len)
         # With speculative decoding, Mamba2 groups hold 1 + num_speculative_tokens
         # state blocks per request (one per speculative position), so their row
-        # width comes from the spec rather than from the sequence length.
+        # width comes from the group's manager rather than from the sequence length.
         max_num_blocks_per_req = [
-            spec.max_num_blocks_per_req(self.vllm_config, max_model_len) if
-            (self._mamba_spec_decode and isinstance(spec, MambaSpec)) else cdiv(max_model_len, spec.block_size)
-            for spec in kv_cache_specs
+            g.max_num_blocks_per_req(self.vllm_config, max_model_len) if
+            (self._mamba_spec_decode and is_mamba_group(g)) else cdiv(max_model_len, g.block_size) for g in groups
         ]
         # Only these tables have the speculative state columns; the state index
         # lookups of speculative decoding read no others (prepare_mamba_state_idxs).
-        self._mamba_spec_group_ids = frozenset(i for i, spec in enumerate(kv_cache_specs)
-                                               if self._mamba_spec_decode and isinstance(spec, MambaSpec))
+        self._mamba_spec_group_ids = frozenset(i for i, g in enumerate(groups)
+                                               if self._mamba_spec_decode and is_mamba_group(g))
 
         if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [self.cache_config.block_size]:
             assert self.vllm_config.offload_config.uva.cpu_offload_gb == 0, (

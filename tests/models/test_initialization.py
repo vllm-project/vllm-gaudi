@@ -54,11 +54,11 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
         return hf_config
 
     def _initialize_kv_caches_v1(self, vllm_config):
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
-        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
+        layer_configs = self.model_executor.get_kv_cache_layer_configs()
+        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, layer_configs)
         scheduler_kv_cache_config = get_kv_cache_configs(
             vllm_config,
-            kv_cache_specs,
+            layer_configs,
             [10 * GiB_bytes],
             global_kv_cache_groups,
         )[0]
