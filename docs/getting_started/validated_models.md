@@ -63,9 +63,7 @@ The following configurations have been validated to function with IntelÂ® GaudiÂ
 | [Qwen/Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B)     | 1    | BF16    | Gaudi 3|
 | [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)     | 1    | BF16    | Gaudi 3|
 | [RedHatAI/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8-dynamic](https://huggingface.co/RedHatAI/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8-dynamic)     | 8    | FP8    | Gaudi 3|
-| [RedHatAI/NVIDIA-Nemotron-3-Ultra-550B-A55B-quantized.w4a16](https://huggingface.co/RedHatAI/NVIDIA-Nemotron-3-Ultra-550B-A55B-quantized.w4a16)     | 4, 8    | INT4    | Gaudi 3|
 | [ibm-granite/granite-4.0-h-small](https://huggingface.co/ibm-granite/granite-4.0-h-small)     | 1    |  BF16    | Gaudi 3|
-| [ibm-granite/granite-4.1-8b](https://huggingface.co/ibm-granite/granite-4.1-8b)     | 1    | BF16    | Gaudi 3|
 | [zai-org/GLM-5.2-FP8](https://huggingface.co/zai-org/GLM-5.2-FP8)     | 8    | FP8    | Gaudi 3|
 
 !!! note
