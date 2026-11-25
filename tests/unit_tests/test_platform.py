@@ -361,7 +361,6 @@ def test_update_block_size_for_backend_realigns_mamba_page_size(monkeypatch):
         block_size=128,
         user_specified_block_size=False,
         mamba_block_size=128,
-        mamba_cache_mode="align",
         mamba_page_size_padded=512,  # wrongly aligned to old block_size=128
         cache_dtype="auto",
         enable_prefix_caching=False,
@@ -520,7 +519,6 @@ def test_check_and_update_config_does_not_rescale_granitemoehybrid_mamba_page_si
         block_size=128,
         user_specified_block_size=False,
         mamba_block_size=528,
-        mamba_cache_mode="align",
         mamba_page_size_padded=CORRECT_MAMBA_PAGE_SIZE_PADDED,
         cache_dtype="auto",
         enable_prefix_caching=False,

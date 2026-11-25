@@ -33,7 +33,7 @@ class HPUScheduler(Scheduler):
 
     @cached_property
     def _align_to_mamba_block(self) -> bool:
-        """Qwen3.5 hybrid on non-compact GDN with prefix caching: in "align" mode an SSM
+        """Qwen3.5 hybrid on non-compact GDN with prefix caching: an SSM
         state is only checkpointed when a step ends on a state-block boundary.
         """
         from vllm_gaudi.platform import HpuPlatform, is_qwen3_5_hybrid_model

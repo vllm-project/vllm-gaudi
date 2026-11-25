@@ -1970,7 +1970,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _mamba_spec_window_cols(self, req_indices, context_lens, num_scheduled_tokens) -> tuple[list[int], list[int]]:
         """First block table columns of the Mamba2 state slots of a decode step with drafts and prefix caching.
 
-        In the "align" cache mode a mamba block table is indexed by position:
+        With prefix caching a mamba block table is indexed by position:
         column j holds the state after (j + 1) * mamba_block_size tokens. As
         upstream, a step's 1 + K slots start at the column of its last query
         token (curr), and it resumes from the previous step's slots (prev).
