@@ -616,6 +616,33 @@ def test_update_states_kv_load_failure_drops_discarded_output(model_runner, dist
     assert recompute_chunk(4, 1) == [[[0]]]
 
 
+@pytest.mark.parametrize("use_async_scheduling", [False, True])
+def test_partial_prefill_chunk_rows_with_structured_output(model_runner, dist_init, use_async_scheduling):
+    """A chunk that does not finish its prompt samples nothing under sync scheduling, also right after a step with a
+    grammar: nothing would discard its token. Async scheduling gives it one row, marked invalid."""
+    req_id = "req_0"
+    model_runner.use_async_scheduling = use_async_scheduling
+    model_runner.use_structured_output = True  # The previous step had a grammar.
+    model_runner.invalid_req_indices = []
+    new_req = NewRequestData(req_id=req_id,
+                             prompt_token_ids=[1, 2, 3, 4, 5],
+                             mm_features=[],
+                             sampling_params=SamplingParams(),
+                             pooling_params=None,
+                             block_ids=([0], ),
+                             num_computed_tokens=0,
+                             lora_request=None,
+                             prefill_token_ids=[1, 2, 3, 4, 5])
+    model_runner._update_states(
+        _empty_step(scheduled_new_reqs=[new_req], num_scheduled_tokens={req_id: 4}, total_num_scheduled_tokens=4))
+    contents, _ = model_runner._extract_prefill_batch_contents(1, 0, [4])
+    positions = [c.logits_positions for c in contents if c.req_ids]
+    if use_async_scheduling:
+        assert positions == [[[3]]] and model_runner.invalid_req_indices == [0]
+    else:
+        assert positions == [[[]]] and model_runner.invalid_req_indices == []
+
+
 def test_maybe_setup_kv_connector_handles_preemptions_before_load(monkeypatch):
     """The connector flushes saves from reused blocks before this step's metadata is bound and its loads start."""
     import vllm_gaudi.v1.worker.hpu_model_runner as runner_module

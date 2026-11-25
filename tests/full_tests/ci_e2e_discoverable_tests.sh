@@ -789,6 +789,15 @@ run_structured_output_test() {
     echo "✅ Test with structured outputs passed."
 }
 
+# Structured output next to chunked prefills, sync scheduling
+run_structured_output_chunked_prefill_test() {
+    echo "➡️ Testing structured output next to chunked prefills..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_output_chunked_prefill.py"
+    VLLM_MERGED_PREFILL=true VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_output_chunked_prefill.py"
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_output_chunked_prefill.py" --spec-decode ngram
+    echo "✅ Test with structured output next to chunked prefills passed."
+}
+
 # --- Utility Functions ---
 
 # Function to run all tests sequentially
@@ -847,6 +856,7 @@ launch_all_tests() {
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test
+    run_structured_output_chunked_prefill_test
     echo "🎉 All test suites passed successfully!"
 }
 

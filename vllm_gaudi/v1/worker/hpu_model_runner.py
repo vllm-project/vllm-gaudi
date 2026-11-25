@@ -3702,15 +3702,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
             # In preemption scenario num_tokens will also include the tokens emitted before preemption
             num_prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
-            if self.use_async_scheduling or self.use_structured_output:
+            if self.use_async_scheduling:
                 # NOTE(tianmu-li): align behavior of incomplete prompt with gpu_model_runner
-                # Always have at least 1 logit when using async scheduling
-                # or structured output
+                # Async scheduling keeps one row per request; a chunk that does not finish its prompt gets one and
+                # its token is discarded. Sync scheduling has nothing to discard it, so such a chunk samples nothing.
                 if seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1 < 1:
                     num_output_logits = 1
-                    if self.use_async_scheduling:
-                        # Discard partial prefill logit for async scheduling
-                        self.invalid_req_indices.append(batch_idx)
+                    self.invalid_req_indices.append(batch_idx)
                 else:
                     num_output_logits = seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1
             else:
@@ -5706,8 +5704,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 sample_hidden_states_prefills.append(sample_hidden_states)
                 # Skip separate sampling for structured output
                 if self.use_structured_output:
-                    logits_prompt.append(logits_device)
-                    prefill_sampled_requests.extend(logits_requests)
+                    # Under sync scheduling a chunk that does not finish its
+                    # prompt has no rows. With speculative decoding the decodes
+                    # are sampled above, so a step can have no rows to sample.
+                    if logits_requests:
+                        logits_prompt.append(logits_device)
+                        prefill_sampled_requests.extend(logits_requests)
                 else:
                     # If there are no logits, there is nothing to sample.
                     # This can happen with chunked prefill when a chunk does
@@ -5879,6 +5881,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # above), then the rows of the prefill requests that sample.
             logits = torch.cat(logits_decode + logits_prompt, dim=0)
             row_req_ids = structured_decode_req_ids + list(prefill_sampled_requests)
+            assert logits.shape[0] == len(row_req_ids), f"{logits.shape[0]} logits rows for {len(row_req_ids)} requests"
             self.apply_grammar_bitmask(grammar_output, logits, {req_id: (i, 1) for i, req_id in enumerate(row_req_ids)})
             # Sampling metadata in the same row order.
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits, row_req_ids, logits.shape[0])
