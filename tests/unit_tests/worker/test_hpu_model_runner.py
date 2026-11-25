@@ -1379,8 +1379,7 @@ def test_compact_gdn_state_idxs_mirror_blocks(monkeypatch):
     # others get the mamba pad id on their rows and compact groups pad the
     # tail with -1.
     idxs = runner.prepare_mamba_state_idxs([0, 1], [0, 1], 4, group_ids={0, 1})
-    assert idxs.tolist() == [[5, 2, NUM_BLOCKS, NUM_BLOCKS], [7, 1, -1, -1],
-                             [NUM_BLOCKS, NUM_BLOCKS, -1, -1]]
+    assert idxs.tolist() == [[5, 2, NUM_BLOCKS, NUM_BLOCKS], [7, 1, -1, -1], [NUM_BLOCKS, NUM_BLOCKS, -1, -1]]
 
 
 def test_compact_gdn_state_idxs_private_slots(monkeypatch):
