@@ -656,6 +656,7 @@ _UNSUPPORTED_ENGINE_FEATURES = [
     ("mixed sliding/full dflash drafts", lambda c: setattr(
         c, "speculative_config", _dflash_spec(["DFlashDraftModel"], ["sliding_attention", "full_attention"]))),
     ("DFlash candidate-head drafts", lambda c: setattr(c, "speculative_config", _dflash_spec(["DFlash2DraftModel"]))),
+    ("DFlash candidate-head drafts", lambda c: setattr(c, "speculative_config", _dflash_spec(["DSpineDraftModel"]))),
     ("diffusion models", lambda c: setattr(c.model_config, "is_diffusion", True)),
     ("batch-sharded sampling", lambda c: setattr(c.parallel_config, "enable_batch_sharded_sampling", True)),
     ("Step5", lambda c: setattr(c.model_config, "architecture", "Step5ForCausalLM")),

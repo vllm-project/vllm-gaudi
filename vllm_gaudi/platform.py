@@ -441,7 +441,8 @@ class HpuPlatform(Platform):
                 if 0 < num_sliding < len(layer_types):
                     unsupported.append("mixed sliding/full dflash drafts")
                 candidate_head_archs = {
-                    "DFlash2DraftModel", "DFlash2BeamDraftModel", "DFlash2RicursiveDraftModel", "LiLiCorrDraftModel"
+                    "DFlash2DraftModel", "DFlash2BeamDraftModel", "DFlash2RicursiveDraftModel", "LiLiCorrDraftModel",
+                    "DSpineDraftModel"
                 }
                 if draft_archs & candidate_head_archs:
                     unsupported.append("DFlash candidate-head drafts")
