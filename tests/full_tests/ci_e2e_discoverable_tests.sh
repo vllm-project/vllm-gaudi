@@ -324,7 +324,7 @@ _run_gpqa_kimi_k26_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only (baseline, no fsdpa_slicing)
 # Requires: pip install 'lm_eval[longbench]'
-run_longbench_qwen3_30b_fp8_static_test() {
+_run_longbench_qwen3_30b_fp8_static_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
@@ -335,7 +335,7 @@ run_longbench_qwen3_30b_fp8_static_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache and fsdpa slicing in torch.compile mode
 # Requires: pip install 'lm_eval[longbench]'
-run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
+_run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
@@ -348,7 +348,7 @@ run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with FP8 KV cache and fsdpa slicing in torch.compile mode
 # Requires: pip install 'lm_eval[longbench]'
-run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
+_run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 KV_CACHE_DTYPE=fp8_inc \
@@ -568,44 +568,59 @@ _run_parallel_on_card_slices() {
     return "$rc"
 }
 
-# GSM8K on Qwen3.5 / Qwen3.6 35B-A3B (1 card each)
-run_gsm8k_qwen3x_35b_a3b_parallel() {
-    _run_parallel_on_card_slices qwen3x_35b \
-        _run_gsm8k_qwen36_35b_a3b_test 1 \
-        _run_gsm8k_qwen35_35b_a3b_test 1
-}
-
-# GSM8K on gemma-4: E4B (1 card) runs first, then 26B / 31B (TP=4 each) in
-# parallel across the two 4-card halves of an 8-card host.
+# GSM8K on gemma-4 26B / 31B (TP=4 each) across the two 4-card halves of an
+# 8-card host. E4B runs in run_long_mixed_parallel.
 run_gsm8k_gemma4_parallel() {
-    _run_gsm8k_gemma4_e4b_test
     _run_parallel_on_card_slices gemma4 \
         _run_gsm8k_gemma4_26b_test 4 \
         _run_gsm8k_gemma4_31b_test 4
 }
 
-# GSM8K on phi-4 (1 card), phi-4 TP=2 (2 cards), Phi-4-mini 4k and 16k (1 card each), warmup ON
-run_gsm8k_phi4_parallel() {
-    _run_parallel_on_card_slices phi4 \
+# GSM8K on phi-4 (1 card), phi-4 TP=2 (2 cards), Phi-4-mini 4k and 16k (1 card each),
+# and spec decode eagle3 num_spec_2 / eagle3 / ngram (1 card each): 8 cards
+run_gsm8k_phi4_spec_decode_parallel() {
+    _run_parallel_on_card_slices phi4_spec_decode \
         _run_gsm8k_phi4_test 1 \
         _run_gsm8k_phi4_tp2_test 2 \
         _run_gsm8k_phi4_mini_test 1 \
-        _run_gsm8k_phi4_mini_16k_test 1
-}
-
-# Spec decode: eagle3 num_spec_2 / eagle3 / ngram (1 card each)
-run_spec_decode_parallel() {
-    _run_parallel_on_card_slices spec_decode \
+        _run_gsm8k_phi4_mini_16k_test 1 \
         _run_spec_decode_eagle3_num_spec_2_test 1 \
         _run_spec_decode_eagle3_test 1 \
         _run_spec_decode_ngram_test 1
 }
 
-# Spec decode: eagle / DeepSeek eagle MTP (1 card each)
-run_spec_decode_extra_parallel() {
-    _run_parallel_on_card_slices spec_decode_extra \
+# The three LongBench variants share one checkpoint, and loading it several times
+# at once is much slower, so they run one after another on one TP=2 slice. Each
+# runs as its own process: set -e stays in force inside it (a function called as
+# 'f || ...' runs with set -e off), and one failure does not skip the others.
+_run_longbench_qwen3_30b_fp8_chain() {
+    local rc=0 fn
+    for fn in _run_longbench_qwen3_30b_fp8_static_test \
+              _run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test \
+              _run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test; do
+        "$fn" &
+        if ! wait "$!"; then
+            echo "❌ longbench chain [${fn}] FAILED"
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+# The longest tests that use few cards, on one host: GSM8K on Qwen3.6 / Qwen3.5
+# 35B-A3B (1 card each), the LongBench chain (TP=2), spec decode with DeepSeek
+# eagle MTP and eagle (1 card each), and GSM8K on gemma-4-E4B (1 card).
+# lm_eval[longbench] is installed before any member starts, so no member imports
+# lm_eval while pip changes it.
+run_long_mixed_parallel() {
+    pip install 'lm_eval[longbench]' --quiet
+    _run_parallel_on_card_slices long_mixed \
+        _run_gsm8k_qwen36_35b_a3b_test 1 \
+        _run_gsm8k_qwen35_35b_a3b_test 1 \
+        _run_longbench_qwen3_30b_fp8_chain 2 \
+        _run_spec_decode_eaglemtp_test 1 \
         _run_spec_decode_eagle_test 1 \
-        _run_spec_decode_eaglemtp_test 1
+        _run_gsm8k_gemma4_e4b_test 1
 }
 
 # Multimodal members load vLLM's default test image when they start. vLLM writes it
@@ -803,13 +818,16 @@ launch_all_tests() {
     _run_gsm8k_deepseek_test
     _run_gsm8k_qwen3_30b_test
     _run_gpqa_kimi_k26_test
-    run_longbench_qwen3_30b_fp8_static_test
-    run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
-    run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
+    _run_longbench_qwen3_30b_fp8_static_test
+    _run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
+    _run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
     run_preemption_test
     run_row_order_test
-    run_spec_decode_parallel
-    run_spec_decode_extra_parallel
+    _run_spec_decode_eagle3_num_spec_2_test
+    _run_spec_decode_eagle3_test
+    _run_spec_decode_ngram_test
+    _run_spec_decode_eagle_test
+    _run_spec_decode_eaglemtp_test
     run_embedding_model_test
     # run_pd_disaggregate_nixl_libfabric_test temporarily disabled: see comment above its definition
     run_pd_disaggregate_nixl_ucx_test
