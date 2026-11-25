@@ -247,7 +247,8 @@ def apply_logits_processors(
         apply_bad_words_with_drafts(logits, bad_words_token_ids, output_token_ids, rows_per_seq)
 
     for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
-        if isinstance(processor, MinTokensLogitsProcessor):
+        # Wrapped by the input batch to map its batch rows to this call's rows.
+        if isinstance(getattr(processor, "processor", processor), MinTokensLogitsProcessor):
             logits = processor.apply_with_spec_decode(logits, rows_per_seq)
     return logits
 
