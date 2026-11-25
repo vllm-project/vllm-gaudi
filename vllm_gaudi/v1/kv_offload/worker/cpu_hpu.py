@@ -285,7 +285,7 @@ def CPUOffloadingWorker_init_(
             ``num_cpu_blocks`` to match the upstream constructor contract
             after vLLM PR #52615 (block -> chunk terminology refactor).
         mmap_region: must be None. ``CPUOffloadingSpec`` passes a shared
-            region only on CUDA; ``TieringOffloadingSpec`` always passes one,
+            region only on CUDA and XPU; ``TieringOffloadingSpec`` always passes one,
             and its other tiers read and write that region, which these
             private CPU tensors would silently bypass, so it is refused.
         canonical_layout: unused on HPU (needs ``mmap_region``).
