@@ -520,12 +520,6 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
 
     self.device_kv_caches = kv_caches
     self.dst_num_blocks[self.engine_id] = self.num_blocks
-    # Local engine's own per-region geometry; the remote side's copy is filled
-    # in add_remote_agent, which falls back to these uniform values when a peer
-    # omits them from its NixlAgentMetadata.
-    self.dst_region_num_blocks[self.engine_id] = self.region_num_blocks
-    self.dst_region_group_ids[self.engine_id] = self.region_group_ids
-    self.dst_region_mem_types[self.engine_id] = self.region_mem_types
 
     if self._has_mamba:
         logger.info(
