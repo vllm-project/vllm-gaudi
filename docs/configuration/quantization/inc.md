@@ -5,7 +5,7 @@ title: Intel® Neural Compressor
 
 # Intel® Neural Compressor
 
-vLLM Hardware Plugin for Intel® Gaudi® supports 8-bit floating point (FP8) weight and activation quantization using Intel® Neural Compressor on Intel® Gaudi® 2 and Intel® Gaudi® 3 AI accelerators. Intel® Gaudi® supports quantization of various modules and functions, including `Linear`, `KVCache`, `Matmul`, and `Softmax`. For more information, see [Custom Patched Modules](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#custom-patched-modules). Currently, quantization is validated only on Llama models.
+vLLM Hardware Plugin for Intel® Gaudi® supports 8-bit floating point (FP8) weight and activation quantization using Intel® Neural Compressor on Intel® Gaudi® 3 AI accelerators. Intel® Gaudi® supports quantization of various modules and functions, including `Linear`, `KVCache`, `Matmul`, and `Softmax`. For more information, see [Custom Patched Modules](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#custom-patched-modules). Currently, quantization is validated only on Llama models.
 
 This guide describes the steps for quantization and inference. Because inference depends on prior calibration, the process begins with calibrating your model. Calibration generates the necessary measurements, quantization files, and configuration data that are required for running quantized models. These calibration outputs are essential as they provide model-specific metrics and define the quantization parameters applied during inference. To calibrate your model, follow the [Calibration](../calibration/calibration.md) guide. Once calibration is complete, you can proceed with offline or online inference described in this document.
 
@@ -13,7 +13,7 @@ For an end-to-end example tutorial for quantizing a BF16 Llama 3.1 model to FP8 
 
 ## Recommendations
 
-- Before running inference, ensure your measurements were generated on the same device type that you use for inference. Measurements are device-dependent, so scales collected during calibration on Intel® Gaudi® 3 cannot be reused on Intel® Gaudi® 2, and vice versa. Using measurements generated on a different device type may cause accuracy issues.
+- Before running inference, ensure your measurements were generated on Intel® Gaudi® 3. Measurements are device-dependent, so scales collected with earlier releases on Intel® Gaudi® 2 cannot be reused on Intel® Gaudi® 3. Using measurements generated on a different device type may cause accuracy issues.
 
 - For prototyping or testing your model with FP8, you can set the environment variable `VLLM_SKIP_WARMUP=true` to disable the time-consuming warm-up stage. However, we do not recommend disabling it in production environments, as it can lead to a significant performance drop.
 

@@ -9,7 +9,7 @@ title: Frequently Asked Questions
 
 - Ubuntu 22.04 LTS OS.
 - Python 3.10.
-- Intel Gaudi 2 or Intel Gaudi 3 AI accelerator.
+- Intel Gaudi 3 AI accelerator.
 - Intel Gaudi software version {{ VERSION }} and above.
 
 ### What is the vLLM plugin and where can I find its GitHub repository?
@@ -67,7 +67,7 @@ There are two different installation methods:
 
 ## Examples and Model Support
 
-### Which models and configurations have been validated on Intel® Gaudi® 2 and Intel® Gaudi® 3 devices?
+### Which models and configurations have been validated on Intel® Gaudi® 3 devices?
 
 The list of validated models is available in the [Validated Models](../getting_started/validated_models.md) document. The list includes models such as:
 

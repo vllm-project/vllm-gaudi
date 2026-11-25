@@ -22,7 +22,7 @@ Where:
 The graph compilation process consists of two stages: GC graph compilation and HPU graph compilation. When `PT_HPU_RECIPE_CACHE_CONFIG` is enabled, the GC stage is skipped by reusing cached graphs, significantly reducing overall compilation time. The HPU graph compilation step, however, is still executed. The graph has to be regenerated in the following cases:
 
 - PyTorch container or Intel® Gaudi® software version changes.
-- Platform changes, for example Intel® Gaudi® 2 to Intel® Gaudi® 3.
+- Intel® Gaudi® accelerator generation changes.
 - Model tensor parallelism or data type changes, for example, BF16 to FP8 or FP8 to BF16.
 
 ### Storage Recommendations

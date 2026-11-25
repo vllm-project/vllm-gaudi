@@ -14,7 +14,7 @@ Before you start, install the latest [vllm-fork](https://github.com/HabanaAI/vll
 1. Check if all Gaudi NIC ports are up using the following commands on the host, not inside the container.
 
     ```bash
-    cd /opt/habanalabs/qual/gaudi2/bin 
+    cd /opt/habanalabs/qual/gaudi3/bin 
     ./manage_network_ifs.sh --status 
     # All the ports should be in 'up' state. Try flipping the state
     ./manage_network_ifs.sh --down 

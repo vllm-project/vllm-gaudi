@@ -3,7 +3,7 @@ title: Validated Models
 ---
 [](){ #validated-models }
 
-The following configurations have been validated to function with Intel® Gaudi® 2 and Intel® Gaudi® 3 AI accelerator with random or greedy sampling. Configurations that are not listed may work but have not been extensively tested.
+The following configurations have been validated to function with Intel® Gaudi® 3 AI accelerator with random or greedy sampling. Configurations that are not listed may work but have not been extensively tested.
 
 | Model   | Tensor parallelism [x HPU]   | Datatype    | Validated AI accelerator    |
 |:---    |:---:    |:---:    |:---:  |
@@ -26,13 +26,13 @@ The following configurations have been validated to function with Intel® Gaudi�
 | [ibm-granite/Granite-3.1-8B-instruct](https://huggingface.co/ibm-granite/granite-3.1-8b-instruct)     | 1  | BF16    | Gaudi 3|
 | [ibm-granite/Granite-3B-code-instruct-128k](https://huggingface.co/ibm-granite/granite-3b-code-instruct-128k)     | 1  | BF16    | Gaudi 3|
 | [ibm-granite/Granite-8B-code-instruct-128k](https://huggingface.co/ibm-granite/granite-8b-code-instruct-128k)     | 1  | BF16    | Gaudi 3|
-| [ibm-granite/Granite-20B-code-instruct-8k](https://huggingface.co/ibm-granite/granite-20b-code-instruct-8k)     | 1  | BF16, FP8    | Gaudi 2, Gaudi 3|
+| [ibm-granite/Granite-20B-code-instruct-8k](https://huggingface.co/ibm-granite/granite-20b-code-instruct-8k)     | 1  | BF16, FP8    | Gaudi 3|
 | [ibm-granite/Granite-34B-code-instruc-8k](https://huggingface.co/ibm-granite/granite-34b-code-instruct-8k)     | 1  | BF16    | Gaudi 3|
 | [meta-llama/Llama-4-Scout-17B-16E-Instruct](https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct)     | 4, 8  | BF16    | Gaudi 3|
-| [meta-llama/Meta-Llama-3.1-8B](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B)     | 1    | BF16, FP8  | Gaudi 2, Gaudi 3|
-| [meta-llama/Meta-Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct)     | 1    | BF16, FP8    | Gaudi 2, Gaudi 3|
-| [meta-llama/Meta-Llama-3.1-70B](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B)    | 2, 4, 8    | BF16, FP8  |Gaudi 2, Gaudi 3|
-| [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct)     | 2, 4, 8    | BF16, FP8   |Gaudi 2, Gaudi 3|
+| [meta-llama/Meta-Llama-3.1-8B](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B)     | 1    | BF16, FP8  | Gaudi 3|
+| [meta-llama/Meta-Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct)     | 1    | BF16, FP8    | Gaudi 3|
+| [meta-llama/Meta-Llama-3.1-70B](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B)    | 2, 4, 8    | BF16, FP8  |Gaudi 3|
+| [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct)     | 2, 4, 8    | BF16, FP8   |Gaudi 3|
 | [meta-llama/Meta-Llama-3.1-405B](https://huggingface.co/meta-llama/Meta-Llama-3.1-405B)     | 8    | BF16, FP8    |Gaudi 3|
 | [meta-llama/Meta-Llama-3.1-405B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-405B-Instruct)     | 8    | BF16, FP8    |Gaudi 3|
 | [meta-llama/Meta-Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct)     | 4, 8  | BF16, FP8    | Gaudi 3|
@@ -41,19 +41,18 @@ The following configurations have been validated to function with Intel® Gaudi�
 | [mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2)     | 1   | BF16    | Gaudi 3|
 | [mistralai/Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3)     | 1  | BF16    | Gaudi 3|
 | [mistralai/Mistral-Large-3-675B-Instruct-2512](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512)     | 8    | BF16, FP8    | Gaudi 3|
-| [mistralai/Mistral-Large-Instruct-2407](https://huggingface.co/mistralai/Mistral-Large-Instruct-2407)     | 4, 8    | BF16, FP8    | Gaudi 2, Gaudi 3|
-| [mistralai/Mixtral-8x7B-Instruct-v0.1](https://huggingface.co/mistralai/Mixtral-8x7B-v0.1)     | 1, 2    | FP8, BF16    |Gaudi 2, Gaudi 3|
+| [mistralai/Mistral-Large-Instruct-2407](https://huggingface.co/mistralai/Mistral-Large-Instruct-2407)     | 4, 8    | BF16, FP8    | Gaudi 3|
+| [mistralai/Mixtral-8x7B-Instruct-v0.1](https://huggingface.co/mistralai/Mixtral-8x7B-v0.1)     | 1, 2    | FP8, BF16    |Gaudi 3|
 | [mistralai/Mixtral-8x22B-Instruct-v0.1](https://huggingface.co/mistralai/Mixtral-8x22B-v0.1)     | 4    | BF16    |Gaudi 3|
 | [openai/gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b)     | 1, 2, 4    | BF16    | Gaudi 3|
 | [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b)     | 4    | BF16    | Gaudi 3|
-| [Qwen/Qwen2-72B-Instruct](https://huggingface.co/Qwen/Qwen2-72B-Instruct)     | 8    | BF16    |Gaudi 2|
 | [Qwen/Qwen2.5-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct)     | 1    | BF16    | Gaudi 3|
 | [Qwen/Qwen2.5-14B-Instruct](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct)     | 1   | BF16    |Gaudi 3|
 | [Qwen/Qwen2.5-32B-Instruct](https://huggingface.co/Qwen/Qwen2.5-32B-Instruct)     | 1   | BF16   |Gaudi 3|
 | [Qwen/Qwen2.5-72B-Instruct](https://huggingface.co/Qwen/Qwen2.5-72B-Instruct)     | 4, 8    | BF16    |Gaudi 3|
 | [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct)     | 1    | BF16   |Gaudi 3|
 | [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) | 1 | BF16 | Gaudi 3 |
-| [Qwen/Qwen3-30B-A3B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507)     | 4, 8    | BF16, FP8    | Gaudi 2, Gaudi 3|
+| [Qwen/Qwen3-30B-A3B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507)     | 4, 8    | BF16, FP8    | Gaudi 3|
 | [Qwen/Qwen3-VL-32B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct)     | 1    | BF16, FP8    | Gaudi 3|
 | [Qwen/Qwen3-VL-32B-Thinking](https://huggingface.co/Qwen/Qwen3-VL-32B-Thinking)     | 1    | BF16, FP8    | Gaudi 3|
 | [Qwen/Qwen3-VL-235B-A22B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct)     | 8    | BF16   | Gaudi 3|
