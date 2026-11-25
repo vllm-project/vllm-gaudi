@@ -17,6 +17,7 @@ from vllm.v1.kv_offload.base import (
     DevicePointers,
     GPULoadStoreSpec,
     LoadStoreSpec,
+    OffloadingWorker,
     TransferResult,
 )
 from vllm.v1.kv_offload.cpu.gpu_worker import (
@@ -261,6 +262,10 @@ def CPUOffloadingWorker_init_(
     blocks_per_chunk: int,
     num_cpu_chunks: int,
     mmap_region=None,
+    canonical_layout: bool = False,
+    defer_host_setup: bool = False,
+    prefault_shard: tuple[int, int] | None = None,
+    pin_pace: float = 2.0,
 ):
     """HPU CPUOffloadingWorker initializer.
 
@@ -279,9 +284,21 @@ def CPUOffloadingWorker_init_(
         num_cpu_chunks: number of CPU chunks to allocate. Renamed from
             ``num_cpu_blocks`` to match the upstream constructor contract
             after vLLM PR #52615 (block -> chunk terminology refactor).
-        mmap_region: unused on HPU; accepted for upstream API parity.
+        mmap_region: must be None. ``CPUOffloadingSpec`` passes a shared
+            region only on CUDA and XPU; ``TieringOffloadingSpec`` always passes one,
+            and its other tiers read and write that region, which these
+            private CPU tensors would silently bypass, so it is refused.
+        canonical_layout: unused on HPU (needs ``mmap_region``).
+        defer_host_setup: unused on HPU; upstream forces ``async_init`` off on
+            non-CUDA platforms (vLLM PR #66583), so the CPU tier is set up here.
+        prefault_shard: unused on HPU (shared-region pre-faulting only).
+        pin_pace: unused on HPU (background pinning only).
     """
-    del mmap_region  # HPU offloading does not use a shared mmap region.
+    if mmap_region is not None:
+        raise NotImplementedError("HPU CPU offloading does not support a shared offload region "
+                                  "(TieringOffloadingSpec); use CPUOffloadingSpec.")
+    # HPU offloading does not use background host setup.
+    del canonical_layout, defer_host_setup, prefault_shard, pin_pace
     # Upstream resolves GPU block IDs to device pointers against the first data
     # ref of each group (vLLM PR #56076); keep its base/stride to invert that.
     ref_tensor = kv_caches.tensors[kv_caches.group_data_refs[0][0].tensor_idx].tensor
@@ -383,6 +400,11 @@ SingleDirectionOffloadingHandler.wait = wait
 SingleDirectionOffloadingHandler.shutdown = shutdown
 
 CPUOffloadingWorker.__init__ = CPUOffloadingWorker_init_
+# The HPU worker is ready once constructed: use the base no-ops instead of
+# upstream's background setup (vLLM PR #66583), which reads state set only by
+# the upstream initializer.
+CPUOffloadingWorker.start_deferred_setup = OffloadingWorker.start_deferred_setup
+CPUOffloadingWorker.is_ready = OffloadingWorker.is_ready
 CPUOffloadingWorker.submit_store = submit_store
 CPUOffloadingWorker.submit_load = submit_load
 CPUOffloadingWorker.get_finished = worker_get_finished

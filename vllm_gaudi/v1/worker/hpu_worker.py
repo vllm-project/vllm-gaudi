@@ -15,6 +15,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 import habana_frameworks.torch as htorch
+import vllm.ir
 from vllm.tasks import SupportedTask
 from vllm_gaudi.extension.debug import init_debug_logger
 from vllm_gaudi.extension.defragmentation import OnlineDefragmenter
@@ -283,6 +284,10 @@ class HPUWorker(WorkerBase):
         self.parallel_config.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
+        # As WorkerBase.__init__: without this, vLLM IR ops (RoPE since vllm-project/vllm#58838) run as opaque
+        # torch custom ops, which the HPU compile backend cannot trace.
+        vllm_config.kernel_config.ir_op_priority.set_default()
+        vllm.ir.set_default_torch_wrap(vllm_config.compilation_config.ir_enable_torch_wrap)
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype

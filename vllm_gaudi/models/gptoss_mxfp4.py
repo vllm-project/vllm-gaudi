@@ -287,7 +287,7 @@ def _load_weights_mxfp4_dequantize_hpu(
             else:
                 # (only load on rank 0 to avoid duplication)
                 if tp_rank != 0:
-                    weight.zero_()
+                    weight = torch.zeros_like(weight)
             param = params_dict[_param_key(name)]
             param.copy_(weight)
             loaded_params.add(_param_key(name))
