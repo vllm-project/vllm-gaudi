@@ -1350,19 +1350,22 @@ def test_compact_gdn_no_prefix_caching_allocation(monkeypatch):
 def test_compact_gdn_state_idxs_mirror_blocks(monkeypatch):
     """PC: state rows are the block-table entries themselves (row b == block b);
     the compact groups pad with -1 (its rows are never 0), non-compact groups
-    with the mamba pad id."""
+    with the mamba pad id. Offsets are read pairwise: request i reads column
+    offsets[i] of its own table, so ([0, 1], [0, 1]) maps req_a to column 0
+    and req_b to column 1."""
     runner = _make_compact_gdn_runner(monkeypatch, enable_prefix_caching=True)
     _add_compact_gdn_requests(runner, "req_a", "req_b")
     idxs = runner.prepare_mamba_state_idxs([0, 1], [0, 1], 4)
     assert idxs.shape == (3, 4)
-    assert idxs[0].tolist() == [5, 4, NUM_BLOCKS, NUM_BLOCKS]  # attention group reads its table
-    assert idxs[1].tolist() == [7, 9, -1, -1]  # GDN group 1: block ids as rows
-    assert idxs[2].tolist() == [8, 2, -1, -1]  # GDN group 2: block ids as rows
-    # Spec-decode style group_ids: only the listed groups read tables, the
-    # others take the mamba pad id even though they are compact GDN groups.
+    assert idxs[0].tolist() == [5, 2, NUM_BLOCKS, NUM_BLOCKS]  # attention group reads its table
+    assert idxs[1].tolist() == [7, 1, -1, -1]  # GDN group 1: block ids as rows
+    assert idxs[2].tolist() == [8, 5, -1, -1]  # GDN group 2: block ids as rows
+    # Spec-decode style group_ids: only the listed groups read tables; the
+    # others get the mamba pad id on their rows and compact groups pad the
+    # tail with -1.
     idxs = runner.prepare_mamba_state_idxs([0, 1], [0, 1], 4, group_ids={0, 1})
-    assert idxs.tolist() == [[5, 4, NUM_BLOCKS, NUM_BLOCKS], [7, 9, -1, -1],
-                             [NUM_BLOCKS, NUM_BLOCKS, NUM_BLOCKS, NUM_BLOCKS]]
+    assert idxs.tolist() == [[5, 2, NUM_BLOCKS, NUM_BLOCKS], [7, 1, -1, -1],
+                             [NUM_BLOCKS, NUM_BLOCKS, -1, -1]]
 
 
 def test_compact_gdn_state_idxs_private_slots(monkeypatch):
@@ -1375,6 +1378,6 @@ def test_compact_gdn_state_idxs_private_slots(monkeypatch):
     runner._gdn_req_to_base_slot["req_b"] = 7
     idxs = runner.prepare_mamba_state_idxs([0, 1], [0, 1], 4)
     assert idxs.shape == (3, 4)
-    assert idxs[0].tolist() == [5, 4, NUM_BLOCKS, NUM_BLOCKS]  # attention group reads its table
+    assert idxs[0].tolist() == [5, 2, NUM_BLOCKS, NUM_BLOCKS]  # attention group reads its table
     assert idxs[1].tolist() == [2 * 2 + 0 + 1, 7 * 2 + 0 + 1, -1, -1]  # group offset 0
     assert idxs[2].tolist() == [2 * 2 + 1 + 1, 7 * 2 + 1 + 1, -1, -1]  # group offset 1
