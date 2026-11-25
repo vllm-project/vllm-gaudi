@@ -5706,7 +5706,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if self.use_structured_output:
                     # Under sync scheduling a chunk that does not finish its
                     # prompt has no rows. With speculative decoding the decodes
-                    # are sampled above, so a step can have no rows to sample.
+                    # are sampled below, so a step can have no rows to sample.
                     if logits_requests:
                         logits_prompt.append(logits_device)
                         prefill_sampled_requests.extend(logits_requests)
