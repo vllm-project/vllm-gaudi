@@ -660,6 +660,7 @@ _UNSUPPORTED_ENGINE_FEATURES = [
     ("diffusion models", lambda c: setattr(c.model_config, "is_diffusion", True)),
     ("batch-sharded sampling", lambda c: setattr(c.parallel_config, "enable_batch_sharded_sampling", True)),
     ("Step5", lambda c: setattr(c.model_config, "architecture", "Step5ForCausalLM")),
+    ("Qwen3.5 slot decision models", lambda c: setattr(c.model_config, "architecture", "Qwen3_5ForSlotDecision")),
 ]
 
 

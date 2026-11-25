@@ -452,6 +452,10 @@ class HpuPlatform(Platform):
             unsupported.append("batch-sharded sampling")
         if getattr(model_config, "architecture", None) in ("Step5ForCausalLM", "Step5ForConditionalGeneration"):
             unsupported.append("Step5")
+        # Its block-bidirectional PrefixLM mask is built only by the Model Runner V2 model state (vLLM PR #63114);
+        # the HPU runner would serve it with causal attention.
+        if getattr(model_config, "architecture", None) == "Qwen3_5ForSlotDecision":
+            unsupported.append("Qwen3.5 slot decision models")
         return unsupported
 
     @classmethod
