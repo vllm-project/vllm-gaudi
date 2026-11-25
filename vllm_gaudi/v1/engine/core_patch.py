@@ -371,6 +371,9 @@ def install_engine_core_patch() -> None:
             # Rebuild batch queue and scheduling helpers.
             self.batch_queue_size = new_config.max_concurrent_batches
             self.batch_queue = deque(maxlen=self.batch_queue_size) if self.batch_queue_size > 1 else None
+            # Step state that EngineCore.__init__ resets with the batch queue.
+            self.deferred_step = None
+            self.num_executed_steps = 0
 
             self.is_ec_consumer = (new_config.ec_transfer_config is None
                                    or new_config.ec_transfer_config.is_ec_consumer)
