@@ -1237,6 +1237,17 @@ def _build_compact_gdn_kv_cache_config():
     return kv_cache_config, attn_spec, mamba_spec
 
 
+def _gdn_layer_stub() -> SimpleNamespace:
+    """Stand-in for a GDN layer in static_forward_context."""
+    ns = SimpleNamespace(kv_cache=None)
+
+    def bind_kv_cache(value):
+        ns.kv_cache = tuple(value)
+
+    ns.bind_kv_cache = bind_kv_cache
+    return ns
+
+
 def _make_compact_gdn_runner(monkeypatch, enable_prefix_caching: bool) -> HPUModelRunner:
     # The runner captures the GDN envs at construction; the auto-enable block
     # only fires for model-derived GDN layers (OPT has none), so set them here.
@@ -1250,10 +1261,14 @@ def _make_compact_gdn_runner(monkeypatch, enable_prefix_caching: bool) -> HPUMod
     with set_current_vllm_config(vllm_config):
         vllm_ctx = vllm_config.compilation_config.static_forward_context
         vllm_ctx["layer.0"] = Attention(num_heads=8, head_size=64, scale=1.0, prefix="layer.0")
-        # GDN layers bind state-tuple caches, not Attention modules: a writable
-        # kv_cache attribute is all bind_kv_cache needs.
-        vllm_ctx["mamba.1"] = SimpleNamespace(kv_cache=None)
-        vllm_ctx["mamba.2"] = SimpleNamespace(kv_cache=None)
+        # GDN layers bind state-tuple caches, not Attention modules. Upstream
+        # bind_kv_cache_to_layers calls layer.bind_kv_cache(value) for every
+        # forward-context entry, and vllm_gaudi's MambaBase replacement stores
+        # the pre-split sequence as self.kv_cache = tuple(kv_cache) (see the
+        # HPU MambaBase.bind_kv_cache patch in vllm_gaudi/patches.py), so the
+        # stand-ins reproduce exactly that contract.
+        vllm_ctx["mamba.1"] = _gdn_layer_stub()
+        vllm_ctx["mamba.2"] = _gdn_layer_stub()
         kv_cache_config, attn_spec, _ = _build_compact_gdn_kv_cache_config()
         runner = HPUModelRunner(vllm_config, DEVICE)
         # Emulate a 2-group GDN model on the OPT-125M config.
