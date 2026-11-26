@@ -9,8 +9,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig, KVCacheGroup)
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -49,12 +49,14 @@ def _scheduler(cls, max_num_batched_tokens=MNBT, max_model_len=2048, long_prefil
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["layer"],
-                             FullAttentionSpec(block_size=BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32))
+            KVCacheGroup.from_layers({
+                "layer":
+                FullAttentionManager.layer_config(
+                    AttentionSpec(block_size=BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32))
+            })
         ],
     )
     cache_config.num_gpu_blocks = num_blocks
-    register_all_kvcache_specs(vllm_config)
     return cls(vllm_config=vllm_config,
                kv_cache_config=kv_cache_config,
                block_size=BLOCK_SIZE,

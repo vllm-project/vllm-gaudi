@@ -992,6 +992,7 @@ def create_fused_moe_router(
     scoring_func: str = "softmax",
     num_fused_shared_experts: int = 0,
     shared_expert_weight: float = 1.0,
+    has_shared_expert_gate: bool = False,
     # grouped topk + fused topk bias parameters
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
@@ -1035,6 +1036,10 @@ def create_fused_moe_router(
         shared_expert_weight: Weight of the fused shared-expert slot (upstream
             vLLM d039c171+). Accepted for signature parity; unused on HPU since
             the fused-shared-expert path is not taken (default 1.0 no-op).
+        has_shared_expert_gate: Whether the last fused shared-expert columns of
+            the router logits are gate logits (upstream vLLM PR 64737). Accepted
+            for signature parity; only the ROCm AITER shared-expert router reads
+            it, and HPU does not build that router.
 
     Grouped topk and fused topk bias arguments:
         routed_scaling_factor: Scaling factor for routed weights

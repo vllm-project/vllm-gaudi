@@ -225,7 +225,7 @@ class HpuPlatform(Platform):
                 cache_config.block_size,
             )
             cache_config.block_size = 128
-            if cache_config.mamba_cache_mode == "align":
+            if cache_config.enable_prefix_caching:
                 cache_config.mamba_block_size = 128
         # Hybrid GDN/Mamba models: upstream HybridAttentionMambaModelConfig
         # already ran and computed block_size / mamba_page_size_padded for
@@ -302,21 +302,19 @@ class HpuPlatform(Platform):
         if get_config().VLLM_CONTIGUOUS_PA:
             logger.warning("Using Contiguous PA, disabling prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
+            if vllm_config.model_config.is_hybrid:
+                # The model config hooks ran with prefix caching on and sized
+                # Mamba blocks for it; without it vLLM keeps one per sequence.
+                vllm_config.cache_config.mamba_block_size = vllm_config.model_config.max_model_len
             if vllm_config.model_config.get_sliding_window():
                 logger.info("Contiguous paged attention is enabled; sliding-window layers "
                             "will use indexed KV-cache fetches.")
 
-        if (vllm_config.cache_config.enable_prefix_caching and vllm_config.cache_config.mamba_cache_mode == "all"):
-            vllm_config.cache_config.mamba_cache_mode = "align"
-            logger.info("[HPU] Overriding mamba_cache_mode from 'all' to 'align' "
-                        "to ensure block-aligned chunked prefill splits.")
-
         if (vllm_config.model_config is not None and vllm_config.model_config.is_hybrid):
             logger.debug(
                 "[HPU] Hybrid model cache config: block_size=%s, "
-                "mamba_block_size=%s, mamba_cache_mode=%s, "
-                "enable_prefix_caching=%s", cache_config.block_size, getattr(cache_config, "mamba_block_size", None),
-                getattr(cache_config, "mamba_cache_mode", None), cache_config.enable_prefix_caching)
+                "mamba_block_size=%s, enable_prefix_caching=%s", cache_config.block_size,
+                getattr(cache_config, "mamba_block_size", None), cache_config.enable_prefix_caching)
 
         if compilation_config.mode != CompilationMode.NONE:
             logger.info("[HPU] Forcing CompilationMode.NONE "
@@ -336,18 +334,61 @@ class HpuPlatform(Platform):
         # Disable multi-stream for shared experts as no Stream on CPU
         os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-        # NOTE: vLLM has default enabled async scheduling with speculative decoding is on.
-        # However, for HPU, speculative decoding is not supported with async scheduling.
-        vllm_config.scheduler_config.async_scheduling = \
-            vllm_config.scheduler_config.async_scheduling and vllm_config.speculative_config is None
+        # NOTE: vLLM enables async scheduling by default, also with speculative
+        # decoding. The HPU runner supports the two together only for one draft
+        # token of an EAGLE-style drafter (EAGLE, EAGLE3, MTP), by default only
+        # on Nemotron-H (see _async_spec_decode_enabled); otherwise speculative
+        # decoding runs with synchronous scheduling.
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and vllm_config.scheduler_config.async_scheduling and not (
+                cls._async_spec_decode_enabled(vllm_config) and spec_config.use_eagle()
+                and spec_config.num_speculative_tokens == 1):
+            vllm_config.scheduler_config.async_scheduling = False
         # Since the Model Runner V1 removal (vLLM aac1b2a4f3) vLLM enables async scheduling for pipeline
         # parallelism too; the HPU runner does not support that combination.
         if vllm_config.scheduler_config.async_scheduling and vllm_config.parallel_config.pipeline_parallel_size > 1:
             logger.warning("[HPU] Async scheduling is not supported with pipeline parallelism; disabling it.")
             vllm_config.scheduler_config.async_scheduling = False
+        # Runs after the async scheduling decisions above, which it depends on.
+        cls._maybe_use_hpu_scheduler(vllm_config)
         cls._reject_unsupported_engine_features(vllm_config)
 
         cls._maybe_disable_chunked_mm_input(vllm_config)
+
+    @classmethod
+    def _maybe_use_hpu_scheduler(cls, vllm_config: VllmConfig) -> None:
+        """Keep HPUAsyncScheduler's prefill chunks for synchronous speculative decoding on hybrids.
+
+        With prefix caching, upstream's synchronous scheduler ends the prefill
+        chunks of a hybrid model on KV cache block boundaries. HPUScheduler
+        splits them as HPUAsyncScheduler does, on the mamba chunk grid that the
+        HPU prefill path and its buckets expect.
+        """
+        scheduler_config = vllm_config.scheduler_config
+        if (vllm_config.speculative_config is not None and not scheduler_config.async_scheduling
+                and scheduler_config.scheduler_cls is None and vllm_config.cache_config.enable_prefix_caching
+                and getattr(vllm_config.model_config, 'is_hybrid', False)):
+            scheduler_config.scheduler_cls = "vllm_gaudi.v1.core.sched.hpu_scheduler.HPUScheduler"
+
+    @classmethod
+    def _async_spec_decode_enabled(cls, vllm_config: VllmConfig) -> bool:
+        """Whether async scheduling may stay on with speculative decoding.
+
+        Mirrors the async_spec_decode feature value, which the worker resolves
+        once it knows the model type; the runtime config does not know it yet
+        at engine-construction time. On by default for Nemotron-H unless
+        contiguous PA is on. An explicitly set VLLM_HPU_ASYNC_SPEC_DECODE takes
+        precedence. With prefix caching on a hybrid model, the mamba state
+        blocks of a step follow the tokens the previous step accepted, so the
+        runner decides them on the device (see
+        HPUModelRunner._copy_mamba_spec_boundary_states_async).
+        """
+        explicit = get_config().VLLM_HPU_ASYNC_SPEC_DECODE
+        model_config = getattr(vllm_config, 'model_config', None)
+        if explicit is not None:
+            return explicit
+        return (model_config is not None and getattr(model_config.hf_config, 'model_type', None) == 'nemotron_h'
+                and not get_config().VLLM_CONTIGUOUS_PA)
 
     @classmethod
     def _reject_unsupported_engine_features(cls, vllm_config: "VllmConfig") -> None:
@@ -398,7 +439,8 @@ class HpuPlatform(Platform):
                 if 0 < num_sliding < len(layer_types):
                     unsupported.append("mixed sliding/full dflash drafts")
                 candidate_head_archs = {
-                    "DFlash2DraftModel", "DFlash2BeamDraftModel", "DFlash2RicursiveDraftModel", "LiLiCorrDraftModel"
+                    "DFlash2DraftModel", "DFlash2BeamDraftModel", "DFlash2RicursiveDraftModel", "LiLiCorrDraftModel",
+                    "DSpineDraftModel"
                 }
                 if draft_archs & candidate_head_archs:
                     unsupported.append("DFlash candidate-head drafts")
@@ -408,6 +450,10 @@ class HpuPlatform(Platform):
             unsupported.append("batch-sharded sampling")
         if getattr(model_config, "architecture", None) in ("Step5ForCausalLM", "Step5ForConditionalGeneration"):
             unsupported.append("Step5")
+        # Its block-bidirectional PrefixLM mask is built only by the Model Runner V2 model state (vLLM PR #63114);
+        # the HPU runner would serve it with causal attention.
+        if getattr(model_config, "architecture", None) == "Qwen3_5ForSlotDecision":
+            unsupported.append("Qwen3.5 slot decision models")
         return unsupported
 
     @classmethod
@@ -481,14 +527,14 @@ class HpuPlatform(Platform):
         if is_granite_hybrid:
             # Compute the correct block_size using the PC-aware formula.
             from vllm.utils.math_utils import cdiv
-            from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+            from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
             from vllm.model_executor.models import ModelRegistry
             if cache_config.cache_dtype == "auto":
                 kv_dtype = model_config.dtype
             else:
                 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
                 kv_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-            attn_1tok = FullAttentionSpec(
+            attn_1tok = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
                 head_size=model_config.get_head_size(),
@@ -511,7 +557,7 @@ class HpuPlatform(Platform):
                     alignment = 16
                 attn_block_size = alignment * cdiv(mamba_page_size, alignment * attn_1tok)
                 cache_config.block_size = attn_block_size
-                if cache_config.mamba_cache_mode == "align":
+                if cache_config.enable_prefix_caching:
                     cache_config.mamba_block_size = attn_block_size
                 logger.info(
                     "Setting granitemoehybrid block_size to %d tokens "

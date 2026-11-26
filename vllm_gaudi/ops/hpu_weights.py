@@ -4,7 +4,6 @@ import vllm.model_executor.model_loader.utils as hpu_utils
 import vllm.model_executor.model_loader.base_loader as base_loader
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.attention import (Attention, MLAAttention)
-from vllm.model_executor.model_loader.reload import set_torchao_reload_attrs
 
 
 def hpu_process_weights_after_loading(model, model_config, target_device):
@@ -21,9 +20,6 @@ def hpu_process_weights_after_loading(model, model_config, target_device):
         if isinstance(module, (Attention, MLAAttention)) and hasattr(module, "process_weights_after_loading"):
             #with device_loading_context(module, target_device):
             module.process_weights_after_loading()
-
-    if model_config.quantization == "torchao":
-        set_torchao_reload_attrs(model, model_config)
 
 
 hpu_utils.process_weights_after_loading = hpu_process_weights_after_loading

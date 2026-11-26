@@ -230,7 +230,7 @@ _run_qwen2_5_vl_load_generate_test() {
 # Multimodal-support with qwen2.5-vl with warmup (small max model len and max num seqs) and torch.compile
 _run_qwen2_5_vl_compile_warmup_test() {
     echo "➡️ Testing Qwen2.5-VL-7B with full warmup under tight limits and torch.compile..."
-    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PAs=False \
+    VLLM_SKIP_WARMUP=false VLLM_CONTIGUOUS_PA=False \
     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/qwen2.5-vl-7b-small-ctx.yaml"
     echo "✅ Test Qwen2.5-VL-7B with full restricted warmup and torch.compile passed."
 }
@@ -267,14 +267,6 @@ _run_mistral3_load_generate_test() {
 #     python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/deepseek-ocr.yaml"
 #     echo "✅ Test with multimodal-support with deepseek-ocr passed."
 # }
-
-_run_llama3_70b_inc_dynamic_quant_test() {
-    echo "➡️ Testing Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode ..."
-    QUANT_CONFIG="${VLLM_GAUDI_PREFIX}/calibration/quantization_config/maxabs_quant_dynamic_quantization_weight_pcs_pow2.json" \
-    RUNTIME_SCALE_PATCHING=0 VLLM_SKIP_WARMUP=true VLLM_DYNAMIC_KV_QUANT=1 \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/generate.py" --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --max-model-len 2048
-    echo "✅ Test with Llama-3.3-70B-Instruct-FP8-dynamic + inc dynamic quant in torch.compile mode passed."
-}
 
 # --- LM-eval tests ---
 # Tests below score models on lmeval tasks, usually gsm8k
@@ -319,8 +311,9 @@ _run_gsm8k_qwen3_30b_test() {
 # Launches a vLLM OpenAI server, runs lm-eval as a local-chat-completions
 # client, and gates on the accuracy thresholds in the config yaml.
 # Requires HF_TOKEN with access to the gated Idavidrein/gpqa dataset.
-# TODO: Enable kimi2.6 test later
-run_gpqa_kimi_k26_test() {
+# Disabled: without the run_ prefix CI does not discover it. Rename it back to
+# run_gpqa_kimi_k26_test and restore the commands below to enable it.
+_run_gpqa_kimi_k26_test() {
     echo "⏭️  Skipping GPQA-diamond on Kimi-K2.6 (disabled)."
     # echo "➡️ Testing GPQA-diamond on Kimi-K2.6..."
     # cd "${VLLM_GAUDI_PREFIX}/tests/full_tests/gpqa_eval" && \
@@ -331,7 +324,7 @@ run_gpqa_kimi_k26_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only (baseline, no fsdpa_slicing)
 # Requires: pip install 'lm_eval[longbench]'
-run_longbench_qwen3_30b_fp8_static_test() {
+_run_longbench_qwen3_30b_fp8_static_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
@@ -342,7 +335,7 @@ run_longbench_qwen3_30b_fp8_static_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache and fsdpa slicing in torch.compile mode
 # Requires: pip install 'lm_eval[longbench]'
-run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
+_run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with BF16 KV cache + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 \
@@ -355,7 +348,7 @@ run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test() {
 
 # LongBench on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with FP8 KV cache and fsdpa slicing in torch.compile mode
 # Requires: pip install 'lm_eval[longbench]'
-run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
+_run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test() {
     echo "➡️ Testing LongBench (longbench_triviaqa) on Intel/Qwen3-30B-A3B-FP8-Static-Test-Only with KV_CACHE_DTYPE=fp8_inc + enable_fsdpa_slicing + PT_HPU_LAZY_MODE=0..."
     pip install 'lm_eval[longbench]' --quiet
     VLLM_CONTIGUOUS_PA=False ENABLE_APC=False VLLM_SKIP_WARMUP=True PT_HPU_LAZY_MODE=0 TP_SIZE=2 KV_CACHE_DTYPE=fp8_inc \
@@ -455,14 +448,6 @@ _run_gsm8k_phi4_mini_16k_test() {
 # If the accept rate is below the threshold, the test will fail. The same applies for accuracy rate.
 # For implementation details see:
 #   tests/full_tests/spec_decode.py
-
-# Multimodal-support with mistral-small-3
-_run_mistral3_test() {
-    echo "➡️ Testing Mistral-Small-3.1-24B..."
-    VLLM_SKIP_WARMUP=true VLLM_CONTIGUOUS_PA=False \
-    python -u "${VLLM_GAUDI_PREFIX}/tests/models/language/generation/generation_mm.py" --model-card-path "${VLLM_GAUDI_PREFIX}/tests/full_tests/model_cards/mistral3-small.yaml"
-    echo "✅ Test with multimodal-support with Mistral-Small-3.1-24B passed."
-}
 
 # Preemption test
 run_preemption_test() {
@@ -583,44 +568,59 @@ _run_parallel_on_card_slices() {
     return "$rc"
 }
 
-# GSM8K on Qwen3.5 / Qwen3.6 35B-A3B (1 card each)
-run_gsm8k_qwen3x_35b_a3b_parallel() {
-    _run_parallel_on_card_slices qwen3x_35b \
-        _run_gsm8k_qwen36_35b_a3b_test 1 \
-        _run_gsm8k_qwen35_35b_a3b_test 1
-}
-
-# GSM8K on gemma-4: E4B (1 card) runs first, then 26B / 31B (TP=4 each) in
-# parallel across the two 4-card halves of an 8-card host.
+# GSM8K on gemma-4 26B / 31B (TP=4 each) across the two 4-card halves of an
+# 8-card host. E4B runs in run_long_mixed_parallel.
 run_gsm8k_gemma4_parallel() {
-    _run_gsm8k_gemma4_e4b_test
     _run_parallel_on_card_slices gemma4 \
         _run_gsm8k_gemma4_26b_test 4 \
         _run_gsm8k_gemma4_31b_test 4
 }
 
-# GSM8K on phi-4 (1 card), phi-4 TP=2 (2 cards), Phi-4-mini 4k and 16k (1 card each), warmup ON
-run_gsm8k_phi4_parallel() {
-    _run_parallel_on_card_slices phi4 \
+# GSM8K on phi-4 (1 card), phi-4 TP=2 (2 cards), Phi-4-mini 4k and 16k (1 card each),
+# and spec decode eagle3 num_spec_2 / eagle3 / ngram (1 card each): 8 cards
+run_gsm8k_phi4_spec_decode_parallel() {
+    _run_parallel_on_card_slices phi4_spec_decode \
         _run_gsm8k_phi4_test 1 \
         _run_gsm8k_phi4_tp2_test 2 \
         _run_gsm8k_phi4_mini_test 1 \
-        _run_gsm8k_phi4_mini_16k_test 1
-}
-
-# Spec decode: eagle3 num_spec_2 / eagle3 / ngram (1 card each)
-run_spec_decode_parallel() {
-    _run_parallel_on_card_slices spec_decode \
+        _run_gsm8k_phi4_mini_16k_test 1 \
         _run_spec_decode_eagle3_num_spec_2_test 1 \
         _run_spec_decode_eagle3_test 1 \
         _run_spec_decode_ngram_test 1
 }
 
-# Spec decode: eagle / DeepSeek eagle MTP (1 card each)
-run_spec_decode_extra_parallel() {
-    _run_parallel_on_card_slices spec_decode_extra \
+# The three LongBench variants share one checkpoint, and loading it several times
+# at once is much slower, so they run one after another on one TP=2 slice. Each
+# runs as its own process: set -e stays in force inside it (a function called as
+# 'f || ...' runs with set -e off), and one failure does not skip the others.
+_run_longbench_qwen3_30b_fp8_chain() {
+    local rc=0 fn
+    for fn in _run_longbench_qwen3_30b_fp8_static_test \
+              _run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test \
+              _run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test; do
+        "$fn" &
+        if ! wait "$!"; then
+            echo "❌ longbench chain [${fn}] FAILED"
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+# The longest tests that use few cards, on one host: GSM8K on Qwen3.6 / Qwen3.5
+# 35B-A3B (1 card each), the LongBench chain (TP=2), spec decode with DeepSeek
+# eagle MTP and eagle (1 card each), and GSM8K on gemma-4-E4B (1 card).
+# lm_eval[longbench] is installed before any member starts, so no member imports
+# lm_eval while pip changes it.
+run_long_mixed_parallel() {
+    pip install 'lm_eval[longbench]' --quiet
+    _run_parallel_on_card_slices long_mixed \
+        _run_gsm8k_qwen36_35b_a3b_test 1 \
+        _run_gsm8k_qwen35_35b_a3b_test 1 \
+        _run_longbench_qwen3_30b_fp8_chain 2 \
+        _run_spec_decode_eaglemtp_test 1 \
         _run_spec_decode_eagle_test 1 \
-        _run_spec_decode_eaglemtp_test 1
+        _run_gsm8k_gemma4_e4b_test 1
 }
 
 # Multimodal members load vLLM's default test image when they start. vLLM writes it
@@ -638,7 +638,6 @@ run_load_generate_a_parallel() {
         _run_gemma3_load_generate_test 1 \
         _run_dsv2_blockfp8_static_scaling_fp8qkv_load_generate_test 1 \
         _run_dsv2_blockfp8_static_scaling_fp8kv_load_generate_test 1 \
-        _run_llama3_70b_inc_dynamic_quant_test 1 \
         _run_llama3_70b_inc_dynamic_quant_load_generate_test 1 \
         _run_gptq_load_generate_test 1 \
         _run_deepseek_v2_inc_load_generate_test 1 \
@@ -653,7 +652,6 @@ run_load_generate_b_parallel() {
         _run_awq_load_generate_test 1 \
         _run_qwen2_5_vl_compile_warmup_test 1 \
         _run_qwen3_vl_load_generate_test 1 \
-        _run_mistral3_test 1 \
         _run_mistral3_load_generate_test 1 \
         _run_granite_4_h_load_generate_test 1 \
         _run_qwen3_inc_dynamic_load_generate_test 1
@@ -742,6 +740,14 @@ run_async_penalty_consistency_test() {
     echo "✅ Test async-scheduling penalty consistency passed."
 }
 
+# min_tokens, logit_bias and min_p reach the logits processors (sync and async scheduling)
+run_logits_processor_params_test() {
+    echo "➡️ Testing min_tokens, logit_bias and min_p..."
+    VLLM_SKIP_WARMUP=true \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_logits_processor_params.py"
+    echo "✅ Test min_tokens, logit_bias and min_p passed."
+}
+
 # Upstream's own async-scheduler suite, run against HPUAsyncScheduler so the
 # override is held to the contract it overrides. Needs no accelerator and takes
 # seconds. --confcutdir keeps the vLLM root conftest out of the run, so the gate
@@ -783,6 +789,15 @@ run_structured_output_test() {
     echo "✅ Test with structured outputs passed."
 }
 
+# Structured output next to chunked prefills, sync scheduling
+run_structured_output_chunked_prefill_test() {
+    echo "➡️ Testing structured output next to chunked prefills..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_output_chunked_prefill.py"
+    VLLM_MERGED_PREFILL=true VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_output_chunked_prefill.py"
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_output_chunked_prefill.py" --spec-decode ngram
+    echo "✅ Test with structured output next to chunked prefills passed."
+}
+
 # --- Utility Functions ---
 
 # Function to run all tests sequentially
@@ -815,29 +830,33 @@ launch_all_tests() {
     _run_qwen2_5_vl_compile_warmup_test
     _run_qwen3_vl_load_generate_test
     _run_mistral3_load_generate_test
-    _run_llama3_70b_inc_dynamic_quant_test
     _run_gsm8k_granite_test
     _run_gsm8k_granite_async_test
     _run_gsm8k_deepseek_test
     _run_gsm8k_qwen3_30b_test
-    run_gpqa_kimi_k26_test
-    run_longbench_qwen3_30b_fp8_static_test
-    run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
-    run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
+    _run_gpqa_kimi_k26_test
+    _run_longbench_qwen3_30b_fp8_static_test
+    _run_longbench_qwen3_30b_fp8_static_bf16_fsdpa_slicing_compile_test
+    _run_longbench_qwen3_30b_fp8_static_fp8_fsdpa_slicing_compile_test
     run_preemption_test
     run_row_order_test
-    run_spec_decode_parallel
-    run_spec_decode_extra_parallel
+    _run_spec_decode_eagle3_num_spec_2_test
+    _run_spec_decode_eagle3_test
+    _run_spec_decode_ngram_test
+    _run_spec_decode_eagle_test
+    _run_spec_decode_eaglemtp_test
     run_embedding_model_test
     # run_pd_disaggregate_nixl_libfabric_test temporarily disabled: see comment above its definition
     run_pd_disaggregate_nixl_ucx_test
     run_cpu_offloading_test
     run_offloading_connector_test
     run_async_penalty_consistency_test
+    run_logits_processor_params_test
     run_upstream_async_scheduler_gate
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test
+    run_structured_output_chunked_prefill_test
     echo "🎉 All test suites passed successfully!"
 }
 

@@ -97,6 +97,9 @@ Currently:
   version that uses FusedSDPA when the ``fsdpa_impl`` attention implementation
   is configured, providing 1.4-2x performance improvement for models that use
   transformers SDPA attention (e.g., vision encoders in Gemma4 models).
+
+* ``Gemma4VisionRotaryEmbedding.forward`` — restore the FP32 matmul vision RoPE
+  from transformers <= 5.18 (huggingface/transformers#49265 changed it).
 """
 
 import functools
@@ -915,6 +918,31 @@ def _hpu_sdpa_attention_forward(
     return attn_output, None
 
 
+@torch.no_grad()
+def _hpu_gemma4_vision_rope_forward(self, x: torch.Tensor, position_ids: torch.Tensor):
+    """Gemma4 vision RoPE as in transformers <= 5.18."""
+    inv_freq_expanded = self.inv_freq[None, ...].to(device=x.device, dtype=torch.float32)
+    position_ids_expanded = position_ids[..., None].float()
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        freqs = position_ids_expanded @ inv_freq_expanded
+        cos = freqs.cos() * self.attention_scaling
+        sin = freqs.sin() * self.attention_scaling
+    cos = self.recomposition_frequencies(cos)
+    sin = self.recomposition_frequencies(sin)
+    return cos.to(x.dtype), sin.to(x.dtype)
+
+
+def _patch_gemma4_vision_rotary_embedding() -> None:
+    try:
+        from transformers.models.gemma4 import modeling_gemma4
+    except ImportError:
+        return
+    rope_cls = getattr(modeling_gemma4, "Gemma4VisionRotaryEmbedding", None)
+    if rope_cls is None or not hasattr(rope_cls, "recomposition_frequencies"):
+        return
+    rope_cls.forward = _hpu_gemma4_vision_rope_forward
+
+
 def _patch_sdpa_attention_forward() -> None:
     """Replace transformers' ``sdpa_attention_forward`` with HPU-optimized version.
 
@@ -1559,6 +1587,11 @@ def _patch_kimi_k3_arch() -> None:
         _patch_kimi_attn_res()
         _patch_kimi_linear_weights()
         _patch_mla_bind_kv_cache()
+        from vllm.model_executor.models import config as _model_config
+        k3_config_cls = getattr(_model_config, "KimiK3ForConditionalGenerationConfig", None)
+        if k3_config_cls is not None:
+            # K3.1 shares the K3 quantization hook (MXFP4 experts instead of compressed-tensors)
+            _model_config.MODELS_CONFIG_MAP.setdefault("KimiK31ForConditionalGeneration", k3_config_cls)
         import vllm.models.kimi_k3 as k3_pkg
         import vllm.models.kimi_k3.amd.linear as _amd_linear
         import vllm.models.kimi_k3.amd.mla as _amd_mla
@@ -1576,6 +1609,7 @@ def _patch_kimi_k3_arch() -> None:
         from vllm.model_executor.models.registry import ModelRegistry
         ModelRegistry.register_model("KimiLinearForCausalLM", _amd_linear.KimiLinearForCausalLM)
         ModelRegistry.register_model("KimiK3ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
+        ModelRegistry.register_model("KimiK31ForConditionalGeneration", _amd_model.KimiK3ForConditionalGeneration)
         ModelRegistry.register_model("KimiK3MTP", _amd_mtp.KimiK3MTP)
         _kimi_patch_installed("model_registration")
 
@@ -1645,6 +1679,33 @@ def _patch_kimi_k3_arch() -> None:
             _amd_linear.KimiLinearModel.forward = _safe_kimi_linear_model_forward
             _amd_linear.KimiLinearModel._patched_hpu_tokens = True
         _kimi_patch_installed("linear_model_tokens_1d")
+
+        # Kimi-K3.1 checkpoints carry DSA indexer tensors that the dense MLA built on HPU has no parameters for.
+        orig_linear_load_weights = getattr(_amd_linear.KimiLinearModel, "load_weights", None)
+        if orig_linear_load_weights is not None and not getattr(_amd_linear.KimiLinearModel, "_patched_skip_indexer",
+                                                                False):
+
+            def _load_weights_skip_indexer(self, weights):
+                if not getattr(self, "_hpu_kimi_k3", False):  # standalone Kimi-Linear: upstream loader
+                    return orig_linear_load_weights(self, weights)
+
+                def _without_indexer():
+                    warned = False
+                    for item in weights:
+                        if ".self_attn.indexer." in item[0]:
+                            if not warned:
+                                warned = True
+                                _kimi_patch_logger().warning(
+                                    "Kimi-K3: DSA is not supported on HPU, skipping the DSA indexer weights "
+                                    "(dense MLA attention is used)")
+                            continue
+                        yield item
+
+                return orig_linear_load_weights(self, _without_indexer())
+
+            _amd_linear.KimiLinearModel.load_weights = _load_weights_skip_indexer
+            _amd_linear.KimiLinearModel._patched_skip_indexer = True
+        _kimi_patch_installed("skip_dsa_indexer_weights")
 
         # out-of-place attn_res on the decoder layer (2D inputs, bank shape check): the in-place updates of the
         # upstream version do not survive the per-layer graph boundaries of torch.compile mode
@@ -1901,6 +1962,31 @@ def _patch_engine_core_sleep_host_guard() -> None:
     EngineCore.sleep = _hpu_sleep
 
 
+def _patch_sampling_params_spec_decode() -> None:
+    """Reject ``min_p`` and ``logit_bias`` with speculative decoding again.
+
+    vLLM #67061 deleted ``SamplingParams._validate_spec_decode`` because Model Runner V2 now applies both to drafts.
+    The HPU runner does not: with speculative decoding its logits processors are min_tokens only, so such a request
+    would be accepted and the two parameters silently ignored. This restores the deleted check where it ran.
+    """
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
+
+    original_verify = SamplingParams.verify
+    if getattr(original_verify, "_hpu_spec_decode_check", False):
+        return
+
+    @functools.wraps(original_verify)
+    def _hpu_verify(self, model_config, speculative_config, *args, **kwargs):
+        original_verify(self, model_config, speculative_config, *args, **kwargs)
+        if speculative_config is not None and (self.min_p > _SAMPLING_EPS or self.logit_bias):
+            raise VLLMValidationError("The min_p and logit_bias sampling parameters are not supported with "
+                                      "speculative decoding on HPU.")
+
+    _hpu_verify._hpu_spec_decode_check = True  # type: ignore[attr-defined]
+    SamplingParams.verify = _hpu_verify
+
+
 class _RemoteTokenizerNoticeFilter:
     """Drop the 'Calling super().encode with ...' notice of the Kimi remote tokenizer (tokenization_kimi.py).
 
@@ -1976,8 +2062,10 @@ def apply() -> None:
         _patch_mla_bind_kv_cache()
         _patch_free_blocks()
         _patch_sdpa_attention_forward()
+        _patch_gemma4_vision_rotary_embedding()
         _patch_inc_quantization_config()
         _patch_engine_core_sleep_host_guard()
+        _patch_sampling_params_spec_decode()
         _patch_mla_prefill_selector()
         _patch_moe_runner_delegation()
         _patch_latent_moe_runner_forward()

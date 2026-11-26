@@ -19,23 +19,28 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm_gaudi.v1._vendored.worker.block_table import MultiGroupBlockTable
-from vllm_gaudi.v1._vendored.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessors)
+from vllm_gaudi.v1._vendored.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessors, MoveDirectionality)
+from vllm_gaudi.v1.sample.hpu_logits_processors import logitsprocs_for_call
 
 from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
 
-_SAMPLING_EPS = 1e-5
 
-
-def splice_placeholders(output_token_ids: list[int], new_ids: list[int]) -> None:
+def splice_placeholders(output_token_ids: list[int], new_ids: list[int], num_slots: Optional[int] = None) -> None:
     """Replace the newest -1 placeholders of ``output_token_ids`` in place with one step's sampled ids.
 
     Under async scheduling every step appends a -1 per request, and the real ids are only spliced in while a
     penalty or bad-words consumer needs them, so a request can also carry older placeholders, for tokens already in
     the KV cache. Those stay, so the list length keeps matching the tokens in the KV cache.
 
+    With async speculative decoding the scheduler counts a placeholder for each of the step's tokens, its drafts
+    included, as if all were accepted, and the runner mirrors that count. Then num_slots is the step's count for the
+    request (1 + its drafts): its valid ids replace all of those newest placeholders, so the slots of rejected drafts
+    go, and older placeholders stay.
+
     Args:
         output_token_ids: a request's output ids, ending in -1 placeholders.
         new_ids: that request's row of the step's sampled ids; -1 marks unused (rejected) slots.
+        num_slots: the newest placeholders the step's valid ids replace; default as many as there are valid ids.
     """
     if not new_ids:
         return
@@ -43,9 +48,9 @@ def splice_placeholders(output_token_ids: list[int], new_ids: list[int]) -> None
     num_placeholders = 0
     while (num_placeholders < len(output_token_ids) and output_token_ids[-1 - num_placeholders] == -1):
         num_placeholders += 1
-    num_to_replace = min(num_sampled_ids, num_placeholders)
+    num_to_replace = min(num_sampled_ids if num_slots is None else num_slots, num_placeholders)
     if num_to_replace:
-        output_token_ids[len(output_token_ids) - num_to_replace:] = new_ids[:num_to_replace]
+        output_token_ids[len(output_token_ids) - num_to_replace:] = new_ids[:min(num_sampled_ids, num_to_replace)]
 
 
 class HPUMultiGroupBlockTable(MultiGroupBlockTable):
@@ -153,6 +158,7 @@ class InputBatch:
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
+        max_num_blocks_per_req: Optional[list[int]] = None,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -193,8 +199,16 @@ class InputBatch:
         # vLLM #40996 dropped max_model_len from MultiGroupBlockTable and now
         # requires the caller to pass the per-group block count. HPU does not
         # use DCP (cp_world_size == 1), so max_num_blocks reduces to
-        # cdiv(max_model_len, block_size) per KV cache group.
-        max_num_blocks = [cdiv(max_model_len, block_size) for block_size in block_sizes]
+        # cdiv(max_model_len, block_size) per KV cache group, unless the
+        # caller passes the KV cache specs' max_num_blocks_per_req (Mamba
+        # groups need 1 + num_speculative_tokens state blocks per request).
+        # Both are in KV-manager blocks; HPUMultiGroupBlockTable converts
+        # them to kernel blocks.
+        if max_num_blocks_per_req is not None:
+            assert len(max_num_blocks_per_req) == len(block_sizes)
+            max_num_blocks = list(max_num_blocks_per_req)
+        else:
+            max_num_blocks = [cdiv(max_model_len, block_size) for block_size in block_sizes]
         self.block_table = HPUMultiGroupBlockTable(max_num_reqs=max_num_reqs,
                                                    max_num_batched_tokens=max_num_batched_tokens,
                                                    pin_memory=pin_memory,
@@ -222,11 +236,6 @@ class InputBatch:
         self.top_k_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.int32, device="cpu", pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
-
-        self.min_p = torch.empty((max_num_reqs, ), dtype=torch.float32, device=device)
-        self.min_p_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.float32, device="cpu", pin_memory=pin_memory)
-        self.min_p_cpu = self.min_p_cpu_tensor.numpy()
-        self.min_p_reqs: set[str] = set()
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, ), dtype=torch.float, device=device)
@@ -275,9 +284,8 @@ class InputBatch:
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
-        # Internal representation of per-step batch state changes, used for
-        # reordering persistent batch and generating logitsprocs batch state
-        # updates. Should reset each step.
+        # Rows added, removed and moved in this step, for the logits processors
+        # (min_tokens, logit_bias, min_p). Applied by update_logitsprocs.
         self.batch_update_builder = BatchUpdateBuilder()
 
         # Set by swap_states, which moves only the CPU copies of the per-row
@@ -342,6 +350,7 @@ class InputBatch:
             self.req_output_token_ids[req_index] = request.output_token_ids
 
         self.req_id_to_index[req_id] = req_index
+        self._register_add_request(request, req_index)
 
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = len(request.prompt_token_ids)
@@ -387,10 +396,7 @@ class InputBatch:
             else:
                 top_k = self.vocab_size
             self.top_k_cpu[req_index] = top_k
-            self.min_p_cpu[req_index] = sampling_params.min_p
             self.frequency_penalties_cpu[req_index] = sampling_params.frequency_penalty
-            if sampling_params.min_p > _SAMPLING_EPS:
-                self.min_p_reqs.add(req_id)
             if sampling_params.frequency_penalty != 0.0:
                 self.frequency_penalties_reqs.add(req_id)
             self.presence_penalties_cpu[req_index] = sampling_params.presence_penalty
@@ -456,12 +462,28 @@ class InputBatch:
         self._invalidate_prompt_token_ids_cache()
         return req_index
 
+    def _register_add_request(self, request: "CachedRequestState", req_index: int) -> None:
+        """Record an added request for the logits processors, as upstream's _register_add_request.
+
+        The runner picks the row itself, filling removed rows first. A refilled row is no longer removed: the
+        processors apply additions before removals, so leaving it would drop the new request's state.
+        """
+        builder = self.batch_update_builder
+        if builder.has_removed() and req_index in builder.removed:
+            builder.removed.remove(req_index)
+        builder.batch_changed = True
+        if request.sampling_params:
+            # The processors keep the output list itself and read its length every step (min_tokens).
+            builder.added.append(
+                (req_index, request.sampling_params, request.prompt_token_ids, request.output_token_ids))
+
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense()."""
 
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
+        self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
@@ -469,7 +491,6 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
-        self.min_p_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -532,10 +553,9 @@ class InputBatch:
             self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1]
         self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] =\
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
-        self.min_p_cpu[i1], self.min_p_cpu[i2] =\
-            self.min_p_cpu[i2], self.min_p_cpu[i1]
         if i1 != i2:
             self._sampling_rows_moved = True
+            self.batch_update_builder.moved.append((i1, i2, MoveDirectionality.SWAP))
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -607,7 +627,6 @@ class InputBatch:
             self.frequency_penalties_cpu[empty_index] = self.frequency_penalties_cpu[last_req_index]
             self.presence_penalties_cpu[empty_index] = self.presence_penalties_cpu[last_req_index]
             self.repetition_penalties_cpu[empty_index] = self.repetition_penalties_cpu[last_req_index]
-            self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -618,6 +637,12 @@ class InputBatch:
                 last_req_index -= 1
                 # Sampling state not used by pooling models.
                 continue
+
+            # The filled row is no longer removed; its new request moved in from last_req_index.
+            builder = self.batch_update_builder
+            if empty_index in builder.removed:
+                builder.removed.remove(empty_index)
+            builder.moved.append((last_req_index, empty_index, MoveDirectionality.UNIDIRECTIONAL))
 
             if self.allowed_token_ids_mask_cpu_tensor is not None:
                 self.allowed_token_ids_mask_cpu_tensor[empty_index] = self.allowed_token_ids_mask_cpu_tensor[
@@ -635,15 +660,27 @@ class InputBatch:
         self._invalidate_prompt_token_ids_cache()
 
     def refresh_sampling_metadata(self):
-        """Apply batch updates, reset input batch at end of step
-        * Apply batch add/remove/permute to logits procs' states
-        * If batch state is modified, update sampling metadata
+        """Rebuild the sampling metadata after the batch changed.
+
+        The logits processors get the batch changes from update_logitsprocs instead: HPU reorders the batch after this.
         """
-        # NOTE(chendi): don't reset batch_update_builder here
-        # TODO: follow upstream PR#16728 for enabling batch_update
         self._invalidate_prompt_token_ids_cache()
         self.sampling_metadata = self._make_sampling_metadata()
         self._sampling_rows_moved = False
+
+    def update_logitsprocs(self) -> None:
+        """Hand the batch changes recorded since the last call to the logits processors.
+
+        Their state is keyed by batch row, so call this after the last reorder of a step and before its first
+        sampler call, and also before the next step changes the batch, for a step that did not sample. The
+        processors run every time, with or without changes: min_tokens drops a request that reached its minimum.
+        """
+        if self.is_pooling_model:
+            self.batch_update_builder.reset()
+            return
+        batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
+        for processor in self.logitsprocs.all:
+            processor.update_state(batch_update)
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
@@ -655,8 +692,6 @@ class InputBatch:
             async_h2d_copy(self.top_p_cpu_tensor, self.top_p)
         if not self.no_top_k:
             async_h2d_copy(self.top_k_cpu_tensor, self.top_k)
-        if not self.no_min_p:
-            async_h2d_copy(self.min_p_cpu_tensor, self.min_p)
 
         if not self.no_penalties:
             # Since syncing these tensors is expensive only copy them
@@ -840,7 +875,7 @@ class InputBatch:
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=bad_words_token_ids,
-            logitsprocs=self.logitsprocs,
+            logitsprocs=logitsprocs_for_call(self.logitsprocs, req_indices, self.num_reqs, self.device),
         )
 
     def set_async_sampled_token_ids(
@@ -870,8 +905,12 @@ class InputBatch:
             self.sampled_token_ids_cpu = None
             self.async_copy_ready_event = None
 
-    def update_async_output_token_ids(self) -> None:
+    def update_async_output_token_ids(self, num_slots: Optional[Sequence[int]] = None) -> None:
         """Splice the prior step's real sampled ids over the -1 placeholders.
+
+        num_slots: async speculative decoding, per row of the prior step: the
+        placeholders the scheduler counted for it (1 + its drafts), see
+        splice_placeholders.
 
         Ported from the identically named method in vLLM's V1 GPU runner
         (vendored as vllm_gaudi/v1/_vendored/worker/gpu_input_batch.py). Under
@@ -906,7 +945,8 @@ class InputBatch:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-            splice_placeholders(req_output_token_ids, sampled_token_ids[prev_index])
+            splice_placeholders(req_output_token_ids, sampled_token_ids[prev_index],
+                                None if num_slots is None else num_slots[prev_index])
 
     def get_pooling_params(self) -> list[PoolingParams]:
         assert len(self.req_ids) == len(self.pooling_params)
@@ -988,10 +1028,6 @@ class InputBatch:
         return len(self.top_k_reqs) == 0
 
     @property
-    def no_min_p(self) -> bool:
-        return len(self.min_p_reqs) == 0
-
-    @property
     def no_penalties(self) -> bool:
         return (len(self.presence_penalties_reqs) == 0 and len(self.frequency_penalties_reqs) == 0
                 and len(self.repetition_penalties_reqs) == 0)
@@ -1003,9 +1039,9 @@ class InputBatch:
         Both penalties and bad_words read it, so the -1 placeholders must be
         repaired before sampling if either is active for any request.
 
-        Upstream also ORs in a custom-logitsprocs flag; unreachable here because
-        batch_update_builder is never populated on HPU (see the PR#16728 TODO in
-        _make_sampling_metadata). Add it back when batch_update is enabled.
+        Upstream also ORs in a custom-logitsprocs flag. HPU refuses custom
+        logits processors, and of the builtin ones only min_tokens reads the
+        outputs, for their count, which the placeholders keep right.
         """
         return not self.no_penalties or bool(self.bad_words_token_ids)
 
