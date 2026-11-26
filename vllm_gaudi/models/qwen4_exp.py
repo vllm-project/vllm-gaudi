@@ -98,7 +98,16 @@ from vllm_gaudi.models.qwen3_5 import HPUGatedDeltaNetAttention
 
 logger = init_logger(__name__)
 
-ATTENTION_LAYER_TYPES = ("full_attention", "qwen_sparse_attention")
+# transformers parses the checkpoint's indexer-backed "full_attention" layers
+# as "qwen_sparse_attention" below 5.18 and renames the same sparse type to
+# "indexed_attention" from 5.18 on (remap_legacy_layer_types; empirically
+# fenced 5.17.0 old-name / 5.18.0 new-name). Accept both spellings so the
+# port stays bootable across both transformers generations.
+ATTENTION_LAYER_TYPES = (
+    "full_attention",
+    "qwen_sparse_attention",
+    "indexed_attention",
+)
 
 # Class-level checkpoint-name -> vLLM-name mapping for the registered
 # Qwen4ExpForConditionalGeneration wrapper.  ``configure_quant_config``
