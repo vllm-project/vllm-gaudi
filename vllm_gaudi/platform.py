@@ -455,6 +455,10 @@ class HpuPlatform(Platform):
         # the HPU runner would serve it with causal attention.
         if getattr(model_config, "architecture", None) == "Qwen3_5ForSlotDecision":
             unsupported.append("Qwen3.5 slot decision models")
+        # Only the Model Runner V2 and CPU runners mask these tokens out of the logits (vLLM PR #68976); the HPU
+        # runner would still sample them.
+        if getattr(model_config, "masked_token_ids", None):
+            unsupported.append("masked token ids")
         return unsupported
 
     @classmethod

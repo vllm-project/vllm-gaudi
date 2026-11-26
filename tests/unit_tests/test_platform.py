@@ -665,6 +665,7 @@ _UNSUPPORTED_MRV2_ONLY_FEATURES = [
      lambda c: setattr(c, "speculative_config", _dflash_spec(["DSpineDraftModel"]))),
     ("Qwen3.5 slot decision", "Qwen3.5 slot decision models",
      lambda c: setattr(c.model_config, "architecture", "Qwen3_5ForSlotDecision")),
+    ("masked token ids", "masked token ids", lambda c: setattr(c.model_config, "masked_token_ids", [7])),
 ]
 
 
@@ -693,6 +694,13 @@ def test_mrv2_only_features_fail_at_startup(feature, enable):
     [None, _spec_config(), _dflash_spec(["DFlashDraftModel"], ["full_attention"])])
 def test_supported_engine_config_passes_startup(speculative_config):
     _run_check_and_update_config(_engine_config(speculative_config=speculative_config))
+
+
+def test_empty_masked_token_ids_pass_startup():
+    """An empty list masks nothing upstream, so it is not refused."""
+    vllm_config = _engine_config()
+    vllm_config.model_config.masked_token_ids = []
+    _run_check_and_update_config(vllm_config)
 
 
 @pytest.mark.parametrize("pipeline_parallel_size, expected", [(1, True), (2, False)])
