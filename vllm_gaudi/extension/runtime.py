@@ -45,16 +45,18 @@ def eager_deferred_sampling_warning(max_model_len: int, free_device_bytes: float
     ask_bytes = bytes_per_token * blockpad
     if ask_bytes <= free_device_bytes:
         return None
-    return (f'May hit a deferred device allocation of about '
-            f'{ask_bytes / 2**30:.1f} GiB ({ask_bytes} B on the measured model class) at its first '
-            f'sampling pass (https://github.com/vllm-project/vllm-gaudi/issues/1846): under the eager PT bridge '
-            f'with the default \'exp\' bucketing tree, a near-cap request (prompt + generation close '
-            f'to max_model_len={max_model_len}) triggers this deferred allocation; free device memory is '
-            f'{free_device_bytes / 2**30:.1f} GiB -- on the measured Qwen3.8 GDN hybrid this aborts all workers. '
-            f'The allocation is authored below the Python layer (deferred pipeline materialization) and its '
-            f'per-token width is model-geometry dependent, so verify against your own model. The measured remedy for '
-            f'long-context serving is the padding-aware bucketing tree (VLLM_BUCKETING_STRATEGY=pad with '
-            f'VLLM_HPU_FSDPA_SLICE_ENABLED=0, https://github.com/vllm-project/vllm-gaudi/issues/1854); otherwise cap --max-model-len.')
+    return (
+        f'May hit a deferred device allocation of about '
+        f'{ask_bytes / 2**30:.1f} GiB ({ask_bytes} B on the measured model class) at its first '
+        f'sampling pass (https://github.com/vllm-project/vllm-gaudi/issues/1846): under the eager PT bridge '
+        f'with the default \'exp\' bucketing tree, a near-cap request (prompt + generation close '
+        f'to max_model_len={max_model_len}) triggers this deferred allocation; free device memory is '
+        f'{free_device_bytes / 2**30:.1f} GiB -- on the measured Qwen3.8 GDN hybrid this aborts all workers. '
+        f'The allocation is authored below the Python layer (deferred pipeline materialization) and its '
+        f'per-token width is model-geometry dependent, so verify against your own model. The measured remedy for '
+        f'long-context serving is the padding-aware bucketing tree (VLLM_BUCKETING_STRATEGY=pad with '
+        f'VLLM_HPU_FSDPA_SLICE_ENABLED=0, https://github.com/vllm-project/vllm-gaudi/issues/1854); otherwise cap --max-model-len.'
+    )
 
 
 def filter_defined(config, keys):

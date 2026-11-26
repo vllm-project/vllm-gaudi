@@ -8502,8 +8502,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         free_bytes = getattr(self, 'mem_margin', None)
         if free_bytes is None:
             free_bytes = HabanaMemoryProfiler.current_free_device_memory()
-        warning = eager_deferred_sampling_warning(self.model_config.max_model_len,
-                                                  free_bytes)
+        warning = eager_deferred_sampling_warning(self.model_config.max_model_len, free_bytes)
         if warning:
             logger.warning(warning)
 
