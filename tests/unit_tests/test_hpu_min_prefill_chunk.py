@@ -60,7 +60,7 @@ def _scheduler(cls, max_num_batched_tokens=MNBT, max_model_len=2048, long_prefil
     return cls(vllm_config=vllm_config,
                kv_cache_config=kv_cache_config,
                block_size=BLOCK_SIZE,
-               log_stats=True,
+               collect_stats=True,
                structured_output_manager=StructuredOutputManager(vllm_config))
 
 

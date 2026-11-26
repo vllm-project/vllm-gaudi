@@ -232,7 +232,7 @@ class RequestRunner:
         self.scheduler = scheduler_cls(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
-            log_stats=True,
+            collect_stats=True,
             structured_output_manager=StructuredOutputManager(vllm_config),
             block_size=block_size,
         )

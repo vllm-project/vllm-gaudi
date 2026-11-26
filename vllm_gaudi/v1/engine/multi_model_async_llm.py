@@ -193,9 +193,10 @@ class MultiModelAsyncLLM:
         engine.input_processor = InputProcessor(target_config, renderer)
         engine.output_processor = OutputProcessor(
             renderer.tokenizer,
-            log_stats=engine.log_stats,
+            collect_stats=engine.collect_stats,
             stream_interval=target_config.scheduler_config.stream_interval,
             tracing_enabled=target_config.observability_config.otlp_traces_endpoint is not None,
+            admission_stats=engine.admission_stats,
         )
 
         # --- 3. Restart the output handler with the new processors ---
