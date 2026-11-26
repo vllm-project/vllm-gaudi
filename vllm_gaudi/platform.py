@@ -445,6 +445,11 @@ class HpuPlatform(Platform):
                 }
                 if draft_archs & candidate_head_archs:
                     unsupported.append("DFlash candidate-head drafts")
+                # Anchor-first drafts (vLLM PR #68827) run one query per draft token. Only the Model Runner V2
+                # speculator implements that layout; the vendored V1 proposer does not, so it would propose wrong
+                # drafts.
+                if getattr(spec.speculator_config, "sample_from_anchor", False):
+                    unsupported.append("anchor-first DFlash drafts")
         if getattr(model_config, "is_diffusion", False):
             unsupported.append("diffusion models")
         if getattr(parallel_config, "enable_batch_sharded_sampling", False):

@@ -626,7 +626,9 @@ def _run_check_and_update_config(vllm_config):
 def _xpress_spec():
     from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
-    return _spec_config(method="dflash", speculator_config=mock.Mock(spec=XPressSpeculatorConfig))
+    # XPress subclasses DFlash, so the spec'd mock would answer sample_from_anchor with a truthy Mock.
+    speculator_config = mock.Mock(spec=XPressSpeculatorConfig, sample_from_anchor=False)
+    return _spec_config(method="dflash", speculator_config=speculator_config)
 
 
 def _dflash_spec(architectures, layer_types=None):
@@ -666,6 +668,9 @@ _UNSUPPORTED_MRV2_ONLY_FEATURES = [
     ("Qwen3.5 slot decision", "Qwen3.5 slot decision models",
      lambda c: setattr(c.model_config, "architecture", "Qwen3_5ForSlotDecision")),
     ("masked token ids", "masked token ids", lambda c: setattr(c.model_config, "masked_token_ids", [7])),
+    ("anchor-first DFlash", "anchor-first DFlash drafts",
+     lambda c: setattr(c, "speculative_config",
+                       _spec_config(method="dflash", speculator_config=SimpleNamespace(sample_from_anchor=True)))),
 ]
 
 
