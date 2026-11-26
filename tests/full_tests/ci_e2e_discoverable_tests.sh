@@ -740,6 +740,14 @@ run_async_penalty_consistency_test() {
     echo "✅ Test async-scheduling penalty consistency passed."
 }
 
+# min_tokens, logit_bias and min_p reach the logits processors (sync and async scheduling)
+run_logits_processor_params_test() {
+    echo "➡️ Testing min_tokens, logit_bias and min_p..."
+    VLLM_SKIP_WARMUP=true \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_logits_processor_params.py"
+    echo "✅ Test min_tokens, logit_bias and min_p passed."
+}
+
 # Upstream's own async-scheduler suite, run against HPUAsyncScheduler so the
 # override is held to the contract it overrides. Needs no accelerator and takes
 # seconds. --confcutdir keeps the vLLM root conftest out of the run, so the gate
@@ -779,6 +787,15 @@ run_structured_output_test() {
     HABANA_VISIBLE_DEVICES=all VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_outputs.py"
     HABANA_VISIBLE_DEVICES=all VLLM_MERGED_PREFILL=True VLLM_CONTIGUOUS_PA=False VLLM_SKIP_WARMUP=True python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_outputs.py"
     echo "✅ Test with structured outputs passed."
+}
+
+# Structured output next to chunked prefills, sync scheduling
+run_structured_output_chunked_prefill_test() {
+    echo "➡️ Testing structured output next to chunked prefills..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_output_chunked_prefill.py"
+    VLLM_MERGED_PREFILL=true VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_output_chunked_prefill.py"
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/structured_output_chunked_prefill.py" --spec-decode ngram
+    echo "✅ Test with structured output next to chunked prefills passed."
 }
 
 # --- Utility Functions ---
@@ -834,10 +851,12 @@ launch_all_tests() {
     run_cpu_offloading_test
     run_offloading_connector_test
     run_async_penalty_consistency_test
+    run_logits_processor_params_test
     run_upstream_async_scheduler_gate
     run_sleep_mode_test
     run_online_model_swap_test
     run_structured_output_test
+    run_structured_output_chunked_prefill_test
     echo "🎉 All test suites passed successfully!"
 }
 

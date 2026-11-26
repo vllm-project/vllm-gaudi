@@ -100,11 +100,12 @@ def _make_classes():
     from transformers import BatchFeature
     from vllm.models.kimi_k3.common.mm_preprocess import (
         KimiK3DummyInputsBuilder,
+        KimiK3MultiModalDataParser,
         KimiK3MultiModalProcessor,
         KimiK3ProcessingInfo,
     )
     from vllm.multimodal.inputs import MultiModalFieldConfig
-    from vllm.multimodal.parse import MultiModalDataParser, VideoProcessorItems
+    from vllm.multimodal.parse import VideoProcessorItems
     from vllm.multimodal.processing import PromptReplacement, PromptUpdateDetails, cached_encode
 
     class HpuKimiK3VideoProcessingInfo(KimiK3ProcessingInfo):
@@ -112,9 +113,11 @@ def _make_classes():
         def get_supported_mm_limits(self) -> Mapping[str, int | None]:
             return {"image": None, "video": None}
 
-        def get_data_parser(self) -> MultiModalDataParser:
-            # The chunk plan needs the source fps / frame positions of the loader metadata.
-            return MultiModalDataParser(
+        def get_data_parser(self) -> KimiK3MultiModalDataParser:
+            # Upstream's parser (image embeds / metadata-only inputs, vllm-project/vllm#66925), plus the source
+            # fps / frame positions of the loader metadata that the chunk plan needs.
+            return KimiK3MultiModalDataParser(
+                media_proc_cfg=self.image_processor.media_proc_cfg,
                 expected_hidden_size=self._get_expected_hidden_size(),
                 allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
                 video_needs_metadata=True,

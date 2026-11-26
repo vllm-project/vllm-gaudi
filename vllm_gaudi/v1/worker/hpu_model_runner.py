@@ -103,7 +103,7 @@ from vllm_gaudi.v1._vendored.spec_decode.eagle import EagleProposer
 from vllm_gaudi.v1._vendored.spec_decode.metadata import SpecDecodeMetadata
 from vllm_gaudi.v1._vendored.spec_decode.ngram_proposer import NgramProposer
 from vllm_gaudi.v1._vendored.sample.sampler import Sampler
-from vllm_gaudi.v1._vendored.sample.logits_processor import build_logitsprocs
+from vllm_gaudi.v1._vendored.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.sampling_params import SamplingParams
@@ -1993,7 +1993,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     def _mamba_spec_window_cols(self, req_indices, context_lens, num_scheduled_tokens) -> tuple[list[int], list[int]]:
         """First block table columns of the Mamba2 state slots of a decode step with drafts and prefix caching.
 
-        In the "align" cache mode a mamba block table is indexed by position:
+        With prefix caching a mamba block table is indexed by position:
         column j holds the state after (j + 1) * mamba_block_size tokens. As
         upstream, a step's 1 + K slots start at the column of its last query
         token (curr), and it resumes from the previous step's slots (prev).
@@ -2581,6 +2581,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        # Changes left by a step that did not sample, so they are not merged with this step's.
+        self.input_batch.update_logitsprocs()
         # A preempted request is dropped like a finished one and comes back as a new request whose
         # prefill_token_ids carry its outputs so far (the Model Runner V2 contract). Keep its seeded
         # generator so the resumed request continues the same random stream.
@@ -3727,15 +3729,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # self.input_batch.num_prompt_tokens[batch_idx] == self.input_batch.num_tokens[batch_idx].
             # In preemption scenario num_tokens will also include the tokens emitted before preemption
             num_prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
-            if self.use_async_scheduling or self.use_structured_output:
+            if self.use_async_scheduling:
                 # NOTE(tianmu-li): align behavior of incomplete prompt with gpu_model_runner
-                # Always have at least 1 logit when using async scheduling
-                # or structured output
+                # Async scheduling keeps one row per request; a chunk that does not finish its prompt gets one and
+                # its token is discarded. Sync scheduling has nothing to discard it, so such a chunk samples nothing.
                 if seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1 < 1:
                     num_output_logits = 1
-                    if self.use_async_scheduling:
-                        # Discard partial prefill logit for async scheduling
-                        self.invalid_req_indices.append(batch_idx)
+                    self.invalid_req_indices.append(batch_idx)
                 else:
                     num_output_logits = seq_num_computed_tokens + seq_num_scheduled_tokens - num_prompt_tokens + 1
             else:
@@ -5489,6 +5489,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
         return attn_metadata
 
+    def _build_logitsprocs(self, max_num_reqs: int) -> LogitsProcessors:
+        """The logits processors for an input batch of max_num_reqs rows: min_p keeps max_num_seqs rows of state."""
+        vllm_config = self.vllm_config
+        if max_num_reqs != vllm_config.scheduler_config.max_num_seqs:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.scheduler_config = copy.copy(vllm_config.scheduler_config)
+            vllm_config.scheduler_config.max_num_seqs = max_num_reqs
+        return build_logitsprocs(vllm_config, self.device, self.pin_memory, self.is_pooling_model,
+                                 self.vllm_config.model_config.logits_processors)
+
     def _ensure_decodes_first(self, scheduler_output: "SchedulerOutput"):
         num_reqs = self.input_batch.num_reqs
         while True:
@@ -5601,6 +5611,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # prefix-cache hit before the request computing it has written it.
         if self.use_prefix_caching:
             sort_prompts_by_context(self.input_batch, self._get_num_decodes(scheduler_output))
+        # The batch rows are final for this step: hand the changes to the logits processors.
+        self.input_batch.update_logitsprocs()
         # Prepare prompts/decodes info
         pd_info = self._get_prompts_and_decodes(scheduler_output)
         num_decodes = len(pd_info.decode_req_ids)
@@ -5719,8 +5731,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 sample_hidden_states_prefills.append(sample_hidden_states)
                 # Skip separate sampling for structured output
                 if self.use_structured_output:
-                    logits_prompt.append(logits_device)
-                    prefill_sampled_requests.extend(logits_requests)
+                    # Under sync scheduling a chunk that does not finish its
+                    # prompt has no rows. With speculative decoding the decodes
+                    # are sampled below, so a step can have no rows to sample.
+                    if logits_requests:
+                        logits_prompt.append(logits_device)
+                        prefill_sampled_requests.extend(logits_requests)
                 else:
                     # If there are no logits, there is nothing to sample.
                     # This can happen with chunked prefill when a chunk does
@@ -5892,6 +5908,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             # above), then the rows of the prefill requests that sample.
             logits = torch.cat(logits_decode + logits_prompt, dim=0)
             row_req_ids = structured_decode_req_ids + list(prefill_sampled_requests)
+            assert logits.shape[0] == len(row_req_ids), f"{logits.shape[0]} logits rows for {len(row_req_ids)} requests"
             self.apply_grammar_bitmask(grammar_output, logits, {req_id: (i, 1) for i, req_id in enumerate(row_req_ids)})
             # Sampling metadata in the same row order.
             sampler_output, _sampling_metadata = self._run_sampling(batch_changed, logits, row_req_ids, logits.shape[0])
@@ -7688,6 +7705,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not self.is_pooling_model and not self.num_mamba_like_layers \
             and max_bucket > self.input_batch.max_num_reqs:
             input_batch_bkp = self.input_batch
+            # This batch also serves after warmup unless it is restored below, so it needs working processors.
             self.input_batch = InputBatch(
                 max_num_reqs=self.bucketing_manager.decode_buckets[-1][0],
                 max_model_len=self.max_model_len,
@@ -7697,8 +7715,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=[self.block_size],
                 kernel_block_sizes=[self.block_size],
-                logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
-                                              self.vllm_config.model_config.logits_processors),
+                logitsprocs=self._build_logitsprocs(self.bucketing_manager.decode_buckets[-1][0]),
             )
 
         if not self.is_pooling_model:

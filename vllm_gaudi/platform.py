@@ -225,7 +225,7 @@ class HpuPlatform(Platform):
                 cache_config.block_size,
             )
             cache_config.block_size = 128
-            if cache_config.mamba_cache_mode == "align":
+            if cache_config.enable_prefix_caching:
                 cache_config.mamba_block_size = 128
         # Hybrid GDN/Mamba models: upstream HybridAttentionMambaModelConfig
         # already ran and computed block_size / mamba_page_size_padded for
@@ -302,21 +302,19 @@ class HpuPlatform(Platform):
         if get_config().VLLM_CONTIGUOUS_PA:
             logger.warning("Using Contiguous PA, disabling prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
+            if vllm_config.model_config.is_hybrid:
+                # The model config hooks ran with prefix caching on and sized
+                # Mamba blocks for it; without it vLLM keeps one per sequence.
+                vllm_config.cache_config.mamba_block_size = vllm_config.model_config.max_model_len
             if vllm_config.model_config.get_sliding_window():
                 logger.info("Contiguous paged attention is enabled; sliding-window layers "
                             "will use indexed KV-cache fetches.")
 
-        if (vllm_config.cache_config.enable_prefix_caching and vllm_config.cache_config.mamba_cache_mode == "all"):
-            vllm_config.cache_config.mamba_cache_mode = "align"
-            logger.info("[HPU] Overriding mamba_cache_mode from 'all' to 'align' "
-                        "to ensure block-aligned chunked prefill splits.")
-
         if (vllm_config.model_config is not None and vllm_config.model_config.is_hybrid):
             logger.debug(
                 "[HPU] Hybrid model cache config: block_size=%s, "
-                "mamba_block_size=%s, mamba_cache_mode=%s, "
-                "enable_prefix_caching=%s", cache_config.block_size, getattr(cache_config, "mamba_block_size", None),
-                getattr(cache_config, "mamba_cache_mode", None), cache_config.enable_prefix_caching)
+                "mamba_block_size=%s, enable_prefix_caching=%s", cache_config.block_size,
+                getattr(cache_config, "mamba_block_size", None), cache_config.enable_prefix_caching)
 
         if compilation_config.mode != CompilationMode.NONE:
             logger.info("[HPU] Forcing CompilationMode.NONE "
@@ -441,7 +439,8 @@ class HpuPlatform(Platform):
                 if 0 < num_sliding < len(layer_types):
                     unsupported.append("mixed sliding/full dflash drafts")
                 candidate_head_archs = {
-                    "DFlash2DraftModel", "DFlash2BeamDraftModel", "DFlash2RicursiveDraftModel", "LiLiCorrDraftModel"
+                    "DFlash2DraftModel", "DFlash2BeamDraftModel", "DFlash2RicursiveDraftModel", "LiLiCorrDraftModel",
+                    "DSpineDraftModel"
                 }
                 if draft_archs & candidate_head_archs:
                     unsupported.append("DFlash candidate-head drafts")
@@ -451,6 +450,10 @@ class HpuPlatform(Platform):
             unsupported.append("batch-sharded sampling")
         if getattr(model_config, "architecture", None) in ("Step5ForCausalLM", "Step5ForConditionalGeneration"):
             unsupported.append("Step5")
+        # Its block-bidirectional PrefixLM mask is built only by the Model Runner V2 model state (vLLM PR #63114);
+        # the HPU runner would serve it with causal attention.
+        if getattr(model_config, "architecture", None) == "Qwen3_5ForSlotDecision":
+            unsupported.append("Qwen3.5 slot decision models")
         return unsupported
 
     @classmethod
@@ -554,7 +557,7 @@ class HpuPlatform(Platform):
                     alignment = 16
                 attn_block_size = alignment * cdiv(mamba_page_size, alignment * attn_1tok)
                 cache_config.block_size = attn_block_size
-                if cache_config.mamba_cache_mode == "align":
+                if cache_config.enable_prefix_caching:
                     cache_config.mamba_block_size = attn_block_size
                 logger.info(
                     "Setting granitemoehybrid block_size to %d tokens "

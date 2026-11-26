@@ -1233,8 +1233,8 @@ def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypa
     )
     cache_config = SimpleNamespace(
         block_size=528,
+        enable_prefix_caching=True,
         mamba_block_size=None,
-        mamba_cache_mode="none",
         mamba_page_size_padded=None,
         cache_dtype="auto",
     )
@@ -1259,23 +1259,21 @@ def test_normalize_reconfigure_config_aligns_granite_hybrid_mamba_state(monkeypa
 
     assert check_and_update_config.call_count == 2
     assert update_block_size_for_backend.call_count == 2
-    assert cache_config.mamba_cache_mode == "align"
     assert cache_config.mamba_block_size == 528
     assert cache_config.mamba_page_size_padded == 2111
 
 
-def test_normalize_reconfigure_resets_mamba_block_size_from_max_model_len_sentinel(monkeypatch):
-    """Regression: _normalize_reconfigure_config_for_platform must reset
-    mamba_block_size when it equals max_model_len (the 'none' mode sentinel).
+@pytest.mark.parametrize("prefix_caching", [True, False])
+def test_normalize_reconfigure_resets_mamba_block_size_from_max_model_len_sentinel(monkeypatch, prefix_caching):
+    """Regression: _normalize_reconfigure_config_for_platform must size
+    mamba_block_size as a cold start does.
 
-    In vLLM's HybridAttentionMambaModelConfig.verify_and_update_config, when
-    prefix caching is disabled (mamba_cache_mode='none'), mamba_block_size is
-    set to max_model_len as a sentinel value meaning "one block per sequence".
-    When the reconfigure path changes mamba_cache_mode to 'align', the old
-    sentinel must be replaced with cache_config.block_size.  Without the fix,
-    the KVCacheCoordinatorBase assertion (scheduler_block_size %
-    mamba_block_size == 0) fails because max_model_len (e.g. 32768) is not
-    divisible by the HPU attention block size (e.g. 528).
+    In vLLM's MambaModelConfig.verify_and_update_config, when prefix caching
+    is disabled, mamba_block_size is set to max_model_len as a sentinel value
+    meaning "one block per sequence". With prefix caching the reconfigure path
+    replaces it with cache_config.block_size; without it the sentinel stays,
+    because the Mamba manager frees every block before the last computed
+    token's and the runner reads the state from the first one.
     """
 
     class _FakeModelClass:
@@ -1307,8 +1305,8 @@ def test_normalize_reconfigure_resets_mamba_block_size_from_max_model_len_sentin
     )
     cache_config = SimpleNamespace(
         block_size=528,
-        mamba_block_size=MAX_MODEL_LEN,  # sentinel set by vLLM for "none" mode
-        mamba_cache_mode="none",
+        enable_prefix_caching=prefix_caching,
+        mamba_block_size=MAX_MODEL_LEN,  # sentinel set by vLLM without prefix caching
         mamba_page_size_padded=2162688,
         cache_dtype="auto",
     )
@@ -1331,10 +1329,11 @@ def test_normalize_reconfigure_resets_mamba_block_size_from_max_model_len_sentin
 
     core_patch._normalize_reconfigure_config_for_platform(config)
 
-    # Mode must be updated and mamba_block_size must be reset from the sentinel.
-    assert cache_config.mamba_cache_mode == "align"
-    assert cache_config.mamba_block_size == 528, (
-        "mamba_block_size must be reset from max_model_len sentinel to block_size")
+    if prefix_caching:
+        assert cache_config.mamba_block_size == 528, (
+            "mamba_block_size must be reset from max_model_len sentinel to block_size")
+    else:
+        assert cache_config.mamba_block_size == MAX_MODEL_LEN
     # mamba_page_size_padded was already set, so no second normalization pass.
     assert check_and_update_config.call_count == 1
     assert update_block_size_for_backend.call_count == 1

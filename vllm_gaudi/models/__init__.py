@@ -80,6 +80,13 @@ def register_model():
     # Same for Phi3 (vllm-project/vllm#66559): the Transformers backend attention
     # reshape assumes flattened tokens, so warmup fails on HPU's [batch, seq] layout.
     ModelRegistry.register_model("Phi3ForCausalLM", "vllm_gaudi.models.phi3:Phi3ForCausalLM")
+    # Same for Qwen2 (vllm-project/vllm#66821), through upstream's native Qwen3 model.
+    ModelRegistry.register_model("Qwen2ForCausalLM", "vllm_gaudi.models.qwen2:HpuQwen2ForCausalLM")
+    ModelRegistry.register_model("Qwen2Model", "vllm_gaudi.models.qwen2:HpuQwen2ForCausalLM")
+    # Same for Llama (vllm-project/vllm#66547), whose native class upstream still ships; it also dropped the
+    # LLaMAForCausalLM alias.
+    for arch in ("LlamaForCausalLM", "LLaMAForCausalLM", "LlamaModel", "MistralModel"):
+        ModelRegistry.register_model(arch, "vllm.model_executor.models.llama:LlamaForCausalLM")
 
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401
     import vllm_gaudi.models.qwen3_next  # noqa: F401

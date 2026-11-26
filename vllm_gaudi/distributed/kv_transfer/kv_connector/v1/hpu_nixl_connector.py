@@ -368,8 +368,9 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         tensor_shape=next(iter(kv_caches.values())).shape if not self._has_mamba else None,
         is_mamba=self._has_mamba,
     )
-    self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config, self.backend_name,
-                                                       self.transfer_topo._cross_layers_blocks)
+    self.compat_hash = compute_nixl_compatibility_hash(self.vllm_config,
+                                                       self._compat_backend_name(),
+                                                       transfer_mode=self._TRANSFER_MODE)
 
     if self.use_host_buffer:
         self.initialize_host_xfer_buffer(kv_caches=kv_caches)
@@ -520,12 +521,6 @@ def _hpu_register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
 
     self.device_kv_caches = kv_caches
     self.dst_num_blocks[self.engine_id] = self.num_blocks
-    # Local engine's own per-region geometry; the remote side's copy is filled
-    # in add_remote_agent, which falls back to these uniform values when a peer
-    # omits them from its NixlAgentMetadata.
-    self.dst_region_num_blocks[self.engine_id] = self.region_num_blocks
-    self.dst_region_group_ids[self.engine_id] = self.region_group_ids
-    self.dst_region_mem_types[self.engine_id] = self.region_mem_types
 
     if self._has_mamba:
         logger.info(

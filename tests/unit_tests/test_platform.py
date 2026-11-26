@@ -366,7 +366,6 @@ def test_update_block_size_for_backend_realigns_mamba_page_size(monkeypatch):
         block_size=128,
         user_specified_block_size=False,
         mamba_block_size=128,
-        mamba_cache_mode="align",
         mamba_page_size_padded=512,  # wrongly aligned to old block_size=128
         cache_dtype="auto",
         enable_prefix_caching=False,
@@ -525,7 +524,6 @@ def test_check_and_update_config_does_not_rescale_granitemoehybrid_mamba_page_si
         block_size=128,
         user_specified_block_size=False,
         mamba_block_size=528,
-        mamba_cache_mode="align",
         mamba_page_size_padded=CORRECT_MAMBA_PAGE_SIZE_PADDED,
         cache_dtype="auto",
         enable_prefix_caching=False,
@@ -666,15 +664,33 @@ _UNSUPPORTED_ENGINE_FEATURES = [
     ("Step5", lambda c: setattr(c.model_config, "architecture", "Step5ForCausalLM")),
 ]
 
+# Added upstream after Model Runner V1 was removed and served there only by Model Runner V2: (id, feature, enable).
+_UNSUPPORTED_MRV2_ONLY_FEATURES = [
+    ("DSpine drafts", "DFlash candidate-head drafts",
+     lambda c: setattr(c, "speculative_config", _dflash_spec(["DSpineDraftModel"]))),
+    ("Qwen3.5 slot decision", "Qwen3.5 slot decision models",
+     lambda c: setattr(c.model_config, "architecture", "Qwen3_5ForSlotDecision")),
+]
+
+
+def _assert_refused_at_startup(feature, enable):
+    vllm_config = _engine_config()
+    enable(vllm_config)
+    with pytest.raises(ValueError, match=f"HPU does not support: {re.escape(feature)}\\."):
+        _run_check_and_update_config(vllm_config)
+
 
 @pytest.mark.parametrize("feature, enable",
                          _UNSUPPORTED_ENGINE_FEATURES,
                          ids=[f for f, _ in _UNSUPPORTED_ENGINE_FEATURES])
 def test_unsupported_engine_features_fail_at_startup(feature, enable):
-    vllm_config = _engine_config()
-    enable(vllm_config)
-    with pytest.raises(ValueError, match=f"HPU does not support: {re.escape(feature)}\\."):
-        _run_check_and_update_config(vllm_config)
+    _assert_refused_at_startup(feature, enable)
+
+
+@pytest.mark.parametrize("feature, enable", [(f, e) for _, f, e in _UNSUPPORTED_MRV2_ONLY_FEATURES],
+                         ids=[i for i, _, _ in _UNSUPPORTED_MRV2_ONLY_FEATURES])
+def test_mrv2_only_features_fail_at_startup(feature, enable):
+    _assert_refused_at_startup(feature, enable)
 
 
 @pytest.mark.parametrize(
