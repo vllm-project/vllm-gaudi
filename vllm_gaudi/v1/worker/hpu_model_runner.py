@@ -102,6 +102,7 @@ from vllm_gaudi.v1._vendored.sample.rejection_sampler import PLACEHOLDER_TOKEN_I
 from vllm_gaudi.v1._vendored.spec_decode.eagle import EagleProposer
 from vllm_gaudi.v1._vendored.spec_decode.metadata import SpecDecodeMetadata
 from vllm_gaudi.v1._vendored.spec_decode.ngram_proposer import NgramProposer
+from vllm_gaudi.v1.spec_decode.methods import uses_eagle_proposer
 from vllm_gaudi.v1._vendored.sample.sampler import Sampler
 from vllm_gaudi.v1._vendored.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
@@ -1724,7 +1725,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.speculative_config:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
-            elif self.speculative_config.use_eagle():
+            elif uses_eagle_proposer(self.speculative_config):
                 from vllm_gaudi.v1.spec_decode.hpu_eagle import HpuEagleProposer
                 self.drafter = HpuEagleProposer(self.vllm_config, self.device, self)  # type: ignore
                 if self.speculative_config.method == "eagle3":
@@ -1808,7 +1809,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # host builds the next step before this step's drafts are verified, so
         # it assumes they are all accepted and the device corrects.
         self.use_async_spec_decode = self.use_async_scheduling and self.speculative_config is not None
-        assert not self.use_async_spec_decode or (self.speculative_config.use_eagle()
+        assert not self.use_async_spec_decode or (uses_eagle_proposer(self.speculative_config)
                                                   and self.speculative_config.num_speculative_tokens == 1), \
             "Async scheduling supports speculative decoding only with one draft token of an EAGLE-style drafter."
         assert not (self.use_async_spec_decode and self.use_contiguous_pa), \
@@ -6834,7 +6835,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            block_id=0):
         # Spec decode: blocks should include look ahead tokens (eagle)
         total_tokens_for_blocks = total_tokens
-        if self.speculative_config and self.speculative_config.use_eagle():
+        if self.speculative_config and uses_eagle_proposer(self.speculative_config):
             # Consider the block space for draft tokens to propose
             total_tokens_for_blocks += self.speculative_config.num_speculative_tokens
             # Check the limit of the max model length
@@ -6951,7 +6952,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         # Leave space for the output token and draft tokens to propose
         num_lookahead_tokens = 1
-        if self.speculative_config and self.speculative_config.use_eagle():
+        if self.speculative_config and uses_eagle_proposer(self.speculative_config):
             # Consider the token space for draft tokens to propose
             # The draft tokens for eagle consumes block table space
             num_lookahead_tokens += self.speculative_config.num_speculative_tokens
@@ -7020,7 +7021,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         prompt_total_tokens = [capped_ctx * self.block_size + prompt_query_len]
             for _ in range(prompt_bs):
                 for tokens, context_len in zip(prompt_total_tokens, prompt_num_context_blocks):
-                    if self.speculative_config and self.speculative_config.use_eagle():
+                    if self.speculative_config and uses_eagle_proposer(self.speculative_config):
                         # Leave the block space for draft tokens to propose
                         # The draft tokens for eagle consumes block table space
                         num_speculative_tokens = self.speculative_config.num_speculative_tokens
@@ -8607,7 +8608,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.propose_ngram_draft_token_ids(sampled_token_ids)
-        elif self.speculative_config.use_eagle():
+        elif uses_eagle_proposer(self.speculative_config):
             assert isinstance(self.drafter, EagleProposer)
 
             draft_token_ids = None

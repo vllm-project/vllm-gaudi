@@ -12,6 +12,7 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.kimi_k3_gate import is_kimi_k3_vllm_config, kimi_k3_seen, mark_kimi_k3_seen
+from vllm_gaudi.v1.spec_decode.methods import uses_eagle_proposer
 
 
 class _KimiK3OnlyList:
@@ -341,7 +342,7 @@ class HpuPlatform(Platform):
         # decoding runs with synchronous scheduling.
         spec_config = vllm_config.speculative_config
         if spec_config is not None and vllm_config.scheduler_config.async_scheduling and not (
-                cls._async_spec_decode_enabled(vllm_config) and spec_config.use_eagle()
+                cls._async_spec_decode_enabled(vllm_config) and uses_eagle_proposer(spec_config)
                 and spec_config.num_speculative_tokens == 1):
             vllm_config.scheduler_config.async_scheduling = False
         # Since the Model Runner V1 removal (vLLM aac1b2a4f3) vLLM enables async scheduling for pipeline
