@@ -169,9 +169,9 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
         "[gaudi_reconfigure] platform config normalization failed for model %s: %s",
     )
 
-    # Granite hybrid switch path can arrive with mamba_cache_mode=none and
-    # no padded Mamba page size, which later makes KV page-size unification
-    # fail in vLLM core. Force align-mode metadata in that case.
+    # Granite hybrid switch path can arrive without a usable
+    # mamba_block_size and with no padded Mamba page size, which later makes
+    # KV page-size unification fail in vLLM core. Fill both in that case.
     try:
         model_config = getattr(config, "model_config", None)
         cache_config = getattr(config, "cache_config", None)
@@ -183,22 +183,18 @@ def _normalize_reconfigure_config_for_platform(config: VllmConfig) -> None:
         if not is_granite_hybrid:
             return
 
-        mamba_mode = getattr(cache_config, "mamba_cache_mode", None)
-        if isinstance(mamba_mode, str) and mamba_mode.lower() == "none":
-            cache_config.mamba_cache_mode = "align"
-
-        # When mamba_cache_mode is "none" (no prefix caching), vLLM's
-        # HybridAttentionMambaModelConfig sets mamba_block_size to
-        # max_model_len as a sentinel meaning "one block per sequence".
-        # That sentinel is not valid for "align" mode and would fail the
-        # KVCacheCoordinatorBase assertion (scheduler_block_size %
-        # mamba_block_size == 0) because max_model_len (e.g. 32768) is
-        # not divisible by the HPU attention block size (e.g. 528).
-        # Treat None, 0, and max_model_len as "unset" and use block_size.
+        # Size Mamba blocks as vLLM's MambaModelConfig does on a cold start:
+        # with prefix caching one per attention block, without it one per
+        # sequence (max_model_len). Without prefix caching the Mamba manager
+        # frees every block before the last computed token's, and the runner
+        # reads the state from the first one, so it must cover the sequence.
         max_model_len = getattr(model_config, "max_model_len", None)
         mamba_bs = getattr(cache_config, "mamba_block_size", None)
-        if mamba_bs is None or mamba_bs == 0 or (max_model_len is not None and mamba_bs == max_model_len):
-            cache_config.mamba_block_size = cache_config.block_size
+        if getattr(cache_config, "enable_prefix_caching", False):
+            if mamba_bs is None or mamba_bs == 0 or (max_model_len is not None and mamba_bs == max_model_len):
+                cache_config.mamba_block_size = cache_config.block_size
+        elif max_model_len is not None:
+            cache_config.mamba_block_size = max_model_len
 
         # Ensure mamba_page_size_padded exists. Final divisibility and other
         # backend-specific alignment should be handled by platform hooks.
@@ -371,6 +367,9 @@ def install_engine_core_patch() -> None:
             # Rebuild batch queue and scheduling helpers.
             self.batch_queue_size = new_config.max_concurrent_batches
             self.batch_queue = deque(maxlen=self.batch_queue_size) if self.batch_queue_size > 1 else None
+            # Step state that EngineCore.__init__ resets with the batch queue.
+            self.deferred_step = None
+            self.num_executed_steps = 0
 
             self.is_ec_consumer = (new_config.ec_transfer_config is None
                                    or new_config.ec_transfer_config.is_ec_consumer)

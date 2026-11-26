@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Mamba2 speculative-decoding state slots of HPUModelRunner with prefix caching.
 
-In the "align" cache mode a mamba block table is indexed by position: column j
+With prefix caching a mamba block table is indexed by position: column j
 holds the state after (j + 1) * block_size tokens. With K speculative tokens a
 decode step writes its 1 + K states to the columns from the one of its last
 query token on, resumes from the slots of the previous step, and copies a
@@ -47,7 +47,7 @@ def _make_request(req_id: str, mamba_blocks: list[int]) -> CachedRequestState:
 
 
 def _make_runner_stub(rows: dict[str, list[int]], num_computed: list[int]):
-    # Group 0: attention. Group 1: mamba in the "align" cache mode, one block
+    # Group 0: attention. Group 1: mamba with prefix caching, one block
     # table column per block of the sequence plus the speculative ones.
     batch = InputBatch(
         max_num_reqs=4,
@@ -74,7 +74,7 @@ def _make_runner_stub(rows: dict[str, list[int]], num_computed: list[int]):
             KVCacheGroup.from_layers({"attn": FullAttentionManager.layer_config(attn_spec)}),
             KVCacheGroup.from_layers({
                 "mixer":
-                MambaManager.layer_config(mamba_spec, mamba_cache_mode="align", num_speculative_blocks=NUM_SPEC)
+                MambaManager.layer_config(mamba_spec, enable_prefix_caching=True, num_speculative_blocks=NUM_SPEC)
             }),
         ]),
         device=torch.device("hpu"),
