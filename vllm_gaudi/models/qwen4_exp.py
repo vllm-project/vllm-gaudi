@@ -91,7 +91,7 @@ from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
 from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 
 import vllm_gaudi.models.qwen3_5  # noqa: F401  (GDN class patch side-effect)
 from vllm_gaudi.models.qwen3_5 import HPUGatedDeltaNetAttention
@@ -933,7 +933,7 @@ def hpu_qsa_sparse_paged_attention(
 class HpuQwen4ExpQSAAttention(nn.Module, AttentionLayerBase):
     """Full-attention layer whose KV is selected by the QSA indexer.
 
-    The main BF16 paged KV cache follows the standard FullAttentionSpec path
+    The main BF16 paged KV cache follows the standard AttentionSpec path
     (allocated and bound by the HPU runner); this module writes its K/V rows
     itself and runs the sparse gather-attend over the packed plan.
     """
@@ -1040,7 +1040,7 @@ class HpuQwen4ExpQSAAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type:
         # QSA attention runs eagerly in this port (indexer + paged gather in
         # torch ops; no backend impl is dispatched), but the layer still
-        # exposes a standard FullAttentionSpec, so the platform/runner side
+        # exposes a standard AttentionSpec, so the platform/runner side
         # (block-size selection, attention grouping) expects the backend the
         # HPU platform selects for full attention — the same class the DSA
         # indexer-cache precedent returns for its eager side-caches.
@@ -1048,20 +1048,31 @@ class HpuQwen4ExpQSAAttention(nn.Module, AttentionLayerBase):
         return HPUAttentionBackendV1
 
     def bind_kv_cache(self, kv_cache: Any) -> None:
-        # FullAttention allocation hands us (kc, vc, k_scales, v_scales).
+        # AttentionSpec allocation hands us (kc, vc, k_scales, v_scales).
         if isinstance(kv_cache, (tuple, list)):
             self.kv_cache = (kv_cache[0], kv_cache[1])
         else:
             self.kv_cache = kv_cache
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return FullAttentionSpec(
+        return AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
             head_size_v=self.head_dim,
             dtype=torch.bfloat16,
         )
+
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+        spec = AttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            head_size_v=self.head_dim,
+            dtype=torch.bfloat16,
+        )
+        return FullAttentionManager.layer_config(spec)
 
     # -- forward -------------------------------------------------------------
 
