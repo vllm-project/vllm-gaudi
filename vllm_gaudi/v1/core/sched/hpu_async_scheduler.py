@@ -87,16 +87,18 @@ class HPUAsyncScheduler(HPUScheduler, AsyncScheduler):
     ) -> tuple[set[str], int, set[int]]:
         """HPU override: clamp num_external_computed_tokens to 0 instead of
         allowing it to go negative when OOM-invalidated blocks span both
-        externally-computed and locally-computed token ranges.
+        externally-computed and locally-computed token ranges, and roll a
+        running request back consistently while later steps are in flight.
 
         NOTE: This is a near-verbatim copy of the upstream
-        ``vllm.v1.core.sched.async_scheduler.AsyncScheduler
-        ._update_requests_with_invalid_blocks``. The only functional delta is
+        ``vllm.v1.core.sched.scheduler.Scheduler
+        ._update_requests_with_invalid_blocks``. The functional deltas are
         the ``max(0, ...)`` clamp on ``request.num_external_computed_tokens``
-        below (search for "HPU delta"). Keep this method in sync with
-        upstream when that routine evolves (hybrid memory allocator support,
-        new connector types, etc.). An upstream issue tracking the negative
-        clamp should be filed against vllm-project/vllm.
+        and the rollback of running requests (search for "HPU delta"). Keep
+        this method in sync with upstream when that routine evolves (hybrid
+        memory allocator support, new connector types, etc.). An upstream
+        issue tracking the negative clamp should be filed against
+        vllm-project/vllm.
         """
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
@@ -111,11 +113,14 @@ class HPUAsyncScheduler(HPUScheduler, AsyncScheduler):
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 req_num_computed_tokens = (request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0) if req_id
                                            in self.failed_recving_kv_req_ids else len(req_block_ids) * self.block_size)
+            elif hasattr(request, "num_cached_tokens"):
+                req_num_computed_tokens = request.num_cached_tokens
             else:
-                # vLLM removed Request.num_cached_tokens in newer branches.
-                # Fall back to upstream-equivalent computed-token accounting.
-                req_num_computed_tokens = (request.num_cached_tokens if hasattr(request, "num_cached_tokens") else
-                                           request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0))
+                # HPU delta vs upstream: the tokens computed before the failed
+                # step. Upstream subtracts only that step's tokens, but under
+                # async scheduling num_computed_tokens also counts the steps
+                # scheduled after it, which are still in flight.
+                req_num_computed_tokens = request.num_computed_tokens - request.num_in_flight_tokens
 
             req_num_computed_blocks = (req_num_computed_tokens + self.block_size - 1) // self.block_size
             for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
@@ -152,6 +157,18 @@ class HPUAsyncScheduler(HPUScheduler, AsyncScheduler):
                 if not marked_invalid_block:
                     total_affected_tokens += (request.num_computed_tokens - req_num_computed_tokens)
                     request.num_computed_tokens = req_num_computed_tokens
+
+                if request.status == RequestStatus.RUNNING:
+                    # HPU delta vs upstream: the steps in flight after the
+                    # failed one computed over the KV that failed to load. As
+                    # _handle_stopped_request does, drop their output and
+                    # placeholders, so that it is never delivered and
+                    # num_output_tokens counts only real outputs.
+                    request.spec_token_ids = []
+                    request.drop_stale_output = True
+                    request.num_stale_output_tokens = request.num_in_flight_tokens
+                    request.num_output_placeholders = 0
+                    request.num_output_placeholder_steps = 0
 
                 affected_req_ids.add(request.request_id)
 
