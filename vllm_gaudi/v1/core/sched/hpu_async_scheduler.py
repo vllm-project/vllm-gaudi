@@ -93,11 +93,13 @@ class HPUAsyncScheduler(HPUScheduler, AsyncScheduler):
         NOTE: This is a near-verbatim copy of the upstream
         ``vllm.v1.core.sched.scheduler.Scheduler
         ._update_requests_with_invalid_blocks``. The functional deltas are
-        the ``max(0, ...)`` clamp on ``request.num_external_computed_tokens``
-        and the rollback of running requests (search for "HPU delta"). Keep
-        this method in sync with upstream when that routine evolves (hybrid
-        memory allocator support, new connector types, etc.). An upstream
-        issue tracking the negative clamp should be filed against
+        the ``max(0, ...)`` clamp on ``request.num_external_computed_tokens``,
+        the computed-token frontier (its WAITING_FOR_REMOTE_KVS and
+        ``num_cached_tokens`` branches, and the in-flight steps of running
+        requests) and the rollback of running requests (search for "HPU
+        delta"). Keep this method in sync with upstream when that routine
+        evolves (hybrid memory allocator support, new connector types, etc.).
+        An upstream issue tracking the negative clamp should be filed against
         vllm-project/vllm.
         """
         affected_req_ids: set[str] = set()

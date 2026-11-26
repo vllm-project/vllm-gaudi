@@ -2716,11 +2716,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
-            # A KV-load failure rolled the request back to at most where its last step started, short of its next
-            # input (where every decode resumes, even after a draft rejection). The scheduler discarded the output
-            # of the steps since, so the sampled ids kept for a skipped step are not its outputs.
-            if (num_computed_tokens <= req_state.num_computed_tokens
-                    and num_computed_tokens < req_state.num_prompt_tokens + req_data.num_output_tokens[i] - 1):
+            # Every step moves a request past where its last step started, a draft rejection included, so not
+            # getting there means a KV-load failure rolled it back. The scheduler discarded the output of the steps
+            # since, so the sampled ids kept for a skipped step are not its outputs.
+            if num_computed_tokens <= req_state.num_computed_tokens:
                 self._pending_placeholder_repair.pop(req_id, None)
             req_state.num_computed_tokens = num_computed_tokens
 
