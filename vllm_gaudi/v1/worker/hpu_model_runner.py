@@ -102,6 +102,7 @@ from vllm_gaudi.v1._vendored.sample.rejection_sampler import PLACEHOLDER_TOKEN_I
 from vllm_gaudi.v1._vendored.spec_decode.eagle import EagleProposer
 from vllm_gaudi.v1._vendored.spec_decode.metadata import SpecDecodeMetadata
 from vllm_gaudi.v1._vendored.spec_decode.ngram_proposer import NgramProposer
+from vllm_gaudi.v1.spec_decode.methods import uses_eagle_proposer
 from vllm_gaudi.v1._vendored.sample.sampler import Sampler
 from vllm_gaudi.v1._vendored.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
@@ -1177,6 +1178,13 @@ class HpuKVConnectorModelRunnerMixin:
             return get_kv_transfer_group().get_finished(scheduler_output.finished_req_ids)
         return None, None
 
+    @staticmethod
+    def get_kv_load_errors() -> set[int]:
+        """Blocks the connector failed to load; the scheduler applies kv_load_failure_policy to their requests."""
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_block_ids_with_load_errors()
+        return set()
+
 
 class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
 
@@ -1656,17 +1664,16 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 if not os.environ.get("VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"):
                     os.environ["VLLM_USE_NAIVE_MAMBA_CACHE_SHARING"] = "0"
                 if not os.environ.get("VLLM_COMPACT_GDN"):
-                    # Auto-disable compact GDN for incompatible modes:
-                    # prefix caching and PD disaggregated serving.
-                    incompatible = (self.vllm_config.kv_transfer_config is not None
-                                    or self.vllm_config.cache_config.enable_prefix_caching)
+                    # Auto-disable compact GDN for PD disaggregated serving.
+                    # Prefix caching is supported: the compact state rows
+                    # mirror the shared block table (see
+                    # prepare_mamba_state_idxs and the compact allocation
+                    # below in initialize_kv_cache).
+                    incompatible = self.vllm_config.kv_transfer_config is not None
                     os.environ["VLLM_COMPACT_GDN"] = "0" if incompatible else "1"
                     if incompatible:
                         logger.warning_once("Compact GDN auto-disabled: incompatible with "
-                                            "prefix caching / PD disaggregated serving")
-                if os.environ.get("VLLM_COMPACT_GDN", "0") in ("1", "true") \
-                        and self.vllm_config.cache_config.enable_prefix_caching:
-                    logger.warning_once("Compact GDN mode does not support prefix caching.")
+                                            "PD disaggregated serving")
                 logger.info(
                     "GDN layers detected (%d): "
                     "VLLM_USE_HYBRID_CACHE=%s, "
@@ -1697,11 +1704,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Compact GDN/linear_attention state slot allocator.
         # GDN recurrent states are fixed-size per request (independent of
         # sequence length), so we can allocate fewer slots than num_blocks.
-        # IMPORTANT: all GDN groups share the same underlying state tensor,
-        # so each request needs num_gdn_groups distinct slot indices.
-        # For request with base_slot `s` in group `g`, the actual tensor
-        # index is `s * num_gdn_groups + g + 1` (1-based, slot 0 unused).
-        # Tensor size: max_num_reqs * num_gdn_groups + 2.
+        # GDN layers cannot as_strided-split one raw state buffer
+        # (aot_autograd rejects in-place mutation of mixed-dtype views), so
+        # each GDN layer gets a contiguous state tensor. Tensors are keyed
+        # by (spec, layer_pos, num_slots) in initialize_kv_cache, so layers
+        # at the same position with equal specs share one tensor across GDN
+        # groups. Cross-group writes to that shared tensor never alias:
+        # under prefix caching each row mirrors a block id, and the single
+        # BlockPool issues block ids unique across KV cache groups; without
+        # prefix caching the base-slot formula below gives each group a
+        # disjoint row range inside the shared tensor.
+        # Without prefix caching, request `req` with base_slot `s` in group
+        # `g` uses tensor index `s * num_gdn_groups + g + 1` (1-based, slot 0
+        # unused); tensor size max_num_reqs * num_gdn_groups + 2 (last row is
+        # the dead pad that torch.remainder(-1, total) must land on).
+        # With prefix caching the slot bookkeeping is bypassed entirely and
+        # the rows mirror the shared block table directly (row b == block b),
+        # so the tensor holds num_blocks + 1 rows exactly like the
+        # non-compact layout (prepare_mamba_state_idxs).
         self._compact_gdn_enabled = os.environ.get("VLLM_COMPACT_GDN", "1").strip().lower() in ("1", "true")
         self._compact_gdn_group_ids: set[int] = set()
         self._compact_gdn_group_offset: dict[int, int] = {}  # {group_idx: g_offset}
@@ -1724,7 +1744,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.speculative_config:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
-            elif self.speculative_config.use_eagle():
+            elif uses_eagle_proposer(self.speculative_config):
                 from vllm_gaudi.v1.spec_decode.hpu_eagle import HpuEagleProposer
                 self.drafter = HpuEagleProposer(self.vllm_config, self.device, self)  # type: ignore
                 if self.speculative_config.method == "eagle3":
@@ -1808,7 +1828,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # host builds the next step before this step's drafts are verified, so
         # it assumes they are all accepted and the device corrects.
         self.use_async_spec_decode = self.use_async_scheduling and self.speculative_config is not None
-        assert not self.use_async_spec_decode or (self.speculative_config.use_eagle()
+        assert not self.use_async_spec_decode or (uses_eagle_proposer(self.speculative_config)
                                                   and self.speculative_config.num_speculative_tokens == 1), \
             "Async scheduling supports speculative decoding only with one draft token of an EAGLE-style drafter."
         assert not (self.use_async_spec_decode and self.use_contiguous_pa), \
@@ -1914,7 +1934,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         num_indices = len(req_indices)
         all_state_indices_cpu = []
         for group_idx in range(len(self.input_batch.block_table.block_tables)):
-            if group_idx in self._compact_gdn_group_ids:
+            if group_idx in self._compact_gdn_group_ids and not self.use_prefix_caching:
                 g_offset = self._compact_gdn_group_offset[group_idx]
                 state_indices_cpu = torch.zeros(num_indices, dtype=torch.int32)
                 for i, req_idx in enumerate(req_indices):
@@ -1926,6 +1946,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             else:
                 block_table_cpu_tensor = self.input_batch.block_table[group_idx].get_cpu_tensor()
                 state_indices_cpu = block_table_cpu_tensor[req_indices, block_table_offsets].clone()
+                # Compact GDN with prefix caching reuses this mapping
+                # directly: state rows are block-identical to the
+                # non-compact layout (row b == block b), so no cross-group
+                # offset arithmetic is needed. This is collision-free even
+                # when layers at the same position in different GDN groups
+                # share one state tensor (see the allocation in
+                # initialize_kv_cache), because the single BlockPool issues
+                # block ids unique across KV cache groups. Row 0 is the
+                # engine null block (the kernels' state_indices == 0 zero
+                # guard); row num_blocks is the dead pad that remainder(-1,
+                # num_blocks + 1) lands on for -1 pad lanes.
 
             if num_indices < target_bs:
                 pad_val = -1 if group_idx in self._compact_gdn_group_ids else self._MAMBA_PAD_BLOCK_ID
@@ -2644,7 +2675,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # multiprocessing each worker gets a different PYTHONHASHSEED,
         # so set iteration order differs across TP ranks.  We must sort
         # to keep _gdn_slot_free_list identical on every rank.
-        if self._compact_gdn_group_ids:
+        # Slot bookkeeping exists only in the non-prefix-caching mode; with
+        # prefix caching the rows mirror the block table (no slots to free).
+        if self._compact_gdn_group_ids and not self.use_prefix_caching:
             for req_id in sorted(scheduler_output.finished_req_ids):
                 base_slot = self._gdn_req_to_base_slot.pop(req_id, None)
                 if base_slot is not None:
@@ -2709,6 +2742,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
+            # Every step moves a request past where its last step started, a draft rejection included, so not
+            # getting there means a KV-load failure rolled it back. The scheduler discarded the output of the steps
+            # since, so the sampled ids kept for a skipped step are not its outputs.
+            if num_computed_tokens <= req_state.num_computed_tokens:
+                self._pending_placeholder_repair.pop(req_id, None)
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
@@ -2744,7 +2782,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.input_batch.num_tokens[req_index] = num_tokens
             # The failure also rolled num_computed_tokens back. As add_request does for a resumed request, count the
             # known outputs as prompt, so that only the chunk reaching the end samples a token. Sync only: under async
-            # scheduling the scheduler keeps the discarded token as a placeholder.
+            # scheduling sampled ids are not in token_ids_cpu, and the rollback drops every output since the failed
+            # step, which was the request's first, so the row already counts what is left as prompt.
             if (req_index is not None and not self.use_async_scheduling
                     and num_computed_tokens < req_state.num_tokens - 1
                     and self.input_batch.num_prompt_tokens[req_index] < req_state.num_tokens):
@@ -2806,7 +2845,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             self.input_batch.add_request(req_state, req_index)
 
         # Allocate GDN compact base-slots for newly added requests.
-        if self._compact_gdn_group_ids:
+        # Non-prefix-caching mode only: with prefix caching the state rows
+        # mirror the block table, so there is nothing to allocate per request.
+        if self._compact_gdn_group_ids and not self.use_prefix_caching:
             for req_id in req_ids_to_add:
                 if req_id not in self._gdn_req_to_base_slot:
                     base_slot = self._gdn_slot_free_list.pop()
@@ -5626,6 +5667,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 with set_forward_context(None, self.vllm_config):
                     self.maybe_setup_kv_connector(scheduler_output)
         finished_sending, finished_recving = set[str](), set[str]()
+        invalid_block_ids: set[int] = set()
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
         # prefill one by one, so save hidden states as list
@@ -6066,6 +6108,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not warmup_mode:
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)  # type: ignore
+            invalid_block_ids = self.get_kv_load_errors()
 
         if self.use_async_scheduling:
             assert_output_rows(all_req_ids, len(postprocessed_sampled_token_ids), req_ids_output_copy)
@@ -6078,6 +6121,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 kv_connector_output=KVConnectorOutput(
                     finished_sending=finished_sending,
                     finished_recving=finished_recving,
+                    invalid_block_ids=invalid_block_ids,
                 ))
             async_output = AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
@@ -6110,6 +6154,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             kv_connector_output=KVConnectorOutput(
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
+                invalid_block_ids=invalid_block_ids,
             ))
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
@@ -6834,7 +6879,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                            block_id=0):
         # Spec decode: blocks should include look ahead tokens (eagle)
         total_tokens_for_blocks = total_tokens
-        if self.speculative_config and self.speculative_config.use_eagle():
+        if self.speculative_config and uses_eagle_proposer(self.speculative_config):
             # Consider the block space for draft tokens to propose
             total_tokens_for_blocks += self.speculative_config.num_speculative_tokens
             # Check the limit of the max model length
@@ -6951,7 +6996,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         # Leave space for the output token and draft tokens to propose
         num_lookahead_tokens = 1
-        if self.speculative_config and self.speculative_config.use_eagle():
+        if self.speculative_config and uses_eagle_proposer(self.speculative_config):
             # Consider the token space for draft tokens to propose
             # The draft tokens for eagle consumes block table space
             num_lookahead_tokens += self.speculative_config.num_speculative_tokens
@@ -7020,7 +7065,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         prompt_total_tokens = [capped_ctx * self.block_size + prompt_query_len]
             for _ in range(prompt_bs):
                 for tokens, context_len in zip(prompt_total_tokens, prompt_num_context_blocks):
-                    if self.speculative_config and self.speculative_config.use_eagle():
+                    if self.speculative_config and uses_eagle_proposer(self.speculative_config):
                         # Leave the block space for draft tokens to propose
                         # The draft tokens for eagle consumes block table space
                         num_speculative_tokens = self.speculative_config.num_speculative_tokens
@@ -8189,15 +8234,36 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES and \
                             self._compact_gdn_enabled:
                         # GDN/linear_attention: compact allocation.
-                        # All GDN groups share the same state tensor, so each
-                        # request needs _num_gdn_groups distinct indices.
-                        # Total slots: max_num_reqs * num_gdn_groups + 2
-                        # (slot 0 unused, last slot for -1 padding).
+                        # GDN layers cannot as_strided-split one raw state
+                        # buffer (aot_autograd rejects in-place mutation of
+                        # mixed-dtype views), so each layer gets a
+                        # contiguous state tensor. The (spec, layer_pos,
+                        # num_slots) keying means layers at the same
+                        # position with equal specs share one tensor across
+                        # GDN groups; the row mapping stays collision-free
+                        # because block ids are unique across KV cache
+                        # groups (single BlockPool) under prefix caching,
+                        # and the base-slot formula gives each group a
+                        # disjoint row range inside the shared tensor
+                        # otherwise.
+                        # Without prefix caching each request owns private
+                        # per-group slots (max_num_reqs * num_gdn_groups + 2,
+                        # slot 0 unused, last slot for -1 padding).
+                        # With prefix caching the rows mirror the shared
+                        # block table directly (row b == block b), so
+                        # num_blocks + 1 rows suffice — identical to the
+                        # non-compact layout (row 0 is the null block's
+                        # kernel zero guard, the final row is the dead -1
+                        # pad reached by remainder(-1, total)).
                         self._compact_gdn_group_ids.add(group_idx)
-                        gdn_max_reqs = self._gdn_max_reqs
-                        compact_total = gdn_max_reqs * self._num_gdn_groups + 2
-                        logger.debug("GDN compact tensor: %d slots (max_reqs=%d * groups=%d + 2) vs baseline %d",
-                                     compact_total, gdn_max_reqs, self._num_gdn_groups, num_blocks + 1)
+                        if self.use_prefix_caching:
+                            compact_total = num_blocks + 1
+                        else:
+                            compact_total = self._gdn_max_reqs * self._num_gdn_groups + 2
+                        logger.debug(
+                            "GDN compact tensor: %d rows (groups=%d, prefix_caching=%s, max_reqs=%d) "
+                            "vs non-compact per-layer %d rows", compact_total, self._num_gdn_groups,
+                            self.use_prefix_caching, self._gdn_max_reqs, num_blocks + 1)
                         kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, compact_total)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
@@ -8264,10 +8330,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES and \
                             self._compact_gdn_enabled:
-                        # GDN/linear_attention: compact allocation.
+                        # GDN/linear_attention: compact allocation (see the
+                        # hybrid loop above for the row layout).
                         self._compact_gdn_group_ids.add(group_idx)
-                        gdn_max_reqs = self._gdn_max_reqs
-                        compact_total = gdn_max_reqs * self._num_gdn_groups + 2
+                        if self.use_prefix_caching:
+                            compact_total = num_blocks + 1
+                        else:
+                            compact_total = self._gdn_max_reqs * self._num_gdn_groups + 2
                         kv_caches[layer_name] = _mamba_state_tensors(kv_cache_spec, layer_pos, compact_total)
                     elif isinstance(kv_cache_spec, MambaSpec) and \
                             kv_cache_spec.mamba_type in _GDN_MAMBA_TYPES:
@@ -8379,11 +8448,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self._compact_gdn_group_ids:
             self._compact_gdn_group_offset = {gid: i for i, gid in enumerate(sorted(self._compact_gdn_group_ids))}
             gdn_max_reqs = self._gdn_max_reqs
-            self._gdn_slot_free_list = list(range(gdn_max_reqs - 1, -1, -1))
+            if self.use_prefix_caching:
+                # Block-mirror layout: state rows derive from the shared
+                # block table on every step (row b == block b), so
+                # per-request slot bookkeeping is bypassed (_update_states
+                # skips it in this mode) and only the group offsets are
+                # needed. Each tensor holds num_blocks + 1 rows (see the
+                # allocation above); layers at the same position with equal
+                # specs share one tensor across GDN groups, and the shared
+                # BlockPool issues block ids unique across KV cache groups,
+                # so the row mapping is collision-free.
+                self._gdn_slot_free_list = []
+                compact_total = num_blocks + 1
+            else:
+                self._gdn_slot_free_list = list(range(gdn_max_reqs - 1, -1, -1))
+                compact_total = gdn_max_reqs * self._num_gdn_groups + 2
             self._gdn_req_to_base_slot.clear()
-            compact_total = gdn_max_reqs * self._num_gdn_groups + 2
-            logger.info("GDN compact: %d groups, %d base_slots, tensor_dim0=%d vs baseline=%d, free_list_len=%d",
-                        len(self._compact_gdn_group_ids), gdn_max_reqs, compact_total, num_blocks + 1,
+            logger.info("GDN compact: %d groups, prefix_caching=%s, rows_per_group_tensor=%d, free_list_len=%d",
+                        len(self._compact_gdn_group_ids), self.use_prefix_caching, compact_total,
                         len(self._gdn_slot_free_list))
 
         if has_kv_transfer_group():
@@ -8607,7 +8689,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.propose_ngram_draft_token_ids(sampled_token_ids)
-        elif self.speculative_config.use_eagle():
+        elif uses_eagle_proposer(self.speculative_config):
             assert isinstance(self.drafter, EagleProposer)
 
             draft_token_ids = None

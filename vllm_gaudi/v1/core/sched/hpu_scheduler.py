@@ -33,15 +33,18 @@ class HPUScheduler(Scheduler):
 
     @cached_property
     def _align_to_mamba_block(self) -> bool:
-        """Qwen3.5 hybrid on non-compact GDN with prefix caching: an SSM
-        state is only checkpointed when a step ends on a state-block boundary.
+        """Qwen3.5 hybrid with prefix caching: in "align" mode an SSM state is
+        only checkpointed when a step ends on a state-block boundary.
+
+        Applies to both compact and non-compact GDN: a chunked-prefill split
+        that ends mid-state-block would leave the load row holding an
+        incomplete boundary state that the next chunk resumes from, so every
+        split must land on a mamba state-grid multiple.
         """
-        from vllm_gaudi.platform import HpuPlatform, is_qwen3_5_hybrid_model
+        from vllm_gaudi.platform import is_qwen3_5_hybrid_model
         if not self.vllm_config.cache_config.enable_prefix_caching:
             return False
-        if not is_qwen3_5_hybrid_model(self.vllm_config.model_config):
-            return False
-        return not HpuPlatform._compact_gdn_active(self.vllm_config)
+        return is_qwen3_5_hybrid_model(self.vllm_config.model_config)
 
     @cached_property
     def _mamba_state_block_size(self) -> int:
@@ -89,10 +92,10 @@ class HPUScheduler(Scheduler):
         own logic exactly (see the cached properties above); a mismatch makes
         the runner assert on an unaligned context_lens.
 
-        For Qwen3.5 hybrids on non-compact GDN with prefix caching
-        (``_align_to_mamba_block``), chunk ends are additionally placed on the
-        mamba state grid (``_mamba_state_block_size``), so the state slot a
-        step writes holds exactly the tokens its block hash claims.
+        For Qwen3.5 hybrids with prefix caching (``_align_to_mamba_block``,
+        both compact and non-compact GDN), chunk ends are additionally placed
+        on the mamba state grid (``_mamba_state_block_size``), so the state
+        row a chunk reads from holds exactly the tokens its block hash claims.
         """
         chunk_size = self._mamba_align_chunk_size
         num_mamba_layers = self._num_mamba_like_layers

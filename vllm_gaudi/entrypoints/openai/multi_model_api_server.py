@@ -513,8 +513,10 @@ async def _init_multi_model_state(
     # Upstream vllm#50195 hoisted both of these out of init_generate_state into
     # the caller: default_chat_template_kwargs is now a required positional
     # argument (the helper folds --cohere-format into it), and the tool server
-    # is read from state.tool_server instead of being built there.
-    default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
+    # is read from state.tool_server instead of being built there. vllm#69468
+    # applies --cohere-format only when told the tokenizer mode is cohere.
+    default_chat_template_kwargs = resolve_default_chat_template_kwargs(
+        args, tokenizer_mode=state.vllm_config.model_config.tokenizer_mode)
     state.tool_server = await init_tool_server(args) if "generate" in supported_tasks else None
 
     # Upstream vllm#44285 split OpenAIServingRender into a thin entrypoint

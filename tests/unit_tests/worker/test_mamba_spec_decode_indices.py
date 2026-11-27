@@ -131,7 +131,7 @@ def _dummy_step(max_num_tokens: int, batch_size: int) -> tuple[dict, dict]:
                                    attn_block_size=128,
                                    max_model_len=32768,
                                    speculative_config=types.SimpleNamespace(num_speculative_tokens=NUM_SPEC,
-                                                                            use_eagle=lambda: True))
+                                                                            method="eagle"))
     for name in ("_generate_seq_lengths", "_prepare_dummy_scenario"):
         setattr(runner, name, types.MethodType(getattr(HPUModelRunner, name), runner))
 
