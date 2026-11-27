@@ -48,7 +48,7 @@ Before you start, install the latest [vllm-fork](https://github.com/HabanaAI/vll
     vllm serve meta-llama/Llama-3.1-405B-Instruct --dtype bfloat16 --max-model-len  2048 --block-size 128 --max-num-seqs 32 --tensor-parallel-size 16 --distributed-executor-backend ray
     ```
 
-For information on running FP8 models with a multi-node setup, see [this guide](https://github.com/HabanaAI/vllm-hpu-extension/blob/main/calibration/README.md).
+For information on running FP8 models with a multi-node setup, see [Multi-Node Calibration with Ray](calibration/advanced.md#multi-node-calibration-with-ray).
 
 ## Online Serving Examples
 
