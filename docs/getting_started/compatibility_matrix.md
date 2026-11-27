@@ -3,7 +3,10 @@ title: Compatibility Matrix
 ---
 [](){ #compatibility-matrix }
 
-The following table details the supported vLLM versions for Intel® Gaudi® 2 and Intel® Gaudi® 3 AI accelerators. The versions marked as unsupported may still work, but they have not been thoroughly tested. The latest validated release is **vLLM v0.30.0** on Intel® Gaudi® software version 1.24.2.
+The following table details the supported vLLM versions for Intel® Gaudi® AI accelerators. The versions marked as unsupported may still work, but they have not been thoroughly tested. The latest validated release is **vLLM v0.30.0** on Intel® Gaudi® software version 1.24.2.
+
+!!! note
+    Starting with vLLM v0.33.0 and Intel® Gaudi® software version 1.24.3, only Intel® Gaudi® 3 is supported. Earlier versions support both Intel® Gaudi® 2 and Intel® Gaudi® 3. The last release that supports Intel® Gaudi® 2 is vLLM v0.30.0 on Intel® Gaudi® software version 1.24.2.
 
 <div class="compatibility-matrix">
 <table>

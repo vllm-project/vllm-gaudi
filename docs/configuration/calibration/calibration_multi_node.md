@@ -2,7 +2,7 @@
 
 This procedure explains how to perform calibration for multiple Intel® Gaudi® nodes with more than 8 cards. It requires execution within a [Gaudi Pytorch container](https://docs.habana.ai/en/latest/Installation_Guide/Additional_Installation/Docker_Installation.html#use-intel-gaudi-containers).
 
-As an example, we use the Llama 3.1 405B model running in tensor parallelism 16 mode spanning two Intel® Gaudi® 2 nodes.
+As an example, we use the Llama 3.1 405B model running in tensor parallelism 16 mode spanning two Intel® Gaudi® 3 nodes.
 
 ## Prerequisites
 
@@ -31,7 +31,7 @@ To perform calibration, follow these steps in a [Gaudi Pytorch container](https:
 3. Check if all Intel® Gaudi® NIC ports are up and running by using the following commands on the host, not inside the container.
 
     ```bash
-    cd /opt/habanalabs/qual/gaudi2/bin 
+    cd /opt/habanalabs/qual/gaudi3/bin 
     ./manage_network_ifs.sh --status 
     # All the ports should be in the 'up' state, you may try flipping the state
     ./manage_network_ifs.sh --down 
@@ -67,7 +67,7 @@ To perform calibration, follow these steps in a [Gaudi Pytorch container](https:
     ./calibrate_model.sh -m meta-llama/Llama-3.1-405B-Instruct -d <path-to-dataset>/open_orca_gpt4_tokenized_llama.calibration_1000.pkl -o <nfs-path-to-calibration-output>/fp8_output -l 4096 -t 16 -b 128
     ```
 
-7. Optionally, you can reduce the target tensor parallelism level by unifying the measurement scales. For example, you can perform FP8 calibration on the Llama 3.1 405B model using two Intel® Gaudi® 2 nodes with tensor parallelism set to 16, and then use the unification script to reduce the tensor parallelism to 8. To achieve this, you can add the optional `-r` parameter, to the `calibration_model.sh` script. This parameter specifies the rank number of the unified measurements. For example, to convert scales from tensor parallelism 16 to 8, set `-r 8`.
+7. Optionally, you can reduce the target tensor parallelism level by unifying the measurement scales. For example, you can perform FP8 calibration on the Llama 3.1 405B model using two Intel® Gaudi® 3 nodes with tensor parallelism set to 16, and then use the unification script to reduce the tensor parallelism to 8. To achieve this, you can add the optional `-r` parameter, to the `calibration_model.sh` script. This parameter specifies the rank number of the unified measurements. For example, to convert scales from tensor parallelism 16 to 8, set `-r 8`.
 
     ```bash
     ./calibrate_model.sh -m meta-llama/Llama-3.1-405B-Instruct -d <path-to-dataset>/open_orca_gpt4_tokenized_llama.calibration_1000.pkl -o <nfs-path-to-calibration-output>/fp8_output -l 4096 -t 16 -b 128 -r 8
@@ -76,19 +76,19 @@ To perform calibration, follow these steps in a [Gaudi Pytorch container](https:
     If you have already performed calibration, you can use the `step-5-unify_measurements` script to convert existing scales, as in the following example. In this case, the `-m <path/ID>` parameter has to be set to the calibration output directory containing the measurement files.
 
     ```bash
-    python3 step-5-unify_measurements.py -r 8 -m <nfs-path-to-calibration-output>/fp8_output/llama-3.1-405b-instruct/g2/ -o <nfs-path-to-calibration-output>/fp8_output/llama-3.1-405b-instruct/g2/
+    python3 step-5-unify_measurements.py -r 8 -m <nfs-path-to-calibration-output>/fp8_output/llama-3.1-405b-instruct/g3/ -o <nfs-path-to-calibration-output>/fp8_output/llama-3.1-405b-instruct/g3/
     ```
 
     If the model contains Mixture of Experts (MoE) layers and is calibrated with expert parallelism, use the `-u` parameter to unify the original measurement results according to expert parallelism rules, as in the following example:
 
     ```bash
-    python3 step-5-unify_measurements.py -r 4 -m <nfs-path-to-calibration-output>/fp8_output/model_name/g2 -o <nfs-path-to-calibration-output>/fp8_output/model_name/g2 -u
+    python3 step-5-unify_measurements.py -r 4 -m <nfs-path-to-calibration-output>/fp8_output/model_name/g3 -o <nfs-path-to-calibration-output>/fp8_output/model_name/g3 -u
     ```
 
 8. Serve the FP8 quantized model.
 
     ```bash
-    export QUANT_CONFIG='<nfs-path-to-calibration-output>/fp8_output/llama-3.1-405b-instruct/maxabs_quant_g2.json'
+    export QUANT_CONFIG='<nfs-path-to-calibration-output>/fp8_output/llama-3.1-405b-instruct/maxabs_quant_g3.json'
     vllm serve meta-llama/Llama-3.1-405B-Instruct --quantization inc --kv-cache-dtype fp8_inc --tensor-parallel-size 8 --max-model-len 2048
     ```
 

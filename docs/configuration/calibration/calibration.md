@@ -8,7 +8,7 @@ This document explains how to perform calibration. It provides separate procedur
 
 ### Device Recommendation
 
-For calibration, use the same device type that you plan to use for inference. The generated measurements are device-dependent, so scales collected on Intel® Gaudi® 3 cannot be reused on Intel® Gaudi® 2, and vice versa. Using measurements generated on a different device type may cause accuracy issues.
+Run calibration on Intel® Gaudi® 3, the device you use for inference. The generated measurements are device-dependent, so scales collected with earlier releases on Intel® Gaudi® 2 cannot be reused on Intel® Gaudi® 3. Recalibrate such models on Intel® Gaudi® 3. Using measurements generated on a different device type may cause accuracy issues.
 
 ### Mandatory Parameters
 
@@ -61,7 +61,7 @@ The following table summarizes the options that you can set in a configuration f
 | `scale_method`     | The method for calculating the scale from measurements. | - `unit_scale` (default): Always uses the scale of 1.<br>- `maxabs_arbitrary`: Stretches or compresses maxabs to the full-scale of FP8.<br>- `maxabs_hw`: Stretches or compresses maxabs to full-scale of FP8, then replaces it with hardware-accelerated scale based on `device_for_scales`.<br>- `maxabs_pow2`: Stretches or compresses maxabs to full-scale of FP8, then replaces it with hardware-accelerated scale based on `device_for_scales`, rounded to the power of 2.<br>- `maxabs_hw_opt_weight`: The weight scale chosen for the minimal MSE among hardware-accelerated scales; activations use `maxabs_hw`.<br>- `act_maxabs_pow2_weights_pcs_opt_pow2`: Per-channel weights use `maxabs_hw_opt_weight`; activations use `maxabs_pow2`.<br>- `act_maxabs_hw_weights_pcs_maxabs_pow2`: Per-channel weights use `maxabs_pow2`; activations use `maxabs_hw`.<br>- `act_maxabs_pcs_pow2_weight_maxabs_pts_pow2_hw`: Only for dynamic quantization. Per-tensor weights use `maxabs_hw`; activations use per-token `maxabs_pow2`. |
 | `measure_exclude`  | Tensor types to exclude from measurement. | - `NONE`: Measures all tensors.<br>- `OUTPUT` (default): Skips output tensors. |
 | `scale_format`     | The format of scales passed to custom PyTorch operations. | - `const`: Scales passed as tensors.<br>- `scalar` (default): Scales passed as scalar values for compilation time and throughput optimizations. |
-| `device_for_scales`| Exponent-bias values for converting FP32/BF16 to FP8-143. | - `GAUDI3`: The expanded exponent-bias range (0–63).<br>- `GAUDI2`: Four possible exponent biases (3, 7, 11, 15), default is 7. |
+| `device_for_scales`| Exponent-bias values for converting FP32/BF16 to FP8-143. | - `GAUDI3`: The expanded exponent-bias range (0–63). |
 | `dynamic_quantization` | Enables dynamic FP8 quantization with per-token scales. Only supported with `act_maxabs_pcs_pow2_weight_maxabs_pts_pow2_hw`. | - `true`: Enable.<br>- `false` (default): Disable. |
 
 ### Configuring Backoff Factors
