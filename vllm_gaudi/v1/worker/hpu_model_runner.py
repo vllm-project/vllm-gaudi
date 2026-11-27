@@ -1178,6 +1178,13 @@ class HpuKVConnectorModelRunnerMixin:
             return get_kv_transfer_group().get_finished(scheduler_output.finished_req_ids)
         return None, None
 
+    @staticmethod
+    def get_kv_load_errors() -> set[int]:
+        """Blocks the connector failed to load; the scheduler applies kv_load_failure_policy to their requests."""
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_block_ids_with_load_errors()
+        return set()
+
 
 class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
 
@@ -2710,6 +2717,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
+            # Every step moves a request past where its last step started, a draft rejection included, so not
+            # getting there means a KV-load failure rolled it back. The scheduler discarded the output of the steps
+            # since, so the sampled ids kept for a skipped step are not its outputs.
+            if num_computed_tokens <= req_state.num_computed_tokens:
+                self._pending_placeholder_repair.pop(req_id, None)
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
@@ -2745,7 +2757,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     self.input_batch.num_tokens[req_index] = num_tokens
             # The failure also rolled num_computed_tokens back. As add_request does for a resumed request, count the
             # known outputs as prompt, so that only the chunk reaching the end samples a token. Sync only: under async
-            # scheduling the scheduler keeps the discarded token as a placeholder.
+            # scheduling sampled ids are not in token_ids_cpu, and the rollback drops every output since the failed
+            # step, which was the request's first, so the row already counts what is left as prompt.
             if (req_index is not None and not self.use_async_scheduling
                     and num_computed_tokens < req_state.num_tokens - 1
                     and self.input_batch.num_prompt_tokens[req_index] < req_state.num_tokens):
@@ -5627,6 +5640,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 with set_forward_context(None, self.vllm_config):
                     self.maybe_setup_kv_connector(scheduler_output)
         finished_sending, finished_recving = set[str](), set[str]()
+        invalid_block_ids: set[int] = set()
 
         # NOTE(Chendi): used by spec decode draft model, since we are doing
         # prefill one by one, so save hidden states as list
@@ -6067,6 +6081,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not warmup_mode:
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)  # type: ignore
+            invalid_block_ids = self.get_kv_load_errors()
 
         if self.use_async_scheduling:
             assert_output_rows(all_req_ids, len(postprocessed_sampled_token_ids), req_ids_output_copy)
@@ -6079,6 +6094,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 kv_connector_output=KVConnectorOutput(
                     finished_sending=finished_sending,
                     finished_recving=finished_recving,
+                    invalid_block_ids=invalid_block_ids,
                 ))
             async_output = AsyncHPUModelRunnerOutput(
                 model_runner_output=model_runner_output,
@@ -6111,6 +6127,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             kv_connector_output=KVConnectorOutput(
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
+                invalid_block_ids=invalid_block_ids,
             ))
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
