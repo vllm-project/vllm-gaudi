@@ -437,9 +437,12 @@ def limit_video_loader_frames(model_config) -> None:
 
 
 def log_video_settings() -> None:
-    """Logs the video input settings when ``install_kimi_k3_video`` has installed the modality."""
+    """Logs the video input settings when ``install_kimi_k3_video`` has installed the modality, else that it is off."""
     import vllm.models.kimi_k3.amd.model as amd_model
     import vllm.renderers.kimi_k3 as k3_renderer
     if getattr(amd_model.KimiK3ForConditionalGeneration, _INSTALLED_FLAG, False):
         logger.info("Kimi-K3 video input enabled (loader fps=%s, max frames=%s, %s=%d)", K3_VIDEO_LOADER_FPS,
                     k3_renderer._K3_MEDIA_IO_DEFAULTS["video"]["num_frames"], ENV_VIT_DP, int(_vit_dp_requested()))
+    else:
+        logger.warning("Kimi-K3 video input is off on HPU until it is ported to vLLM PR #69584 (token-level "
+                       "placeholders); Kimi-K3 serves images only.")

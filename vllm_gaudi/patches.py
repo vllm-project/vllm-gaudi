@@ -1737,12 +1737,14 @@ def _patch_kimi_k3_arch() -> None:
 
 
 def _patch_kimi_k3_video() -> None:
-    """Add the video modality to the Kimi-K3 model (K3 only, see ``vllm_gaudi/models/kimi_k3_video.py``).
+    """Would add the video modality to the Kimi-K3 model (K3 only, see ``vllm_gaudi/models/kimi_k3_video.py``).
 
-    Depends on the K3 model registration of ``_patch_kimi_k3_arch``.
+    Not installed since vLLM PR #69584: the K3 processor matches placeholders on token ids only and encodes only the
+    image placeholder on its own, so the video placeholder merges with its neighbours, and chat video parts reach the
+    checkpoint encoder, which cannot render them. Without the modality K3 serves images only, as upstream, and
+    upstream refuses video inputs with its per-prompt limit check. ``install_kimi_k3_video`` stays for the port.
     """
-    from vllm_gaudi.models.kimi_k3_video import install_kimi_k3_video
-    install_kimi_k3_video()
+    return
 
 
 def _hpu_mxfp4_routed_apply(layer, x, topk_weights, topk_ids, group_size):
