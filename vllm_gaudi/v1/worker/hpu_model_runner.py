@@ -7190,8 +7190,17 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             finished_req_ids=set(req.req_id for req in requests),
             free_encoder_mm_hashes=[],
         )
-        self.execute_model(sched_output, warmup_mode=True)
-        self.sample_tokens(None)
+        try:
+            self.execute_model(sched_output, warmup_mode=True)
+            self.sample_tokens(None)
+        except Exception:
+            # The engine keeps serving after a failed /health_generate probe (HPUWorker.probe_forward), so do not
+            # leave the dummy requests (and their mamba slots) in the runner. Best effort: re-raise the step's error.
+            try:
+                self.execute_model(cleanup, warmup_mode=True)
+            except Exception:
+                logger.warning("Cleanup after a failed dummy step failed", exc_info=True)
+            raise
         self.execute_model(cleanup, warmup_mode=True)
 
     def _generate_profiling(self, prompt_cfg, decode_cfg):
