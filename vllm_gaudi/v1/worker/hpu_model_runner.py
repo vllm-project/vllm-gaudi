@@ -1738,6 +1738,23 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.attn_groups: list[list[AttentionGroup]] = []
         # mm_hash -> encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
+        # Hybrid-GDN guard: speculative decode unsupported on hybrid-GDN (one
+        # live GDN state slot per request, no accepted-prefix commit). Disable
+        # spec unless VLLM_ALLOW_GDN_SPEC=1 (escape hatch, no correctness
+        # guarantee).
+        if getattr(self, "num_gdn", 0) > 0 and self.speculative_config is not None:
+            allow = os.environ.get("VLLM_ALLOW_GDN_SPEC", "0").strip().lower() in ("1", "true")
+            if not allow:
+                logger.warning(
+                    "Speculative decoding is not supported for hybrid-GDN models "
+                    "on HPU (num_gdn=%d); disabling speculative_config (%s) — "
+                    "set VLLM_ALLOW_GDN_SPEC=1 to override (no correctness guarantee)",
+                    self.num_gdn, getattr(self.speculative_config, "method", "unknown"))
+                self.speculative_config = None
+                try:
+                    self.vllm_config.speculative_config = None
+                except Exception:
+                    pass
         # Set up speculative decoding.
         # NOTE(Chendi): Speculative decoding is only enabled for the last rank
         # in the pipeline parallel group.
