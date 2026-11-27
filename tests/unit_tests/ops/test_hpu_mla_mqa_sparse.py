@@ -15,13 +15,12 @@ from types import MethodType, SimpleNamespace
 import pytest
 import torch
 
+_IMPORT_ERROR: Exception | None = None
 try:
     from vllm_gaudi.attention.backends.hpu_attn import HPUMLAImpl
 except Exception as e:  # no HPU stack in this environment (imports raise before device setup)
     HPUMLAImpl = None
     _IMPORT_ERROR = e
-else:
-    _IMPORT_ERROR = None
 
 pytestmark = pytest.mark.skipif(HPUMLAImpl is None,
                                 reason=f"hpu_attn import unavailable on this platform: {_IMPORT_ERROR}")
@@ -51,14 +50,14 @@ def _ref_fp32(q, selected, pad_mask, scale):
     return torch.bmm(attn, selected[..., :KV_RANK].float()).reshape(q.shape[0], HEADS * KV_RANK)
 
 
-def _build(batch, topk, pad, seed, poison_slot0=False):
+def _build(batch, topk, pad, seed, poison_slot0=False, amplitude=0.25):
     """Random q / latent cache / per-request top-k selection with a tail of -1 padding slots."""
     g = torch.Generator().manual_seed(seed)
     slots = (batch * topk) + 64
-    cache = torch.randn(slots, L, generator=g, dtype=torch.bfloat16) * 0.25
+    cache = torch.randn(slots, L, generator=g, dtype=torch.bfloat16) * amplitude
     if poison_slot0:
         cache[0] = torch.full_like(cache[0], 1e30)  # finite poison: 0-weight x 1e30 = 0 stays finite
-    q = torch.randn(batch, HEADS, L, generator=g, dtype=torch.bfloat16) * 0.25
+    q = torch.randn(batch, HEADS, L, generator=g, dtype=torch.bfloat16) * amplitude
     topk_indices = torch.empty(batch, topk, dtype=torch.int32)
     pool = slots - 1 if poison_slot0 else slots
     offset = 1 if poison_slot0 else 0  # reserve slot 0 so only the -1 clamp can reach it
@@ -87,6 +86,21 @@ def test_forward_matches_fp32_reference():
         diff = (out.float() - ref).abs().max().item()
         assert diff < 8e-3 and torch.allclose(out.float(), ref, rtol=1.6e-2, atol=1e-2), \
             f"B={batch} topk={topk} pad={pad}: max abs diff {diff:.3e}"
+
+
+def test_unit_variance_inputs_pin_the_score_dtype():
+    """Unit-variance q / cache (logit std ~1, not the near-uniform 0.06 regime of the 0.25
+    build, where even an fp8-scoring variant passes): the bf16 scoring chain must stay within
+    a relative-norm bound that an fp8-grade score dtype would break (its measured relative
+    norm error is ~4-5e-2), so the test actually pins the score dtype."""
+    impl = _impl()
+    for batch, topk, pad in ((1, TOPK, 0), (4, TOPK, 10), (3, 16, 3)):
+        q, cache, topk_indices = _build(batch, topk, pad, seed=500 + batch * 7 + pad, amplitude=1.0)
+        out = impl.forward_mqa_sparse(q, cache, None, topk_indices)
+        selected = _selected(cache, topk_indices, batch, topk)
+        ref = _ref_fp32(q, selected, topk_indices == -1, SCALE)
+        rel = (out.float() - ref).norm() / ref.norm()
+        assert rel < 1e-2, f"B={batch} topk={topk} pad={pad}: rel-norm diff {rel:.3e}"
 
 
 def test_all_padding_row_is_exactly_zero():
