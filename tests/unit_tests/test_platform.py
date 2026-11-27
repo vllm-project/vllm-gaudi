@@ -512,7 +512,6 @@ def test_check_and_update_config_does_not_rescale_granitemoehybrid_mamba_page_si
 @pytest.mark.parametrize("field, value", [
     ("prompt_logprob_token_ids", [[1, 2]]),
     ("prompt_logprob_start", 1),
-    ("logprob_token_ids", [1, 2]),
 ])
 def test_validate_request_rejects_features_the_runner_ignores(field, value):
     from vllm.exceptions import VLLMValidationError
@@ -523,6 +522,19 @@ def test_validate_request_rejects_features_the_runner_ignores(field, value):
     with pytest.raises(VLLMValidationError, match=f"{field} is not supported on HPU") as excinfo:
         HpuPlatform.validate_request(None, params)
     assert excinfo.value.parameter == field
+
+
+def test_validate_request_rejects_full_vocabulary_logprobs():
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import SamplingParams
+
+    with pytest.raises(VLLMValidationError,
+                       match=r"logprobs=-1 \(the full vocabulary\) is not supported on HPU") as excinfo:
+        HpuPlatform.validate_request(None, SamplingParams(max_tokens=4, logprobs=-1))
+    assert excinfo.value.parameter == "logprobs"
+    # A top-k and exact ids stay accepted.
+    HpuPlatform.validate_request(None, SamplingParams(max_tokens=4, logprobs=5))
+    HpuPlatform.validate_request(None, SamplingParams(max_tokens=4, logprob_token_ids=[1, 2]))
 
 
 def test_validate_request_accepts_prompt_logprobs_start_zero_and_thinking_budget():
@@ -670,17 +682,14 @@ def test_async_scheduling_is_disabled_with_pipeline_parallelism(pipeline_paralle
     assert vllm_config.scheduler_config.async_scheduling is expected
 
 
-@pytest.mark.parametrize("allowed_token_ids, refused", [(None, False), ([1, 2], True)])
-def test_beam_search_step_with_allowlist_is_refused(allowed_token_ids, refused):
-    from vllm.exceptions import VLLMValidationError
+@pytest.mark.parametrize("allowed_token_ids", [None, [1, 2]])
+def test_beam_search_step_with_allowlist_is_accepted(allowed_token_ids):
     from vllm.sampling_params import BeamSearchParams, SamplingParams
 
     # The per-step params beam search builds, as upstream's configure_logprobs sets them.
     params = SamplingParams(logprobs=4, max_tokens=1)
     config = SimpleNamespace(speculative_config=None, model_config=SimpleNamespace(is_diffusion=False))
     BeamSearchParams(beam_width=2, max_tokens=4, allowed_token_ids=allowed_token_ids).configure_logprobs(params, config)
-    if not refused:
-        HpuPlatform.validate_request(None, params)
-        return
-    with pytest.raises(VLLMValidationError, match="logprob_token_ids is not supported on HPU"):
-        HpuPlatform.validate_request(None, params)
+    # An allowlist turns the step's top-k into exact-ID logprobs.
+    assert params.logprob_token_ids == allowed_token_ids
+    HpuPlatform.validate_request(None, params)

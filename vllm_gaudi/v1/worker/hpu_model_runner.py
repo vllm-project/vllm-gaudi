@@ -1521,6 +1521,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         self.supports_mm_inputs = False
 
         self.sampler = Sampler()
+        # Kept uncompiled when the sampler is compiled, for the calls with logprob_token_ids (see _run_sampling).
+        self.eager_sampler = self.sampler
 
         # NOTE(kzawora) update_env is a hack to work around VLLMKVCache in
         # hpu-extension which selects fetch_from_cache implementation based
@@ -5125,9 +5127,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         if not active_segments:
             return None
 
-        # Determine the number of logprob columns from the first
-        # active segment
-        num_cols = active_segments[0][1].logprob_token_ids.shape[1]
+        # Segments differ in width when logprob_token_ids rows are in some of them only. Each request reads its own
+        # first columns, so narrower rows are padded like the sampler pads: token id 0, logprob -inf.
+        num_cols = max(lp.logprob_token_ids.shape[1] for _, lp in active_segments)
 
         # Pre-allocate output arrays
         combined_token_ids = np.zeros((num_output_rows, num_cols), dtype=np.int64)
@@ -5137,10 +5139,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Transfer each segment to CPU and scatter into output arrays
         for req_ids, lp_tensors in active_segments:
             lp_lists = lp_tensors.tolists()
+            width = lp_lists.logprob_token_ids.shape[1]
             for i, req_id in enumerate(req_ids):
                 idx = self.input_batch.req_id_to_index[req_id]
-                combined_token_ids[idx] = lp_lists.logprob_token_ids[i]
-                combined_logprobs[idx] = lp_lists.logprobs[i]
+                combined_token_ids[idx, :width] = lp_lists.logprob_token_ids[i]
+                combined_logprobs[idx, :width] = lp_lists.logprobs[i]
+                combined_logprobs[idx, width:] = float("-inf")
                 combined_ranks[idx] = lp_lists.sampled_token_ranks[i]
 
         return LogprobsLists(combined_token_ids, combined_logprobs, combined_ranks)
@@ -5299,7 +5303,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         # Async scheduling: repair -1 placeholders before penalties read them.
         self.input_batch.update_async_output_token_ids(self._async_spec_prev_num_slots())
         sampling_metadata = self._prepare_sampling(batch_changed, request_ids, pad_to, logits_requests)
-        sampler_output = self.sampler(logits=logits_device, sampling_metadata=sampling_metadata)
+        # The compiled sampler would recompile for every new number of logprob_token_ids rows in a call.
+        sampler = self.eager_sampler if sampling_metadata.logprob_token_ids else self.sampler
+        sampler_output = sampler(logits=logits_device, sampling_metadata=sampling_metadata)
         htorch.core.mark_step()
         return sampler_output, sampling_metadata
 
