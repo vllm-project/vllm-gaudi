@@ -539,6 +539,21 @@ async def switch_model(api_host: str, api_port: int, model_name: str, drain_time
         }
 
 
+async def check_health_generate(api_host: str, api_port: int, timeout_s: float = 300) -> dict[str, Any]:
+    """Call /health_generate: an idle engine runs one forward probe on every worker (vllm-project/vllm#60505).
+
+    The timeout is generous because the job skips warmup, so the probe step may still compile.
+    """
+    url = _api_url(api_host, api_port, f'/health_generate?timeout_s={timeout_s:g}')
+    try:
+        resp = await asyncio.to_thread(_HTTP_SESSION.get, url, timeout=timeout_s + 30)
+    except Exception as e:
+        return {'status': 'error', 'error': str(e)}
+    if resp.status_code == 200:
+        return {'status': 'ok'}
+    return {'status': 'error', 'error': f"HTTP {resp.status_code}: {resp.text[:500]}"}
+
+
 async def generate(api_host: str,
                    api_port: int,
                    model_name: str,
@@ -943,6 +958,18 @@ async def main():
                 continue
 
             print(f"  ✓ Generated {gen_result['output_tokens']} tokens in {gen_result['duration_s']:.2f}s")
+
+            # The engine is idle and the active model awake: /health_generate must run its probe and answer 200.
+            health_result = await check_health_generate(args.api_host, args.api_port)
+            if health_result['status'] != 'ok':
+                error_msg = health_result.get('error')
+                print(f"  ✗ /health_generate failed: {error_msg}")
+                phase_metrics['status'] = 'health_failed'
+                phase_metrics['error'] = error_msg
+                phase_failures.append(f"phase{phase} /health_generate failed: {error_msg}")
+                all_metrics.append(phase_metrics)
+                continue
+            print("  ✓ /health_generate: ready")
 
             if phase == 1:
                 phase_metrics['reconfigure_s'] = initial_load_s
