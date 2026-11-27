@@ -1,0 +1,67 @@
+diff --git a/sample/sampler.py b/sample/sampler.py
+index 58a8ef3..eabfe10 100644
+--- a/sample/sampler.py
++++ b/sample/sampler.py
+@@ -197,7 +197,17 @@ class Sampler(nn.Module):
+         # If we have both num_logprobs and logprob_token_ids, prefer
+         # logprob_token_ids as it's more specific
+         if logprob_token_ids_tensors is not None and num_logprobs is not None:
+-            logprobs_tensors = logprob_token_ids_tensors
++            # vllm-gaudi local change [P9]: only for the rows that set it. The
++            # other rows keep their top-k, as in Model Runner V2.
++            if num_logprobs == -1:
++                logprobs_tensors = logprob_token_ids_tensors
++            else:
++                assert logprobs_tensors is not None
++                logprobs_tensors = self.merge_specific_token_logprobs(
++                    logprobs_tensors,
++                    logprob_token_ids_tensors,
++                    sampling_metadata.logprob_token_ids,
++                )
+ 
+         # Use int32 to reduce the tensor size.
+         sampled = sampled.to(torch.int32)
+@@ -289,6 +299,43 @@ class Sampler(nn.Module):
+             selected_token_ranks=token_ranks,
+         )
+ 
++    # vllm-gaudi local change [P9]
++    def merge_specific_token_logprobs(
++        self,
++        topk: LogprobsTensors,
++        specific: LogprobsTensors,
++        logprob_token_ids: dict[int, list[int]],
++    ) -> LogprobsTensors:
++        """Take the rows in logprob_token_ids from specific, the rest from topk.
++
++        Both have the sampled token in column 0 and the same ranks. The
++        narrower one is padded like gather_specific_token_logprobs pads its
++        rows: token id 0, logprob -inf.
++        """
++        width = max(topk.logprobs.shape[1], specific.logprobs.shape[1])
++        is_specific_cpu = torch.zeros(
++            specific.logprobs.shape[0], 1, dtype=torch.bool, pin_memory=self.pin_memory
++        )
++        is_specific_cpu[list(logprob_token_ids)] = True
++        is_specific = is_specific_cpu.to(specific.logprobs.device, non_blocking=True)
++
++        def widen(t: torch.Tensor, value: float) -> torch.Tensor:
++            return torch.nn.functional.pad(t, (0, width - t.shape[1]), value=value)
++
++        return LogprobsTensors(
++            logprob_token_ids=torch.where(
++                is_specific,
++                widen(specific.logprob_token_ids, 0),
++                widen(topk.logprob_token_ids, 0),
++            ),
++            logprobs=torch.where(
++                is_specific,
++                widen(specific.logprobs, float("-inf")),
++                widen(topk.logprobs, float("-inf")),
++            ),
++            selected_token_ranks=topk.selected_token_ranks,
++        )
++
+     @staticmethod
+     def apply_temperature(
+         logits: torch.Tensor,

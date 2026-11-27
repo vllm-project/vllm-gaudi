@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Vendored from https://github.com/vllm-project/vllm/blob/b46907cce0/vllm/v1/sample/sampler.py
-# (removed upstream in aac1b2a4f3, vllm-project/vllm#63373). Local changes: imports retargeted.
+# (removed upstream in aac1b2a4f3, vllm-project/vllm#63373). Local changes: imports retargeted; P9 (see tools/vendor_v1/patches/).
 """A layer that samples the next tokens from the model's outputs."""
 
 import torch
@@ -197,7 +197,17 @@ class Sampler(nn.Module):
         # If we have both num_logprobs and logprob_token_ids, prefer
         # logprob_token_ids as it's more specific
         if logprob_token_ids_tensors is not None and num_logprobs is not None:
-            logprobs_tensors = logprob_token_ids_tensors
+            # vllm-gaudi local change [P9]: only for the rows that set it. The
+            # other rows keep their top-k, as in Model Runner V2.
+            if num_logprobs == -1:
+                logprobs_tensors = logprob_token_ids_tensors
+            else:
+                assert logprobs_tensors is not None
+                logprobs_tensors = self.merge_specific_token_logprobs(
+                    logprobs_tensors,
+                    logprob_token_ids_tensors,
+                    sampling_metadata.logprob_token_ids,
+                )
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
@@ -287,6 +297,43 @@ class Sampler(nn.Module):
             logprob_token_ids=token_ids_tensor.to(torch.int32),
             logprobs=gathered_logprobs,
             selected_token_ranks=token_ranks,
+        )
+
+    # vllm-gaudi local change [P9]
+    def merge_specific_token_logprobs(
+        self,
+        topk: LogprobsTensors,
+        specific: LogprobsTensors,
+        logprob_token_ids: dict[int, list[int]],
+    ) -> LogprobsTensors:
+        """Take the rows in logprob_token_ids from specific, the rest from topk.
+
+        Both have the sampled token in column 0 and the same ranks. The
+        narrower one is padded like gather_specific_token_logprobs pads its
+        rows: token id 0, logprob -inf.
+        """
+        width = max(topk.logprobs.shape[1], specific.logprobs.shape[1])
+        is_specific_cpu = torch.zeros(
+            specific.logprobs.shape[0], 1, dtype=torch.bool, pin_memory=self.pin_memory
+        )
+        is_specific_cpu[list(logprob_token_ids)] = True
+        is_specific = is_specific_cpu.to(specific.logprobs.device, non_blocking=True)
+
+        def widen(t: torch.Tensor, value: float) -> torch.Tensor:
+            return torch.nn.functional.pad(t, (0, width - t.shape[1]), value=value)
+
+        return LogprobsTensors(
+            logprob_token_ids=torch.where(
+                is_specific,
+                widen(specific.logprob_token_ids, 0),
+                widen(topk.logprob_token_ids, 0),
+            ),
+            logprobs=torch.where(
+                is_specific,
+                widen(specific.logprobs, float("-inf")),
+                widen(topk.logprobs, float("-inf")),
+            ),
+            selected_token_ranks=topk.selected_token_ranks,
         )
 
     @staticmethod

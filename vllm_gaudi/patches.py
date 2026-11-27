@@ -1968,6 +1968,8 @@ def _patch_sampling_params_spec_decode() -> None:
     vLLM #67061 deleted ``SamplingParams._validate_spec_decode`` because Model Runner V2 now applies both to drafts.
     The HPU runner does not: with speculative decoding its logits processors are min_tokens only, so such a request
     would be accepted and the two parameters silently ignored. This restores the deleted check where it ran.
+
+    ``logprob_token_ids`` is rejected there too: the HPU rejection sampler returns only top-k logprobs.
     """
     from vllm.exceptions import VLLMValidationError
     from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
@@ -1979,9 +1981,17 @@ def _patch_sampling_params_spec_decode() -> None:
     @functools.wraps(original_verify)
     def _hpu_verify(self, model_config, speculative_config, *args, **kwargs):
         original_verify(self, model_config, speculative_config, *args, **kwargs)
-        if speculative_config is not None and (self.min_p > _SAMPLING_EPS or self.logit_bias):
+        if speculative_config is None:
+            return
+        if self.min_p > _SAMPLING_EPS or self.logit_bias:
             raise VLLMValidationError("The min_p and logit_bias sampling parameters are not supported with "
                                       "speculative decoding on HPU.")
+        if self.logprob_token_ids:
+            # Callers may not have set it themselves.
+            raise VLLMValidationError(
+                "logprob_token_ids is not supported with speculative decoding on HPU (beam search "
+                "allowed_token_ids and generative scoring label_token_ids set it).",
+                parameter="logprob_token_ids")
 
     _hpu_verify._hpu_spec_decode_check = True  # type: ignore[attr-defined]
     SamplingParams.verify = _hpu_verify

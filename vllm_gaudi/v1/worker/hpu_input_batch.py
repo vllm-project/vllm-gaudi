@@ -277,6 +277,8 @@ class InputBatch:
         self.generators: dict[int, torch.Generator] = {}
 
         self.num_logprobs: dict[str, int] = {}
+        # Token ids whose logprobs a request asks for instead of (or as) its top-k.
+        self.logprob_token_ids: dict[str, list[int]] = {}
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
@@ -413,6 +415,8 @@ class InputBatch:
 
             if sampling_params.logprobs is not None:
                 self.num_logprobs[req_id] = sampling_params.logprobs
+            if sampling_params.logprob_token_ids:
+                self.logprob_token_ids[req_id] = sampling_params.logprob_token_ids
             # A request that already has outputs (resumed after preemption, or re-added after a skipped step)
             # sent its prompt logprobs before; scoring the prompt again would send them twice.
             if sampling_params.prompt_logprobs is not None and not request.output_token_ids:
@@ -496,6 +500,7 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        self.logprob_token_ids.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
@@ -724,6 +729,10 @@ class InputBatch:
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
+            logprob_token_ids={
+                self.req_id_to_index[req_id]: token_ids
+                for req_id, token_ids in self.logprob_token_ids.items()
+            } or None,
             prompt_token_ids=prompt_token_ids,
             frequency_penalties=None if self.no_penalties else self.frequency_penalties[:num_reqs],
             presence_penalties=None if self.no_penalties else self.presence_penalties[:num_reqs],
@@ -856,6 +865,14 @@ class InputBatch:
                 if req_idx not in seen and req_idx in self.bad_words_token_ids:
                     bad_words_token_ids[i] = self.bad_words_token_ids[req_idx]
                 seen.add(req_idx)
+        # Same keying as bad words. None keeps the sampler's exact-id path off for selections without such a request.
+        logprob_token_ids: dict[int, list[int]] = {}
+        if self.logprob_token_ids:
+            seen_req_ids: set[str] = set()
+            for i, (req_id, _) in enumerate(req_id_output_token_ids):
+                if req_id not in seen_req_ids and req_id in self.logprob_token_ids:
+                    logprob_token_ids[i] = self.logprob_token_ids[req_id]
+                seen_req_ids.add(req_id)
         return SamplingMetadata(
             temperature=self.temperature.index_select(0, idx),
             all_greedy=self.all_greedy,
@@ -867,6 +884,7 @@ class InputBatch:
                 for i, req_idx in enumerate(req_indices) if self.generators.get(req_idx, None) is not None
             },
             max_num_logprobs=self.max_num_logprobs,
+            logprob_token_ids=logprob_token_ids or None,
             prompt_token_ids=prompt_token_ids,
             frequency_penalties=self.frequency_penalties.index_select(0, idx),
             presence_penalties=self.presence_penalties.index_select(0, idx),

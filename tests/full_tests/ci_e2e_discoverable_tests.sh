@@ -740,6 +740,19 @@ run_async_penalty_consistency_test() {
     echo "✅ Test async-scheduling penalty consistency passed."
 }
 
+# Exact-ID sample logprobs (logprob_token_ids, beam search allowlists) in mixed batches, sync and async scheduling,
+# eager and with the compiled sampler. The speculative decoding refusal runs on its own: it needs a second engine.
+run_logprob_token_ids_test() {
+    echo "➡️ Testing logprob_token_ids..."
+    VLLM_SKIP_WARMUP=true \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_logprob_token_ids.py" -k "not spec_decode"
+    LOGPROB_TOKEN_IDS_ENFORCE_EAGER=0 VLLM_SKIP_WARMUP=true \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_logprob_token_ids.py" -k "not spec_decode"
+    VLLM_SKIP_WARMUP=true \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_logprob_token_ids.py" -k spec_decode
+    echo "✅ Test logprob_token_ids passed."
+}
+
 # min_tokens, logit_bias and min_p reach the logits processors (sync and async scheduling)
 run_logits_processor_params_test() {
     echo "➡️ Testing min_tokens, logit_bias and min_p..."
@@ -860,6 +873,7 @@ launch_all_tests() {
     run_cpu_offloading_test
     run_offloading_connector_test
     run_async_penalty_consistency_test
+    run_logprob_token_ids_test
     run_logits_processor_params_test
     run_kv_load_failure_recovery_test
     run_upstream_async_scheduler_gate
