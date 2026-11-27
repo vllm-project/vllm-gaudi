@@ -199,3 +199,6 @@ shellcheck*/
 
 # Ingore moe/marlin_moe gen code
 csrc/moe/marlin_moe_wna16/kernel_*
+
+# Profiler / FX graph dumps from local bench scripts
+tests/unit_tests/ops/traces_*/
