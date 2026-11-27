@@ -687,6 +687,102 @@ def test_bf16_caches_and_inputs_stay_close_to_fp32_reference():
     torch.testing.assert_close(caches[1][1].float(), ref_ssm, rtol=3e-2, atol=3e-2)
 
 
+def _load_kda_at(name: str):
+    """Exec the op module under a fresh name so the import-time env reads are re-evaluated."""
+    spec = importlib.util.spec_from_file_location(name, _MODULE_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return mod
+
+
+def test_kda_compute_fp32_flag_defaults_and_parses(monkeypatch):
+    """The decode compute dtype is read from VLLM_KDA_COMPUTE_FP32 at import time (default: float32)."""
+    monkeypatch.delenv("VLLM_KDA_COMPUTE_FP32", raising=False)
+    assert _load_kda_at("kda_gate_test_default")._KDA_COMPUTE_DTYPE is torch.float32
+    monkeypatch.setenv("VLLM_KDA_COMPUTE_FP32", "1")
+    assert _load_kda_at("kda_gate_test_on")._KDA_COMPUTE_DTYPE is torch.float32
+    monkeypatch.setenv("VLLM_KDA_COMPUTE_FP32", "0")
+    assert _load_kda_at("kda_gate_test_off")._KDA_COMPUTE_DTYPE is torch.bfloat16
+    finally_modules = ("kda_gate_test_default", "kda_gate_test_on", "kda_gate_test_off")
+    for name in finally_modules:
+        sys.modules.pop(name, None)
+
+
+def test_bf16_decode_compute_stays_close_to_fp32_reference(monkeypatch):
+    """With VLLM_KDA_COMPUTE_FP32=0 the decode math runs in bf16: the caches stay read-only for the step, the
+    state writes stay the two index_copy_, and the per-step output and the state stay close to the fp32
+    reference (the conv rows are exact copies of the inputs, so the conv caches are bit-equal)."""
+    monkeypatch.setenv("VLLM_KDA_COMPUTE_FP32", "0")
+    kda_bf16 = _load_kda_at("kda_decode_bf16_test")
+    try:
+        params = _make_params(190)
+        state_idx = torch.tensor([1, 2])
+        steps = [{k: v.to(torch.bfloat16) for k, v in _make_inputs(192 + t, 2).items()} for t in range(10)]
+
+        def run(mod):
+            conv, ssm = _new_caches(4, True)
+            outs, last = [], None
+            for tok in steps:
+                before = (conv.clone(), ssm.clone())
+                out, slots, conv_rows, ssm_rows = mod.kda_decode_step(tok["mixed_qkv"], tok["raw_g"], tok["raw_beta"],
+                                                                      params["conv_weight"], params["conv_bias"],
+                                                                      params["A_log"], params["dt_bias"],
+                                                                      params["lower_bound"], conv, ssm, state_idx, H, D)
+                assert all(torch.equal(a, b) for a, b in zip((conv, ssm), before))  # the step only reads
+                outs.append(out)
+                last = (slots, conv_rows, ssm_rows)
+                mod.write_kda_decode_state(conv, ssm, slots, conv_rows, ssm_rows)
+            return torch.stack(outs), conv, ssm, last
+
+        ref_out, ref_conv, ref_ssm, _ = run(kda)
+        bf16_out, bf16_conv, bf16_ssm, (slots, conv_rows, ssm_rows) = run(kda_bf16)
+        assert bf16_out.dtype == torch.bfloat16
+        torch.testing.assert_close(bf16_out.float(), ref_out, rtol=3e-2, atol=3e-2)
+        torch.testing.assert_close(bf16_ssm.float(), ref_ssm, rtol=3e-2, atol=3e-2)
+        assert torch.equal(bf16_conv, ref_conv)
+
+        conv_w, ssm_w = _new_caches(4, True)
+        assert _aten_ops(kda_bf16.write_kda_decode_state, conv_w, ssm_w, slots, conv_rows, ssm_rows) == \
+            ["index_copy_", "index_copy_"]
+
+        # the step graph still has no cache mutations and matches eager bit-for-bit with bf16 math
+        from functorch.compile import make_boxed_func
+        from torch._dynamo.backends.common import aot_autograd
+
+        graphs = []
+
+        def capture(gm, example_inputs):
+            graphs.append(gm)
+            return make_boxed_func(gm.forward)
+
+        tok = steps[0]
+        caches = _new_caches(4, False)
+
+        def step(mixed_qkv, raw_g, raw_beta, conv_cache, ssm_cache):
+            return kda_bf16.kda_decode_step(mixed_qkv, raw_g, raw_beta, params["conv_weight"], params["conv_bias"],
+                                            params["A_log"], params["dt_bias"], params["lower_bound"], conv_cache,
+                                            ssm_cache, state_idx, H, D)
+
+        compiled = torch.compile(step,
+                                 backend=aot_autograd(fw_compiler=capture, keep_inference_input_mutations=True),
+                                 dynamic=False, fullgraph=True)
+        out, _, _, _ = compiled(tok["mixed_qkv"], tok["raw_g"], tok["raw_beta"], *caches)
+        assert graphs
+        targets = {str(n.target) for gm in graphs for n in gm.graph.nodes if n.op == "call_function"}
+        assert not {t for t in targets if "copy_" in t or "index_copy" in t}, targets
+        expected = kda_bf16.kda_decode_step(tok["mixed_qkv"], tok["raw_g"], tok["raw_beta"], params["conv_weight"],
+                                            params["conv_bias"], params["A_log"], params["dt_bias"],
+                                            params["lower_bound"], *caches, state_idx, H, D)
+        assert torch.equal(out, expected[0])
+    finally:
+        sys.modules.pop("kda_decode_bf16_test", None)
+
+
 def test_gated_rmsnorm_sigmoid_matches_formula():
     g = torch.Generator().manual_seed(21)
     x = torch.randn(4, H, D, generator=g)
@@ -1560,7 +1656,19 @@ def test_chunked_vec_prefill_outputs_are_dense_tensors(lengths, padded, chunk):
 
 
 def _load_kimi_layer_module(monkeypatch):
-    """models/kimi_k3_kda.py by file path (the models package imports vLLM) with a stub forward context."""
+    """models/kimi_k3_kda.py by file path (the models package imports vLLM) with a stub forward context.
+
+    The vllm_gaudi submodules are stubbed like in _load_layer_module so the file-loaded envs and op are used
+    even when a different vllm_gaudi version is installed in the environment."""
+    ext_logger = types.ModuleType("vllm_gaudi.extension.logger")
+    ext_logger.logger = lambda: logging.getLogger("kimi_k3_kda_test")
+    for name, mod in (("vllm_gaudi", types.ModuleType("vllm_gaudi")),
+                      ("vllm_gaudi.ops", types.ModuleType("vllm_gaudi.ops")),
+                      ("vllm_gaudi.ops.hpu_kda_pytorch", kda),
+                      ("vllm_gaudi.extension", types.ModuleType("vllm_gaudi.extension")),
+                      ("vllm_gaudi.extension.logger", ext_logger),
+                      ("vllm_gaudi.envs", _load_envs_module(monkeypatch))):
+        monkeypatch.setitem(sys.modules, name, mod)
     path = pathlib.Path(__file__).resolve().parents[3] / "vllm_gaudi" / "models" / "kimi_k3_kda.py"
     spec = importlib.util.spec_from_file_location("kimi_k3_kda_under_test", path)
     module = importlib.util.module_from_spec(spec)

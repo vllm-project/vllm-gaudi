@@ -27,9 +27,21 @@ under torch.compile.
 
 from __future__ import annotations
 
+import os
+
 from typing import Any, Callable
 
 import torch
+
+# Set VLLM_KDA_COMPUTE_FP32=0 to run the decode step's state math (decay, key projection, delta update and
+# output projection) and its q/k/v/gate inputs in bfloat16 instead of float32. fp32 is the DEFAULT and is
+# load-bearing for correctness: the KDA state is a whole-context accumulator that keeps growing as the per-key
+# decay approaches 1, so low-precision state COMPUTE error compounds over the sequence (bf16 state STORAGE,
+# i.e. the ssm cache dtype, is unaffected by this flag). Measured: the bf16 output matches the fp32 one to
+# ~2e-4 in absolute terms, but the 50-step relative state drift reaches ~1e-2. Do not re-enable bf16 compute
+# without a numerics analysis.
+_KDA_COMPUTE_FP32 = os.getenv("VLLM_KDA_COMPUTE_FP32", "1") == "1"
+_KDA_COMPUTE_DTYPE = torch.float32 if _KDA_COMPUTE_FP32 else torch.bfloat16
 
 
 def kda_gate(raw_g: torch.Tensor, A_log: torch.Tensor, dt_bias: torch.Tensor,
@@ -521,26 +533,27 @@ def kda_chunked_steps_vec(state: torch.Tensor,
 
 def _prepare_qkv_gates(conv_out: torch.Tensor, raw_g: torch.Tensor, raw_beta: torch.Tensor, A_log: torch.Tensor,
                        dt_bias: torch.Tensor, lower_bound: float | None, num_heads: int, head_dim: int,
-                       token_mask: torch.Tensor | None):
-    """conv_out [B,L,3P] (after silu), raw_g [B,L,P], raw_beta [B,L,H] -> q,k,v,g,beta (fp32, [B,L,H,*]).
+                       token_mask: torch.Tensor | None, dt: torch.dtype = torch.float32):
+    """conv_out [B,L,3P] (after silu), raw_g [B,L,P], raw_beta [B,L,H] -> q,k,v,g,beta in dtype ``dt``, [B,L,H,*].
 
-    g is the LOG of the forget gate (<= 0)."""
+    For a compute dtype other than float32, q/k are l2-normalized AFTER the cast (the norm is computed in
+    ``dt``); in float32 this is the plain l2norm. g is the LOG of the forget gate (<= 0)."""
     bsz, seq_len, _ = conv_out.shape
     proj = num_heads * head_dim
     q, k, v = conv_out.split(proj, dim=-1)
     q = q.reshape(bsz, seq_len, num_heads, head_dim)
     k = k.reshape(bsz, seq_len, num_heads, head_dim)
     v = v.reshape(bsz, seq_len, num_heads, head_dim)
-    q = l2norm(q) * (head_dim**-0.5)
-    k = l2norm(k)
+    q = l2norm(q if dt is torch.float32 else q.to(torch.bfloat16)) * (head_dim**-0.5)
+    k = l2norm(k if dt is torch.float32 else k.to(torch.bfloat16))
     g = kda_gate(raw_g.reshape(bsz, seq_len, num_heads, head_dim), A_log, dt_bias.reshape(num_heads, head_dim),
-                 lower_bound)
-    beta = torch.sigmoid(raw_beta.float())
+                 lower_bound).to(dt)
+    beta = torch.sigmoid(raw_beta.float()).to(dt)
     if token_mask is not None:  # padded tokens: decay 1, beta 0 -> exact no-op on the state
-        m = token_mask.reshape(bsz, seq_len, 1).float()
+        m = token_mask.reshape(bsz, seq_len, 1).to(dt)
         g = g * m.unsqueeze(-1)
         beta = beta * m
-    return q, k, v, g, beta
+    return q.to(dt), k.to(dt), v.to(dt), g, beta
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -628,30 +641,41 @@ def kda_decode_step(mixed_qkv: torch.Tensor, raw_g: torch.Tensor, raw_beta: torc
                     state_idx: torch.Tensor, num_heads: int, head_dim: int):
     """Out-of-place decode step: only READS the caches, returns ``(o, slots, conv_rows, ssm_rows)``.
 
-    ``o`` [B,H,V] fp32; ``conv_rows`` / ``ssm_rows`` are the new cache rows of ``slots``, already in the layout and
-    dtype of the caches, so ``write_kda_decode_state`` is just two ``index_copy_``. Traceable by torch.compile
-    (no in-place writes to graph inputs, which HPU compile can silently drop).
+    ``o`` [B,H,V] (float32 by default, see ``VLLM_KDA_COMPUTE_FP32``); ``conv_rows`` / ``ssm_rows`` are the new
+    cache rows of ``slots``, already in the layout and dtype of the caches, so ``write_kda_decode_state`` is just
+    two ``index_copy_``. Traceable by torch.compile (no in-place writes to graph inputs, which HPU compile can
+    silently drop; the in-place chain below runs on the local state copy only).
     """
     bsz, channels = mixed_qkv.shape
     width = conv_weight.shape[-1]
     slots = _slots(state_idx, conv_cache)
 
-    state_c = read_conv_state(conv_cache, slots, channels, width - 1)  # [B, W-1, C]
-    seq = torch.cat([state_c, mixed_qkv.float().unsqueeze(1)], dim=1)  # [B, W, C]
+    state_c = read_conv_state(conv_cache, slots, channels, width - 1)  # [B, W-1, C], oldest input first
     w = conv_weight.reshape(channels, width).float()
-    conv_out = (seq * w.t().unsqueeze(0)).sum(dim=1)
+    # depthwise conv without the cat: the W-1 state taps and the new input are combined directly, in the same
+    # per-channel tap order as the cat form, so the fp32 default stays bit-identical to it
+    new_x = mixed_qkv.float()
+    conv_out = (state_c * w.t().unsqueeze(0)[:, :width - 1]).sum(dim=1) + new_x * w[:, width - 1]
     if conv_bias is not None:
         conv_out = conv_out + conv_bias.float()
     conv_out = torch.nn.functional.silu(conv_out)
-    conv_rows = seq[:, 1:, :]
+    conv_rows = torch.cat([state_c[:, 1:], new_x.unsqueeze(1)], dim=1)  # [B, W-1, C]
     if _conv_is_dim_first(conv_cache, channels, width - 1):
         conv_rows = conv_rows.transpose(-1, -2)
     conv_rows = conv_rows.to(dtype=conv_cache.dtype).contiguous()
 
+    # recurrent step on the LOCAL state copy: the per-op sequence matches kda_recurrent_step (bit-identical in
+    # fp32) and stays traceable, since only this out-of-graph-input copy is mutated
     q, k, v, g, beta = _prepare_qkv_gates(conv_out.unsqueeze(1), raw_g.unsqueeze(1), raw_beta.unsqueeze(1), A_log,
-                                          dt_bias, lower_bound, num_heads, head_dim, None)
-    state = read_ssm_state(ssm_cache, slots)
-    out, state = kda_recurrent_step(state, q[:, 0], k[:, 0], v[:, 0], torch.exp(g[:, 0]), beta[:, 0])
+                                          dt_bias, lower_bound, num_heads, head_dim, None, dt=_KDA_COMPUTE_DTYPE)
+    state = read_ssm_state(ssm_cache, slots).to(_KDA_COMPUTE_DTYPE)
+    q0, k0, v0 = q[:, 0], k[:, 0], v[:, 0]
+    dec = torch.exp(g[:, 0])
+    state.mul_(dec.unsqueeze(-2))
+    proj = torch.matmul(state, k0.unsqueeze(-1)).squeeze(-1)
+    delta = (v0 - proj) * beta[:, 0].unsqueeze(-1)
+    state.add_(delta.unsqueeze(-1) * k0.unsqueeze(-2))
+    out = torch.matmul(state, q0.unsqueeze(-1)).squeeze(-1)
     ssm_rows = state.to(dtype=ssm_cache.dtype).contiguous()
     return out, slots, conv_rows, ssm_rows
 
