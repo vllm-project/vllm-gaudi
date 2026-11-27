@@ -376,7 +376,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         """Attend with an absorbed query to top-k physical latent-cache slots.
 
         q contains [q_nope @ W_UK_T, q_rope]. Return latent values for the
-        owning MLA layer's W_UV projection. A slot of -1 denotes padding.
+        owning MLA layer's W_UV projection. A slot of -1 denotes padding;
+        scoring runs in the query dtype (within a few bf16 ulps of the fp32
+        scoring path), and an all-padding row still yields exact zeros.
         """
         if isinstance(k_cache, tuple):
             k_cache = k_cache[0]
@@ -387,9 +389,10 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         flat_idx = topk_indices.clamp(min=0).reshape(-1)
         selected = k_cache[flat_idx].view(batch_size, topk, self.kv_lora_rank + self.qk_rope_head_dim)
-        logits = torch.bmm(q, selected.transpose(1, 2)).float() * self.scale
-        logits = logits.masked_fill(pad_mask.unsqueeze(1), torch.finfo(torch.float32).min)
-        attn = logits.softmax(dim=-1).masked_fill(pad_mask.unsqueeze(1), 0).to(q.dtype)
+        logits = torch.bmm(q, selected.transpose(1, 2)).mul_(self.scale)
+        logits.masked_fill_(pad_mask.unsqueeze(1), float("-inf"))
+        attn = logits.softmax(dim=-1)
+        attn.masked_fill_(pad_mask.unsqueeze(1), 0)
         out = torch.bmm(attn, selected[..., :self.kv_lora_rank])
         return out.reshape(batch_size, self.num_heads * self.kv_lora_rank)
 
