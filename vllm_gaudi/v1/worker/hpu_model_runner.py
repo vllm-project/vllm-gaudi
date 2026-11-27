@@ -7331,7 +7331,12 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                     mm_options=mm_options,
                 )
             from vllm.multimodal.processing import TimingContext
-            dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
+            from vllm.multimodal.processing.context import profiling_media
+
+            # Dummy media, not a request: keep it out of the per-prompt media byte limits (vllm#69098), as
+            # upstream's own get_dummy_mm_inputs does.
+            with profiling_media():
+                dummy_mm_inputs = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
         else:
             # Fallback to default options. vllm#57674 moved get_dummy_mm_inputs
             # from MultiModalRegistry onto the processor.
@@ -7410,6 +7415,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         else:
             mm_options = self._resolve_mm_limit_options(self.model_config.get_multimodal_config(), modality)
             count = mm_options.count if mm_options and hasattr(mm_options, 'count') else 1
+            if count is None:
+                count = 999  # vllm#69098: an entry without a count (was 999), as get_limit_per_prompt reads it
             if count_override is not None:
                 count = count_override
             batch = count
@@ -7485,7 +7492,10 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         is_image_warmup = (mm_config is not None and mm_config.limit_per_prompt.get("image") is not None
                            and "image" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['image'] != 0)
-        is_video_warmup = (mm_config is not None and mm_config.limit_per_prompt.get("video") is not None
+        # Video warmup needs an explicit video count. Without one the limit is now the model's default (vllm#69098),
+        # not 999, so check the count itself to keep skipping as before.
+        is_video_warmup = (mm_config is not None
+                           and getattr(mm_config.limit_per_prompt.get("video"), 'count', None) is not None
                            and "video" in self.mm_budget.mm_limits and self.mm_budget.mm_limits['video'] != 999)
         # Get width/height from config if available for warmup_lists
         warmup_lists = []
@@ -7545,6 +7555,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             explicit_set = set(explicit_resolutions)
             mm_options = self._resolve_mm_limit_options(mm_config, modality)
             user_max_count = mm_options.count if mm_options and hasattr(mm_options, 'count') else 1
+            if user_max_count is None:
+                user_max_count = 999  # vllm#69098: an entry without a count (was 999), as get_limit_per_prompt reads it
 
             # Count graphs as we go (one per item count per resolution) and warn
             # once when the running total crosses the threshold. Wide count
