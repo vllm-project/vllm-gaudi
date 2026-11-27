@@ -5,10 +5,10 @@ Pipeline parallelism is a distributed model parallelization technique that split
 The following example shows how to use the pipeline parallelism with vLLM on HPU:
 
 ```bash
-vllm serve <model_path> --device hpu --tensor-parallel-size 8 --pipeline-parallel-size 2
+vllm serve <model_path> --tensor-parallel-size 8 --pipeline-parallel-size 2
 ```
 
-Since pipeline parallelism runs a `pp_size` number of virtual engines on each device, you have to lower `max_num_seqs` accordingly, as it acts as a micro batch for each virtual engine.
+vLLM detects the HPU platform by itself. With pipeline parallelism, the engine keeps up to `pipeline_parallel_size` batches in flight, one per stage. `max_num_seqs` limits the running requests of all these batches together, so with the same `max_num_seqs` each batch holds fewer requests than without pipeline parallelism.
 
 Currently, pipeline parallelism on the lazy mode requires the `PT_HPUGRAPH_DISABLE_TENSOR_CACHE=0` flag.
 
