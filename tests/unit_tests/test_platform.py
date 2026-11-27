@@ -391,9 +391,9 @@ def test_update_block_size_keeps_128_for_llama4_multi_backend_selection():
     """Llama-4 keeps two backends that both prefer 128.
 
     Only the backend list is patched and the real Platform selection runs.
-    Since vllm-project/vllm#60892 upstream keeps a preference that every
-    backend shares, so the KV cache uses 128. Prompt attention on HPU
-    unflattens the cache with 128, so any other size fails warmup.
+    Since vllm-project/vllm#60892, upstream selects 128 because both
+    backends prefer it. Prompt attention on HPU unflattens the cache with
+    128, so any other size fails warmup.
     """
     from vllm.platforms import Platform
     from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionBackendV1

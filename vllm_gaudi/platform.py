@@ -592,9 +592,7 @@ class HpuPlatform(Platform):
             # VllmConfig.__post_init__, including pickle deserialization in
             # MultiprocExecutor IPC) will not reset block_size.
             cache_config.user_specified_block_size = True
-            super().update_block_size_for_backend(vllm_config)
-        else:
-            super().update_block_size_for_backend(vllm_config)
+        super().update_block_size_for_backend(vllm_config)
 
     @classmethod
     def is_pin_memory_available(cls):
