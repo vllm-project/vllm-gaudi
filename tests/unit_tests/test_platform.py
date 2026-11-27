@@ -10,6 +10,10 @@ Covers:
   ``update_block_size_for_backend`` must produce consistent KV-cache page sizes
   for granitemoehybrid models across cold-start, deserialization, and
   reconfigure paths.
+* Compact-GDN gating: auto-detection stays active with prefix caching (the
+  state rows mirror the shared block table), stays disabled for PD
+  disaggregation, excludes granitemoehybrid, and always honors an explicit
+  VLLM_COMPACT_GDN override.
 """
 import os
 import re
@@ -185,9 +189,10 @@ def test_compact_gdn_disabled_for_pd_disaggregation():
     assert HpuPlatform._compact_gdn_active(cfg) is False
 
 
-def test_compact_gdn_disabled_for_prefix_caching():
+def test_compact_gdn_active_with_prefix_caching():
+    """Prefix caching is compatible: the state rows mirror the shared block table."""
     cfg = _fake_vllm_config(gdn_layers=4, prefix_caching=True)
-    assert HpuPlatform._compact_gdn_active(cfg) is False
+    assert HpuPlatform._compact_gdn_active(cfg) is True
 
 
 def test_compact_gdn_active_when_prefix_caching_off():
@@ -626,7 +631,9 @@ def _run_check_and_update_config(vllm_config):
 def _xpress_spec():
     from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
-    return _spec_config(method="dflash", speculator_config=mock.Mock(spec=XPressSpeculatorConfig))
+    # XPress subclasses DFlash, so the spec'd mock would answer sample_from_anchor with a truthy Mock.
+    speculator_config = mock.Mock(spec=XPressSpeculatorConfig, sample_from_anchor=False)
+    return _spec_config(method="dflash", speculator_config=speculator_config)
 
 
 def _dflash_spec(architectures, layer_types=None):
@@ -665,6 +672,10 @@ _UNSUPPORTED_MRV2_ONLY_FEATURES = [
      lambda c: setattr(c, "speculative_config", _dflash_spec(["DSpineDraftModel"]))),
     ("Qwen3.5 slot decision", "Qwen3.5 slot decision models",
      lambda c: setattr(c.model_config, "architecture", "Qwen3_5ForSlotDecision")),
+    ("masked token ids", "masked token ids", lambda c: setattr(c.model_config, "masked_token_ids", [7])),
+    ("anchor-first DFlash", "anchor-first DFlash drafts",
+     lambda c: setattr(c, "speculative_config",
+                       _spec_config(method="dflash", speculator_config=SimpleNamespace(sample_from_anchor=True)))),
 ]
 
 
@@ -693,6 +704,13 @@ def test_mrv2_only_features_fail_at_startup(feature, enable):
     [None, _spec_config(), _dflash_spec(["DFlashDraftModel"], ["full_attention"])])
 def test_supported_engine_config_passes_startup(speculative_config):
     _run_check_and_update_config(_engine_config(speculative_config=speculative_config))
+
+
+def test_empty_masked_token_ids_pass_startup():
+    """An empty list masks nothing upstream, so it is not refused."""
+    vllm_config = _engine_config()
+    vllm_config.model_config.masked_token_ids = []
+    _run_check_and_update_config(vllm_config)
 
 
 @pytest.mark.parametrize("pipeline_parallel_size, expected", [(1, True), (2, False)])

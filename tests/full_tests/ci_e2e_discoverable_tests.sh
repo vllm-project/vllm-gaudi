@@ -748,6 +748,15 @@ run_logits_processor_params_test() {
     echo "✅ Test min_tokens, logit_bias and min_p passed."
 }
 
+# A failed synchronous KV load: recomputed (sync and async scheduling) or failed, per kv_load_failure_policy
+run_kv_load_failure_recovery_test() {
+    echo "➡️ Testing recovery from a failed KV load..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/kv_load_failure_recovery.py"
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/kv_load_failure_recovery.py" --async-scheduling
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/kv_load_failure_recovery.py" --async-scheduling --policy fail
+    echo "✅ Test recovery from a failed KV load passed."
+}
+
 # Upstream's own async-scheduler suite, run against HPUAsyncScheduler so the
 # override is held to the contract it overrides. Needs no accelerator and takes
 # seconds. --confcutdir keeps the vLLM root conftest out of the run, so the gate
@@ -852,6 +861,7 @@ launch_all_tests() {
     run_offloading_connector_test
     run_async_penalty_consistency_test
     run_logits_processor_params_test
+    run_kv_load_failure_recovery_test
     run_upstream_async_scheduler_gate
     run_sleep_mode_test
     run_online_model_swap_test

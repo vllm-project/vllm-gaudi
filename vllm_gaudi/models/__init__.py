@@ -80,6 +80,8 @@ def register_model():
     # Same for Phi3 (vllm-project/vllm#66559): the Transformers backend attention
     # reshape assumes flattened tokens, so warmup fails on HPU's [batch, seq] layout.
     ModelRegistry.register_model("Phi3ForCausalLM", "vllm_gaudi.models.phi3:Phi3ForCausalLM")
+    # Same for ERNIE 4.5 dense (vllm-project/vllm#69087).
+    ModelRegistry.register_model("Ernie4_5ForCausalLM", "vllm_gaudi.models.ernie45:Ernie4_5ForCausalLM")
     # Same for Qwen2 (vllm-project/vllm#66821), through upstream's native Qwen3 model.
     ModelRegistry.register_model("Qwen2ForCausalLM", "vllm_gaudi.models.qwen2:HpuQwen2ForCausalLM")
     ModelRegistry.register_model("Qwen2Model", "vllm_gaudi.models.qwen2:HpuQwen2ForCausalLM")
