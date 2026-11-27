@@ -14,7 +14,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, SchedulerConf
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.core.kv_cache_planning import (estimate_max_model_len, get_global_kv_cache_groups, get_kv_cache_configs)
+from vllm.v1.core.kv_cache_planning import (DefaultKVCacheConfigBuilder, _estimate_max_model_len_from_groups,
+                                            get_global_kv_cache_groups, get_kv_cache_configs, get_kv_cache_groups)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData, SchedulerOutput)
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig, KVCacheGroup, KVCacheTensor, MambaSpec)
@@ -102,6 +103,12 @@ def get_vllm_config(enable_prefix_caching: bool = False) -> VllmConfig:
         parallel_config=parallel_config,
     )
     return vllm_config
+
+
+def _estimate_max_model_len(vllm_config: VllmConfig, layer_configs, available_memory: int) -> int:
+    # vllm#69814 removed estimate_max_model_len; upstream's tests estimate from the KV cache groups instead.
+    groups = get_kv_cache_groups(vllm_config, layer_configs)
+    return _estimate_max_model_len_from_groups(DefaultKVCacheConfigBuilder(), vllm_config, groups, available_memory)
 
 
 @pytest.fixture
@@ -951,7 +958,7 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config: None):
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len =\
-        estimate_max_model_len(vllm_config, layer_configs, 5 * GiB_bytes)
+        _estimate_max_model_len(vllm_config, layer_configs, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 1310720
 
@@ -1028,7 +1035,7 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config: None):
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len =\
-        estimate_max_model_len(vllm_config, layer_configs, 5 * GiB_bytes)
+        _estimate_max_model_len(vllm_config, layer_configs, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 2 * 1310720
 
