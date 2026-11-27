@@ -743,8 +743,12 @@ run_async_penalty_consistency_test() {
 # thinking_token_budget ends the reasoning (sync, async, ngram spec decode)
 run_thinking_token_budget_test() {
     echo "➡️ Testing thinking_token_budget..."
-    VLLM_SKIP_WARMUP=true \
-    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_thinking_token_budget.py"
+    local mode
+    # One process per mode: the test runs its engine in-process.
+    for mode in sync async ngram ngram_async; do
+        THINKING_BUDGET_TEST_MODE="$mode" VLLM_SKIP_WARMUP=true \
+        pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_thinking_token_budget.py"
+    done
     echo "✅ Test thinking_token_budget passed."
 }
 

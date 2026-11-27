@@ -11,6 +11,11 @@ others decode, prefills share steps with decodes, and rows move in the batch. Ev
 (ignore_eos plus max_tokens), so without speculative decoding the batch goes through the same steps in the run
 under test and in its reference, and the rows without a budget must come out the same. Each case checks its
 control first, so it cannot pass if the budget had nothing to change.
+
+The engine runs in this process (VLLM_ENABLE_V1_MULTIPROCESSING=0): a separate engine core admits requests while
+generate() is still adding them, so the first steps, and with them the bf16 results, could differ between runs.
+vllm-gaudi reads its runtime config once per process, so each process tests one mode, THINKING_BUDGET_TEST_MODE
+(default sync); ci_e2e_discoverable_tests.sh runs all of them.
 """
 import gc
 import os
@@ -65,15 +70,20 @@ MODES = {
     }, {}),
 }
 
+MODE = os.getenv("THINKING_BUDGET_TEST_MODE", "sync")
+IN_PROCESS = {"VLLM_ENABLE_V1_MULTIPROCESSING": "0"}
 
-@pytest.fixture(scope="module", params=list(MODES))
-def mode(request):
-    return request.param
+
+@pytest.fixture(scope="module")
+def mode():
+    assert MODE in MODES, f"THINKING_BUDGET_TEST_MODE={MODE}, expected one of {list(MODES)}"
+    return MODE
 
 
 @pytest.fixture(scope="module")
 def llm(mode):
     kwargs, env = MODES[mode]
+    env = IN_PROCESS | env
     saved = {name: os.environ.get(name) for name in env}
     os.environ.update(env)
     llm = LLM(
