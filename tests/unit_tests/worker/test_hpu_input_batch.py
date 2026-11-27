@@ -4,12 +4,14 @@
 import inspect
 from collections.abc import Sequence
 from typing import Optional
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 import habana_frameworks.torch  # noqa: F401
 
+from vllm.config.reasoning import ReasoningConfig
 from vllm.sampling_params import SamplingParams
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm_gaudi.v1._vendored._compat import make_tensor_with_pad
@@ -25,6 +27,7 @@ NUM_OUTPUT_TOKENS = 20
 MAX_PROMPT_SIZE = 100
 CUDA_DEVICES = ['hpu']
 MAX_NUM_PROMPT_TOKENS = 64
+THINK_START, THINK_END = 1000, 1001
 
 
 def _compare_objs(obj1, obj2, skip: Sequence = ("logitsprocs", "batch_update_builder")):
@@ -576,3 +579,84 @@ def test_selective_sampling_metadata_after_swap(device: str):
         assert (a is None) == (b is None), name
         if a is not None:
             assert torch.equal(a.cpu(), b.cpu()), f"{name}: {a.cpu().tolist()} != {b.cpu().tolist()}"
+
+
+def _reasoning_batch(device: str, max_num_reqs: int) -> InputBatch:
+    reasoning_config = MagicMock(spec=ReasoningConfig,
+                                 enabled=True,
+                                 reasoning_start_token_ids=[THINK_START],
+                                 reasoning_end_token_ids=[THINK_END])
+    return InputBatch(
+        max_num_reqs=max_num_reqs,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        pin_memory=is_pin_memory_available(),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        kernel_block_sizes=[1],
+        reasoning_config=reasoning_config,
+    )
+
+
+def _thinking_req(req_id: str, budget: Optional[int]) -> CachedRequestState:
+    return CachedRequestState(
+        req_id=req_id,
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(thinking_token_budget=budget),
+        pooling_params=None,
+        mm_features=[],
+        block_ids=([], ),
+        generator=None,
+        num_computed_tokens=4,
+        output_token_ids=[THINK_START, 5, 6],
+    )
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_thinking_budget_state_leaves_with_its_request(device: str):
+    """condense moves a row without a budget into the row of a budgeted request that left while thinking.
+
+    The moved request must not inherit the budget state that was in that row. A reorder swap follows in the same
+    step, as in the runner, and must carry the other budgeted request's state along.
+    """
+    batch = _reasoning_batch(device, 4)
+    for req_id, budget in (("req_0", None), ("req_1", 2), ("req_2", 7), ("req_3", None)):
+        batch.add_request(_thinking_req(req_id, budget))
+    batch.update_logitsprocs()
+    holder = batch.thinking_budget_state_holder
+    assert holder is not None and set(holder._state) == {1, 2}
+    req_2_state = holder._state[2]
+
+    batch.remove_request("req_1")
+    batch.condense([1])
+    batch.swap_states(0, 2)
+    batch.update_logitsprocs()
+    assert batch.req_id_to_index == {"req_2": 0, "req_3": 1, "req_0": 2}
+    assert holder._state == {0: req_2_state}, f"budget state in rows {set(holder._state)}"
+    metadata = batch.make_selective_sampling_metadata([("req_3", [THINK_START, 5, 6])])
+    assert metadata.thinking_budget_state_holder is None
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_thinking_budget_view_rekeys_rows_of_the_call(device: str):
+    """A sampling call's view of the holder is keyed by call row, skips padding rows, and shares the state."""
+    batch = _reasoning_batch(device, 3)
+    for req_id, budget in (("req_0", None), ("req_1", 4), ("req_2", 2)):
+        batch.add_request(_thinking_req(req_id, budget))
+    batch.update_logitsprocs()
+    holder = batch.thinking_budget_state_holder
+    assert holder is not None
+
+    # A call without a budgeted row gets no holder.
+    assert batch.make_selective_sampling_metadata([("req_0", [])]).thinking_budget_state_holder is None
+    # Padded call, in another order than the batch: req_2 is call row 0, its copies are padding.
+    outputs = {req_id: list(batch.req_output_token_ids[i]) for req_id, i in batch.req_id_to_index.items()}
+    order = ["req_2", "req_0", "req_1", "req_2", "req_2"]
+    metadata = batch.make_selective_sampling_metadata([(req_id, outputs[req_id]) for req_id in order])
+    view = metadata.thinking_budget_state_holder
+    assert view is not None and view is not holder
+    assert view._state == {0: holder._state[2], 2: holder._state[1]}
+    assert view._state[0] is holder._state[2]
+    # Budgeted rows get their outputs; the row without a budget or penalties does not.
+    assert metadata.output_token_ids == [outputs["req_2"], [], outputs["req_1"], outputs["req_2"], outputs["req_2"]]

@@ -216,7 +216,7 @@ def apply_logits_processors(
     sampling_metadata: SamplingMetadata,
     metadata: SpecDecodeMetadata,
 ) -> torch.Tensor:
-    """Penalties, allowed token ids, bad words and min tokens for the draft rows.
+    """Penalties, allowed token ids, bad words, min tokens and the thinking budget for the draft rows.
 
     Upstream's RejectionSampler.apply_logits_processors, for the HPU layout:
     every request has max_num_draft_tokens rows, so the shapes stay static, and
@@ -250,6 +250,13 @@ def apply_logits_processors(
         # Wrapped by the input batch to map its batch rows to this call's rows.
         if isinstance(getattr(processor, "processor", processor), MinTokensLogitsProcessor):
             logits = processor.apply_with_spec_decode(logits, rows_per_seq)
+
+    holder = sampling_metadata.thinking_budget_state_holder
+    if holder is not None and holder.has_tracked_requests():
+        # The holder reads only the length of each layout row: its first logits row is the sum before it. Its
+        # state was updated by the bonus token's sampler call, and has the real drafts.
+        layout = [[PLACEHOLDER_TOKEN_ID] * rows_per_request] * num_seqs
+        logits = holder.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=layout)
     return logits
 
 

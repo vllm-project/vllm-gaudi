@@ -740,6 +740,14 @@ run_async_penalty_consistency_test() {
     echo "✅ Test async-scheduling penalty consistency passed."
 }
 
+# thinking_token_budget ends the reasoning (sync, async, ngram spec decode)
+run_thinking_token_budget_test() {
+    echo "➡️ Testing thinking_token_budget..."
+    VLLM_SKIP_WARMUP=true \
+    pytest -v -s "${VLLM_GAUDI_PREFIX}/tests/full_tests/test_thinking_token_budget.py"
+    echo "✅ Test thinking_token_budget passed."
+}
+
 # min_tokens, logit_bias and min_p reach the logits processors (sync and async scheduling)
 run_logits_processor_params_test() {
     echo "➡️ Testing min_tokens, logit_bias and min_p..."
@@ -860,6 +868,7 @@ launch_all_tests() {
     run_cpu_offloading_test
     run_offloading_connector_test
     run_async_penalty_consistency_test
+    run_thinking_token_budget_test
     run_logits_processor_params_test
     run_kv_load_failure_recovery_test
     run_upstream_async_scheduler_gate

@@ -4,7 +4,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import numpy as np
 import torch
@@ -20,9 +20,14 @@ from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm_gaudi.v1._vendored.worker.block_table import MultiGroupBlockTable
 from vllm_gaudi.v1._vendored.sample.logits_processor import (BatchUpdateBuilder, LogitsProcessors, MoveDirectionality)
+from vllm_gaudi.v1._vendored.sample.thinking_budget_state import maybe_create_thinking_budget_state_holder
 from vllm_gaudi.v1.sample.hpu_logits_processors import logitsprocs_for_call
+from vllm_gaudi.v1.sample.hpu_thinking_budget import budgeted_rows, sync_thinking_budget, thinking_budget_for_call
 
 from vllm_gaudi.utils import async_h2d_copy, async_h2d_update
+
+if TYPE_CHECKING:
+    from vllm.config.reasoning import ReasoningConfig
 
 
 def splice_placeholders(output_token_ids: list[int], new_ids: list[int], num_slots: Optional[int] = None) -> None:
@@ -159,6 +164,8 @@ class InputBatch:
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
         max_num_blocks_per_req: Optional[list[int]] = None,
+        reasoning_config: Optional["ReasoningConfig"] = None,
+        num_spec_tokens: int = 0,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -296,6 +303,12 @@ class InputBatch:
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
         self.logitsprocs = logitsprocs or LogitsProcessors()
+
+        # thinking_token_budget, which vLLM accepts only with reasoning enabled. Keyed by batch row, like the
+        # processors, and updated with them.
+        reasoning_enabled = reasoning_config is not None and reasoning_config.enabled
+        self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
+            reasoning_config if reasoning_enabled else None, max_num_reqs, num_spec_tokens, device, pin_memory)
 
         self.has_allowed_token_ids: set[str] = set()
         # NOTE(lufang): In the mask tensor, if the corresponding token allowed,
@@ -679,6 +692,8 @@ class InputBatch:
             self.batch_update_builder.reset()
             return
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
+        if self.thinking_budget_state_holder is not None:
+            sync_thinking_budget(self.thinking_budget_state_holder, batch_update)
         for processor in self.logitsprocs.all:
             processor.update_state(batch_update)
 
@@ -775,7 +790,12 @@ class InputBatch:
         self,
         req_id_output_token_ids: list[tuple[str, list[int]]],
         skip_copy: bool = False,
+        spec_decode: bool = False,
     ) -> SamplingMetadata:
+        """Sampling metadata for one sampling call, whose row i is request req_id_output_token_ids[i].
+
+        spec_decode: the call is the rejection sampler's, see thinking_budget_for_call.
+        """
         if self._sampling_rows_moved:
             self._resync_moved_rows()
         req_indices: list[int] = [self.req_id_to_index[req_id] for req_id, _ in req_id_output_token_ids]
@@ -819,10 +839,11 @@ class InputBatch:
                 prompt_token_ids = None
 
         output_token_ids: list[list[int]] = []
-        # Only penalty and bad-words rows read their outputs. The penalty tensor is padded to the longest list, and
-        # under async scheduling a row that decoded with no such consumer in the batch keeps a run of -1s as long as
-        # its output. Every other row gets an empty list: its penalties are neutral, so the result is the same.
-        # A thinking-token budget would read its rows' outputs too, if HPU ever supports it.
+        # Only penalty, bad-words and thinking-budget rows read their outputs. The penalty tensor is padded to the
+        # longest list, and under async scheduling a row that decoded with no such consumer in the batch keeps a run
+        # of -1s as long as its output. Every other row gets an empty list: its penalties are neutral, so the result
+        # is the same.
+        budgeted = budgeted_rows(self.thinking_budget_state_holder)
         for (req_id, output_tokens), req_idx in zip(req_id_output_token_ids, req_indices):
             assert req_id is not None
             # Currently we create a tensor for output_token_ids from scratch
@@ -833,7 +854,8 @@ class InputBatch:
             # TODO - Replace this with incremental update to output token
             # statistics.
             if (req_id in self.frequency_penalties_reqs or req_id in self.presence_penalties_reqs
-                    or req_id in self.repetition_penalties_reqs or req_idx in self.bad_words_token_ids):
+                    or req_id in self.repetition_penalties_reqs or req_idx in self.bad_words_token_ids
+                    or req_idx in budgeted):
                 output_token_ids.append(output_tokens)
             else:
                 output_token_ids.append([])
@@ -876,6 +898,8 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=bad_words_token_ids,
             logitsprocs=logitsprocs_for_call(self.logitsprocs, req_indices, self.num_reqs, self.device),
+            thinking_budget_state_holder=thinking_budget_for_call(self.thinking_budget_state_holder, req_indices,
+                                                                  spec_decode),
         )
 
     def set_async_sampled_token_ids(
@@ -890,8 +914,8 @@ class InputBatch:
         scheduling copies the sampled ids to CPU without a blocking sync; keep
         the CPU tensor and its copy-ready event so update_async_output_token_ids
         can splice the real ids in later. Cleared when no consumer reads
-        output_token_ids (no penalties and no bad_words), so the fast path skips
-        the per-step sync.
+        output_token_ids (no penalties, bad_words or thinking budget), so the
+        fast path skips the per-step sync.
 
         Args:
             sampled_token_ids_cpu: prior step's sampled ids, shape (num_reqs, 1).
@@ -1036,14 +1060,17 @@ class InputBatch:
     def needs_output_token_ids(self) -> bool:
         """Whether any sampler consumer reads output_token_ids this batch.
 
-        Both penalties and bad_words read it, so the -1 placeholders must be
-        repaired before sampling if either is active for any request.
+        Penalties, bad_words and the thinking-token budget read it, so the -1
+        placeholders must be repaired before sampling if any is active for any
+        request.
 
         Upstream also ORs in a custom-logitsprocs flag. HPU refuses custom
         logits processors, and of the builtin ones only min_tokens reads the
         outputs, for their count, which the placeholders keep right.
         """
-        return not self.no_penalties or bool(self.bad_words_token_ids)
+        holder = self.thinking_budget_state_holder
+        return (not self.no_penalties or bool(self.bad_words_token_ids)
+                or (holder is not None and holder.has_tracked_requests()))
 
     @property
     def max_num_logprobs(self) -> Optional[int]:
