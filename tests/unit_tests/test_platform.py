@@ -524,6 +524,19 @@ def test_validate_request_rejects_features_the_runner_ignores(field, value):
     assert excinfo.value.parameter == field
 
 
+def test_validate_request_rejects_full_vocabulary_logprobs():
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import SamplingParams
+
+    with pytest.raises(VLLMValidationError,
+                       match=r"logprobs=-1 \(the full vocabulary\) is not supported on HPU") as excinfo:
+        HpuPlatform.validate_request(None, SamplingParams(max_tokens=4, logprobs=-1))
+    assert excinfo.value.parameter == "logprobs"
+    # A top-k and exact ids stay accepted.
+    HpuPlatform.validate_request(None, SamplingParams(max_tokens=4, logprobs=5))
+    HpuPlatform.validate_request(None, SamplingParams(max_tokens=4, logprob_token_ids=[1, 2]))
+
+
 def test_validate_request_accepts_prompt_logprobs_start_zero_and_thinking_budget():
     from vllm.sampling_params import SamplingParams
 

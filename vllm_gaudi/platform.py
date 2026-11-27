@@ -468,9 +468,11 @@ class HpuPlatform(Platform):
 
     @classmethod
     def validate_request(cls, processed_inputs, params) -> None:
-        """Reject per-request prompt logprob features the HPU model runner does not implement.
+        """Reject per-request logprob features the HPU model runner does not implement.
 
-        vLLM refused them for Model Runner V1 itself; without it, they would be accepted and ignored.
+        vLLM refused the prompt-logprob ones for Model Runner V1 itself; without it, they would be accepted and
+        ignored. logprobs=-1 (the full vocabulary) has no output path on HPU: alone it crashes the engine, and next
+        to a request with a top-k or logprob_token_ids it gets that request's columns instead.
         """
         from vllm.exceptions import VLLMValidationError
         from vllm.sampling_params import SamplingParams
@@ -484,6 +486,10 @@ class HpuPlatform(Platform):
         for name, is_set in unsupported.items():
             if is_set:
                 raise VLLMValidationError(f"{name} is not supported on HPU.", parameter=name)
+        if params.logprobs == -1:
+            raise VLLMValidationError("logprobs=-1 (the full vocabulary) is not supported on HPU.",
+                                      parameter="logprobs",
+                                      value=-1)
 
     @classmethod
     def _maybe_disable_chunked_mm_input(cls, vllm_config: "VllmConfig") -> None:
