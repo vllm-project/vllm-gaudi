@@ -130,6 +130,9 @@ class MultiModelEngineClient(EngineClient):
     async def check_health(self) -> None:
         await self._engine.check_health()
 
+    async def check_health_generate(self, timeout_s: float) -> None:
+        await self._engine.check_health_generate(timeout_s)
+
     async def start_profile(self) -> None:
         await self._engine.start_profile()
 

@@ -173,6 +173,7 @@ class HPUAsyncScheduler(HPUScheduler, AsyncScheduler):
                     request.num_output_placeholder_steps = 0
 
                 affected_req_ids.add(request.request_id)
+                self._refresh_queued_workload(request)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 

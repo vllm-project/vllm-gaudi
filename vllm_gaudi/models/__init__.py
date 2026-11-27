@@ -86,8 +86,9 @@ def register_model():
     ModelRegistry.register_model("Qwen2ForCausalLM", "vllm_gaudi.models.qwen2:HpuQwen2ForCausalLM")
     ModelRegistry.register_model("Qwen2Model", "vllm_gaudi.models.qwen2:HpuQwen2ForCausalLM")
     # Same for Llama (vllm-project/vllm#66547), whose native class upstream still ships; it also dropped the
-    # LLaMAForCausalLM alias.
-    for arch in ("LlamaForCausalLM", "LLaMAForCausalLM", "LlamaModel", "MistralModel"):
+    # LLaMAForCausalLM alias. InternLM3 and IQuestCoder used that class too until vllm-project/vllm#66416.
+    for arch in ("LlamaForCausalLM", "LLaMAForCausalLM", "LlamaModel", "MistralModel", "InternLM3ForCausalLM",
+                 "IQuestCoderForCausalLM"):
         ModelRegistry.register_model(arch, "vllm.model_executor.models.llama:LlamaForCausalLM")
 
     import vllm_gaudi.models.gptoss_mxfp4  # noqa: F401

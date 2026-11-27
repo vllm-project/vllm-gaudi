@@ -663,6 +663,18 @@ def test_empty_masked_token_ids_pass_startup():
     _run_check_and_update_config(vllm_config)
 
 
+@pytest.mark.parametrize("use_replayssm", [True, False])
+def test_replayssm_is_refused_at_startup(use_replayssm):
+    """The HPU mamba layers never read the ReplaySSM rings, so --use-replayssm is refused; the default passes."""
+    vllm_config = _engine_config()
+    vllm_config.cache_config.use_replayssm = use_replayssm
+    if use_replayssm:
+        with pytest.raises(ValueError, match="HPU does not support: ReplaySSM\\."):
+            _run_check_and_update_config(vllm_config)
+    else:
+        _run_check_and_update_config(vllm_config)
+
+
 @pytest.mark.parametrize("pipeline_parallel_size, expected", [(1, True), (2, False)])
 def test_async_scheduling_is_disabled_with_pipeline_parallelism(pipeline_parallel_size, expected):
     vllm_config = _engine_config(async_scheduling=True, pipeline_parallel_size=pipeline_parallel_size)

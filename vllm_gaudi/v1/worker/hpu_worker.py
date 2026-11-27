@@ -869,6 +869,21 @@ class HPUWorker(WorkerBase):
             return
         torch.hpu.synchronize()
 
+    def probe_forward(self) -> str | None:
+        """Readiness probe of /health_generate (vllm#60505): one dummy step, then wait for the device.
+
+        The same dummy step as execute_dummy_batch: a decode, or a one-token prefill on a KV producer. EngineCore calls
+        it only while idle. Returns the error instead of
+        raising it, as WorkerBase.probe_forward documents, so the executor reads every worker's reply.
+        """
+        try:
+            self.model_runner._dummy_run(1)  # type: ignore[union-attr]
+            self.synchronize_device()
+        except Exception as e:
+            logger.exception("Forward probe failed")
+            return repr(e)
+        return None
+
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
 

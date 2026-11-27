@@ -464,6 +464,11 @@ class HpuPlatform(Platform):
         # runner would still sample them.
         if getattr(model_config, "masked_token_ids", None):
             unsupported.append("masked token ids")
+        # ReplaySSM keeps extra decode-input rings in the mamba state (vLLM PR #62004 allows it for the Qwen3.5
+        # GatedDeltaNet models). The HPU GDN and Mamba2 layers read only the plain state, so the rings would take
+        # KV cache memory and never be used.
+        if getattr(getattr(vllm_config, "cache_config", None), "use_replayssm", False):
+            unsupported.append("ReplaySSM")
         return unsupported
 
     @classmethod
