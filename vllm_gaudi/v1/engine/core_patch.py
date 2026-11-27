@@ -339,7 +339,7 @@ def install_engine_core_patch() -> None:
                 kv_cache_config=kv_cache_config,
                 structured_output_manager=self.structured_output_manager,
                 include_finished_set=False,
-                log_stats=self.log_stats,
+                collect_stats=self.collect_stats,
                 block_size=scheduler_block_size,
                 hash_block_size=hash_block_size,
             )

@@ -12,6 +12,7 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_gaudi.extension.runtime import get_config
 from vllm_gaudi.extension.logger import logger as init_logger
 from vllm_gaudi.kimi_k3_gate import is_kimi_k3_vllm_config, kimi_k3_seen, mark_kimi_k3_seen
+from vllm_gaudi.v1.spec_decode.methods import uses_eagle_proposer
 
 
 class _KimiK3OnlyList:
@@ -341,7 +342,7 @@ class HpuPlatform(Platform):
         # decoding runs with synchronous scheduling.
         spec_config = vllm_config.speculative_config
         if spec_config is not None and vllm_config.scheduler_config.async_scheduling and not (
-                cls._async_spec_decode_enabled(vllm_config) and spec_config.use_eagle()
+                cls._async_spec_decode_enabled(vllm_config) and uses_eagle_proposer(spec_config)
                 and spec_config.num_speculative_tokens == 1):
             vllm_config.scheduler_config.async_scheduling = False
         # Since the Model Runner V1 removal (vLLM aac1b2a4f3) vLLM enables async scheduling for pipeline
@@ -444,6 +445,11 @@ class HpuPlatform(Platform):
                 }
                 if draft_archs & candidate_head_archs:
                     unsupported.append("DFlash candidate-head drafts")
+                # Anchor-first drafts (vLLM PR #68827) run one query per draft token. Only the Model Runner V2
+                # speculator implements that layout; the vendored V1 proposer does not, so it would propose wrong
+                # drafts.
+                if getattr(spec.speculator_config, "sample_from_anchor", False):
+                    unsupported.append("anchor-first DFlash drafts")
         if getattr(model_config, "is_diffusion", False):
             unsupported.append("diffusion models")
         if getattr(parallel_config, "enable_batch_sharded_sampling", False):
@@ -454,6 +460,10 @@ class HpuPlatform(Platform):
         # the HPU runner would serve it with causal attention.
         if getattr(model_config, "architecture", None) == "Qwen3_5ForSlotDecision":
             unsupported.append("Qwen3.5 slot decision models")
+        # Only the Model Runner V2 and CPU runners mask these tokens out of the logits (vLLM PR #68976); the HPU
+        # runner would still sample them.
+        if getattr(model_config, "masked_token_ids", None):
+            unsupported.append("masked token ids")
         return unsupported
 
     @classmethod
