@@ -602,21 +602,7 @@ class HpuPlatform(Platform):
             # VllmConfig.__post_init__, including pickle deserialization in
             # MultiprocExecutor IPC) will not reset block_size.
             cache_config.user_specified_block_size = True
-            super().update_block_size_for_backend(vllm_config)
-        else:
-            super().update_block_size_for_backend(vllm_config)
-            # Upstream keeps vLLM's default block size (16) when a model has
-            # more than one attention backend and every backend accepts it.
-            # Llama-4 does: full attention plus a chunked-local subclass.
-            # check_and_update_config already set 128, and the HPU runner
-            # snapshots that value before this method runs. Leaving 16 here
-            # allocates the KV cache at 16 tokens per block while prompt
-            # attention still unflattens with 128.
-            from vllm.config.cache import CacheConfig
-            if (not cache_config.user_specified_block_size
-                    and cache_config.block_size == CacheConfig.DEFAULT_BLOCK_SIZE):
-                logger.info("Restoring HPU block_size to 128 after multi-backend default selection.")
-                cache_config.block_size = 128
+        super().update_block_size_for_backend(vllm_config)
 
     @classmethod
     def is_pin_memory_available(cls):
