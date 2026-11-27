@@ -1814,6 +1814,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(self.vllm_config, self.device, self.pin_memory, self.is_pooling_model,
                                           self.vllm_config.model_config.logits_processors),
+            **self._thinking_budget_args(),
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -3469,14 +3470,24 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                           batch_changed: bool,
                           request_ids: Union[None, list[str]] = None,
                           pad_to: Optional[int] = None,
-                          logits_reqs=None) -> SamplingMetadata:
+                          logits_reqs=None,
+                          spec_decode: bool = False) -> SamplingMetadata:
         # Create the sampling metadata.
         req_id_output_token_ids_lst = \
             self._generate_req_id_output_token_ids_lst(request_ids, \
                                                        pad_to, logits_reqs)
         sampling_metadata = self.input_batch.make_selective_sampling_metadata(req_id_output_token_ids_lst,
-                                                                              skip_copy=not batch_changed)
+                                                                              skip_copy=not batch_changed,
+                                                                              spec_decode=spec_decode)
         return sampling_metadata
+
+    def _thinking_budget_args(self) -> dict[str, Any]:
+        """InputBatch arguments for thinking_token_budget, the same for every input batch the runner builds."""
+        spec = self.vllm_config.speculative_config
+        return {
+            "reasoning_config": self.vllm_config.reasoning_config,
+            "num_spec_tokens": spec.num_speculative_tokens if spec is not None else 0,
+        }
 
     def get_habana_paged_attn_buffers(self,
                                       block_tables,
@@ -5075,7 +5086,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
 
         Read from the device: with async scheduling the scheduler output only
         has placeholders for them. The copy syncs the host, so this is for
-        batches with penalties or bad words only.
+        batches with penalties, bad words or a thinking budget only.
         """
         num_draft_tokens = spec_decode_metadata.num_draft_tokens
         drafts = spec_decode_metadata.draft_token_ids.view(len(num_draft_tokens), -1).tolist()
@@ -5839,11 +5850,15 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         # token row.
                         htorch.core.mark_step()
                         self.input_batch.update_async_output_token_ids(self._async_spec_prev_num_slots())
-                        sampling_metadata = self._prepare_sampling(batch_changed, pd_info.decode_req_ids,
-                                                                   len(spec_decode_metadata.bonus_logits_indices))
-                        if not sampling_metadata.no_penalties or sampling_metadata.bad_words_token_ids:
+                        sampling_metadata = self._prepare_sampling(batch_changed,
+                                                                   pd_info.decode_req_ids,
+                                                                   len(spec_decode_metadata.bonus_logits_indices),
+                                                                   spec_decode=True)
+                        if (not sampling_metadata.no_penalties or sampling_metadata.bad_words_token_ids
+                                or sampling_metadata.thinking_budget_state_holder is not None):
                             # Penalties and bad words count the drafts before a
-                            # row, and all of them before the bonus token.
+                            # row, and all of them before the bonus token; the
+                            # thinking budget counts them to place the end marker.
                             sampling_metadata = replace(sampling_metadata,
                                                         spec_token_ids=self._spec_token_ids(spec_decode_metadata))
                         if grammar_output is not None:
@@ -7734,6 +7749,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 block_sizes=[self.block_size],
                 kernel_block_sizes=[self.block_size],
                 logitsprocs=self._build_logitsprocs(self.bucketing_manager.decode_buckets[-1][0]),
+                **self._thinking_budget_args(),
             )
 
         if not self.is_pooling_model:
@@ -8547,6 +8563,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 logitsprocs=self.input_batch.logitsprocs,
                 is_pooling_model=self.is_pooling_model,
                 max_num_blocks_per_req=max_num_blocks_per_req,
+                **self._thinking_budget_args(),
             )
 
     def get_kv_caches_4D(self, kv_caches) -> dict[str, torch.Tensor]:
