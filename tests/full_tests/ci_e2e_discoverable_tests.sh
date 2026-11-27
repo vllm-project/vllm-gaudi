@@ -45,6 +45,14 @@ _run_tp2_load_generate_test() {
     echo "✅ Test with tensor parallel size 2 passed."
 }
 
+# Pipeline parallel size 2: generations scored against a single-stage engine (2 cards)
+_run_pp2_generate_test() {
+    echo "➡️ Testing pipeline parallel size 2..."
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pipeline_parallel.py" --chunked-prefill
+    VLLM_SKIP_WARMUP=true python -u "${VLLM_GAUDI_PREFIX}/tests/full_tests/pipeline_parallel.py" --async-scheduling
+    echo "✅ Test with pipeline parallel size 2 passed."
+}
+
 # MLA and MoE test
 _run_mla_moe_load_generate_test() {
     echo "➡️ Testing MLA and MoE with vllm-hpu plugin v1..."
@@ -670,12 +678,13 @@ run_load_generate_c_parallel() {
         _run_basic_load_generate_test 1
 }
 
-# Load and generate: w4a16 (1 card), TP=2 (2 cards), DeepSeek-V2 INC dynamic TP=2 (2 cards)
+# Load and generate: w4a16 (1 card), TP=2 (2 cards), DeepSeek-V2 INC dynamic TP=2 (2 cards), PP=2 (2 cards)
 run_load_generate_tp_parallel() {
     _run_parallel_on_card_slices load_generate_tp \
         _run_compressed_w4a16_channelwise_load_generate_test 1 \
         _run_tp2_load_generate_test 2 \
-        _run_deepseek_v2_inc_dynamic_tp2_load_generate_test 2
+        _run_deepseek_v2_inc_dynamic_tp2_load_generate_test 2 \
+        _run_pp2_generate_test 2
 }
 
 # GSM8K on DeepSeek-V2-Lite (1 card), Qwen3-30B-A3B (TP=2), granite and granite async (1 card each)
@@ -815,6 +824,7 @@ launch_all_tests() {
     # _run_gemma3_load_generate_test
     _run_basic_load_generate_test
     _run_tp2_load_generate_test
+    _run_pp2_generate_test
     _run_mla_moe_load_generate_test
     _run_granite_inc_load_generate_test
     _run_deepseek_v2_inc_load_generate_test

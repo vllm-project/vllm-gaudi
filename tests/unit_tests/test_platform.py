@@ -663,6 +663,28 @@ def test_empty_masked_token_ids_pass_startup():
     _run_check_and_update_config(vllm_config)
 
 
+# Features the HPU runner does not wire for pipeline parallelism: (feature, enable).
+_UNSUPPORTED_WITH_PIPELINE_PARALLELISM = [
+    ("speculative decoding with pipeline parallelism", lambda c: setattr(c, "speculative_config", _spec_config())),
+    ("pooling models with pipeline parallelism", lambda c: setattr(c.model_config, "runner_type", "pooling")),
+    ("multimodal models with pipeline parallelism", lambda c: setattr(c.model_config, "is_multimodal_model", True)),
+]
+
+
+@pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
+@pytest.mark.parametrize("feature, enable",
+                         _UNSUPPORTED_WITH_PIPELINE_PARALLELISM,
+                         ids=[f for f, _ in _UNSUPPORTED_WITH_PIPELINE_PARALLELISM])
+def test_features_without_pipeline_parallel_support_fail_at_startup(feature, enable, pipeline_parallel_size):
+    vllm_config = _engine_config(pipeline_parallel_size=pipeline_parallel_size)
+    enable(vllm_config)
+    if pipeline_parallel_size == 1:
+        _run_check_and_update_config(vllm_config)
+        return
+    with pytest.raises(ValueError, match=f"HPU does not support: {re.escape(feature)}\\."):
+        _run_check_and_update_config(vllm_config)
+
+
 @pytest.mark.parametrize("pipeline_parallel_size, expected", [(1, True), (2, False)])
 def test_async_scheduling_is_disabled_with_pipeline_parallelism(pipeline_parallel_size, expected):
     vllm_config = _engine_config(async_scheduling=True, pipeline_parallel_size=pipeline_parallel_size)

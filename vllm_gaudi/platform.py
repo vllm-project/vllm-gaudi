@@ -417,6 +417,16 @@ class HpuPlatform(Platform):
             unsupported.append("watermarking")
         if getattr(parallel_config, "prefill_context_parallel_size", 1) > 1:
             unsupported.append("prefill context parallel")
+        # The HPU runner passes intermediate tensors between pipeline stages on the generation path only: the
+        # pooling forward and the speculative decoding drafters do not. Multimodal models fail to load on later
+        # stages (weights of modules that stage does not load are left on the meta device).
+        if getattr(parallel_config, "pipeline_parallel_size", 1) > 1:
+            if spec is not None:
+                unsupported.append("speculative decoding with pipeline parallelism")
+            if getattr(model_config, "runner_type", None) == "pooling":
+                unsupported.append("pooling models with pipeline parallelism")
+            if getattr(model_config, "is_multimodal_model", False):
+                unsupported.append("multimodal models with pipeline parallelism")
         if spec is not None:
             from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
