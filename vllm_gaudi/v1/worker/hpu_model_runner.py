@@ -93,7 +93,8 @@ from vllm_gaudi.v1._vendored.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import bind_kv_cache, add_kv_sharing_layers_to_kv_cache_groups
 from vllm.v1.utils import CpuGpuBuffer
 from vllm_gaudi.v1.worker.hpu_input_batch import InputBatch, CachedRequestState, splice_placeholders
-from vllm.distributed.parallel_state import get_pp_group, get_dp_group
+from vllm.distributed.parallel_state import get_pp_group, get_dp_group, get_tp_group
+from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
@@ -1323,6 +1324,9 @@ class HpuModelAdapter(torch.nn.Module, HpuKVConnectorModelRunnerMixin):
     def compute_logits(self, *args, **kwargs):
         return self.model.compute_logits(*args, **kwargs)
 
+    def make_empty_intermediate_tensors(self, *args, **kwargs):
+        return self.model.make_empty_intermediate_tensors(*args, **kwargs)
+
     # def sample(self, *args, **kwargs):
     #    return self.sampler(*args, **kwargs)
 
@@ -1817,6 +1821,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
+        # Pipeline parallelism: per-token shape and dtype of each received intermediate tensor, set on first use.
+        self._pp_token_specs: dict[str, tuple[torch.Size, torch.dtype]] | None = None
         self.use_structured_output: bool = False  # Default to false. Set to true when needed during a run
         # Cache token ids on device to avoid h2d copies
         self.input_ids_hpu = torch.zeros(
@@ -3251,7 +3257,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     ) -> tuple[torch.Tensor | None, dict[str, Any] | None]:
         inputs_embeds = None
         model_mm_kwargs = None
-        if self.supports_mm_inputs:
+        # Later pipeline stages start from the previous stage's hidden states, not from embeddings.
+        if self.supports_mm_inputs and self.is_first_pp_rank:
             # Run the multimodal encoder if any.
             with self.profiler.record_event('internal', 'prepare_input_encoders'):
                 self._execute_mm_encoder(scheduler_output, req_ids)
@@ -3286,6 +3293,14 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
 
         return inputs_embeds, model_mm_kwargs
+
+    @property
+    def is_first_pp_rank(self) -> bool:
+        return get_pp_group().is_first_rank
+
+    @property
+    def is_last_pp_rank(self) -> bool:
+        return get_pp_group().is_last_rank
 
     def get_model(self) -> torch.nn.Module:
         if isinstance(self.model, HpuModelAdapter):
@@ -4901,6 +4916,8 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             use_graphs = False
         if self.model_has_chunked_attention:
             additional_kwargs.update({"model_has_chunked_attention": True})
+        if not self.is_first_pp_rank:
+            additional_kwargs["intermediate_tensors"] = self._pp_recv_intermediate_tensors(token_ids, warmup_mode)
         trimmed_attn_metadata = trim_attn_metadata(attn_metadata)
         if self.is_driver_worker:
             model_event_name = ("model_forward_"
@@ -4919,6 +4936,13 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                model_mm_kwargs=model_mm_kwargs,
                                                lora_mask=lora_mask,
                                                **additional_kwargs)
+        if not self.is_last_pp_rank:
+            # The next PP rank continues this forward pass and computes the logits.
+            assert isinstance(hidden_states, IntermediateTensors)
+            if not warmup_mode:
+                # Received by the next rank before its forward pass of the same batch (_pp_recv_intermediate_tensors).
+                get_pp_group().send_tensor_dict(hidden_states.tensors, all_gather_group=get_tp_group())
+            return None, None, None, None
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
         if self.use_aux_hidden_state_outputs:
@@ -4938,6 +4962,35 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             logits = self.model.compute_logits(hidden_states)
         return non_flattened_hidden_states, aux_hidden_states, \
             hidden_states, logits
+
+    def _pp_recv_intermediate_tensors(self, token_ids: torch.Tensor, warmup_mode: bool) -> IntermediateTensors:
+        """The previous PP rank's output for this forward pass.
+
+        All ranks build the same batches from the same scheduler output and run their forward passes in the same
+        order, so each forward pass receives what the previous rank sent for it. Warmup and dummy runs do not
+        communicate (each rank runs them on its own, as upstream dummy runs do): they get zeros.
+
+        Both get the token layout the model gives its input ids ([batch, seq] or flattened), whatever layout the
+        previous stage's last layer left them in (HPU DeepSeek-V2 MoE layers flatten hidden_states), so that the
+        shapes at runtime are the warmed-up ones.
+        """
+        if self._pp_token_specs is None:
+            template = self.model.make_empty_intermediate_tensors(batch_size=1,
+                                                                  dtype=self.model_config.dtype,
+                                                                  device=self.device)
+            self._pp_token_specs = {k: (v.shape[1:], v.dtype) for k, v in template.tensors.items()}
+        tokens = (token_ids.numel(), ) if get_config().flatten_input else tuple(token_ids.shape)
+        if warmup_mode:
+            tensors = {
+                k: torch.zeros(*tokens, *shape, dtype=dtype, device=self.device)
+                for k, (shape, dtype) in self._pp_token_specs.items()
+            }
+        else:
+            received = get_pp_group().recv_tensor_dict(all_gather_group=get_tp_group())
+            assert received is not None and received.keys() <= self._pp_token_specs.keys(), \
+                f"unexpected intermediate tensors {sorted(received or ())}, expected {sorted(self._pp_token_specs)}"
+            tensors = {k: v.reshape(*tokens, *self._pp_token_specs[k][0]) for k, v in received.items()}
+        return IntermediateTensors(tensors)
 
     def _get_prompt_logprobs_dict(
         self,
@@ -5547,7 +5600,7 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput | None") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         if self.scheduler_output is None:
-            # Nothing to do (PP non-final rank case), output isn't used.
+            # execute_model returned early (no scheduled tokens, or a pooling model): nothing to sample.
             return None  # noqa
         scheduler_output = self.scheduler_output
         warmup_mode = self.warmup_mode
@@ -5719,6 +5772,11 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         model_mm_kwargs=model_mm_kwargs,
                         warmup_mode=warmup_mode)
                 htorch.core.mark_step()
+                if not self.is_last_pp_rank:
+                    # The forward pass went on to the next PP rank, which samples.
+                    if self.is_driver_worker and self.profiler.enabled:
+                        self.profiler.end()
+                    continue
                 non_flattened_hidden_states_prefills.append(non_flattened_hidden_states)
                 # Collect prefill hidden states for prompt logprobs.
                 # req_id is a list of request IDs in this prefill batch.
@@ -5819,7 +5877,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                 warmup_mode=warmup_mode)
             htorch.core.mark_step()
 
-            if self.use_structured_output and decode_data.spec_decode_metadata is None:
+            if not self.is_last_pp_rank:
+                pass  # The forward pass went on to the next PP rank, which samples.
+            elif self.use_structured_output and decode_data.spec_decode_metadata is None:
                 logits_decode.append(logits_device[:num_decodes])
                 decode_sampled_requests.extend(self.input_batch.req_ids[:num_decodes])
                 structured_decode_req_ids = list(self.input_batch.req_ids[:num_decodes])
@@ -5916,6 +5976,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                                                                        None,
                                                                        warmup_mode=warmup_mode)
             htorch.core.mark_step()
+
+        if not self.is_last_pp_rank:
+            return self._non_last_pp_rank_output(scheduler_output, warmup_mode)
 
         if self.use_structured_output and (logits_decode or logits_prompt):
             # Scheduler places cached before prompt: the decode rows (without
@@ -6160,6 +6223,26 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
             get_kv_transfer_group().clear_connector_metadata()
 
         return model_runner_output
+
+    def _non_last_pp_rank_output(self, scheduler_output: "SchedulerOutput", warmup_mode: bool) -> ModelRunnerOutput:
+        """The step output of a PP rank that is not the last: only its KV connector state.
+
+        The last rank samples. The scheduler sends the sampled token ids back to this rank in the next step's
+        scheduled_cached_reqs.new_token_ids, which _update_states reads.
+        """
+        finished_sending, finished_recving = set[str](), set[str]()
+        invalid_block_ids: set[int] = set()
+        if not warmup_mode:
+            self.maybe_wait_for_kv_save()
+            finished_sending, finished_recving = self.get_finished_kv_transfers(scheduler_output)  # type: ignore
+            # This stage loads the KV cache of its own layers, so its load errors count too.
+            invalid_block_ids = self.get_kv_load_errors()
+        if has_kv_transfer_group():
+            get_kv_transfer_group().clear_connector_metadata()
+        return ModelRunnerOutput.with_kv_conn_output_only(
+            KVConnectorOutput(finished_sending=finished_sending,
+                              finished_recving=finished_recving,
+                              invalid_block_ids=invalid_block_ids))
 
     def _uses_mamba2_spec_decode(self) -> bool:
         """Whether decode steps verify draft tokens through Mamba2 layers."""
@@ -7802,7 +7885,9 @@ class HPUModelRunner(HpuKVConnectorModelRunnerMixin):
                         ("HabanaWorker.determine_num_available_blocks needs "
                          "to be called before warming up the model.")
 
-                    self.warmup_sampler()
+                    if self.is_last_pp_rank:
+                        # Only the last PP rank holds the LM head and samples.
+                        self.warmup_sampler()
                     self.defragmenter.warmup()
                     prompt_buckets = self.bucketing_manager.prompt_buckets
 
