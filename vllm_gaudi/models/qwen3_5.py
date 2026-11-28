@@ -306,7 +306,8 @@ class HPUGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                 validate_data=False,
                 # Read from the load slot, write to the store slot: they differ on
                 # the step whose token opens a new mamba block.
-                store_cache_indices=(store_indices[:num_decodes] if store_indices is not None else None),
+                # Row-aligned kernels: one cache index per padded batch row.
+                store_cache_indices=store_indices,
             )
 
             query, key, value = self.rearrange_mixed_qkv(mixed_qkv_conv)
