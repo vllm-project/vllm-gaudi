@@ -643,12 +643,17 @@ class HpuQSAIndexer(nn.Module):
         if rows.numel():
             self.raw_key_ring[slot[rows], ring_offset[rows]] = \
                 raw_keys[rows, 0].to(self.raw_key_ring.dtype)
-        # Compressed store at group row lp // cr (real rows only).
+        # Compressed store: only the last token of each compress group
+        # produces one pooled row; earlier tokens in the same group would
+        # duplicate-index the same (slot, group_row). Gate on (lp+1)%cr==0.
+        # For ring mode (partial tail) last cr real rows carry the tail.
         group_row = torch.div(logical_positions, cr, rounding_mode="floor")
-        store_ok = token_mask & (group_row < self.max_rows_per_req)
+        store_ok = token_mask & ((logical_positions + 1) % cr == 0) & (group_row < self.max_rows_per_req)
         rows = store_ok.nonzero(as_tuple=False).reshape(-1)
         if rows.numel():
             flat = slot[rows] * self.max_rows_per_req + group_row[rows]
+            assert flat.max().item() < self.num_slots * self.max_rows_per_req, \
+                f"QSA slot overflow: flat {flat.max().item()} >= {self.num_slots * self.max_rows_per_req} (num_slots={self.num_slots}, max_rows={self.max_rows_per_req}); increase num_slots bound"
             self.compressed_cache.view(-1,
                                        self.index_head_dim).index_copy_(0, flat,
                                                                         pooled.reshape(-1, self.index_head_dim)[rows])
@@ -871,15 +876,15 @@ def hpu_qsa_sparse_paged_attention(
             if md.block_list is not None else None
         req_of_token = torch.arange(num_tokens, device=device).clamp(max=md.num_real_reqs - 1)
         page = torch.full_like(token_pos, -1)
+        if os.environ.get("VLLM_CONTIGUOUS_PA", "").lower() in ("1", "true", "yes"):
+            raise RuntimeError("VLLM_CONTIGUOUS_PA=true is not supported for Qwen4Exp (occurrence scan assumes non-contiguous layout)")
         if groups is not None and blist is not None and groups.numel() and \
                 md.num_real_reqs > 0:
             valid_entry = (groups >= 0) & (blist >= 0)
             r_of_entry = groups.clamp(min=0)
             base = torch.arange(groups.numel(), device=device)
             same_req = r_of_entry.unsqueeze(1) == r_of_entry.unsqueeze(0)
-            same_id = blist.unsqueeze(1) == blist.unsqueeze(0)
-            earlier = base.unsqueeze(1) < base.unsqueeze(0)
-            occ = (same_req & same_id & earlier).sum(1)
+            occ = (same_req & (base.unsqueeze(1) > base.unsqueeze(0))).sum(1)
             max_blocks = int(seq_lens.max().item()) // block_size + 1 \
                 if seq_lens.numel() else 1
             table = torch.full((md.num_real_reqs, max_blocks), -1, dtype=torch.int64, device=device)
@@ -1892,7 +1897,12 @@ class HpuQwen4ExpModel(nn.Module):
             env_value = os.environ.get(env_key)
             if env_value:
                 profile_bs = max(profile_bs, int(env_value.split(",")[0]))
-        self.num_slots = profile_bs + 8
+        # Slot ids are base_slot * num_gdn_groups + g + 1; with >=2 GDN groups
+        # the max id is max_reqs * num_gdn_groups. Size against the runner
+        # bound (max_num_seqs * num_gdn_groups + 2) with headroom; see
+        # hpu_model_runner.py compact GDN allocation.
+        _gdn_groups = 2  # conservative; matches runner's _num_gdn_groups when compact
+        self.num_slots = profile_bs * _gdn_groups + 8
         # Compressed QSA rows per request: one per completed compress group.
         max_len = int(vllm_config.model_config.max_model_len)
         compress_ratio = int(getattr(config, "indexer_compress_ratio", 4) or 4)
