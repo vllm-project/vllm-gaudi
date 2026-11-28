@@ -34,6 +34,7 @@ from vllm.utils.torch_utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, se
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig, KVCacheLayerConfig, MambaSpec)
 from vllm.v1.outputs import (DraftTokenIds, AsyncModelRunnerOutput, ModelRunnerOutput)
 from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.workspace import init_workspace_manager
 from vllm_gaudi.extension.bucketing.common import HPUBucketingManager
 from vllm_gaudi.utils import is_fake_hpu
 from vllm_gaudi.v1.worker.host_headroom import host_identity, host_memory_headroom_bytes
@@ -390,6 +391,13 @@ class HPUWorker(WorkerBase):
         # Kimi-K3 only; other models keep the upstream behaviour (no affinity handling).
         if is_kimi_k3_vllm_config(self.vllm_config):
             apply_affinity(self.rank, self.local_rank)
+        # Core V1 paths (sparse-indexer scratch reservations, some attention
+        # backends) fetch scratch through current_workspace_manager(), which
+        # asserts on first use unless a worker has initialized it. The GPU
+        # worker does so right before building its model runner; mirror that
+        # here. HPU has no dual-batch overlap and no separate workspace lanes
+        # today, so a single ubatch slot and lane are enough.
+        init_workspace_manager(self.device, num_ubatches=1, num_lanes=1)
         with set_current_vllm_config(self.vllm_config):
             self.model_runner = HPUModelRunner(vllm_config=self.vllm_config, is_driver_worker=self.is_driver_worker)
         self.init_profiler()
